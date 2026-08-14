@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-browser-mcp"
-version = "0.2.2"
+dynamic = ["version"]
 description = "Real-browser MCP server with TMWebDriver/CDP bridge, screenshots, cookies, and physical input"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,7 +29,8 @@ dependencies = [
   "simple-websocket-server",
   "pyautogui",
   "mss",
-  "pillow"
+  "pillow",
+  "tomli>=2.0; python_version < '3.11'"
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,9 @@ agent-browser-mcp = "agent_browser_mcp.cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "agent_browser_mcp.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

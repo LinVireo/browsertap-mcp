@@ -1996,7 +1996,7 @@ def test_bridge_replaces_same_session_id_when_tab_generation_changes():
 
 def test_extension_manifest_is_2_1_3():
     manifest = json.loads((BACKGROUND.parent / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "2.1.3"
+    assert manifest["version"] == "0.3.0"
 
 
 def test_extension_pass2_final_build_is_observable():
