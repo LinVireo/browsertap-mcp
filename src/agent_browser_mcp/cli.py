@@ -6,7 +6,14 @@ import socket
 import sys
 from pathlib import Path
 
-from .server import ROOT, ensure_config_js, get_driver, chrome_extension_dir, mcp
+from .server import (
+    ROOT,
+    ensure_config_js,
+    get_driver,
+    get_setup_status,
+    chrome_extension_dir,
+    mcp,
+)
 
 
 def cmd_extension_path() -> int:
@@ -52,9 +59,17 @@ def cmd_doctor() -> int:
         diag = driver.diagnose()
     except Exception as e:
         diag = {"cause": "diagnose_failed", "ok": False, "error": str(e)}
-    payload = {
-        "extension_path": str(chrome_extension_dir()),
-        "config_js": str((chrome_extension_dir() / 'config.js').resolve()),
+    try:
+        payload = get_setup_status()
+    except Exception as e:
+        payload = {
+            "status": "bridge_unreachable",
+            "action": "restart_bridge",
+            "extension_path": str(chrome_extension_dir()),
+            "config_js": str((chrome_extension_dir() / 'config.js').resolve()),
+            "setup_error": str(e),
+        }
+    payload.update({
         "remote_mode": getattr(driver, "is_remote", False),
         "tmwebdriver_host": getattr(driver, "host", "127.0.0.1"),
         "tmwebdriver_ws_port": ws_port,
@@ -63,20 +78,25 @@ def cmd_doctor() -> int:
         "http_port_open": _port_open(getattr(driver, "host", "127.0.0.1"), http_port),
         "connected_tabs": len(sessions),
         "tabs": sessions,
-        "diagnosis": diag,
+        "diagnosis": payload.get("diagnosis", diag),
         "error": err,
         "next_steps": [
             "Load the unpacked extension in chrome://extensions from extension_path.",
             "Open a normal http/https page in Chrome.",
             "Run `hermes mcp test agent_browser` after adding the MCP config.",
         ],
-    }
+    })
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     # Surface the one-line verdict last so it's the first thing the eye lands on.
-    if isinstance(diag, dict) and diag.get("advice"):
-        mark = "OK" if diag.get("ok") else "!!"
-        print(f"\n[{mark}] {diag.get('cause')}: {diag.get('advice')}", file=sys.stderr)
-    return 0
+    final_diag = payload.get("diagnosis", diag)
+    if payload.get("action") == "reload_extension":
+        print("\n[!!] stale_extension: Reload TMWD CDP Bridge once in chrome://extensions.", file=sys.stderr)
+    elif payload.get("action") == "restart_bridge":
+        print("\n[!!] stale_bridge: Restart the ABM bridge daemon; Chrome does not need restarting.", file=sys.stderr)
+    elif isinstance(final_diag, dict) and final_diag.get("advice"):
+        mark = "OK" if final_diag.get("ok") else "!!"
+        print(f"\n[{mark}] {final_diag.get('cause')}: {final_diag.get('advice')}", file=sys.stderr)
+    return 0 if payload.get("status") == "healthy" else 1
 
 
 def build_parser() -> argparse.ArgumentParser:

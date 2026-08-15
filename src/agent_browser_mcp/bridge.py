@@ -20,12 +20,20 @@ def main() -> int:
     host = os.environ.get("AGENT_BROWSER_TMWD_HOST", "127.0.0.1")
     port = int(os.environ.get("AGENT_BROWSER_TMWD_PORT", "18765"))
     driver = TMWebDriver(host=host, port=port)
-    if driver.is_remote:
-        print(f"bridge already running at {host}:{port}, exiting", flush=True)
+    try:
+        if driver.is_remote:
+            print(f"bridge already running at {host}:{port}, exiting", flush=True)
+            return 0
+        print(f"bridge started: ws={port} http={port + 1} pid={os.getpid()}", flush=True)
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("bridge stopped", flush=True)
         return 0
-    print(f"bridge started: ws={port} http={port + 1} pid={os.getpid()}", flush=True)
-    while True:
-        time.sleep(3600)
+    finally:
+        close = getattr(driver, "close", None)
+        if callable(close):
+            close()
 
 
 if __name__ == "__main__":
