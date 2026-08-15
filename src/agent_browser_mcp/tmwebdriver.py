@@ -125,6 +125,7 @@ class Session:
             self.ws_client = client
             self.http_queue = None
         elif self.type == 'http':
+            self.ws_client = None
             self.http_queue = client
         self.connect_at = time.time()
         self.disconnect_at = None
@@ -261,6 +262,11 @@ class TMWebDriver:
             check_link_token(request.headers, self.link_token)
             data = request.json
             if not isinstance(data, dict):
+                # Bottle only consumes the body for application/json.  A
+                # client that omits Content-Type would otherwise leave bytes
+                # unread; wsgiref can reset the socket on Windows before the
+                # structured error reaches the caller.
+                request.body.read(request.MEMFILE_MAX + 1)
                 return json.dumps({'r': {'error': 'body 必须是带 "cmd" 的 JSON 对象'}},
                                   ensure_ascii=False)
             cmd = data.get('cmd')
