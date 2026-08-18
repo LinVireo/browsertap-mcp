@@ -33,6 +33,16 @@ class TestUndelivered:
             {"result": "Session a:1 no response in 15s (script not polled)"}
         ) == "undelivered"
 
+    def test_structured_delivery_state_is_authoritative(self):
+        assert no_response_kind(
+            {
+                "error_code": "no_response",
+                "delivery_state": "undelivered",
+                "retry_safe": True,
+                "result": "localized human text",
+            }
+        ) == "undelivered"
+
 
 class TestAfterAck:
     """Delivered and possibly still running: retrying could double a submit."""
@@ -45,6 +55,11 @@ class TestAfterAck:
     def test_http_delivered_no_result(self):
         assert no_response_kind(
             {"result": "Session a:1 no response in 15s (delivered but no result)"}
+        ) == "after_ack"
+
+    def test_structured_delivered_state_does_not_depend_on_message(self):
+        assert no_response_kind(
+            {"delivery_state": "delivered_no_result", "result": "任意提示"}
         ) == "after_ack"
 
 
@@ -69,6 +84,11 @@ class TestNavigated:
         # Misclassifying this as undelivered would re-run a form submit.
         kind = no_response_kind({"result": "Session a:1 reloaded.", "closed": 1})
         assert kind != "undelivered"
+
+    def test_structured_navigation_state(self):
+        assert no_response_kind(
+            {"delivery_state": "navigated", "result": "page changed"}
+        ) == "navigated"
 
 
 class TestMalformed:

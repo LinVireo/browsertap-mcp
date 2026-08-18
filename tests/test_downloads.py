@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
 from agent_browser_mcp import server as S
-
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKGROUND = ROOT / "src" / "agent_browser_mcp" / "chrome_extension" / "background.js"

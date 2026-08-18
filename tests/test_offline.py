@@ -10,12 +10,12 @@ import json
 import threading
 import time
 
+import anyio
 import pytest
 
-from agent_browser_mcp import simphtml
 from agent_browser_mcp import server as S
-from agent_browser_mcp.tmwebdriver import Session, TMWebDriver
-
+from agent_browser_mcp import simphtml
+from agent_browser_mcp.browser_bridge import BrowserBridge, Session
 
 # --- how a bridge reply is classified -----------------------------------
 
@@ -108,7 +108,7 @@ def test_ref_numbering_is_stable_across_calls_on_one_dict():
 # --- the offscreen marker ----------------------------------------------
 
 def test_offscreen_note_parses_the_marker():
-    html = '<body><!--tmwd-offscreen:15 scrollY:0 viewH:780 docH:2574--><p>x</p></body>'
+    html = '<body><!--abm-offscreen:15 scrollY:0 viewH:780 docH:2574--><p>x</p></body>'
     assert S._offscreen_note(html) == {
         "elements": 15, "scroll_y": 0, "viewport_height": 780, "doc_height": 2574,
     }
@@ -120,7 +120,7 @@ def test_offscreen_note_absent_when_nothing_was_dropped():
 
 def test_offscreen_note_handles_negative_scroll():
     """Overscroll (rubber-banding) reports a negative scrollY on some platforms."""
-    html = '<!--tmwd-offscreen:3 scrollY:-40 viewH:600 docH:2000-->'
+    html = '<!--abm-offscreen:3 scrollY:-40 viewH:600 docH:2000-->'
     note = S._offscreen_note(html)
     assert note is not None and note["scroll_y"] == -40
 
@@ -264,7 +264,10 @@ def test_page_input_tools_do_not_activate_and_restore_default(monkeypatch):
     assert all(batch["cmd"] == "batch" for batch in batches)
     assert all(session_id == "c:target" for _, session_id, _ in calls)
     focused_batch = batches[2]
-    assert focused_batch["commands"][0]["method"] == "Input.insertText"
+    assert [command["method"] for command in focused_batch["commands"][:2]] == [
+        "Emulation.setFocusEmulationEnabled",
+        "Input.insertText",
+    ]
     resolver_scripts = [script for script, _, _ in calls if script.lstrip().startswith("(() =>")]
     assert resolver_scripts
     assert all(".xterm-helper-textarea" in script for script in resolver_scripts)
@@ -342,12 +345,33 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
     elapsed = time.monotonic() - started
 
     assert result["status"] == "no_response"
+    assert result["delivery_state"] == "undelivered"
+    assert result["retry_safe"] is True
+    # The reserve makes the retry reachable; the total still fits one deadline.
+    assert len(driver.timeouts) == 2
+    assert result["abm_retried"] is True
     assert elapsed < 0.30
     assert sum(driver.timeouts) <= 0.16
 
 
+def test_undelivered_retry_split_reserves_a_reachable_retry_window():
+    # Long budget: the first attempt keeps nearly all of it, reserve is capped.
+    first, reserve = simphtml.undelivered_retry_split(60.0)
+    assert reserve == simphtml.UNDELIVERED_RETRY_RESERVE
+    assert first == 60.0 - reserve
+    # Short budget: split proportionally rather than losing a fixed 2s.
+    first, reserve = simphtml.undelivered_retry_split(1.0)
+    assert 0 < reserve < 1.0
+    assert first + reserve == 1.0
+    # Too small to split: spend it all on the first attempt, never return 0.
+    first, reserve = simphtml.undelivered_retry_split(0.001)
+    assert (first, reserve) == (0.001, 0.0)
+    first, reserve = simphtml.undelivered_retry_split(0.0)
+    assert (first, reserve) == (0.0, 0.0)
+
+
 def test_driver_ack_does_not_restart_execute_js_deadline():
-    driver = TMWebDriver.__new__(TMWebDriver)
+    driver = BrowserBridge.__new__(BrowserBridge)
     driver.is_remote = False
     driver.results = {}
     driver.acks = {}
@@ -372,11 +396,14 @@ def test_driver_ack_does_not_restart_execute_js_deadline():
     elapsed = time.monotonic() - started
 
     assert "ACK received" in result["result"]
+    assert result["error_code"] == "no_response"
+    assert result["delivery_state"] == "delivered_no_result"
+    assert result["retry_safe"] is False
     assert elapsed < 0.23
 
 
 def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
-    driver = TMWebDriver.__new__(TMWebDriver)
+    driver = BrowserBridge.__new__(BrowserBridge)
     driver.is_remote = False
     driver.results = {}
     driver.acks = {}
@@ -397,7 +424,7 @@ def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
     )
     driver.sessions = {"c:1": session}
 
-    monkeypatch.setattr("agent_browser_mcp.tmwebdriver.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
 
     def final_sleep(seconds):
         clock[0] += seconds
@@ -407,7 +434,7 @@ def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
             "tabId": 1,
         }
 
-    monkeypatch.setattr("agent_browser_mcp.tmwebdriver.time.sleep", final_sleep)
+    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.sleep", final_sleep)
 
     result = driver.execute_js("return 9", timeout=0.05, session_id="c:1")
 
@@ -416,7 +443,7 @@ def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
 
 
 def test_ext_cmd_consumes_result_arriving_in_final_poll_slice(monkeypatch):
-    driver = TMWebDriver.__new__(TMWebDriver)
+    driver = BrowserBridge.__new__(BrowserBridge)
     driver.is_remote = False
     driver.results = {}
     driver.acks = {}
@@ -429,13 +456,13 @@ def test_ext_cmd_consumes_result_arriving_in_final_poll_slice(monkeypatch):
             sent["id"] = json.loads(payload)["id"]
 
     driver.ext_clients = {"c": {"ws": Socket(), "ts": 1.0}}
-    monkeypatch.setattr("agent_browser_mcp.tmwebdriver.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
 
     def final_sleep(seconds):
         clock[0] += seconds
         driver.results[sent["id"]] = {"success": True, "data": {"ok": True}}
 
-    monkeypatch.setattr("agent_browser_mcp.tmwebdriver.time.sleep", final_sleep)
+    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.sleep", final_sleep)
 
     result = driver.ext_cmd({"cmd": "tabs"}, timeout=0.05)
 
@@ -443,7 +470,7 @@ def test_ext_cmd_consumes_result_arriving_in_final_poll_slice(monkeypatch):
 
 
 def test_remote_ext_cmd_preserves_bridge_selected_client_id(monkeypatch):
-    driver = TMWebDriver.__new__(TMWebDriver)
+    driver = BrowserBridge.__new__(BrowserBridge)
     driver.is_remote = True
     driver.default_session_id = None
     seen = {}
@@ -492,7 +519,13 @@ def test_page_type_missing_target_sends_no_text_or_key(monkeypatch):
     assert driver.default_session_id == "c:previous"
 
 
-def test_exec_js_undelivered_retry_cannot_restart_timeout(monkeypatch):
+def test_exec_js_undelivered_retry_stays_inside_total_timeout(monkeypatch):
+    """The undelivered retry must happen, and must not extend the deadline.
+
+    The first attempt is deliberately given less than the whole budget: a driver
+    that only reports "undelivered" after spending everything it was handed
+    leaves nothing to retry with, which is how this retry used to be dead code.
+    """
     class SlowUndeliveredDriver:
         default_session_id = "c:target"
 
@@ -517,8 +550,16 @@ def test_exec_js_undelivered_retry_cannot_restart_timeout(monkeypatch):
         S.exec_js("return 1", session_id="c:target", timeout=0.04)
 
     elapsed = time.monotonic() - started
-    assert len(driver.calls) == 1
-    assert elapsed < 0.10
+    assert len(driver.calls) == 2
+    assert driver.calls[0] < 0.04
+    assert sum(driver.calls) <= 0.04
+    # The three assertions above are the contract; they read the budget the code
+    # actually handed the driver, so they hold under any machine load. This one
+    # is only a backstop for a retry that sleeps outside the recorded timeout,
+    # and its failure mode is a re-armed 15s default -- so the ceiling is loose
+    # on purpose. A tight one (0.10s, two sleeps totalling 0.04s) made this test
+    # fail for scheduler noise inside the full offline suite.
+    assert elapsed < 1.0
 
 
 def test_page_type_slow_session_resolution_sends_no_input_after_deadline(monkeypatch):
@@ -589,12 +630,13 @@ def test_page_type_uses_already_validated_session_for_input(monkeypatch):
     assert all(call[1] == "c:target" for call in calls)
     batch = json.loads(calls[1][0])
     assert [command["method"] for command in batch["commands"]] == [
+        "Emulation.setFocusEmulationEnabled",
         "Input.insertText",
         "Runtime.evaluate",
         "Input.dispatchKeyEvent",
         "Input.dispatchKeyEvent",
     ]
-    assert batch["commands"][1]["params"]["awaitPromise"] is True
+    assert batch["commands"][2]["params"]["awaitPromise"] is True
     assert driver.default_session_id == "c:previous"
 
 
@@ -646,33 +688,94 @@ def test_page_input_batch_carries_the_same_absolute_deadline(monkeypatch):
     class _D:
         default_session_id = "c:previous"
 
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            calls.append((payload, client_id, timeout))
+            return {"data": [{}, {"ok": True}]}
+
     calls = []
     monkeypatch.setattr(S, "require_driver", lambda: _D())
     monkeypatch.setattr(S.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(S.time, "time", lambda: 200.0)
 
-    def fake_exec_js(script, session_id=None, timeout=15.0):
-        calls.append((json.loads(script), session_id, timeout))
-        return {"data": [{"ok": True}]}
-
-    monkeypatch.setattr(S, "exec_js", fake_exec_js)
-
-    S._run_page_input(
+    result = S._run_page_input(
         [{"cmd": "cdp", "method": "Input.insertText", "params": {"text": "x"}}],
-        "c:target",
+        "c:42",
         0.2,
         session_validated=True,
         deadline=100.2,
     )
 
-    payload, session_id, timeout = calls[0]
+    payload, client_id, timeout = calls[0]
     assert payload["deadlineEpochMs"] in {200199, 200200}
-    assert session_id == "c:target"
+    assert payload["timeoutMs"] in {199, 200}
+    assert payload["tabId"] == 42
+    assert payload["commands"] == [
+        {
+            "cmd": "cdp",
+            "method": "Emulation.setFocusEmulationEnabled",
+            "params": {"enabled": True},
+        },
+        {"cmd": "cdp", "method": "Input.insertText", "params": {"text": "x"}},
+    ]
+    assert client_id == "c"
     assert timeout == pytest.approx(0.2)
+    assert result["result"] == [{"ok": True}]
+
+
+def test_page_input_timeout_is_not_replayed_through_page_route(monkeypatch):
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, *_args, **_kwargs):
+            raise TimeoutError("extension command timed out")
+
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+    monkeypatch.setattr(
+        S,
+        "exec_js",
+        lambda *_args, **_kwargs: pytest.fail("ambiguous input must not be replayed"),
+    )
+
+    with pytest.raises(TimeoutError, match="extension command timed out"):
+        S._run_page_input(
+            [{"cmd": "cdp", "method": "Input.insertText", "params": {"text": "x"}}],
+            "c:42",
+            0.2,
+            session_validated=True,
+        )
+
+
+def test_page_input_unknown_batch_router_uses_bounded_legacy_route(monkeypatch):
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, *_args, **_kwargs):
+            raise RuntimeError("Unknown cmd: batch")
+
+    legacy_calls = []
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+
+    def fake_exec_js(script, session_id=None, timeout=15.0):
+        legacy_calls.append((json.loads(script), session_id, timeout))
+        return {"data": [{"ok": True}]}
+
+    monkeypatch.setattr(S, "exec_js", fake_exec_js)
+
+    result = S._run_page_input(
+        [{"cmd": "cdp", "method": "Input.insertText", "params": {"text": "x"}}],
+        "c:42",
+        0.2,
+        session_validated=True,
+    )
+
+    assert result["status"] == "success"
+    assert legacy_calls[0][0]["tabId"] == 42
+    assert legacy_calls[0][1] == "c:42"
+    assert 0 < legacy_calls[0][2] <= 0.2
 
 
 def test_driver_does_not_dispatch_when_session_recovers_at_deadline(monkeypatch):
-    driver = TMWebDriver.__new__(TMWebDriver)
+    driver = BrowserBridge.__new__(BrowserBridge)
     driver.is_remote = False
     driver.results = {}
     driver.acks = {}
@@ -690,23 +793,25 @@ def test_driver_does_not_dispatch_when_session_recovers_at_deadline(monkeypatch)
     session.mark_disconnected()
     driver.sessions = {"c:1": session}
 
-    monkeypatch.setattr("agent_browser_mcp.tmwebdriver.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
 
     def recover_on_final_sleep(seconds):
         clock[0] += seconds
         session.reconnect(Socket(), info)
 
     monkeypatch.setattr(
-        "agent_browser_mcp.tmwebdriver.time.sleep", recover_on_final_sleep
+        "agent_browser_mcp.browser_bridge.time.sleep", recover_on_final_sleep
     )
 
     result = driver.execute_js("window.sideEffect = true", timeout=0.05, session_id="c:1")
 
     assert sent == []
     assert "no ACK" in result["result"]
+    assert result["delivery_state"] == "undelivered"
+    assert result["retry_safe"] is True
 
 
-def test_page_input_restores_default_when_batch_fails(monkeypatch):
+def test_page_press_restores_default_when_batch_fails(monkeypatch):
     class _D:
         default_session_id = "c:previous"
 
@@ -738,6 +843,26 @@ def test_page_input_refuses_a_dead_directed_session(monkeypatch):
     with pytest.raises(RuntimeError, match="not found"):
         S.page_press("enter", session_id="c:dead")
     assert called == []
+
+
+def test_page_drag_restores_default_when_batch_fails(monkeypatch):
+    class _D:
+        default_session_id = "c:previous"
+
+    driver = _D()
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "active_sessions", lambda timeout=None, fresh=False: [
+        {"id": "c:target", "url": "https://example.test/"},
+    ])
+    monkeypatch.setattr(
+        S,
+        "exec_js",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("drag failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="drag failed"):
+        S.page_drag(1, 2, 3, 4, session_id="c:target")
+    assert driver.default_session_id == "c:previous"
     assert driver.default_session_id == "c:previous"
 
 
@@ -1032,10 +1157,10 @@ class _FakeSession:
 
 
 def _driver_with(sessions, default, latest=None):
-    """A TMWebDriver with a hand-built session table and no sockets."""
-    from agent_browser_mcp.tmwebdriver import TMWebDriver
+    """A BrowserBridge with a hand-built session table and no sockets."""
+    from agent_browser_mcp.browser_bridge import BrowserBridge
 
-    d = TMWebDriver.__new__(TMWebDriver)      # skip __init__: it binds ports
+    d = BrowserBridge.__new__(BrowserBridge)  # skip __init__: it binds ports
     d.sessions = {s.id: s for s in sessions}
     d.default_session_id = default
     d.latest_session_id = latest
@@ -1105,7 +1230,6 @@ def test_concurrent_starts_still_spawn_one_daemon(tmp_path, monkeypatch):
     callers still spawned. Every caller must also come back True: they depend on
     a bridge being up, not on having been the one to start it.
     """
-    import threading
 
     monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
 
@@ -1178,7 +1302,7 @@ def test_desktop_click_can_still_opt_out(monkeypatch):
     assert raised == []
 
 
-def test_activate_admits_a_window_it_could_not_raise(monkeypatch):
+def test_activate_tab_admits_a_window_it_could_not_raise(monkeypatch):
     """Making a tab active succeeds even when the window is minimised, so
     reporting plain success there sends the caller off clicking coordinates on
     whatever else is on screen. It has to say the tab is not visible."""
@@ -1243,7 +1367,7 @@ class TestCookieValidation:
             S.set_cookies({"value": "x"})
 
     def test_set_cookies_illegal_name_chars_rejected(self):
-        with pytest.raises(ValueError, match="非法"):
+        with pytest.raises(ValueError, match="invalid"):
             S.set_cookies({"name": "a=b", "value": "x"})
 
     def test_set_cookies_value_with_semicolon_rejected(self):
@@ -1255,7 +1379,7 @@ class TestCookieValidation:
             S.set_cookies("{not json")
 
     def test_set_cookies_empty_list_rejected(self):
-        with pytest.raises(ValueError, match="非空"):
+        with pytest.raises(ValueError, match="non-empty"):
             S.set_cookies([])
 
     def test_set_cookies_bad_expires_rejected(self):
@@ -1287,9 +1411,19 @@ class TestWaitForUrlValidation:
         with pytest.raises(ValueError, match="url_pattern"):
             S.wait_for_url("  ")
 
-    def test_bad_regex_rejected(self):
-        with pytest.raises(ValueError, match="正则"):
-            S.wait_for_url("([unclosed")
+    def test_javascript_regex_is_validated_in_page(self, monkeypatch):
+        class _Driver:
+            default_session_id = "client:1"
+
+        monkeypatch.setattr(S, "require_driver", lambda: _Driver())
+        monkeypatch.setattr(S, "ensure_sessions", lambda: None)
+        monkeypatch.setattr(
+            S,
+            "exec_js",
+            lambda script, **_kwargs: {"data": '{"met":true,"url":"https://example.test/","title":"Done","ready":"complete"}'},
+        )
+        result = S.wait_for_url(r"(?<segment>example)", timeout=1)
+        assert result["status"] == "success"
 
 
 # --- regression guards for the audit-fixes round ------------------------
@@ -1326,7 +1460,8 @@ def test_upload_files_parses_a_bare_results_array(monkeypatch):
         return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]}
 
     monkeypatch.setattr(S, "exec_js", fake_exec_js)
-    import tempfile, os
+    import os
+    import tempfile
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
     f.write(b"x"); f.close()
     try:
@@ -1337,6 +1472,34 @@ def test_upload_files_parses_a_bare_results_array(monkeypatch):
         os.unlink(f.name)
 
 
+def test_upload_files_failure_leaves_the_caller_file_untouched(monkeypatch, tmp_path):
+    """A failed upload must not consume, move, or truncate the caller's file.
+
+    `upload_files` resolves and hands out real paths from the user's disk, so a
+    failure part-way through must be inert. The previous version of this test
+    deleted the fixture itself and then asserted it was gone, which held no
+    matter what `upload_files` did to it.
+    """
+    upload = tmp_path / "upload.txt"
+    upload.write_text("fixture", encoding="utf-8")
+    before = upload.stat()
+    monkeypatch.setattr(
+        S,
+        "exec_js",
+        lambda *args, **kwargs: {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]},
+    )
+
+    with pytest.raises(RuntimeError, match="matched no element"):
+        S.upload_files("#missing", str(upload))
+
+    assert upload.is_file()
+    assert upload.read_text(encoding="utf-8") == "fixture"
+    assert upload.stat().st_size == before.st_size
+    # Nor may it leave anything of its own next to the caller's file.
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["upload.txt"]
+
+
+
 def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
     """DOM.querySelector returns nodeId=0 when nothing matches; that used to be
     swallowed (results was always None because data was a list, not a dict) and
@@ -1345,7 +1508,8 @@ def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
         return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]}  # 0 = no match
 
     monkeypatch.setattr(S, "exec_js", fake_exec_js)
-    import tempfile, os
+    import os
+    import tempfile
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
     f.write(b"x"); f.close()
     try:
@@ -1399,42 +1563,300 @@ def test_spawn_lock_recycled_when_owner_pid_is_dead(tmp_path, monkeypatch):
     assert S._acquire_spawn_lock() is not None  # recycled because pid 0 is dead
 
 
-def test_tool_lock_serializes_concurrent_calls(monkeypatch):
-    """The save/restore default_session_id pattern races under concurrency.
-    The global _TOOL_LOCK must serialize tool calls so two directed calls do
-    not read each other's target."""
-    import threading
+def test_session_table_readers_survive_concurrent_registration_churn(monkeypatch):
+    """Every host-side reader runs on a caller thread while the WS thread churns.
 
-    order = []
-    lock = threading.Lock()
+    Tabs register and drop constantly (page loads, service-worker naps, browser
+    restarts), and `for x in self.sessions.values()` raises RuntimeError the
+    instant the table changes size mid-iteration. Worse, diagnose() is the tool
+    people run *because* something is already wrong, so it is the one that must
+    never be the thing that raises. This hammers the readers against a writer
+    instead of trusting each call site to have remembered its list() snapshot.
 
-    class _D:
-        default_session_id = None
+    The writer grows the table in a batch and then drains it: a transient
+    add+remove between two __next__ calls nets to the same size and CPython does
+    not notice it, so churn that only replaces keys would make this test pass
+    against unguarded iteration too.
+    """
+    import queue as _queue
 
-        def execute_js(self, code, timeout=15, session_id=None, allow_failover=False):
-            with lock:
-                order.append(("exec", session_id))
-            return {"data": "ok"}
+    from agent_browser_mcp import browser_bridge as _bb
 
-    d = _D()
-    monkeypatch.setattr(S, "require_driver", lambda: d)
+    # mark_disconnected() logs per tab, and this loops thousands of times.
+    monkeypatch.setattr(_bb.logger, "disabled", True)
+
+    d = BrowserBridge.__new__(BrowserBridge)
+    d.host, d.port = "127.0.0.1", 0
+    d.sessions, d.results, d.acks = {}, {}, {}
+    d.default_session_id = d.latest_session_id = None
+    d.last_ext_seen = time.time()
+    d.client_last_seen, d.ext_clients = {}, {}
+    d.is_remote = False
+
+    stop = threading.Event()
+    failures: list[BaseException] = []
+    rounds = []
+
+    def churn(worker: int) -> None:
+        round_no = 0
+        try:
+            while not stop.is_set():
+                round_no += 1
+                batch = [f"c{worker}:{round_no}:{index}" for index in range(48)]
+                for index, sid in enumerate(batch):
+                    session = Session(
+                        sid,
+                        {"url": f"https://example.test/{index}", "title": "t",
+                         "type": "http", "client_id": f"c{worker}"},
+                        _queue.Queue(),
+                    )
+                    d.sessions[sid] = session
+                    d.latest_session_id = sid
+                    if index == 0:
+                        session.mark_disconnected()
+                d.client_last_seen[f"c{worker}"] = {"browser": "chrome", "ts": time.time()}
+                # ts=0 so clean_sessions actually collects these, keeping the
+                # result/ack sweeps in the churn too.
+                d.results[f"r{worker}:{round_no}"] = {"success": True, "data": 1, "ts": 0.0}
+                d.acks[f"r{worker}:{round_no}"] = 0.0
+                for sid in batch:  # the local list, never the live dict
+                    d.sessions.pop(sid, None)
+            rounds.append(round_no)
+        except BaseException as exc:  # noqa: BLE001 - the point is to report it
+            failures.append(exc)
+
+    def read() -> None:
+        try:
+            while not stop.is_set():
+                d.find_session("example.test")
+                d.find_session("")
+                d.get_all_sessions()
+                d.get_session_dict()
+                d.clean_sessions()
+                d.diagnose(timeout=1)
+                d._live_default_session_id()
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+
+    threads = [threading.Thread(target=churn, args=(n,), daemon=True) for n in range(2)]
+    threads += [threading.Thread(target=read, daemon=True) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    time.sleep(1.5)
+    stop.set()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert failures == [], f"{type(failures[0]).__name__}: {failures[0]}"
+    # An interleave this test cannot produce proves nothing; verified separately
+    # that an unguarded `for s in d.sessions.values()` fails within this window.
+    assert rounds and min(rounds) > 10, f"too little churn to be meaningful: {rounds}"
+
+
+def test_directed_execute_js_restores_the_shared_default_session(monkeypatch):
+    """A session_id-scoped call must not leave the shared default on its tab.
+
+    `execute_js` snapshots `driver.default_session_id` and restores it in its
+    `finally` (server.py:3457) because work inside the call can repoint it — the
+    driver reselects a live default on its own (browser_bridge.py:762). Losing
+    that restore hands the next undirected call somebody else's tab.
+
+    This replaces a test named `test_tool_lock_serializes_concurrent_calls` that
+    could not test either half of its name: it drove the *unwrapped* in-process
+    function, which never enters `_TOOL_LOCK` (only the registered runner does,
+    server.py:325-333), stubbed out `exec_js` so its recording driver was never
+    reached, passed the same session id four times, and asserted nothing at all.
+    Serialization through the real gate is covered by
+    `test_registered_async_tool_shares_lock_and_offloads_blocking_io`.
+    """
+    observed = []
+
+    class Driver:
+        default_session_id = "c:1"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            return {"data": {"ok": True, "token": "scope-token"}}
+
+    driver = Driver()
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
     monkeypatch.setattr(
         S,
         "ensure_sessions",
-        lambda *args, **kwargs: [{"id": "c:1", "url": "https://x"}],
+        lambda **kwargs: [{"id": "c:1", "url": "https://one"}, {"id": "c:2", "url": "https://two"}],
     )
-    monkeypatch.setattr(S, "active_sessions", lambda timeout=None, fresh=False:
-                        [{"id": "c:1", "url": "https://x"}])
-    # switch_session mutates driver.default_session_id; exec_js_rich reads it.
-    monkeypatch.setattr(S, "exec_js", lambda script, session_id=None, timeout=15.0:
-                        {"data": "ok", "executed_tab_id": 1})
 
-    # Two concurrent execute_js calls with different session_ids: both
-    # save/restore, and under the lock they cannot interleave.
-    import concurrent.futures
+    def fake_rich(script, drv, **kwargs):
+        observed.append((kwargs.get("session_id"), drv.default_session_id))
+        # Stand in for the driver reselecting a live default mid-call.
+        drv.default_session_id = "c:2"
+        return {"js_return": "ok"}
 
-    def call(sid):
-        S.execute_js("return 1", session_id=sid)
+    monkeypatch.setattr(S.simphtml, "execute_js_rich", fake_rich)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(call, ["c:1", "c:1", "c:1", "c:1"]))
+    result = S.execute_js("return 1", session_id="c:2")
+
+    assert result["js_return"] == "ok"
+    # The target is threaded through explicitly, not smuggled via the default.
+    assert observed == [("c:2", "c:1")]
+    assert driver.default_session_id == "c:1"
+
+
+def test_undirected_execute_js_keeps_the_default_it_had_to_pick(monkeypatch):
+    """The other half of the rule: an unchosen default may be re-picked and kept.
+
+    When the caller names no tab, a dead default is replaced and the new one
+    must stick — otherwise every later undirected call re-resolves and the agent
+    is forced to `switch_tab` before each step (AGENTS.md section 4).
+    """
+    class Driver:
+        default_session_id = "c:dead"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            return {"data": {"ok": True, "token": "scope-token"}}
+
+    driver = Driver()
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(
+        S,
+        "ensure_sessions",
+        lambda **kwargs: [{"id": "c:9", "url": "https://live"}],
+    )
+    monkeypatch.setattr(
+        S.simphtml, "execute_js_rich", lambda script, drv, **kwargs: {"js_return": "ok"}
+    )
+
+    S.execute_js("return 1")
+
+    assert driver.default_session_id == "c:9"
+
+
+
+@pytest.mark.anyio
+async def test_registered_async_tool_shares_lock_and_offloads_blocking_io(monkeypatch):
+    from types import SimpleNamespace
+
+    order = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Driver:
+        default_session_id = "chrome:7"
+
+        def ext_cmd(self, payload, **kwargs):
+            order.append("permission_start")
+            entered.set()
+            assert release.wait(2)
+            order.append("permission_end")
+            return {"data": {"ok": True}}
+
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "lab")
+    monkeypatch.setenv("AGENT_BROWSER_LAB_NO_ELICIT", "1")
+    monkeypatch.setattr(S, "require_driver", lambda: Driver())
+    monkeypatch.setattr(S, "switch_session", lambda session_id=None: session_id or "chrome:7")
+    monkeypatch.setattr(
+        S,
+        "chrome_extension_dir",
+        lambda: order.append("extension_path") or S.Path("extension"),
+    )
+    permission_fn = S.mcp._tool_manager.get_tool("set_site_permission").fn
+    extension_path_fn = S.mcp._tool_manager.get_tool("extension_path").fn
+
+    async def permission_call():
+        await permission_fn(
+            SimpleNamespace(), "camera", "block", "https://example.test", 300, "chrome:7"
+        )
+
+    async def extension_path_call():
+        await extension_path_fn()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(permission_call)
+        assert await anyio.to_thread.run_sync(entered.wait, 2)
+        tasks.start_soon(extension_path_call)
+        # The event loop remains responsive while ext_cmd blocks in a worker,
+        # but the second registered tool cannot enter the shared serial gate.
+        await anyio.sleep(0.05)
+        assert "extension_path" not in order
+        release.set()
+
+    assert order == ["permission_start", "permission_end", "extension_path"]
+
+
+@pytest.mark.anyio
+async def test_cancelled_tool_never_walks_away_holding_the_tool_lock(monkeypatch):
+    """A cancelled request must not wedge every serialized tool in the process.
+
+    This is the dangerous timing: the acquire is queued behind another holder
+    when the deadline expires. to_thread.run_sync does not abandon its worker, so
+    the lock is handed to this task *after* it was cancelled, and only then does
+    the Cancelled surface. Nothing here may keep it — every serialized tool goes
+    through the same gate, so one leak takes the whole MCP process down until it
+    restarts, and a client pressing Esc during an approval prompt is enough.
+    """
+    holding = threading.Event()
+    release = threading.Event()
+    from types import SimpleNamespace
+
+    tool = S.mcp._tool_manager.get_tool("set_site_permission").fn
+    # The body is unreachable: the lock is held for the entire cancel window, so
+    # anything touching a driver here means the cancellation lost its race.
+    monkeypatch.setattr(
+        S, "require_driver", lambda: pytest.fail("the tool body must not run")
+    )
+
+    def hold():
+        S._TOOL_LOCK.acquire()
+        holding.set()
+        assert release.wait(10)
+        S._TOOL_LOCK.release()
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert holding.wait(5)
+
+    cancelled = []
+
+    async def cancelled_call():
+        with anyio.move_on_after(0.05) as scope:
+            await tool(
+                SimpleNamespace(), "camera", "block", "https://example.test", 300,
+                "chrome:7",
+            )
+        cancelled.append(scope.cancelled_caught)
+
+    try:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(cancelled_call)
+            # Let the deadline expire while the worker is still queued behind the
+            # holder, then hand the lock over: the acquire now completes into an
+            # already-cancelled task, which is the leaking case.
+            await anyio.sleep(0.2)
+            release.set()
+    finally:
+        release.set()
+        holder.join(5)
+
+    assert cancelled == [True]
+    assert S._TOOL_LOCK.locked() is False
+
+
+@pytest.mark.anyio
+async def test_repeated_cancellations_do_not_leak_the_tool_lock():
+    """Same invariant under volume, and for both cancellation timings.
+
+    An already-expired scope cancels before the acquire; a sub-millisecond one
+    lands during it. Neither may leave the gate held, and the lock must still be
+    usable afterwards.
+    """
+    for index in range(120):
+        with anyio.move_on_after(0 if index % 2 else 0.001):
+            await S._acquire_tool_lock()
+            S._TOOL_LOCK.release()
+        assert S._TOOL_LOCK.locked() is False, f"leaked on iteration {index}"
+
+    await S._acquire_tool_lock()
+    try:
+        assert S._TOOL_LOCK.locked() is True
+    finally:
+        S._TOOL_LOCK.release()

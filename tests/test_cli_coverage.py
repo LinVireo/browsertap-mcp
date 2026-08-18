@@ -33,28 +33,32 @@ class FakeDriver:
 
 
 def _install_doctor_fakes(monkeypatch, driver, payload):
-    monkeypatch.setattr(cli, "ensure_config_js", lambda: None)
     monkeypatch.setattr(cli, "get_driver", lambda: driver)
     monkeypatch.setattr(cli, "get_setup_status", lambda: dict(payload))
     monkeypatch.setattr(cli, "_port_open", lambda host, port: port == driver.port)
 
 
-def test_extension_path_prepares_config_and_prints_path(monkeypatch, tmp_path, capsys):
-    calls = []
+def test_extension_path_prints_path_without_writing_package_files(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "chrome_extension_dir", lambda: tmp_path)
-    monkeypatch.setattr(cli, "ensure_config_js", lambda: calls.append("config"))
 
     assert cli.cmd_extension_path() == 0
-    assert calls == ["config"]
     assert capsys.readouterr().out.strip() == str(tmp_path)
 
 
 def test_print_hermes_config(capsys):
     assert cli.cmd_print_hermes_config() == 0
     output = capsys.readouterr().out
-    assert "agent_browser:" in output
+    assert "agent-browser-mcp:" in output
     assert "command: agent-browser-mcp" in output
     assert "connect_timeout: 60" in output
+
+
+def test_version_flag_reports_package_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"agent-browser-mcp {cli.__version__}"
 
 
 @pytest.mark.parametrize("connect_result, expected", [(0, True), (10061, False)])
@@ -125,6 +129,7 @@ def test_doctor_reload_extension_returns_nonzero(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out)["status"] == "stale_extension"
     assert "stale_extension" in captured.err
+    assert "Reload Agent Browser MCP Bridge" in captured.err
 
 
 def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path, capsys):
@@ -132,7 +137,6 @@ def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path
         sessions=RuntimeError("tabs unavailable"),
         diagnosis=RuntimeError("diagnose unavailable"),
     )
-    monkeypatch.setattr(cli, "ensure_config_js", lambda: None)
     monkeypatch.setattr(cli, "get_driver", lambda: driver)
     monkeypatch.setattr(
         cli,
@@ -150,6 +154,8 @@ def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path
     assert payload["error"] == "tabs unavailable"
     assert payload["setup_error"] == "setup unavailable"
     assert payload["diagnosis"]["cause"] == "diagnose_failed"
+    assert "agent-browser-mcp" in payload["next_steps"][-1]
+    assert "hermes" not in payload["next_steps"][-1].lower()
     assert "stale_bridge" in captured.err
 
 
@@ -180,15 +186,59 @@ def test_main_dispatches_simple_subcommands(monkeypatch, command, target):
 
 
 def test_main_dispatches_bridge(monkeypatch):
+    monkeypatch.setattr(cli, "cmd_bridge", lambda **kwargs: 23)
+    assert cli.main(["bridge"]) == 23
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["bridge", "--stop"], {"stop": True, "restart": False}),
+        (["bridge", "--restart"], {"stop": False, "restart": True}),
+    ],
+)
+def test_main_dispatches_bridge_management(monkeypatch, args, expected):
+    calls = []
+    monkeypatch.setattr(cli, "cmd_bridge", lambda **kwargs: calls.append(kwargs) or 19)
+    assert cli.main(args) == 19
+    assert calls == [expected]
+
+
+def test_cmd_bridge_stop_and_restart(monkeypatch, capsys):
     from agent_browser_mcp import bridge
 
-    monkeypatch.setattr(bridge, "main", lambda: 23)
-    assert cli.main(["bridge"]) == 23
+    monkeypatch.setattr(
+        bridge, "stop_bridge_daemon", lambda: {"status": "stopped", "stopped": True}
+    )
+    monkeypatch.setattr(
+        cli, "spawn_bridge_daemon", lambda **kwargs: kwargs == {"reset_spawn_lock": True}
+    )
+    assert cli.cmd_bridge(stop=True) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "stopped"
+    assert cli.cmd_bridge(restart=True) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "restarted"
+
+
+@pytest.mark.parametrize("stop_status", ["identity_mismatch", "unmanaged_running"])
+def test_cmd_bridge_refuses_restart_after_unverified_stop(monkeypatch, capsys, stop_status):
+    from agent_browser_mcp import bridge
+
+    monkeypatch.setattr(
+        bridge,
+        "stop_bridge_daemon",
+        lambda: {"status": stop_status, "stopped": False},
+    )
+    monkeypatch.setattr(
+        cli,
+        "spawn_bridge_daemon",
+        lambda **kwargs: pytest.fail("must not spawn after an unverified stop"),
+    )
+    assert cli.cmd_bridge(restart=True) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "restart_failed"
 
 
 def test_main_without_subcommand_starts_stdio_server(monkeypatch):
     calls = []
-    monkeypatch.setattr(cli, "ensure_config_js", lambda: calls.append("config"))
     monkeypatch.setattr(cli, "get_driver", lambda: calls.append("driver"))
     monkeypatch.setattr(
         cli,
@@ -197,7 +247,7 @@ def test_main_without_subcommand_starts_stdio_server(monkeypatch):
     )
 
     assert cli.main([]) == 0
-    assert calls == ["config", "driver", ("run", {"transport": "stdio"})]
+    assert calls == ["driver", ("run", {"transport": "stdio"})]
 
 
 def test_main_rejects_unknown_subcommand():

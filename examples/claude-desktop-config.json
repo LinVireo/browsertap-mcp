@@ -1,6 +1,7 @@
 {
   "mcpServers": {
-    "agent_browser": {
+    "agent-browser-mcp": {
+      "type": "stdio",
       "command": "agent-browser-mcp",
       "args": []
     }

@@ -7,7 +7,6 @@ from bs4 import BeautifulSoup
 
 from agent_browser_mcp import simphtml as S
 
-
 LONG_PATH = "/a/path/that/is/comfortably/longer/than/thirty/characters"
 
 
@@ -75,7 +74,8 @@ def test_optimize_html_preserves_ref_when_url_join_fails(monkeypatch):
     assert refs == {LONG_PATH: "r1"}
 
 
-def test_execute_in_session_and_temp_monitor_helpers(capsys):
+def test_execute_in_session_and_temp_monitor_helpers(caplog):
+    caplog.set_level("DEBUG", logger="agent_browser_mcp.simphtml")
     driver = QueueDriver([
         {"data": "plain"},
         {"data": "pinned"},
@@ -91,7 +91,7 @@ def test_execute_in_session_and_temp_monitor_helpers(capsys):
     assert S.get_temp_texts(driver) == []
     assert driver.calls[0][1] == {"timeout": 2, "custom": True}
     assert driver.calls[1][1] == {"timeout": 3, "session_id": "c:7"}
-    assert "monitor gone" in capsys.readouterr().out
+    assert "monitor gone" in caplog.text
 
 
 def test_start_temp_monitor_swallows_driver_failure():
@@ -147,13 +147,13 @@ def test_find_changed_elements_handles_new_duplicates_reorder_and_truncation():
 
 def test_get_html_resolves_base_refs_and_restores_iframe(monkeypatch):
     page = (
-        "<!--tmwd-base:https://example.test/root/page-->"
+        "<!--abm-base:https://example.test/root/page-->"
         f'<div data-tag="iframe"><a href="{LONG_PATH}">open</a></div>'
     )
     monkeypatch.setattr(S, "get_main_block", lambda *_args, **_kwargs: page)
     refs = {}
     html = S.get_html(object(), link_refs=refs, session_id="c:2")
-    assert "tmwd-base" not in html
+    assert "abm-base" not in html
     assert "<iframe>" in html
     assert 'href="#r1"' in html
     assert refs == {f"https://example.test{LONG_PATH}": "r1"}
@@ -183,7 +183,8 @@ def test_get_html_cutlist_keeps_instruction_hit_and_emits_hint(monkeypatch):
     assert "[FAKE ELEMENT] 6 more items hidden" in html
 
 
-def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch, capsys):
+def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="agent_browser_mcp.simphtml")
     page = _list_page(6) + "<div>" + "".join('<i class="few">x</i>' for _ in range(4)) + "</div>"
     candidates = [None, {}, {"selector": "["}, {"selector": ".few"}, {"selector": ".item"}]
     driver = QueueDriver([{"data": candidates}])
@@ -191,9 +192,9 @@ def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch
     html = S.get_html(driver, cutlist=True, maxchars=100_000)
     kept = BeautifulSoup(html, "html.parser").select(".item")
     assert [item.get_text().split()[0] for item in kept] == ["item-0", "item-1", "item-2"]
-    output = capsys.readouterr().out
-    assert "skip invalid selector" in output
-    assert "Found 5 list" in output
+    output = caplog.text
+    assert "skipped invalid selector" in output
+    assert "cutlist found 5 list" in output
 
 
 def test_get_html_handles_dict_candidate_empty_page_and_parse_cap(monkeypatch):
@@ -339,7 +340,8 @@ def test_execute_js_rich_classifies_navigation_and_reads_landing(monkeypatch):
     assert result["landed_title"] == "Landed"
 
 
-def test_execute_js_rich_navigation_location_failure_is_best_effort(capsys):
+def test_execute_js_rich_navigation_location_failure_is_best_effort(caplog):
+    caplog.set_level("DEBUG", logger="agent_browser_mcp.simphtml")
     driver = QueueDriver(
         [
             {"result": "Session c:5 reloaded.", "closed": 1},
@@ -351,12 +353,12 @@ def test_execute_js_rich_navigation_location_failure_is_best_effort(capsys):
     )
     assert result["status"] == "navigated"
     assert "landed_url" not in result
-    assert "location unavailable" in capsys.readouterr().out
+    assert "location unavailable" in caplog.text
 
 
 def test_execute_js_rich_returns_blocked_dialog_with_new_tabs():
     response = {
-        "data": {"__tmwd_dialog_result": True, "status": "blocked_by_dialog"},
+        "data": {"__abm_dialog_result": True, "status": "blocked_by_dialog"},
         "newTabs": [{"id": "c:2"}],
         "executed_tab_id": 1,
     }
@@ -381,7 +383,7 @@ def test_execute_js_rich_detects_new_sessions(monkeypatch):
         "open()", driver, timeout=2, before_sids={"c:1"}, session_id="c:1"
     )
     assert result["newTabs"] == [{"id": "c:2", "url": "new"}]
-    assert "页面已刷新" in result["suggestion"]
+    assert "page refreshed" in result["suggestion"]
 
 
 def test_execute_js_rich_reports_dom_diff_and_no_change(monkeypatch):
@@ -391,15 +393,15 @@ def test_execute_js_rich_reports_dom_diff_and_no_change(monkeypatch):
     monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: ["toast"])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     changed = S.execute_js_rich("change()", driver, timeout=2, before_sids={"c:1"}, session_id="c:1")
-    assert "DOM变化量" in changed["diff"]
-    assert "最显著变化" in changed["diff"]
+    assert "DOM changes" in changed["diff"]
+    assert "Most significant change" in changed["diff"]
 
     driver = QueueDriver([{"data": "ok"}], sessions={"c:1": "old"})
     monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: "<p>same</p>")
     monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: [])
     unchanged = S.execute_js_rich("noop()", driver, timeout=2, before_sids={"c:1"}, session_id="c:1")
-    assert "页面无变化" in unchanged["diff"]
-    assert unchanged["suggestion"] == "页面无明显变化"
+    assert "no page changes" in unchanged["diff"]
+    assert unchanged["suggestion"] == "No visible page changes were detected."
 
 
 def test_execute_js_rich_marks_diff_unavailable(monkeypatch):
@@ -416,12 +418,15 @@ def test_execute_js_rich_marks_diff_unavailable(monkeypatch):
     monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     result = S.execute_js_rich("noop()", driver, timeout=2, before_sids=set())
-    assert result["diff"] == "页面变化监控不可用"
+    assert result["diff"] == "Page-change monitoring is unavailable."
 
 
 def test_execute_js_rich_after_ack_does_not_retry():
     driver = QueueDriver([{"result": "No response data in 2s (ACK received, script may still be running)"}])
     result = S.execute_js_rich("slow()", driver, no_monitor=True, timeout=2, before_sids=set())
     assert result["status"] == "no_response"
+    assert result["delivery_state"] == "delivered_no_result"
+    assert result["retry_safe"] is False
     assert len(driver.calls) == 1
-    assert "勿盲目重试" in result["suggestion"]
+    assert "before retrying side effects" in result["suggestion"]
+    assert "wait_for" in result["suggestion"]

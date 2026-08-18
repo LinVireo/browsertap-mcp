@@ -1,5 +1,6 @@
 __pycache__/
 .pytest_cache/
+.coverage*
 *.pyc
 *.pyo
 *.pyd
@@ -12,14 +13,31 @@ src/*.egg-info/
 .venv/
 venv/
 .env
+.env.*
+!.env.example
 .DS_Store
 src/agent_browser_mcp/chrome_extension/config.js
 *.log
 log
 temp_desktop.png
 
+# browser state and user-derived data
+.agent-browser-mcp/
+browser-profile*/
+profiles/
+sessions/
+downloads/
+screenshots/
+test-results/
+*.har
+cookie*.json
+cookies*.json
+junit*.xml
+coverage.xml
+
 # local agent/acceptance material
 .superpowers/
+artifacts/
 AGENTS.md
 CLAUDE.md
 BUGREPORT.md
@@ -27,10 +45,20 @@ SPEC.md
 DELIVER.md
 docs/superpowers/plans/
 
-# local scratch files
-_*.json
-_*.txt
-_*.md
-_*.py
-_mkq.py
-dune_editor.png
+# local scratch files, repository root only
+#
+# Anchored with a leading slash on purpose. Unanchored, `_*.json` matches at
+# every depth, so a real fixture like `tests/fixtures/_expected.json` would
+# vanish from `git status` and never make it into a commit -- the build would
+# still pass locally and a clone would be missing the file. There is
+# deliberately no `_*.py` rule in any form: it would hide
+# `src/agent_browser_mcp/_version.py`, the single source of the release version.
+/_*.json
+/_*.txt
+/_*.md
+
+# local test/build caches that are safe to regenerate
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/

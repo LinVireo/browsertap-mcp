@@ -40,6 +40,8 @@ _NAMED_KEYS = {
 }
 _BUTTONS = {"left", "middle", "right"}
 _BUTTON_BITS = {"left": 1, "right": 2, "middle": 4}
+_LOCATOR_KEYS = frozenset({"css", "role", "name", "text", "exact", "label", "frame", "shadow"})
+_LOCATOR_PRIMARY_KEYS = ("css", "role", "text", "label")
 
 
 def _command(method: str, **params: Any) -> dict[str, Any]:
@@ -72,8 +74,8 @@ def click_commands(x: float, y: float, *, button: str = "left", clicks: int = 1)
     shared = {"button": button, "clickCount": clicks}
     return [
         _mouse_event("mouseMoved", x, y),
-        _mouse_event("mousePressed", x, y, **shared),
-        _mouse_event("mouseReleased", x, y, **shared),
+        _mouse_event("mousePressed", x, y, buttons=_BUTTON_BITS[button], **shared),
+        _mouse_event("mouseReleased", x, y, buttons=0, **shared),
     ]
 
 
@@ -100,7 +102,14 @@ def drag_commands(
     steps = min(20, max(1, math.ceil(duration * 20)))
     commands = [
         _mouse_event("mouseMoved", start_x, start_y),
-        _mouse_event("mousePressed", start_x, start_y, button=button, clickCount=1),
+        _mouse_event(
+            "mousePressed",
+            start_x,
+            start_y,
+            button=button,
+            buttons=_BUTTON_BITS[button],
+            clickCount=1,
+        ),
     ]
     for step in range(1, steps + 1):
         fraction = step / steps
@@ -113,7 +122,20 @@ def drag_commands(
                 buttons=_BUTTON_BITS[button],
             )
         )
-    commands.append(_mouse_event("mouseReleased", end_x, end_y, button=button, clickCount=1))
+    commands.append(
+        _mouse_event(
+            "mouseReleased",
+            end_x,
+            end_y,
+            button=button,
+            buttons=0,
+            clickCount=1,
+        )
+    )
+    # Chromium can retain the drag's pressed-button state when the debugger is
+    # detached immediately after mouseReleased. A zero-button move commits the
+    # released state before the batch lease is torn down.
+    commands.append(_mouse_event("mouseMoved", end_x, end_y, buttons=0))
     return commands
 
 
@@ -178,7 +200,11 @@ def press_commands(chord: str) -> list[dict[str, Any]]:
     }
     commands.extend(
         [
-            _command("Input.dispatchKeyEvent", type="keyDown", **key_params),
+            _command(
+                "Input.dispatchKeyEvent",
+                type="rawKeyDown" if modifiers else "keyDown",
+                **key_params,
+            ),
             _command("Input.dispatchKeyEvent", type="keyUp", **key_params),
         ]
     )
@@ -297,19 +323,234 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
 }})()"""
 
 
-def resolve_selector_script(selector: str, offset_x: float = 0, offset_y: float = 0) -> str:
+def normalize_locator(locator: str | dict[str, Any], *, nested: bool = False) -> str | dict[str, Any]:
+    """Validate a public locator while preserving legacy CSS strings verbatim."""
+    if isinstance(locator, str):
+        if not locator:
+            raise InputValidationError("selector must be a non-empty string")
+        return locator
+    if not isinstance(locator, dict):
+        raise InputValidationError("selector must be a CSS string or locator object")
+    unknown = sorted(set(locator) - _LOCATOR_KEYS)
+    if unknown:
+        raise InputValidationError(f"unknown locator field(s): {', '.join(unknown)}")
+    primary = [key for key in _LOCATOR_PRIMARY_KEYS if locator.get(key) not in (None, "")]
+    if len(primary) != 1:
+        raise InputValidationError(
+            "locator requires exactly one of css, role, text, or label"
+        )
+    if locator.get("name") not in (None, "") and primary[0] != "role":
+        raise InputValidationError("locator name is only valid with role")
+    if "exact" in locator and not isinstance(locator["exact"], bool):
+        raise InputValidationError("locator exact must be a boolean")
+    if primary[0] not in {"role", "text"} and "exact" in locator:
+        raise InputValidationError("locator exact is only valid with role/name or text")
+    normalized: dict[str, Any] = {primary[0]: str(locator[primary[0]])}
+    if not normalized[primary[0]]:
+        raise InputValidationError(f"locator {primary[0]} must be non-empty")
+    if primary[0] == "role" and locator.get("name") not in (None, ""):
+        normalized["name"] = str(locator["name"])
+    if "exact" in locator:
+        normalized["exact"] = locator["exact"]
+
+    if "frame" in locator:
+        if nested:
+            raise InputValidationError("nested frame locators are not supported")
+        frames = locator["frame"] if isinstance(locator["frame"], list) else [locator["frame"]]
+        if not frames:
+            raise InputValidationError("locator frame must not be empty")
+        normalized_frames = []
+        for frame in frames:
+            normalized_frame = normalize_locator(frame, nested=True)
+            normalized_frames.append(
+                {"css": normalized_frame}
+                if isinstance(normalized_frame, str)
+                else normalized_frame
+            )
+        normalized["frame"] = normalized_frames
+    if "shadow" in locator:
+        shadows = locator["shadow"]
+        if isinstance(shadows, str):
+            shadows = [shadows]
+        if not isinstance(shadows, list) or not shadows or any(
+            not isinstance(item, str) or not item for item in shadows
+        ):
+            raise InputValidationError("locator shadow must be a non-empty CSS string or list")
+        normalized["shadow"] = list(shadows)
+    return normalized
+
+
+def structured_locator_script(
+    locator: dict[str, Any],
+    *,
+    purpose: str = "query",
+    offset_x: float = 0,
+    offset_y: float = 0,
+    select_all: bool = False,
+) -> str:
+    """Build the strict browser-side resolver for structured locators."""
+    locator = normalize_locator(locator)  # type: ignore[assignment]
+    if not isinstance(locator, dict):  # pragma: no cover - guarded by the signature
+        raise InputValidationError("structured locator must be an object")
+    if purpose not in {"query", "click", "type"}:
+        raise InputValidationError("locator purpose must be query, click, or type")
+    offset_x = _number(offset_x, "offset_x")
+    offset_y = _number(offset_y, "offset_y")
+    if not isinstance(select_all, bool):
+        raise InputValidationError("select_all must be a boolean")
+    return f"""(() => {{
+  const locator = {json.dumps(locator, ensure_ascii=False)};
+  const purpose = {json.dumps(purpose)};
+  const offsetX = {json.dumps(offset_x)};
+  const offsetY = {json.dumps(offset_y)};
+  const selectAll = {json.dumps(select_all)};
+  const clean = value => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
+  const same = (actual, expected, exact) => exact ? clean(actual) === clean(expected) : clean(actual).includes(clean(expected));
+  const implicitRole = el => {{
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'button') return 'button';
+    if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'img') return 'img';
+    if (tag === 'option') return 'option';
+    if (tag === 'input') {{
+      const type = (el.type || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'button' || type === 'submit' || type === 'reset') return 'button';
+      if (!['hidden', 'file', 'color', 'range'].includes(type)) return 'textbox';
+    }}
+    return '';
+  }};
+  const accessibleName = el => {{
+    const labelled = clean(el.getAttribute && el.getAttribute('aria-labelledby'));
+    if (labelled) {{
+      const text = labelled.split(/\\s+/).map(id => el.ownerDocument.getElementById(id)).filter(Boolean)
+        .map(node => clean(node.textContent)).join(' ');
+      if (text) return text;
+    }}
+    const aria = clean(el.getAttribute && el.getAttribute('aria-label'));
+    if (aria) return aria;
+    if (el.labels && el.labels.length) return clean([...el.labels].map(label => label.textContent).join(' '));
+    return clean((el.getAttribute && (el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('value'))) || el.textContent);
+  }};
+  const allElements = root => [...root.querySelectorAll('*')];
+  const find = (root, spec) => {{
+    let matches = [];
+    if (spec.css) {{
+      try {{ matches = [...root.querySelectorAll(spec.css)]; }}
+      catch (error) {{ return {{error:'invalid_selector', message:String(error && error.message || error)}}; }}
+    }} else if (spec.role) {{
+      matches = allElements(root).filter(el => clean(el.getAttribute('role') || implicitRole(el)).toLowerCase() === clean(spec.role).toLowerCase());
+      if (spec.name) matches = matches.filter(el => same(accessibleName(el), spec.name, !!spec.exact));
+    }} else if (spec.text) {{
+      matches = allElements(root).filter(el => same(el.textContent, spec.text, !!spec.exact));
+      matches = matches.filter(el => ![...el.children].some(child => same(child.textContent, spec.text, !!spec.exact)));
+    }} else if (spec.label) {{
+      const labels = allElements(root).filter(el => (el.tagName || '').toLowerCase() === 'label' && same(el.textContent, spec.label, true));
+      matches = labels.map(label => label.control || (label.htmlFor && label.ownerDocument.getElementById(label.htmlFor)) || label.querySelector('input,textarea,select,button')).filter(Boolean);
+    }}
+    return {{matches}};
+  }};
+  let root = document;
+  let frameOffsetX = 0;
+  let frameOffsetY = 0;
+  for (const frameSpec of (locator.frame || [])) {{
+    const found = find(root, frameSpec);
+    if (found.error) return {{found:false, status:found.error, error:found.message}};
+    if (found.matches.length === 0) return {{found:false, status:'not_found', stage:'frame'}};
+    if (found.matches.length > 1) return {{found:false, status:'ambiguous', matches:found.matches.length, stage:'frame'}};
+    const frame = found.matches[0];
+    const frameRect = frame.getBoundingClientRect();
+    let doc = null;
+    try {{ doc = frame.contentDocument; }} catch (_) {{}}
+    if (!doc) return {{found:false, status:'cross_origin_frame', stage:'frame'}};
+    frameOffsetX += frameRect.left + (frame.clientLeft || 0);
+    frameOffsetY += frameRect.top + (frame.clientTop || 0);
+    root = doc;
+  }}
+  for (const hostSelector of (locator.shadow || [])) {{
+    let hosts = [];
+    try {{ hosts = [...root.querySelectorAll(hostSelector)]; }}
+    catch (error) {{ return {{found:false, status:'invalid_selector', error:String(error && error.message || error), stage:'shadow'}}; }}
+    if (hosts.length === 0) return {{found:false, status:'not_found', stage:'shadow'}};
+    if (hosts.length > 1) return {{found:false, status:'ambiguous', matches:hosts.length, stage:'shadow'}};
+    if (!hosts[0].shadowRoot) return {{found:false, status:'closed_shadow_root', stage:'shadow'}};
+    root = hosts[0].shadowRoot;
+  }}
+  const found = find(root, locator);
+  if (found.error) return {{found:false, status:found.error, error:found.message}};
+  if (found.matches.length === 0) return {{found:false, status:'not_found'}};
+  if (found.matches.length > 1) return {{found:false, status:'ambiguous', matches:found.matches.length}};
+  let el = found.matches[0];
+  if (purpose === 'type') {{
+    let helper = el.matches && el.matches('.xterm-helper-textarea') ? el : null;
+    const xtermRoot = el.matches && el.matches('.xterm') ? el : (el.closest && el.closest('.xterm'));
+    if (!helper && xtermRoot) helper = xtermRoot.querySelector('.xterm-helper-textarea');
+    if (helper) el = helper;
+    const textCapable = /^(INPUT|TEXTAREA)$/.test(el.tagName || '') || el.isContentEditable || !!helper;
+    const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
+    if (!textCapable || el.disabled || el.readOnly || ariaDisabled) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
+    try {{ el.focus({{preventScroll:true}}); }} catch (_) {{ el.focus(); }}
+    if (selectAll) {{
+      if (typeof el.select === 'function') el.select();
+      else if (el.isContentEditable) {{
+        const range = el.ownerDocument.createRange(); range.selectNodeContents(el);
+        const selection = el.ownerDocument.defaultView.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      }}
+    }}
+    return {{found:true, status:'found', targetKind:helper ? 'xterm' : 'element', tagName:el.tagName || ''}};
+  }}
+  const rect = el.getBoundingClientRect();
+  const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
+  if (purpose === 'click' && (rect.width <= 0 || rect.height <= 0 || el.disabled || ariaDisabled)) return {{found:false, status:'not_interactable'}};
+  const challengeSelector = '.cf-turnstile, cf-turnstile, iframe[src*="challenges.cloudflare.com"], [src*="challenges.cloudflare.com"]';
+  const elementSignal = [el.tagName, el.id, el.className, el.getAttribute && el.getAttribute('src'), el.getAttribute && el.getAttribute('name')].filter(Boolean).join(' ').toLowerCase();
+  const pageSignal = [document.title, location.hostname, location.href].join(' ').toLowerCase();
+  const elementIsChallenge = !!(el.matches && el.matches(challengeSelector)) || elementSignal.includes('cf-turnstile') || elementSignal.includes('challenges.cloudflare.com');
+  const pageChallengeElement = document.querySelector(challengeSelector);
+  const markerElement = elementIsChallenge ? el : pageChallengeElement;
+  const challenge = elementIsChallenge || pageSignal.includes('challenges.cloudflare.com') || !!pageChallengeElement || /cloudflare.*challenge|challenge.*cloudflare|just a moment/.test(document.title.toLowerCase());
+  const challengeMarker = challenge ? [location.origin, location.pathname, markerElement ? markerElement.tagName : 'page', markerElement ? markerElement.id : '', markerElement ? markerElement.className : '', markerElement && markerElement.getAttribute ? markerElement.getAttribute('src') || '' : '', markerElement && markerElement.getAttribute ? markerElement.getAttribute('data-sitekey') || '' : ''].join('|') : null;
+  return {{found:true, status:'found', x:frameOffsetX + rect.left + offsetX, y:frameOffsetY + rect.top + offsetY, width:rect.width, height:rect.height, challengeMarker}};
+}})()"""
+
+
+def locator_query_script(locator: str | dict[str, Any]) -> str:
+    """Return a side-effect-free expression whose result describes one locator."""
+    normalized = normalize_locator(locator)
+    if isinstance(normalized, str):
+        return resolve_selector_script(normalized)
+    return structured_locator_script(normalized, purpose="query")
+
+
+def resolve_selector_script(
+    selector: str,
+    offset_x: float = 0,
+    offset_y: float = 0,
+    *,
+    require_interactable: bool = False,
+) -> str:
     """Return a browser-side selector resolver with deterministic JSON quoting."""
     if not isinstance(selector, str) or not selector:
         raise InputValidationError("selector must be a non-empty string")
     offset_x = _number(offset_x, "offset_x")
     offset_y = _number(offset_y, "offset_y")
+    if not isinstance(require_interactable, bool):
+        raise InputValidationError("require_interactable must be a boolean")
     return """(() => {
   const selector = %s;
   const offsetX = %s;
   const offsetY = %s;
+  const requireInteractable = %s;
   const element = document.querySelector(selector);
   if (!element) return {found:false};
   const rect = element.getBoundingClientRect();
+  const ariaDisabled = String(element.getAttribute('aria-disabled') || '').trim().toLowerCase() === 'true';
+  if (requireInteractable && (rect.width <= 0 || rect.height <= 0 || element.disabled || ariaDisabled)) {
+    return {found:false, status:'not_interactable'};
+  }
   const challengeSelector = '.cf-turnstile, cf-turnstile, iframe[src*="challenges.cloudflare.com"], [src*="challenges.cloudflare.com"]';
   const elementSignal = [element.tagName, element.id, element.className, element.getAttribute('src'), element.getAttribute('name')]
     .filter(Boolean).join(' ').toLowerCase();
@@ -335,7 +576,12 @@ def resolve_selector_script(selector: str, offset_x: float = 0, offset_y: float 
     height:rect.height,
     challengeMarker:challengeMarker
   };
-})()""" % (json.dumps(selector), json.dumps(offset_x), json.dumps(offset_y))
+})()""" % (
+        json.dumps(selector),
+        json.dumps(offset_x),
+        json.dumps(offset_y),
+        json.dumps(require_interactable),
+    )
 
 
 @dataclass

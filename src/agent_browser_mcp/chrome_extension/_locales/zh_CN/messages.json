@@ -1,0 +1,17 @@
+{
+  "extensionName": { "message": "Agent Browser MCP Bridge" },
+  "extensionDescription": { "message": "通过浏览器会话和 Cookie 访问连接 Agent Browser MCP。" },
+  "indicatorToggleLabel": { "message": "在页面上显示连接状态" },
+  "cookieViewerTitle": { "message": "Cookie 查看器" },
+  "refreshButton": { "message": "刷新" },
+  "cookieViewerInitial": { "message": "点击刷新读取 Cookie..." },
+  "noActiveTab": { "message": "没有活动标签页" },
+  "errorPrefix": { "message": "错误：" },
+  "unknownError": { "message": "未知错误" },
+  "noCookies": { "message": "（没有 Cookie）" },
+  "cookiesUnavailable": { "message": "仅 HTTP(S) 页面可读取 Cookie。" },
+  "indicatorChecking": { "message": "ABM：检测中" },
+  "indicatorConnected": { "message": "ABM：已连接" },
+  "indicatorDisconnected": { "message": "ABM：桥未连接" },
+  "indicatorRefreshPage": { "message": "ABM：请刷新页面" }
+}

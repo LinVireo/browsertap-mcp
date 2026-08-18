@@ -1,0 +1,17 @@
+{
+  "extensionName": { "message": "Agent Browser MCP Bridge" },
+  "extensionDescription": { "message": "Agent Browser MCP bridge with browser session and cookie access." },
+  "indicatorToggleLabel": { "message": "Show connection status on pages" },
+  "cookieViewerTitle": { "message": "Cookie viewer" },
+  "refreshButton": { "message": "Refresh" },
+  "cookieViewerInitial": { "message": "Select Refresh to read cookies..." },
+  "noActiveTab": { "message": "No active tab" },
+  "errorPrefix": { "message": "Error: " },
+  "unknownError": { "message": "unknown" },
+  "noCookies": { "message": "(no cookies)" },
+  "cookiesUnavailable": { "message": "Cookies are only available for HTTP(S) pages." },
+  "indicatorChecking": { "message": "ABM: checking" },
+  "indicatorConnected": { "message": "ABM: connected" },
+  "indicatorDisconnected": { "message": "ABM: disconnected" },
+  "indicatorRefreshPage": { "message": "ABM: refresh page" }
+}

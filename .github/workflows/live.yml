@@ -1,0 +1,56 @@
+name: ABM live Chrome gates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: abm-live-browser
+  cancel-in-progress: false
+
+env:
+  ABM_PYTHON: ${{ vars.ABM_LIVE_PYTHON || 'python' }}
+
+jobs:
+  live:
+    name: Live Chrome verification
+    if: github.repository == '0xlinn/agent-browser-mcp'
+    environment: abm-live
+    runs-on: [self-hosted, Windows, X64, abm]
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Resolve configured Python
+        shell: powershell
+        run: |
+          $python = Get-Command $env:ABM_PYTHON -ErrorAction Stop
+          "ABM_PYTHON=$($python.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install editable package
+        shell: powershell
+        run: |
+          & $env:ABM_PYTHON -m pip install -e ".[desktop,dev]"
+      - name: Verify bridge and extension diagnostics
+        shell: powershell
+        run: |
+          & $env:ABM_PYTHON -c 'import json; from agent_browser_mcp import server as S; s = S.get_setup_status(); print(json.dumps(s, ensure_ascii=False, indent=2, default=str)); raise SystemExit(2 if s.get("reload_extension_required") or s.get("restart_bridge_required") else 0)'
+      - name: Run live browser suite
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          & $env:ABM_PYTHON -m pytest tests -q -m live --junitxml=artifacts/live-junit.xml
+      - name: Recheck diagnostics after cleanup
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          & $env:ABM_PYTHON -c "import json; from agent_browser_mcp import server as S; print(json.dumps(S.get_setup_status(), ensure_ascii=False, indent=2, default=str))" | Out-File -Encoding utf8 artifacts/setup-status.json
+      - name: Upload live evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abm-live-evidence
+          path: artifacts/
+          if-no-files-found: ignore

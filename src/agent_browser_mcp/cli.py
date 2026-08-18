@@ -4,21 +4,20 @@ import argparse
 import json
 import socket
 import sys
-from pathlib import Path
 
+from . import __version__
 from .server import (
-    ROOT,
-    ensure_config_js,
+    chrome_extension_dir,
+    configure_stdio_logging,
     get_driver,
     get_setup_status,
-    chrome_extension_dir,
     mcp,
+    spawn_bridge_daemon,
 )
 
 
 def cmd_extension_path() -> int:
     path = chrome_extension_dir()
-    ensure_config_js()
     print(path)
     return 0
 
@@ -26,7 +25,7 @@ def cmd_extension_path() -> int:
 def cmd_print_hermes_config() -> int:
     print(
         "mcp_servers:\n"
-        "  agent_browser:\n"
+        "  agent-browser-mcp:\n"
         "    command: agent-browser-mcp\n"
         "    timeout: 120\n"
         "    connect_timeout: 60"
@@ -44,7 +43,6 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def cmd_doctor() -> int:
-    ensure_config_js()
     driver = get_driver()
     ws_port = getattr(driver, "port", 18765)
     http_port = ws_port + 1
@@ -66,7 +64,6 @@ def cmd_doctor() -> int:
             "status": "bridge_unreachable",
             "action": "restart_bridge",
             "extension_path": str(chrome_extension_dir()),
-            "config_js": str((chrome_extension_dir() / 'config.js').resolve()),
             "setup_error": str(e),
         }
     payload.update({
@@ -83,32 +80,66 @@ def cmd_doctor() -> int:
         "next_steps": [
             "Load the unpacked extension in chrome://extensions from extension_path.",
             "Open a normal http/https page in Chrome.",
-            "Run `hermes mcp test agent_browser` after adding the MCP config.",
+            "Run your MCP client's connection check for `agent-browser-mcp` after adding the config.",
         ],
     })
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     # Surface the one-line verdict last so it's the first thing the eye lands on.
     final_diag = payload.get("diagnosis", diag)
     if payload.get("action") == "reload_extension":
-        print("\n[!!] stale_extension: Reload TMWD CDP Bridge once in chrome://extensions.", file=sys.stderr)
+        print("\n[!!] stale_extension: Reload Agent Browser MCP Bridge once in chrome://extensions.", file=sys.stderr)
     elif payload.get("action") == "restart_bridge":
-        print("\n[!!] stale_bridge: Restart the ABM bridge daemon; Chrome does not need restarting.", file=sys.stderr)
+        print(
+            "\n[!!] stale_bridge: Run `agent-browser-mcp bridge --restart`; "
+            "Chrome does not need restarting.",
+            file=sys.stderr,
+        )
     elif isinstance(final_diag, dict) and final_diag.get("advice"):
         mark = "OK" if final_diag.get("ok") else "!!"
         print(f"\n[{mark}] {final_diag.get('cause')}: {final_diag.get('advice')}", file=sys.stderr)
     return 0 if payload.get("status") == "healthy" else 1
 
 
+def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
+    from .bridge import main as bridge_main
+    from .bridge import stop_bridge_daemon
+
+    if not stop and not restart:
+        return bridge_main([])
+
+    stopped = stop_bridge_daemon()
+    if stop:
+        print(json.dumps(stopped, ensure_ascii=False, indent=2))
+        return 0 if stopped["status"] in {"stopped", "not_running"} else 1
+
+    if stopped["status"] not in {"stopped", "not_running"}:
+        payload = {"status": "restart_failed", "stop": stopped, "started": False}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+    started = spawn_bridge_daemon(reset_spawn_lock=True)
+    payload = {
+        "status": "restarted" if started else "restart_failed",
+        "stop": stopped,
+        "started": started,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if started else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-browser-mcp",
-        description="Real-browser MCP server with TMWebDriver/CDP bridge, screenshots, and physical input.",
+        description="Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, and physical input.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("extension-path", help="Print the unpacked Chrome extension path")
     sub.add_parser("doctor", help="Run local diagnostics and print JSON status")
     sub.add_parser("print-hermes-config", help="Print a ready-to-paste Hermes MCP config snippet")
-    sub.add_parser("bridge", help="Run the TMWebDriver bridge daemon in the foreground")
+    bridge = sub.add_parser("bridge", help="Run or manage the browser bridge daemon")
+    bridge_actions = bridge.add_mutually_exclusive_group()
+    bridge_actions.add_argument("--stop", action="store_true", help="Stop the exact managed bridge process")
+    bridge_actions.add_argument("--restart", action="store_true", help="Restart the managed bridge in the background")
     return parser
 
 
@@ -123,11 +154,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "print-hermes-config":
         return cmd_print_hermes_config()
     if args.command == "bridge":
-        from .bridge import main as bridge_main
+        return cmd_bridge(stop=args.stop, restart=args.restart)
 
-        return bridge_main()
-
-    ensure_config_js()
+    configure_stdio_logging()
     get_driver()
     mcp.run(transport="stdio")
     return 0

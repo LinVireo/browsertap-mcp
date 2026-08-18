@@ -1,11 +1,21 @@
-try: from bs4 import BeautifulSoup
-except ImportError: print("[Error] BeautifulSoup4 未安装，请叫Agent安装BeautifulSoup4，再使用web相关工具。")
+import json
+import logging
+import re
+import time
+
+from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 js_optHTML = r'''function optHTML(text_only=false) {
+  // Silence console output during page analysis to avoid polluting console capture.
+  const _origLog = console.log, _origWarn = console.warn, _origInfo = console.info, _origDebug = console.debug;
+  console.log = console.warn = console.info = console.debug = () => {};
+  try {
 function createEnhancedDOMCopy() {  
   const nodeInfo = new WeakMap();  
   const ignoreTags = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK', 'COLGROUP', 'COL', 'TEMPLATE', 'PARAM', 'SOURCE'];  
-  const ignoreIds = ['ljq-ind'];  
+  const ignoreIds = ['abm-indicator'];
   function cloneNode(sourceNode, keep=false) {  
     if (!sourceNode) return null;
     if (sourceNode.nodeType === 8 ||   
@@ -20,7 +30,7 @@ function createEnhancedDOMCopy() {
     if ((sourceNode.tagName === 'INPUT' || sourceNode.tagName === 'TEXTAREA') && sourceNode.value) clone.setAttribute('value', sourceNode.value);
     if (sourceNode.tagName === 'INPUT' && (sourceNode.type === 'radio' || sourceNode.type === 'checkbox') && sourceNode.checked) clone.setAttribute('checked', '');
     else if (sourceNode.tagName === 'SELECT' && sourceNode.value) clone.setAttribute('data-selected', sourceNode.value);  
-    try { if (sourceNode.matches && sourceNode.matches(':-webkit-autofill')) { clone.setAttribute('data-autofilled', 'true'); if (!sourceNode.value) clone.setAttribute('value', '⚠️受保护-读tmwebdriver_sop的autofill章节提取'); } } catch(e) {}
+    try { if (sourceNode.matches && sourceNode.matches(':-webkit-autofill')) { clone.setAttribute('data-autofilled', 'true'); if (!sourceNode.value) clone.setAttribute('value', '[protected autofill value]'); } } catch(e) {}
 
     const isDropdown = sourceNode.classList?.contains('dropdown-menu') ||   
              /dropdown|menu/i.test(sourceNode.className) || sourceNode.getAttribute('role') === 'menu'; 
@@ -65,7 +75,7 @@ function createEnhancedDOMCopy() {
     // the page. Still excluded (keeps the payload small), but now counted so
     // the caller can say "scroll and re-scan".
     const inRange = Math.abs(rect.left) < 5000 && Math.abs(rect.top) < 5000;
-    if (renders && !inRange) window.__tmwd_offscreen = (window.__tmwd_offscreen || 0) + 1;
+    if (renders && !inRange) window.__abm_offscreen = (window.__abm_offscreen || 0) + 1;
     const isVisible = (renders && inRange) || isSmallDropdown;
     const zIndex = style.position !== 'static' ? (parseInt(style.zIndex) || 0) : 0;
   
@@ -129,13 +139,13 @@ function createEnhancedDOMCopy() {
     }  
   };  
 }  
-window.__tmwd_offscreen = 0;
+window.__abm_offscreen = 0;
 const { domCopy, getNodeInfo, isVisible } = createEnhancedDOMCopy();
 if (!domCopy) {
   if (text_only) return '';
   const emptyRoot = document.createElement('body');
-  emptyRoot.setAttribute('data-tmwd-state', 'empty-document');
-  emptyRoot.insertAdjacentHTML('afterbegin', '<!--tmwd-base:' + location.href + '-->');
+  emptyRoot.setAttribute('data-abm-state', 'empty-document');
+  emptyRoot.insertAdjacentHTML('afterbegin', '<!--abm-base:' + location.href + '-->');
   return emptyRoot.outerHTML;
 }
 if (text_only) {
@@ -186,10 +196,10 @@ function analyzeNode(node, pPathType='main') {
     if (isOverlay) handleOverlayContainer(childrenInfo, pathType);  
     else handlePartitionContainer(childrenInfo, pathType);  
 
-    console.log(`${isOverlay ? '覆盖' : '划分'}容器:`, node, `子元素数量: ${children.length}`);  
-    console.log('子元素及标记:', children.map(child => ({   
+    console.log(`${isOverlay ? 'overlay' : 'partition'} container:`, node, `children: ${children.length}`);
+    console.log('children and marks:', children.map(child => ({
       element: child,   
-      mark: child.dataset.mark || '无',  
+      mark: child.dataset.mark || 'none',
       info: getNodeInfo ? getNodeInfo(child) : undefined  
     })));  
     for (const child of children)  
@@ -243,7 +253,7 @@ function analyzeNode(node, pPathType='main') {
     const _efp = document.elementFromPoint(window.innerWidth/2, window.innerHeight/2);
     if (_efp) { let _el = _efp; while (_el) { const _h = childrenInfo.find(c => c.node.id && c.node.id === _el.id); if (_h) { _h.zIndex = 9999; break; } _el = _el.parentElement; } }
     const sorted = [...childrenInfo].sort((a, b) => b.zIndex - a.zIndex);  
-    console.log('排序后的子元素:', sorted);
+    console.log('sorted children:', sorted);
     if (sorted.length === 0) return;  
     
     const top = sorted[0];  
@@ -337,23 +347,28 @@ root.querySelectorAll('iframe').forEach(f => {
 // Emit the page URL so relative hrefs can be resolved to absolute ones when
 // they get turned into refs. Comments survive outerHTML and are stripped again
 // before the HTML reaches the caller.
-root.insertAdjacentHTML('afterbegin', '<!--tmwd-base:' + location.href + '-->');
+root.insertAdjacentHTML('afterbegin', '<!--abm-base:' + location.href + '-->');
 // Tell the caller what the ±5000px viewport clamp dropped, plus where we are
 // in the document, so "nothing found" can be told apart from "not scrolled to
 // it yet". A comment survives outerHTML and costs nothing to parse.
-if (window.__tmwd_offscreen > 0) {
+if (window.__abm_offscreen > 0) {
   const de = document.documentElement;
   root.insertAdjacentHTML('afterbegin',
-    '<!--tmwd-offscreen:' + window.__tmwd_offscreen +
+    '<!--abm-offscreen:' + window.__abm_offscreen +
     ' scrollY:' + Math.round(window.scrollY) +
     ' viewH:' + window.innerHeight +
     ' docH:' + Math.max(de.scrollHeight, document.body.scrollHeight) + '-->');
 }
 return root.outerHTML;
-    }
+  } finally {
+    console.log = _origLog; console.warn = _origWarn; console.info = _origInfo; console.debug = _origDebug;
+  }
+}
 optHTML()'''
 
 js_findMainList = r'''function findMainList(startElement = null) {
+        const _fmlOrigLog = console.log; console.log = () => {};
+        try {
         const root = startElement || document.body;
         if (!root) return [];
         const MIN_CHILDREN = 8;
@@ -429,6 +444,9 @@ js_findMainList = r'''function findMainList(startElement = null) {
         if (kept.length === 0) return [];
 
         return kept.map(c => describeResult(c.container, c.items, c.selector, c.score));
+        } finally {
+            console.log = _fmlOrigLog;
+        }
     }
     
     function findTopGroups(container, limit) {
@@ -692,7 +710,7 @@ def _execute_in_session(driver, script, timeout, session_id=None, **kwargs):
 
 def start_temp_monitor(driver, timeout=15, session_id=None):
     try: _execute_in_session(driver, temp_monitor_js, timeout, session_id=session_id)
-    except: pass
+    except Exception: pass
 
 def get_temp_texts(driver, timeout=15, session_id=None):
     js = """function stopStrMonitor() {  
@@ -714,11 +732,11 @@ def get_temp_texts(driver, timeout=15, session_id=None):
     try: return list(set(_execute_in_session(
         driver, js, timeout, session_id=session_id).get('data', [])))
     except Exception as e:
-        print(e)
+        logger.debug("Temporary monitor read failed: %s", e)
         return []
-    
-import time, re, os, json
+
 from urllib.parse import urljoin
+
 
 class PageUnavailable(RuntimeError):
     """The page never answered, so there is no HTML to process.
@@ -812,7 +830,7 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
     if text_only: return page
     base_url = None
     if isinstance(page, str):
-        m = re.search(r'<!--tmwd-base:(.*?)-->', page)
+        m = re.search(r'<!--abm-base:(.*?)-->', page)
         if m:
             base_url = m.group(1)
             # Consumed here; the caller already knows the URL from list_tabs, so
@@ -825,16 +843,31 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
     html = str(soup)
     if not cutlist: return html
     lists = rr if isinstance(rr, list) else ([rr] if isinstance(rr, dict) and rr.get('selector') else [])
-    if lists: print(f"[cutlist] Found {len(lists)} list(s): {[e.get('selector','?') if isinstance(e,dict) else '?' for e in lists]}")
+    if lists:
+        logger.debug(
+            "cutlist found %d list(s): %s",
+            len(lists),
+            [e.get('selector', '?') if isinstance(e, dict) else '?' for e in lists],
+        )
     for entry in lists:
         sel = entry.get('selector') if isinstance(entry, dict) else None
         if not sel: continue
-        try: items = soup.select(sel)
-        except Exception: print(f'[cutlist] skip invalid selector: {sel}'); continue
+        try:
+            items = soup.select(sel)
+        except Exception:
+            logger.debug("cutlist skipped invalid selector: %s", sel)
+            continue
         if len(items) < 5: continue
         total_len = sum(len(str(it)) for it in items)
         avg_len = total_len / len(items)
-        print(f"[cutlist]   '{sel}': {len(items)} items, avg {avg_len:.0f} chars, total {total_len}, if keep 3, save ~{total_len - 3 * avg_len:.0f} chars")
+        logger.debug(
+            "cutlist selector=%s items=%d avg_chars=%.0f total_chars=%d estimated_saved=%.0f",
+            sel,
+            len(items),
+            avg_len,
+            total_len,
+            total_len - 3 * avg_len,
+        )
         if avg_len < 200 or (avg_len < 700 and total_len < 2500): continue
         hit = [it for it in items if instruction and instruction.strip() and instruction in it.get_text(" ",strip=True)]
         keep = hit[:6] if hit else items[:3]
@@ -851,7 +884,7 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
         for it in removed: it.decompose()
     ss = str(optimize_html_for_tokens(soup, link_refs=link_refs, base_url=base_url)) if lists else html
     saved = f"{100 - len(ss) * 100 // len(html)}% saved" if html else "empty page"
-    print(f"[get_html] Result: {len(html)} -> {len(ss)} chars after cutlist ({saved})")
+    logger.debug("get_html cutlist result: %d -> %d chars (%s)", len(html), len(ss), saved)
     if len(ss) > maxchars: ss = str(smart_truncate(soup, maxchars))
     return ss
 
@@ -888,10 +921,18 @@ def smart_truncate(soup, budget, _depth=0):
     selflen = total - sum(l for _, l in kids)
     remaining_budget = max(budget - selflen, 0)
     tag = getattr(soup, 'name', '?')
-    print(f'{indent}[smart_truncate] <{tag}> total={total} budget={budget} selflen={selflen} kids={len(kids)}')
+    logger.debug(
+        "%ssmart_truncate tag=%s total=%d budget=%d selflen=%d children=%d",
+        indent,
+        tag,
+        total,
+        budget,
+        selflen,
+        len(kids),
+    )
     # === 1 kid: 穿透 ===
     if len(kids) == 1:
-        print(f'{indent}  -> single child, recurse into <{kids[0][0].name}>')
+        logger.debug("%ssmart_truncate recursing into single child tag=%s", indent, kids[0][0].name)
         smart_truncate(kids[0][0], remaining_budget, _depth)
         return soup
     over = sum(l for _, l in kids) - remaining_budget
@@ -907,7 +948,12 @@ def smart_truncate(soup, budget, _depth=0):
         while kids and removed < over:
             c, l = kids.pop(); c.decompose()
             removed += l; removed_count += 1
-        print(f'{indent}  -> tail-cut: removed {removed_count} children ({removed//1000}k chars) from end')
+        logger.debug(
+            "%ssmart_truncate tail cut removed_children=%d removed_chars=%d",
+            indent,
+            removed_count,
+            removed,
+        )
         return soup
     # === top 2-3 按比例分担 ===
     # 过滤掉太小的 kid（不到最大的 10%），让大的全扛
@@ -922,7 +968,14 @@ def smart_truncate(soup, budget, _depth=0):
         c, l = kids[i]
         share = int(over * l / top_total)
         new_keep = l - share
-        print(f'{indent}  -> <{c.name}> {l} -> {new_keep} (share={share})')
+        logger.debug(
+            "%ssmart_truncate child=%s chars=%d keep=%d share=%d",
+            indent,
+            c.name,
+            l,
+            new_keep,
+            share,
+        )
         actions.append((c, l, new_keep))
     # 再统一执行
     for c, l, new_keep in actions:
@@ -939,10 +992,28 @@ MONITOR_TIMEOUT = 6
 MONITOR_MAXCHARS = 300000
 
 def no_response_kind(response):
-    """Classify a driver timeout pseudo-result. 'undelivered' means the script
-    never reached the page (safe to retry); 'after_ack' means it was delivered
-    and may still be running (retrying could double side effects)."""
+    """Classify a driver timeout pseudo-result.
+
+    'undelivered' is the retry-safe class: either the script provably never left
+    the bridge, or it was written to a live socket and never acknowledged, which
+    the ACK-before-execute protocol makes overwhelmingly likely to mean "did not
+    run". These two are one *kind* on purpose — every caller's retry policy is
+    the same for both — but the driver keeps them apart in ``delivery_state``
+    ('undelivered' vs 'sent_unconfirmed') for callers whose work is
+    irreversible. 'after_ack' means it was delivered and may still be running,
+    so retrying could double side effects.
+    """
     if not isinstance(response, dict) or 'data' in response: return None
+    delivery_state = response.get('delivery_state')
+    structured = {
+        'undelivered': 'undelivered',
+        'sent_unconfirmed': 'undelivered',
+        'delivered_no_result': 'after_ack',
+        'navigated': 'navigated',
+    }.get(delivery_state)
+    if structured: return structured
+    # Compatibility with bridge versions that predate structured delivery
+    # metadata. New callers must not derive policy from this human text.
     msg = response.get('result')
     if not isinstance(msg, str): return None
     if 'no ACK' in msg or 'script not polled' in msg: return 'undelivered'
@@ -958,6 +1029,32 @@ def no_response_kind(response):
 def _remaining(deadline, cap=None):
     remaining = max(0.0, deadline - time.monotonic())
     return min(remaining, cap) if cap is not None else remaining
+
+
+# Upper bound on the slice of a call's budget held back for the undelivered
+# retry. A long script keeps almost all of its window; short calls split
+# proportionally instead of losing a fixed 2s they never had.
+UNDELIVERED_RETRY_RESERVE = 2.0
+
+
+def undelivered_retry_split(left):
+    """Split a remaining budget into (first attempt, reserved retry) seconds.
+
+    Handing the first attempt the whole budget makes the undelivered retry
+    unreachable: the driver can only report 'undelivered' once it has waited out
+    everything it was given, so by the time the caller learns the script never
+    landed there is nothing left to retry with. Every layer that advertises
+    "retries proven-undelivered work" has to reserve that window up front.
+
+    The reserve is only worth taking if the first attempt still gets a usable
+    window, so a budget too small to split is spent entirely on the first try.
+    """
+    left = max(0.0, float(left))
+    reserve = min(UNDELIVERED_RETRY_RESERVE, left * 0.2)
+    first = left - reserve
+    if first <= 0.001:
+        return left, 0.0
+    return first, reserve
 
 
 def execute_js_rich(
@@ -995,7 +1092,7 @@ def execute_js_rich(
                 session_id=session_id,
             )
         except Exception as e:
-            print(f"[monitor] baseline snapshot unavailable: {e}")
+            logger.debug("Monitor baseline snapshot unavailable: %s", e)
     if before_sids is None:
         try:
             session_timeout = phase_timeout(MONITOR_TIMEOUT)
@@ -1004,7 +1101,7 @@ def execute_js_rich(
             else:
                 before_sids = set()
         except Exception as e:
-            print(f"[monitor] session snapshot unavailable: {e}")
+            logger.debug("Monitor session snapshot unavailable: %s", e)
             before_sids = set()
 
     result = None
@@ -1013,9 +1110,12 @@ def execute_js_rich(
     newTabs = []
     response = {}
     blocked_dialog = False
+    retried = False
     try:
-        print(f"Executing: {script[:250]} ...")
-        call_timeout = phase_timeout()
+        logger.debug("Executing browser script (%d chars)", len(script))
+        # Hold back part of the budget so the undelivered retry below is
+        # actually reachable; see undelivered_retry_split.
+        call_timeout, _reserved = undelivered_retry_split(phase_timeout())
         if call_timeout:
             response = _execute_in_session(
                 driver, script, call_timeout, session_id=session_id
@@ -1030,7 +1130,8 @@ def execute_js_rich(
         if no_response_kind(response) == 'undelivered' and phase_timeout():
             # Never reached the page (session asleep / SW reconnecting): retry
             # only with the time still left in the original budget.
-            print("No ACK; retrying once within the remaining deadline...")
+            logger.warning("No ACK; retrying once within the remaining deadline")
+            retried = True
             response = _execute_in_session(
                 driver,
                 script,
@@ -1040,7 +1141,7 @@ def execute_js_rich(
         result = response['data'] if 'data' in response else None
         blocked_dialog = bool(
             isinstance(result, dict)
-            and result.get('__tmwd_dialog_result') is True
+            and result.get('__abm_dialog_result') is True
             and result.get('status') == 'blocked_by_dialog'
         )
         if response.get('closed', 0) == 1:
@@ -1051,7 +1152,7 @@ def execute_js_rich(
         error = e.args[0] if e.args else str(e)
         if isinstance(error, dict): error.pop('stack', None)
         error_msg = str(error)
-        print(f"Error: {error_msg}")
+        logger.warning("Browser script execution failed: %s", error_msg)
 
     etab = response.get('executed_tab_id')
     if isinstance(etab, int):
@@ -1074,11 +1175,11 @@ def execute_js_rich(
     if response.get('switched_session'):
         rr['switched_session'] = response['switched_session']
         rr['switched_from'] = response.get('switched_from')
-        rr['switch_note'] = "原会话已断开，本次已在同浏览器的另一会话执行；如目标不对请 list_tabs 后 switch_tab。"
+        rr['switch_note'] = "The original session disconnected, so this ran in another session from the same browser. Verify with list_tabs and switch_tab if needed."
     kind = no_response_kind(response)
     if kind == 'navigated' and not error_msg:
         rr['status'] = 'navigated'
-        rr['js_return_lost'] = "页面在返回值回传前已卸载，脚本返回值无法获取"
+        rr['js_return_lost'] = "The page unloaded before returning the value, so the script result is unavailable."
         try:
             location_timeout = phase_timeout(MONITOR_TIMEOUT)
             if location_timeout:
@@ -1093,15 +1194,36 @@ def execute_js_rich(
                     rr['landed_url'] = info.get('url')
                     rr['landed_title'] = info.get('title')
         except Exception as e:
-            print(f"[monitor] post-navigation location unavailable: {e}")
-        rr['suggestion'] = "脚本已执行且页面已导航。请核对 landed_url 是否为预期页面；脚本返回值已丢失，如需读取请在新页面重新执行。"
+            logger.debug("Monitor post-navigation location unavailable: %s", e)
+        rr['suggestion'] = "The script ran and the page navigated. Verify landed_url; rerun only a read operation on the new page if a result is needed."
     elif kind and not error_msg:
         rr['status'] = 'no_response'
-        rr['suggestion'] = (
-            "脚本未送达（已自动重试1次仍无ACK）：会话可能休眠或断开。先 list_tabs 确认目标，switch_tab 后重试。"
-            if kind == 'undelivered' else
-            "脚本已送达但超时未返回：可能仍在执行或页面被阻塞（如验证码）。勿盲目重试有副作用的脚本，先 scan_page 查看当前状态，或加大 timeout 重试只读脚本。"
+        # Pass the driver's own verdict through when it has one: 'undelivered'
+        # and 'sent_unconfirmed' share a retry policy but not a guarantee, and
+        # collapsing them here would hide that from the caller. Derive from kind
+        # only for pre-structured bridges.
+        rr['delivery_state'] = response.get('delivery_state') or (
+            'undelivered' if kind == 'undelivered' else 'delivered_no_result'
         )
+        rr['retry_safe'] = kind == 'undelivered'
+        # Report whether the in-deadline retry actually ran instead of asking the
+        # caller to trust prose about it. False means the budget was too small to
+        # reserve a retry window, so a caller-side retry is the only one there is.
+        rr['abm_retried'] = retried
+        if kind == 'undelivered':
+            rr['suggestion'] = (
+                ("ABM already retried once inside the original deadline and it was still "
+                 "not delivered. " if retried else
+                 "The deadline was too short for ABM to retry inside it. ")
+                + "Confirm the target with list_tabs, then retry with a longer timeout."
+            )
+        else:
+            rr['suggestion'] = (
+                "The script was delivered but did not return before timeout. If it only waited "
+                "with setTimeout/sleep, replace that wait with wait_for or wait_for_url; do not "
+                "embed waits in execute_js. Otherwise inspect with scan_page before retrying side "
+                "effects; only retry read operations with a longer timeout."
+            )
     if blocked_dialog:
         if response.get('newTabs'):
             rr['newTabs'] = response['newTabs']
@@ -1118,7 +1240,7 @@ def execute_js_rich(
         if new_sids:
             newTabs = [{'id': k, 'url': v} for k, v in new_sids.items()]
             rr['newTabs'] = newTabs
-            rr['suggestion'] = "页面已刷新，以上新标签页在执行期间连接。"
+            rr['suggestion'] = "The page refreshed; the listed new tabs connected during execution."
     if error_msg: rr['error'] = error_msg
     if no_monitor or kind: return rr
     if not reloaded and phase_timeout(MONITOR_TIMEOUT):
@@ -1143,13 +1265,13 @@ def execute_js_rich(
             diff_data = find_changed_elements(last_html, current_html)
             change_count = diff_data.get('changed', 0)
             top_change = diff_data.get('top_change', '')
-            diff_summary = f"DOM变化量: {change_count}"
-            if top_change: diff_summary += f"\n最显著变化:\n{top_change}"
+            diff_summary = f"DOM changes: {change_count}"
+            if top_change: diff_summary += f"\nMost significant change:\n{top_change}"
             transients = rr.get('transients', [])
             if change_count == 0 and not transients and len(newTabs) == 0:
-                diff_summary += " (页面无变化)"
-                rr['suggestion'] = "页面无明显变化"
+                diff_summary += " (no page changes)"
+                rr['suggestion'] = "No visible page changes were detected."
         except Exception:
-            diff_summary = "页面变化监控不可用"
+            diff_summary = "Page-change monitoring is unavailable."
         rr['diff'] = diff_summary
     return rr

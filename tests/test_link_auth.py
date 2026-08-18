@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import requests
 
-from agent_browser_mcp import tmwebdriver as T
+from agent_browser_mcp import browser_bridge as T
 
 TOKEN = "s3cret-token"
 
@@ -201,8 +201,6 @@ class TestAuthenticatedBridge:
         """/api/result can inject fake execution results into the daemon. A
         token-configured bridge must demand the token there as well, or a local
         process could forge results without ever touching /link."""
-        r = _post(link_bridge_auth.port, {"cmd": "longpoll_marker"})
-        # Unknown cmd is not a valid route here; use the actual endpoints.
         r2 = requests.post(
             f"http://127.0.0.1:{link_bridge_auth.port}/api/result",
             json={"type": "result", "id": "forged", "result": "x"},
@@ -231,6 +229,25 @@ class TestAuthenticatedBridge:
             headers=headers, timeout=5)
         assert r.status_code == 200
 
+    @pytest.mark.parametrize("path", ["/link", "/api/result", "/api/longpoll"])
+    def test_a_rejected_request_answers_401_instead_of_resetting(
+            self, link_bridge_auth, path):
+        """The 401 has to survive the body it just refused to read.
+
+        wsgiref on Windows resets the connection when a rejected request leaves
+        unread bytes in its socket, and the caller then cannot tell "your token
+        is wrong" from "the bridge died". A small rejected body aborts a few
+        percent of the time — flaky enough to have been dismissed as noise — so
+        send one larger than the socket buffer, where the undrained version
+        aborts on every attempt.
+        """
+        payload = {"type": "result", "id": "forged", "result": "x" * (2 * 1024 * 1024)}
+        r = requests.post(
+            f"http://127.0.0.1:{link_bridge_auth.port}{path}",
+            json=payload, headers={"Authorization": "Bearer nope"}, timeout=30)
+        assert r.status_code == 401
+        assert "token" in r.text.lower()
+
 
 class TestRemoteClientCarriesTheToken:
     def test_remote_cmd_authenticates_itself(self, link_bridge_auth, monkeypatch):
@@ -258,7 +275,10 @@ class TestRemoteClientCarriesTheToken:
             self, link_bridge_auth):
         T.bridge_token_path().write_text("new-token\n", encoding="utf-8")
         client = _remote_client(link_bridge_auth.port)
-        with pytest.raises(PermissionError, match="重启旧桥"):
+        with pytest.raises(
+            PermissionError,
+            match=r"agent-browser-mcp bridge --restart",
+        ):
             client._remote_cmd({"cmd": "get_all_sessions"})
 
     def test_no_token_anywhere_still_works(self, link_bridge_open, monkeypatch):
@@ -274,9 +294,97 @@ def _remote_client(port):
     __init__ probes and may bind, so build the remote half by hand — the same
     two attributes remote mode actually uses.
     """
-    client = T.TMWebDriver.__new__(T.TMWebDriver)
+    client = T.BrowserBridge.__new__(T.BrowserBridge)
     client.is_remote = True
     client.remote = f"http://127.0.0.1:{port}/link"
     client._http = requests.Session()
     client._http.trust_env = False
     return client
+
+
+# --- the same channel, the other direction ---------------------------------
+# Who may speak to /link is above; this is what comes back. An MCP server
+# process is normally the remote half (get_driver probes and finds a daemon), so
+# these paths are the ordinary ones, not exotic — but every other offline test
+# builds its driver in host form, where the HTTP hop cannot lose anything.
+
+class _NeverAnsweringSocket:
+    """A live extension socket that accepts the frame and returns no result."""
+
+    def __init__(self, host=None):
+        self.host = host          # set to ACK like background.js does
+        self.sent = []
+
+    def send_message(self, payload):
+        self.sent.append(payload)
+        if self.host is not None:
+            import json as _json
+            import time as _time
+
+            # background.js ACKs before it executes; the ACK is what turns
+            # 'sent_unconfirmed' into 'delivered_no_result'.
+            self.host.acks[_json.loads(payload)["id"]] = _time.time()
+
+
+def _register_session(host, session_id, info, client):
+    from agent_browser_mcp.browser_bridge import Session
+
+    session = Session(session_id, info, client)
+    host.sessions[session_id] = session
+    host.latest_session_id = session_id
+    return session
+
+
+@pytest.mark.parametrize("kind,delivery_state,retry_safe,executed_tab_id", [
+    ("unpolled", "undelivered", True, None),
+    ("no_ack", "sent_unconfirmed", True, 7),
+    ("acked", "delivered_no_result", False, 7),
+])
+def test_remote_execute_js_keeps_the_daemons_delivery_verdict(
+    link_bridge_open, kind, delivery_state, retry_safe, executed_tab_id,
+):
+    """A command that gets no result must arrive as a verdict, not a TimeoutError.
+
+    The daemon answers *at* the command deadline, so without
+    REMOTE_TRANSPORT_MARGIN the socket read expires first and the caller sees a
+    bare transport TimeoutError — throwing away delivery_state / retry_safe /
+    executed_tab_id, which is exactly what decides whether a retry may repeat a
+    side effect. This is the natural remote form: __init__ probes the port and
+    goes remote by itself.
+    """
+    # The fixture disabled authentication; if that ever regresses this test would
+    # silently start reading the developer's own token file.
+    assert T.bridge_token() == ""
+    host = link_bridge_open.driver
+    client = T.BrowserBridge("127.0.0.1", link_bridge_open.base)
+    assert client.is_remote is True
+    assert client.remote.endswith(f":{link_bridge_open.port}/link")
+
+    if kind == "unpolled":
+        import queue
+
+        session_id = "http-client:1"
+        # A long-poll session nobody polls: the frame never leaves the queue.
+        _register_session(
+            host, session_id,
+            {"url": "https://example.test/", "title": "t", "type": "http"},
+            queue.Queue(),
+        )
+    else:
+        session_id = "chrome:7"
+        _register_session(
+            host, session_id,
+            {"url": "https://example.test/", "title": "t", "type": "ext_ws",
+             "tab_id": 7, "client_id": "chrome"},
+            _NeverAnsweringSocket(host if kind == "acked" else None),
+        )
+
+    result = client.execute_js("return 1", timeout=0.6, session_id=session_id)
+
+    assert isinstance(result, dict), result
+    assert result["error_code"] == "no_response"
+    assert result["delivery_state"] == delivery_state
+    assert result["retry_safe"] is retry_safe
+    assert result["executed_tab_id"] == executed_tab_id
+    assert "data" not in result          # no result is never a result
+    assert result.get("closed") is None  # and this tab did not navigate away

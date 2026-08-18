@@ -1,3 +1,20 @@
 recursive-include src/agent_browser_mcp/chrome_extension *
+exclude src/agent_browser_mcp/chrome_extension/config.js
+include .gitignore
 include README.md
+include README.zh-CN.md
 include LICENSE
+include SECURITY.md
+include CONTRIBUTING.md
+include CONTRIBUTING.zh-CN.md
+include CHANGELOG.md
+recursive-include docs USAGE.md USAGE.zh-CN.md TROUBLESHOOTING.md TROUBLESHOOTING.zh-CN.md
+recursive-include examples *.json *.yaml
+recursive-include .github/workflows *.yml
+exclude SKILL.md
+exclude docs/browser-mcp-default.SKILL.md
+include pyproject.toml
+include MANIFEST.in
+recursive-include scripts *.py
+recursive-include tests *.py
+global-exclude __pycache__ *.py[cod]

@@ -13,6 +13,8 @@ import inspect
 import pytest
 
 from agent_browser_mcp import server as S
+from scripts.tool_coverage_report import build_report as build_tool_coverage_report
+from tests.tool_coverage_manifest import TOOL_COVERAGE
 
 EXPECTED = {
     # discovery / diagnostics
@@ -84,6 +86,19 @@ def by_name(tools):
 
 def test_expected_tool_set(by_name):
     assert set(by_name) == EXPECTED
+
+
+def test_behavior_manifest_matches_exact_registered_set(by_name):
+    assert len(by_name) == len(TOOL_COVERAGE) == 55
+    assert set(TOOL_COVERAGE) == set(by_name)
+
+
+def test_behavior_evidence_nodes_are_unique_and_tool_bound():
+    report = build_tool_coverage_report(execute=False)
+    assert report["contract_valid_tools"] == report["registered"] == 55
+    assert not report["duplicate_evidence"]
+    assert not report["shared_evidence_nodes"]
+    assert not report["evidence_without_tool_name"]
 
 
 def test_new_tools_are_registered(by_name):
@@ -169,6 +184,7 @@ class TestNewToolSchemas:
         opened = by_name["open_new_tab"].inputSchema["properties"]
         closed = by_name["close_tabs"].inputSchema["properties"]
         assert "owner_id" in opened
+        assert opened["active"]["default"] is False
         assert {"owner_id", "only_if_agent_owned"} <= set(closed)
         assert closed["only_if_agent_owned"]["default"] is True
 
@@ -211,15 +227,16 @@ class TestNewToolSchemas:
     def test_physical_input_can_activate_a_tab(self, by_name):
         """Screen-coordinate input lands on whatever is visible, so the tools
         that move the mouse or type must be able to raise the target first."""
-        for name in ("mouse_click", "type_text"):
+        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
             props = by_name[name].inputSchema["properties"]
             assert "activate_session" in props, name
+            assert "session_id" in props, name
 
     def test_physical_input_raises_the_tab_by_default(self, by_name):
         """Raising must be the DEFAULT, not opt-in. When it was opt-in, an agent
         doing switch_tab + mouse_click clicked the previously visible tab, and
         nothing reported it: the coordinates are valid and pyautogui says ok."""
-        for name in ("mouse_click", "type_text"):
+        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
             props = by_name[name].inputSchema["properties"]
             assert props["activate_session"]["default"] == "current", name
 
@@ -230,7 +247,7 @@ class TestNewToolSchemas:
             assert "ctx" not in by_name[name].inputSchema.get("required", []), name
 
     def test_physical_descriptions_warn_about_target_and_foreground_approval(self, by_name):
-        for name in ("mouse_click", "type_text"):
+        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
             description = by_name[name].description.lower()
             assert "session_id" in description, name
             assert "prefer" in description or "preferred" in description, name

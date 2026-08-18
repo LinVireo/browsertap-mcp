@@ -4,8 +4,9 @@ import base64
 import functools
 import inspect
 import json
+import logging
+import math
 import os
-import random
 import re
 import secrets
 import shutil
@@ -19,43 +20,69 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
+import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image as MCPImage
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field, StrictBool
 
-# All tools share one TMWebDriver whose target (default_session_id) is mutable
+# All tools share one BrowserBridge whose target (default_session_id) is mutable
 # state. When the MCP lowlevel server dispatches concurrent requests, two tools
 # running in parallel both save/restore that global and race each other — a
 # scan_page and an execute_js in the same turn can read/write different tabs
-# than the ones they named. Serialize tool execution with a single RLock; the
+# than the ones they named. Serialize tool execution with a single lock; the
 # cost is lost parallelism, the win is that directed calls stay directed.
-_TOOL_LOCK = threading.RLock()
+#
+# It must be a plain Lock, never an RLock: the async path in _threaded_tool
+# acquires it on an anyio worker thread and releases it on the event-loop
+# thread, and RLock refuses a release from a thread that does not own it
+# ("cannot release un-acquired lock"). Ownership tracking would turn every
+# async tool call into a RuntimeError.
+_TOOL_LOCK = threading.Lock()
 _DRIVER_LOCK = threading.Lock()
 
 ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
-from .tmwebdriver import TMWebDriver  # noqa: E402
-from . import simphtml  # noqa: E402
-from . import physical_input  # noqa: E402
+from . import (
+    __version__,  # noqa: E402
+    physical_input,  # noqa: E402
+    simphtml,  # noqa: E402
+)
+from .browser_bridge import BridgeNoResponseError, BrowserBridge  # noqa: E402
 from .page_input import (  # noqa: E402
     ChallengeAttemptTracker,
     InputValidationError,
     click_commands,
     drag_commands,
+    locator_query_script,
+    normalize_locator,
     press_commands,
     resolve_selector_script,
+    structured_locator_script,
     type_commands,
     type_target_script,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def configure_stdio_logging() -> None:
+    """Route ABM runtime diagnostics away from the MCP stdout transport."""
+    package_logger = logging.getLogger("agent_browser_mcp")
+    if any(getattr(handler, "_abm_stdio_handler", False) for handler in package_logger.handlers):
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler._abm_stdio_handler = True  # type: ignore[attr-defined]
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    package_logger.addHandler(handler)
+    package_logger.setLevel(logging.WARNING)
+    package_logger.propagate = False
+
 mcp = FastMCP(
     name="agent-browser",
     instructions=(
-        "Browser automation tools for the user's real Chrome/Edge session via TMWebDriver/CDP bridge. "
+        "Browser automation tools for the user's real Chrome/Edge session via BrowserBridge/CDP. "
         "Supports page scanning, JS execution, CDP commands, screenshots, cookies, and desktop physical input. "
         "Page screenshots include MCP image content; a model that cannot process images must not claim to "
         "have seen the pixels and should use scan_page, execute_js, a page-specific API, or OCR instead. "
@@ -70,7 +97,7 @@ mcp = FastMCP(
     ),
 )
 
-_driver: Optional[TMWebDriver] = None
+_driver: Optional[BrowserBridge] = None
 _DRIVER_PORT = int(os.environ.get("AGENT_BROWSER_TMWD_PORT", "18765"))
 _DRIVER_HOST = os.environ.get("AGENT_BROWSER_TMWD_HOST", "127.0.0.1")
 
@@ -179,8 +206,11 @@ class _TabOwnershipRegistry:
 _TAB_OWNERSHIP = _TabOwnershipRegistry()
 
 
-def _env_enabled(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _env_enabled(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _automation_mode() -> str:
@@ -197,12 +227,23 @@ def _auto_beforeunload_hosts() -> list[str]:
 
 def _automation_profile() -> dict[str, Any]:
     mode = _automation_mode()
+    no_elicit = mode == "lab" and _env_enabled(
+        "AGENT_BROWSER_LAB_NO_ELICIT", default=True
+    )
     return {
         "mode": mode,
-        "no_elicit": mode == "lab" and _env_enabled("AGENT_BROWSER_LAB_NO_ELICIT"),
+        "no_elicit": no_elicit,
         "auto_beforeunload_hosts": _auto_beforeunload_hosts(),
-        "physical_approval": "every_action" if mode == "safe" else "once_per_session",
-        "site_permission_approval": "every_allow" if mode == "safe" else "once_per_session",
+        "physical_approval": (
+            "every_action" if mode == "safe"
+            else "not_required" if no_elicit
+            else "once_per_session"
+        ),
+        "site_permission_approval": (
+            "every_allow" if mode == "safe"
+            else "not_required" if no_elicit
+            else "once_per_session"
+        ),
     }
 
 
@@ -227,13 +268,59 @@ def _approval_key(ctx: Context) -> str:
 _mcp_tool = mcp.tool
 
 
+async def _acquire_tool_lock() -> None:
+    """Take the process-wide tool lock so that cancellation cannot leak it.
+
+    to_thread.run_sync does not abandon its worker on cancellation: the acquire
+    always runs to completion and the Cancelled is delivered afterwards. Where it
+    lands decides whether the lock comes back — inside the caller's try/finally,
+    or at the `await` before it, in which case the gate stays held by a task that
+    no longer exists and every serialized tool in this process blocks until it
+    restarts. anyio currently lands it in the body (the worker wait is shielded,
+    so delivery is deferred to the next checkpoint), which is an implementation
+    detail of the backend, not a promise. Ask the worker whether it got in and
+    hand the lock straight back if the await raises for any reason;
+    threading.Lock has no owner to interrogate afterwards.
+    """
+    acquired: list[bool] = []
+
+    def _acquire() -> None:
+        _TOOL_LOCK.acquire()
+        acquired.append(True)
+
+    try:
+        await anyio.to_thread.run_sync(_acquire)
+    except BaseException:
+        if acquired:
+            _TOOL_LOCK.release()
+        raise
+
+
 def _threaded_tool(*d_args: Any, **d_kwargs: Any):
     serialize = bool(d_kwargs.pop("serialize", True))
     decorator = _mcp_tool(*d_args, **d_kwargs)
 
     def wrap(fn):
         if inspect.iscoroutinefunction(fn):
-            return decorator(fn)
+            @functools.wraps(fn)
+            async def async_runner(*args: Any, **kwargs: Any):
+                if not serialize:
+                    return await fn(*args, **kwargs)
+                await _acquire_tool_lock()
+                try:
+                    return await fn(*args, **kwargs)
+                finally:
+                    _TOOL_LOCK.release()
+
+            async_runner.__signature__ = inspect.signature(fn, eval_str=True)  # type: ignore[attr-defined]
+            async_runner.__annotations__ = {
+                name: parameter.annotation
+                for name, parameter in async_runner.__signature__.parameters.items()
+                if parameter.annotation is not inspect.Parameter.empty
+            }
+            async_runner.__module__ = fn.__module__
+            decorator(async_runner)
+            return fn
 
         @functools.wraps(fn)
         async def runner(*args: Any, **kwargs: Any):
@@ -274,16 +361,6 @@ def chrome_extension_dir() -> Path:
     return ROOT / "chrome_extension"
 
 
-def ensure_config_js() -> Path:
-    path = chrome_extension_dir() / "config.js"
-    if not path.exists():
-        path.write_text(
-            f"const TID = '__ljq_{hex(random.randint(0, 99999999))[2:8]}';",
-            encoding="utf-8",
-        )
-    return path
-
-
 def _port_open(host: str, port: int) -> bool:
     with socket.socket() as sock:
         sock.settimeout(1)
@@ -303,6 +380,10 @@ def _bridge_log_path() -> Path:
 
 
 _SPAWN_LOCK_STALE = 30.0
+
+
+def _spawn_lock_path() -> Path:
+    return Path.home() / ".agent-browser-mcp" / "spawn.lock"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -353,7 +434,7 @@ def _acquire_spawn_lock() -> Optional[Path]:
     a closed port, and all spawn. The losers then sit there having lost the port
     bind. Observed for real — two daemons with identical creation timestamps.
     """
-    lock = Path.home() / ".agent-browser-mcp" / "spawn.lock"
+    lock = _spawn_lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     try:
         # O_EXCL is the atomic part: exactly one process creates the file.
@@ -392,13 +473,18 @@ def _acquire_spawn_lock() -> Optional[Path]:
     return lock
 
 
-def spawn_bridge_daemon() -> bool:
+def spawn_bridge_daemon(*, reset_spawn_lock: bool = False) -> bool:
     """Start the bridge as a detached process so it outlives this MCP instance.
 
     Returns True once the bridge HTTP port answers. Self-hosting from an MCP
     instance is avoided because these instances are spawned per session and
     recycled, taking the bridge (and its bound ports) down with them.
     """
+    if reset_spawn_lock:
+        try:
+            _spawn_lock_path().unlink(missing_ok=True)
+        except OSError:
+            pass
     lock = _acquire_spawn_lock()
     if lock is None:
         # Another instance is spawning. Wait for its daemon rather than starting
@@ -442,7 +528,14 @@ def _spawn_bridge_daemon_locked() -> bool:
         cand = Path(exe).with_name("pythonw.exe")
         if cand.exists():
             exe = str(cand)
-    cmd = [exe, "-u", "-m", "agent_browser_mcp.bridge"]
+    instance_id = secrets.token_urlsafe(24)
+    cmd = [
+        exe,
+        "-u",
+        "-m",
+        "agent_browser_mcp.bridge",
+        f"--instance-id={instance_id}",
+    ]
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
@@ -470,14 +563,13 @@ def _spawn_bridge_daemon_locked() -> bool:
     return False
 
 
-def get_driver() -> TMWebDriver:
+def get_driver() -> BrowserBridge:
     global _driver
     if _driver is not None:
         return _driver
     with _DRIVER_LOCK:
         if _driver is not None:
             return _driver
-        ensure_config_js()
         if (
             os.environ.get("AGENT_BROWSER_NO_SPAWN") != "1"
             and not _port_open(_DRIVER_HOST, _DRIVER_PORT + 1)
@@ -485,11 +577,11 @@ def get_driver() -> TMWebDriver:
             spawn_bridge_daemon()
         # If the spawn failed the constructor falls back to self-hosting,
         # which keeps the original single-process behavior working.
-        _driver = TMWebDriver(host=_DRIVER_HOST, port=_DRIVER_PORT)
+        _driver = BrowserBridge(host=_DRIVER_HOST, port=_DRIVER_PORT)
     return _driver
 
 
-def require_driver() -> TMWebDriver:
+def require_driver() -> BrowserBridge:
     driver = get_driver()
     # A remote driver outlives the bridge it points at. get_driver only spawns
     # on first construction, so a daemon that dies later would leave every
@@ -599,8 +691,20 @@ def switch_session(
             raise RuntimeError(f"No connected tab for browser '{want}'. Connected: {avail or 'none'}")
         if url_pattern:
             narrowed = [s for s in cands if url_pattern in str(s.get("url", ""))]
-            if narrowed:
-                cands = narrowed
+            if not narrowed:
+                raise RuntimeError(
+                    f"No connected tab for browser '{want}' matches URL pattern "
+                    f"{url_pattern!r}."
+                )
+            cands = narrowed
+            if len(cands) > 1:
+                choices = ", ".join(
+                    f"{item.get('id')} ({item.get('url', '')})" for item in cands[:8]
+                )
+                raise RuntimeError(
+                    f"URL pattern {url_pattern!r} matched {len(cands)} tabs in browser "
+                    f"'{want}': {choices}. Pass the full session_id to select one."
+                )
         sid = str(cands[0]["id"])
         driver.default_session_id = sid
         return sid
@@ -638,12 +742,14 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
     # the shared default out from under a concurrent task working on tab X.
     # session_id=None falls back to the driver's default inside execute_js.
     sid = str(session_id) if session_id is not None else None
-    first_budget = remaining()
+    first_budget, _reserved = simphtml.undelivered_retry_split(remaining())
     if first_budget <= 0:
         raise TimeoutError("bridge JS deadline exhausted before dispatch")
     response = driver.execute_js(script, timeout=first_budget, session_id=sid)
     if simphtml.no_response_kind(response) == "undelivered":
-        # Never reached the page; retrying is side-effect-free.
+        # Never reached the page; retrying is side-effect-free. The reserve
+        # above is what makes this branch reachable — a first attempt handed the
+        # whole budget can only report "undelivered" after spending it all.
         retry_budget = remaining()
         if retry_budget > 0:
             response = driver.execute_js(
@@ -655,9 +761,17 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
     if kind:
         # Tools built on this helper (CDP, cookies, screenshots) have nothing
         # useful to return without data; fail loudly instead of returning junk.
-        raise RuntimeError(
+        delivery_state = response.get("delivery_state") or {
+            "undelivered": "undelivered",
+            "after_ack": "delivered_no_result",
+            "navigated": "navigated",
+        }[kind]
+        raise BridgeNoResponseError(
             f"Bridge no-response ({kind}): {response.get('result')}. "
-            "Session may be asleep or disconnected; run list_tabs, switch_tab to a live session, then retry."
+            "Session may be asleep or disconnected; run list_tabs, switch_tab to a live session, then retry.",
+            error_code=str(response.get("error_code") or "no_response"),
+            delivery_state=delivery_state,
+            retry_safe=bool(response.get("retry_safe", kind == "undelivered")),
         )
     return response
 
@@ -684,12 +798,15 @@ def compact_tabs(timeout: Optional[float] = None, fresh: bool = False) -> list[d
 # Status/diagnostic tools must answer fast even when the bridge is half-dead;
 # they use this short timeout and degrade instead of raising.
 _STATUS_TIMEOUT = 5.0
+_EXTENSION_PROTOCOL_VERSION = 3
+_REQUIRED_EXTENSION_CAPABILITIES = {"content_command_channel_removed"}
 
 
 @mcp.tool(
     description=(
-        "Return the active safe/lab automation profile. Lab is the default and may reuse one "
-        "session approval; safe requires approval for every physical action and permission allow."
+        "Return the active safe/lab automation profile. Lab is the default and skips elicitation "
+        "unless AGENT_BROWSER_LAB_NO_ELICIT is explicitly disabled; safe requires approval for "
+        "every physical action and permission allow."
     )
 )
 def get_automation_profile() -> dict[str, Any]:
@@ -713,19 +830,86 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
     return _automation_profile()
 
 
-@mcp.tool(description="Return extension path, bridge ports, and connection status for setup/diagnostics.")
+@mcp.tool(description="Return component versions, stale-build actions, extension path, bridge ports, and connection status for setup/diagnostics.")
 def get_setup_status() -> dict[str, Any]:
     driver = get_driver()
     bridge_error = None
+    diagnosis: dict[str, Any] = {}
     try:
         sessions = compact_tabs(timeout=_STATUS_TIMEOUT, fresh=True)
     except Exception as e:
         sessions = []
         bridge_error = str(e)
+    try:
+        raw_diagnosis = driver.diagnose(timeout=_STATUS_TIMEOUT)
+        if isinstance(raw_diagnosis, dict):
+            diagnosis = raw_diagnosis
+    except Exception as e:
+        diagnosis = {
+            "cause": "bridge_unreachable",
+            "ok": False,
+            "error": str(e),
+        }
+        bridge_error = bridge_error or str(e)
+    bridge_version = diagnosis.get("bridge_version")
+    extension_version = diagnosis.get("extension_version")
+    protocol_version = diagnosis.get("protocol_version")
+    extension_capabilities = diagnosis.get("extension_capabilities") or {}
+    extension_status_error = diagnosis.get("extension_status_error")
+
+    # An older bridge may not forward extension build data yet, while still
+    # supporting the generic ext_cmd route. Probe it directly before deciding
+    # that Chrome needs a manual extension reload.
+    if extension_version is None or protocol_version is None:
+        try:
+            runtime = _extension_data(
+                driver.ext_cmd({"cmd": "bridge_status"}, timeout=_STATUS_TIMEOUT)
+            )
+            extension_version = (
+                runtime.get("extension_version") or runtime.get("manifest_version")
+            )
+            protocol_version = runtime.get("protocol_version")
+            extension_capabilities = runtime.get("capabilities") or {}
+        except Exception as e:
+            extension_status_error = extension_status_error or str(e)
+
+    restart_bridge_required = bridge_version != __version__
+    missing_extension_capabilities = sorted(
+        capability
+        for capability in _REQUIRED_EXTENSION_CAPABILITIES
+        if extension_capabilities.get(capability) is not True
+    )
+    reload_extension_required = (
+        extension_version != __version__
+        or protocol_version != _EXTENSION_PROTOCOL_VERSION
+        or bool(missing_extension_capabilities)
+    )
+    if bridge_error or diagnosis.get("cause") == "bridge_unreachable":
+        component_status = "bridge_unreachable"
+        component_action = "restart_bridge"
+    elif restart_bridge_required:
+        component_status = "stale_bridge"
+        component_action = "restart_bridge"
+    elif reload_extension_required:
+        component_status = "stale_extension"
+        component_action = "reload_extension"
+    else:
+        component_status = "healthy"
+        component_action = "none"
     status: dict[str, Any] = {
-        "extension_name": "TMWD CDP Bridge",
+        "status": component_status,
+        "action": component_action,
+        "package_version": __version__,
+        "bridge_version": bridge_version,
+        "extension_version": extension_version,
+        "protocol_version": protocol_version,
+        "expected_protocol_version": _EXTENSION_PROTOCOL_VERSION,
+        "extension_capabilities": extension_capabilities,
+        "missing_extension_capabilities": missing_extension_capabilities,
+        "restart_bridge_required": restart_bridge_required,
+        "reload_extension_required": reload_extension_required,
+        "extension_name": "Agent Browser MCP Bridge",
         "extension_path": str(chrome_extension_dir()),
-        "config_js": str(ensure_config_js()),
         "tmwebdriver_host": _DRIVER_HOST,
         "tmwebdriver_ws_port": _DRIVER_PORT,
         "tmwebdriver_http_port": _DRIVER_PORT + 1,
@@ -733,6 +917,7 @@ def get_setup_status() -> dict[str, Any]:
         "connected_tabs": len(sessions),
         "default_session_id": driver.default_session_id,
         "tabs": sessions,
+        "diagnosis": diagnosis,
         "notes": [
             "Load the unpacked extension from extension_path in chrome://extensions with Developer Mode enabled.",
             "Keep a normal http/https page open in Chrome; about:blank is not enough.",
@@ -741,6 +926,8 @@ def get_setup_status() -> dict[str, Any]:
     }
     if bridge_error:
         status["bridge_error"] = bridge_error
+    if extension_status_error:
+        status["extension_status_error"] = extension_status_error
     return status
 
 
@@ -866,8 +1053,9 @@ def close_tabs(
 @mcp.tool(
     description=(
         "Set the target tab for later calls by session id, URL substring, or browser name "
-        "('chrome'/'edge'/'opera') without focusing the browser. Use activate=true or "
-        "activate_tab when foreground work is required."
+        "('chrome'/'edge'/'opera') without focusing the browser. A URL substring must match "
+        "exactly one tab; pass its full session_id when several tabs match. Use activate=true "
+        "or activate_tab when foreground work is required."
     )
 )
 def switch_tab(
@@ -1395,7 +1583,7 @@ def _classify_navigation_result(
             out["status"] = "redirected"
             out.setdefault(
                 "note",
-                "最终 URL 与请求不同，请确认是否为预期页面（可能是登录墙/重定向）。",
+                "The final URL differs from the request; verify that the redirect or sign-in destination is expected.",
             )
         else:
             out.setdefault("status", "ok")
@@ -1479,11 +1667,17 @@ async def resolve_leave_dialog(
     ctx: Context,
     session_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    target_sid = switch_session(session_id=session_id) if session_id is not None else switch_session()
+    target_sid = await anyio.to_thread.run_sync(
+        lambda: switch_session(session_id=session_id)
+        if session_id is not None
+        else switch_session()
+    )
     attempts: list[dict[str, Any]] = []
     for _ in range(2):
         try:
-            result = handle_dialog("accept", session_id=target_sid, timeout=3.0)
+            result = await anyio.to_thread.run_sync(
+                lambda: handle_dialog("accept", session_id=target_sid, timeout=3.0)
+            )
         except Exception as exc:
             result = {"status": "error", "error": str(exc)}
         if result.get("status") == "error":
@@ -1519,7 +1713,7 @@ async def resolve_leave_dialog(
                 "session_id": target_sid,
                 "attempts": attempts,
             }
-        time.sleep(0.1)
+        await anyio.sleep(0.1)
 
     if attempts and all(
         str(item.get("status") or "") in {"error", "dialog_handle_failed"}
@@ -1574,15 +1768,15 @@ async def resolve_leave_dialog(
         "session_id": target_sid,
         "attempts": attempts,
         "physical": physical,
-        "hint": "Please click Leave/离开 in the browser dialog, then retry the intended navigation.",
+        "hint": "Click Leave in the browser dialog, then retry the intended navigation.",
     }
 
 
-@mcp.tool(description="Open one real-browser tab with an operation_id-backed exactly-once create. If the create ACK is lost, the same operation_id is reconciled within one total deadline; a completed result is registered only with its exact client_id, tab_id, and generation. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true; after dispatch, an unresolved operation returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. Never use a URL-based guess or an unmarked create retry.")
+@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Pass active=true only when foreground work is genuinely required. If the create ACK is lost, the same operation_id is reconciled within one total deadline; a completed result is registered only with its exact client_id, tab_id, and generation. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true; after dispatch, an unresolved operation returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. Never use a URL-based guess or an unmarked create retry.")
 def open_new_tab(
     url: str,
     timeout: float = 15.0,
-    active: bool = True,
+    active: bool = False,
     session_id: Optional[str] = None,
     owner_id: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -1682,10 +1876,15 @@ def open_new_tab(
         left = remaining()
         if left <= 0:
             raise TimeoutError("open_new_tab total deadline exhausted before reconciliation")
+        # A sleeping MV3 worker or a briefly busy bridge can take more than one
+        # second to answer even though the operation registry is healthy. Give
+        # each read a useful budget while retaining at least half of the total
+        # deadline for create/reconciliation work that follows.
+        status_timeout = min(left, max(0.001, min(3.0, left * 0.5)))
         return driver.ext_cmd(
             {"cmd": "tabs", "method": "create_status", "operation_id": operation_id},
             client_id=client_id,
-            timeout=min(left, 1.0),
+            timeout=status_timeout,
         )
 
     # Pin one concrete extension before the first mutation. This works with no
@@ -1924,10 +2123,7 @@ def open_new_tab(
 
 @mcp.tool(description="Get absolute path to the unpacked Chrome extension directory for manual installation.")
 def extension_path() -> dict[str, Any]:
-    return {
-        "extension_path": str(chrome_extension_dir()),
-        "config_js": str(ensure_config_js()),
-    }
+    return {"extension_path": str(chrome_extension_dir())}
 
 
 @mcp.tool(description="List installed browser extensions (id, name, enabled, type, version). Works with no tabs open.")
@@ -1979,7 +2175,7 @@ def _extension_operation_result(
         }
     # The in-process/fake route commonly returns an explicit extension
     # envelope: {data: {ok: true, data: <payload>}}.  The real remote bridge,
-    # however, has already removed that inner envelope in TMWebDriver.ext_cmd
+    # however, has already removed that inner envelope in BrowserBridge.ext_cmd
     # and returns {data: <payload>} instead.  Preserve both forms.  Treating a
     # direct dict payload as an envelope used to discard capture snapshots such
     # as {status: "capturing", messages: [...]}, so live Network/Console tools
@@ -2412,16 +2608,36 @@ def network_capture_start(
 
 @mcp.tool(
     description=(
-        "Stop Network capture on a real-browser tab, return all bounded request records and "
-        "response bodies collected so far, and release its debugger lease."
+        "Stop Network capture on a real-browser tab, optionally filter returned records by URL, "
+        "resource type, HTTP status range, or response-body inclusion, and release its debugger lease. "
+        "url_pattern uses the browser's JavaScript RegExp syntax and invalid patterns return a structured error."
     )
 )
 def network_capture_stop(
     session_id: Optional[str] = None,
+    url_pattern: str = "",
+    resource_type: str = "",
+    status_min: Optional[int] = None,
+    status_max: Optional[int] = None,
+    include_response_bodies: bool = True,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
+    if status_min is not None and not 100 <= int(status_min) <= 599:
+        raise ValueError("status_min must be between 100 and 599")
+    if status_max is not None and not 100 <= int(status_max) <= 599:
+        raise ValueError("status_max must be between 100 and 599")
+    if status_min is not None and status_max is not None and int(status_min) > int(status_max):
+        raise ValueError("status_min must not exceed status_max")
     return _tab_extension_operation(
-        {"cmd": "network_capture", "method": "stop"},
+        {
+            "cmd": "network_capture",
+            "method": "stop",
+            "urlPattern": url_pattern,
+            "resourceType": resource_type,
+            "statusMin": int(status_min) if status_min is not None else None,
+            "statusMax": int(status_max) if status_max is not None else None,
+            "includeResponseBodies": bool(include_response_bodies),
+        },
         operation="network_capture_stop",
         session_id=session_id,
         timeout=timeout,
@@ -2457,7 +2673,9 @@ def console_capture_start(
 @mcp.tool(
     description=(
         "Read a page of captured console messages and exceptions from a real-browser tab. "
-        "Set clear=true to clear the full buffer after reading."
+        "Set clear=true to clear the full buffer after reading. "
+        "Set filter='user' to exclude extension service-worker / content-script logs "
+        "and keep only the page's own main-world console output."
     )
 )
 def get_console_messages(
@@ -2465,20 +2683,27 @@ def get_console_messages(
     offset: int = 0,
     max_items: int = 200,
     clear: bool = False,
+    filter: str = "",
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     if int(offset) < 0:
         raise ValueError("offset must be non-negative")
     if not 1 <= int(max_items) <= 1000:
         raise ValueError("max_items must be between 1 and 1000")
+    normalized_filter = str(filter).strip().lower() if filter else ""
+    if normalized_filter and normalized_filter not in {"user", "all"}:
+        raise ValueError("filter must be 'user' or 'all'")
+    payload: dict[str, Any] = {
+        "cmd": "console",
+        "method": "get",
+        "offset": int(offset),
+        "maxItems": int(max_items),
+        "clear": bool(clear),
+    }
+    if normalized_filter == "user":
+        payload["filter"] = "user"
     return _tab_extension_operation(
-        {
-            "cmd": "console",
-            "method": "get",
-            "offset": int(offset),
-            "maxItems": int(max_items),
-            "clear": bool(clear),
-        },
+        payload,
         operation="get_console_messages",
         session_id=session_id,
         timeout=timeout,
@@ -2503,7 +2728,12 @@ def console_capture_stop(
     )
 
 
-@mcp.tool(description="Read the current page as simplified HTML/text, preserving login state from the real browser.")
+@mcp.tool(
+    description=(
+        "Read the current page as simplified HTML/text, preserving login state from the real "
+        "browser. Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
+    )
+)
 def scan_page(
     session_id: Optional[str] = None,
     text_only: bool = False,
@@ -2574,21 +2804,21 @@ def scan_page(
             # as "offscreen" and the numbers mean nothing. Say so rather than
             # reporting a bogus count as fact.
             out["hint"] = (
-                "该标签页当前不可见（视区高度为 0），本次读取的可见性判定不可靠。"
-                "请先 activate_tab 再 scan_page。"
+                "This tab is not currently visible (viewport height is zero), so visibility results are unreliable. "
+                "Run activate_tab before scan_page."
             )
         else:
             out["hint"] = (
-                f"{off['elements']} 个渲染中的元素在视区 ±5000px 之外被省略"
-                f"（scrollY={off['scroll_y']}, 视区高 {off['viewport_height']}, "
-                f"文档高 {off['doc_height']}）。"
-                "如未找到目标，请 scroll_page 后重新 scan_page。"
+                f"{off['elements']} rendered element(s) more than 5000px outside the viewport were omitted "
+                f"(scrollY={off['scroll_y']}, viewport height={off['viewport_height']}, "
+                f"document height={off['doc_height']}). "
+                "If the target is missing, run scroll_page and scan_page again."
             )
     return out
 
 
 _OFFSCREEN_RE = re.compile(
-    r"<!--tmwd-offscreen:(\d+) scrollY:(-?\d+) viewH:(\d+) docH:(\d+)-->")
+    r"<!--abm-offscreen:(\d+) scrollY:(-?\d+) viewH:(\d+) docH:(\d+)-->")
 
 
 def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
@@ -2617,7 +2847,7 @@ def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
     )
 )
 def wait_for(
-    selector: Optional[str] = None,
+    selector: Optional[str | dict[str, Any]] = None,
     text: Optional[str] = None,
     url_pattern: Optional[str] = None,
     js: Optional[str] = None,
@@ -2631,6 +2861,7 @@ def wait_for(
         raise ValueError(
             f"pass exactly one of selector/text/url_pattern/js (got {given or 'none'})")
     kind = given[0]
+    normalized_selector = normalize_locator(selector) if kind == "selector" else None
     driver = require_driver()
     ensure_sessions()
     prev_default = driver.default_session_id
@@ -2647,7 +2878,10 @@ def wait_for(
     }[kind]
     expr = probe.replace("SEL", json.dumps(selector or text or url_pattern)
                          if kind != "js" else (js or "false"))
-    if gone:
+    structured_probe = None
+    if kind == "selector" and isinstance(normalized_selector, dict):
+        structured_probe = locator_query_script(normalized_selector)
+    if gone and structured_probe is None:
         expr = f"!({expr})"
     # Wait in short in-page chunks rather than one long promise. A promise that
     # outlives its page dies with it: injected while the tab is still navigating,
@@ -2664,18 +2898,31 @@ def wait_for(
             if remaining <= 0:
                 break
             chunk = min(CHUNK, remaining)
+            structured_check = ""
+            detail_fields = ""
+            if structured_probe is not None:
+                located_condition = "located.status === 'not_found'" if gone else "!!located.found"
+                structured_check = (
+                    f"const located = ({structured_probe}); "
+                    f"ok = {located_condition}; "
+                    "detail = located;"
+                )
+                detail_fields = (
+                    ", locator_status: detail && detail.status, "
+                    "matches: detail && detail.matches, stage: detail && detail.stage"
+                )
             script = f"""
             return new Promise(resolve => {{
               const start = Date.now();
               const deadline = start + {chunk * 1000};
               const check = () => {{
-                let ok = false, err = null;
-                try {{ ok = !!({expr}); }} catch (e) {{ err = String(e && e.message || e); }}
+                let ok = false, err = null, detail = null;
+                try {{ {structured_check or f'ok = !!({expr});'} }} catch (e) {{ err = String(e && e.message || e); }}
                 if (ok) return resolve(JSON.stringify({{met: true,
-                  url: location.href, title: document.title}}));
+                  url: location.href, title: document.title{detail_fields}}}));
                 if (Date.now() >= deadline) return resolve(JSON.stringify({{met: false,
                   error: err, url: location.href, title: document.title,
-                  ready: document.readyState}}));
+                  ready: document.readyState{detail_fields}}}));
                 setTimeout(check, 100);
               }};
               check();
@@ -2707,11 +2954,17 @@ def wait_for(
         "title": info.get("title"),
     }
     if not met:
+        if info.get("locator_status"):
+            out["locator_status"] = info["locator_status"]
+        if info.get("matches") is not None:
+            out["matches"] = info["matches"]
+        if info.get("stage"):
+            out["stage"] = info["stage"]
         if info.get("error"):
             out["error"] = info["error"]
         elif last_error:
-            out["error"] = f"页面在等待期间多次不可用：{last_error}"
-        out["hint"] = "条件未在超时内满足。确认选择器/文本是否正确，或用 scan_page 查看当前页面实际内容。"
+            out["error"] = f"The page was repeatedly unavailable while waiting: {last_error}"
+        out["hint"] = "The condition was not met before timeout. Verify the selector or text, or inspect the page with scan_page."
     return out
 
 
@@ -2733,11 +2986,11 @@ def wait_for_url(
 ) -> dict[str, Any]:
     pattern = str(url_pattern or "")
     if not pattern.strip():
-        raise ValueError("url_pattern 不能为空")
-    try:
-        re.compile(pattern)
-    except re.error as e:
-        raise ValueError(f"url_pattern 不是合法正则：{e}（要按纯文本匹配请转义特殊字符）") from None
+        raise ValueError("url_pattern must not be empty")
+    # The condition is evaluated by the browser, so JavaScript RegExp syntax is
+    # authoritative here. Python's ``re`` accepts a different language (and
+    # rejects valid JS features such as named groups). An invalid JavaScript
+    # pattern is still a valid literal substring under this tool's contract.
     driver = require_driver()
     ensure_sessions()
     prev_default = driver.default_session_id
@@ -2748,8 +3001,12 @@ def wait_for_url(
     # 文档里 —— 这对"等导航落定"尤其重要，因为这里本来就预期页面会换。
     # 正则匹配不上时退一步按子串匹配：调用方多半直接贴了一个 URL 进来（'?'、'.'
     # 在正则里另有含义），静默等不到不如两种都试。
-    probe = (f"(new RegExp({json.dumps(pattern)}).test(location.href)"
-             f" || location.href.includes({json.dumps(pattern)}))")
+    pattern_json = json.dumps(pattern)
+    probe = (
+        "(() => { const pattern = " + pattern_json + "; "
+        "try { return new RegExp(pattern).test(location.href) || location.href.includes(pattern); } "
+        "catch (_) { return location.href.includes(pattern); } })()"
+    )
     if wait_ready:
         probe = f"({probe} && document.readyState === 'complete')"
     CHUNK = 4.0
@@ -2811,12 +3068,12 @@ def wait_for_url(
         if info.get("error"):
             out["error"] = info["error"]
         elif last_error:
-            out["error"] = f"页面在等待期间多次不可用：{last_error}"
+            out["error"] = f"The page was repeatedly unavailable while waiting: {last_error}"
         landed = info.get("url")
         out["hint"] = (
-            f"超时：当前 URL 是 {landed}（readyState={info.get('ready')}），与 url_pattern 不匹配"
+            f"Timed out: current URL {landed} (readyState={info.get('ready')}) does not match url_pattern"
             if landed else
-            "超时且读不到当前 URL：标签页可能已休眠或断开，先 list_tabs 确认目标。")
+            "Timed out and could not read the current URL. The tab may be suspended or disconnected; confirm it with list_tabs first.")
     return out
 
 
@@ -2825,7 +3082,7 @@ def wait_for_url(
         "Scroll the page and report the new position. scan_page omits anything past "
         "±5000px from the current scroll offset, so on a long page: scan, then scroll, "
         "then scan again. Pass to='bottom'/'top', a pixel offset, or a CSS selector to "
-        "bring into view."
+        "bring into view. Defaults: to='bottom', timeout=15 seconds."
     )
 )
 def scroll_page(
@@ -2874,7 +3131,7 @@ def scroll_page(
     info = json.loads(raw) if isinstance(raw, str) else (raw or {})
     if is_selector and info.get("__not_found"):
         return {"status": "not_found", "selector": target,
-                "note": f"选择器 {target!r} 在页面中无匹配；请检查选择器，或改用 'top'/'bottom'/像素值"}
+                "note": f"Selector {target!r} did not match the page; verify it or use 'top', 'bottom', or a pixel offset"}
     return {
         "status": "success",
         "scrolled_from": info.get("before"),
@@ -2897,11 +3154,11 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
       const deadline = Date.now() + {deadline_ms};
       const scoped = policy === 'accept' || policy === 'dismiss';
       if (scoped) {{
-        const scopes = Array.isArray(window.__tmwd_dialog_scopes)
-          ? window.__tmwd_dialog_scopes : [];
+        const scopes = Array.isArray(window.__abm_dialog_scopes)
+          ? window.__abm_dialog_scopes : [];
         scopes.push({{token, policy, deadline}});
-        window.__tmwd_dialog_scopes = scopes;
-        window.__tmwd_suppress_until = Math.max(
+        window.__abm_dialog_scopes = scopes;
+        window.__abm_suppress_until = Math.max(
           deadline, ...scopes.map(scope => Number(scope.deadline) || 0));
       }}
       try {{
@@ -2929,10 +3186,10 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
         return {{ok: false, error: {{name: error.name || 'Error',
           message: error.message || String(error), stack: error.stack || ''}}}};
       }} finally {{
-        if (scoped && Array.isArray(window.__tmwd_dialog_scopes)) {{
-          window.__tmwd_dialog_scopes = window.__tmwd_dialog_scopes
+        if (scoped && Array.isArray(window.__abm_dialog_scopes)) {{
+          window.__abm_dialog_scopes = window.__abm_dialog_scopes
             .filter(scope => scope.token !== token && Date.now() < scope.deadline);
-          window.__tmwd_suppress_until = window.__tmwd_dialog_scopes.reduce(
+          window.__abm_suppress_until = window.__abm_dialog_scopes.reduce(
             (latest, scope) => Math.max(latest, Number(scope.deadline) || 0), 0);
         }}
       }}
@@ -2999,7 +3256,7 @@ def _execute_js_cdp_fallback(
     }
 
 
-@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. ABM pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting.")
+@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. ABM pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting. Use wait_for/wait_for_url instead of setTimeout or sleep Promises; ABM retries only proven-undelivered work, never an acknowledged script whose side effects may already have run.")
 def execute_js(
     script: str,
     session_id: Optional[str] = None,
@@ -3128,7 +3385,7 @@ def execute_js(
         scoped_script = (
             script
             if policy == "manual" else
-            f"/*__tmwd_dialog_scope:{scope_token}*/\n{script}"
+            f"/*__abm_dialog_scope:{scope_token}*/\n{script}"
             if scope_token is not None else script
         )
         result = simphtml.execute_js_rich(
@@ -3141,7 +3398,7 @@ def execute_js(
             deadline=deadline,
         )
         wrapped = result.get("js_return")
-        if isinstance(wrapped, dict) and wrapped.get("__tmwd_dialog_result") is True:
+        if isinstance(wrapped, dict) and wrapped.get("__abm_dialog_result") is True:
             result = dict(result)
             result["js_return"] = wrapped.get("value")
             wrapped_status = wrapped.get("status")
@@ -3189,11 +3446,13 @@ def execute_js(
                             timeout=min(cleanup_timeout, 15.0),
                         )
                     else:
-                        print("[execute_js] total deadline exhausted; dialog scope will expire naturally")
+                        logger.warning(
+                            "execute_js deadline exhausted; dialog scope will expire naturally"
+                        )
                 except Exception as cleanup_error:
                     if primary_error is None:
                         raise
-                    print(f"[execute_js] dialog policy cleanup failed: {cleanup_error}")
+                    logger.warning("execute_js dialog policy cleanup failed: %s", cleanup_error)
         finally:
             if session_id is not None:
                 driver.default_session_id = prev_default
@@ -3427,6 +3686,19 @@ def _run_page_input(
     """Dispatch one uninterrupted CDP input sequence to one resolved tab."""
     if not commands:
         raise InputValidationError("page input commands must not be empty")
+    # Chrome drops Input.* events sent to a tab that has never received focus,
+    # even though the CDP commands return success.  Focus emulation makes the
+    # renderer input-capable without activating the tab or changing the user's
+    # foreground page.  Keep it in this same batch so attach/lease ordering is
+    # atomic and do not expose the internal setup result to callers.
+    input_commands = [
+        {
+            "cmd": "cdp",
+            "method": "Emulation.setFocusEmulationEnabled",
+            "params": {"enabled": True},
+        },
+        *commands,
+    ]
     if deadline is None:
         deadline = time.monotonic() + timeout
     driver = require_driver()
@@ -3451,20 +3723,62 @@ def _run_page_input(
             raise TimeoutError("page input deadline exhausted before batch dispatch")
         payload = {
             "cmd": "batch",
-            "commands": commands,
+            "commands": input_commands,
             # The extension uses the absolute deadline to stop a batch whose
             # transport ACK or an earlier CDP command consumed the budget.
             "deadlineEpochMs": int(wall_now_ms + remaining * 1000),
+            "timeoutMs": max(1, int(remaining * 1000)),
         }
-        response = exec_js(
-            json.dumps(payload), session_id=target_session, timeout=remaining
-        )
+        ext_cmd = getattr(driver, "ext_cmd", None)
+        if callable(ext_cmd):
+            client_id, tab_id = _split_session_target(target_session)
+            payload["tabId"] = tab_id
+            try:
+                # A batch is an extension command, not page JavaScript. Sending it
+                # over the browser-level socket avoids relying on a background
+                # tab's content-script ACK while retaining the exact target tab.
+                response = ext_cmd(
+                    payload,
+                    client_id=client_id,
+                    timeout=remaining,
+                )
+            except BaseException as exc:
+                fallback_budget = max(0.0, deadline - time.monotonic())
+                # Only an explicit old-router rejection proves the mutation did
+                # not run. A timeout or transport failure is ambiguous and must
+                # never replay clicks, keys, or drags through another route.
+                if not _unknown_command_error(exc) or fallback_budget <= 0:
+                    raise
+                response = exec_js(
+                    json.dumps(payload),
+                    session_id=target_session,
+                    timeout=fallback_budget,
+                )
+        else:  # Compatibility for older embedded/fake drivers.
+            response = exec_js(
+                json.dumps(payload), session_id=target_session, timeout=remaining
+            )
+        result = response.get("data") if isinstance(response, dict) else response
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise RuntimeError(
+                f"page input batch failed: {result.get('error') or 'unknown extension error'}"
+            )
+        # The focus-emulation command is an internal prelude.  Current
+        # extensions return one result per command; retain compatibility with
+        # older/fake routes that return a shorter synthetic list.
+        if (
+            isinstance(result, list)
+            and len(result) == len(input_commands)
+            and result
+            and result[0] == {}
+        ):
+            result = result[1:]
         return {
             "status": "success",
             "session_id": target_session,
             "input_mode": "cdp",
             "foreground_changed": False,
-            "result": response.get("data") if isinstance(response, dict) else response,
+            "result": result,
         }
     finally:
         if directed:
@@ -3472,14 +3786,27 @@ def _run_page_input(
 
 
 def _page_selector_info(
-    selector: str,
+    selector: str | dict[str, Any],
     offset_x: float,
     offset_y: float,
     session_id: str,
     timeout: float,
 ) -> dict[str, Any]:
+    normalized = normalize_locator(selector)
+    script = (
+        resolve_selector_script(
+            normalized,
+            offset_x,
+            offset_y,
+            require_interactable=True,
+        )
+        if isinstance(normalized, str)
+        else structured_locator_script(
+            normalized, purpose="click", offset_x=offset_x, offset_y=offset_y
+        )
+    )
     response = exec_js(
-        resolve_selector_script(selector, offset_x, offset_y),
+        script,
         session_id=session_id,
         timeout=timeout,
     )
@@ -3495,13 +3822,23 @@ def _page_selector_info(
 
 
 def _page_type_target_info(
-    selector: str,
+    selector: str | dict[str, Any],
     clear: bool,
     session_id: str,
     timeout: float,
 ) -> dict[str, Any]:
+    # An empty selector is the legacy focused-element mode. Structured locator
+    # validation only applies when the caller actually supplied a selector.
+    normalized = selector if selector == "" else normalize_locator(selector)
+    script = (
+        type_target_script(normalized, select_all=clear)
+        if isinstance(normalized, str)
+        else structured_locator_script(
+            normalized, purpose="type", select_all=clear
+        )
+    )
     response = exec_js(
-        type_target_script(selector, select_all=clear),
+        script,
         session_id=session_id,
         timeout=timeout,
     )
@@ -3522,12 +3859,14 @@ def _page_type_target_info(
 
 @mcp.tool(
     description=(
-        "Click a CSS selector or viewport coordinates in a specific real browser tab using "
-        "background CDP input. This does not activate the tab or move the desktop cursor."
+        "Click a CSS/structured locator or viewport coordinates in a specific real browser tab "
+        "using background CDP input. Ambiguous or unreachable targets dispatch nothing; the tab "
+        "is not activated and the desktop cursor does not move. Selector offsets are measured "
+        "from the element's top-left corner; an omitted axis uses the element centre."
     )
 )
 def page_click(
-    selector: str = "",
+    selector: str | dict[str, Any] = "",
     x: Optional[float] = None,
     y: Optional[float] = None,
     offset_x: Optional[float] = None,
@@ -3537,7 +3876,7 @@ def page_click(
     session_id: Optional[str] = None,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
-    selector_mode = isinstance(selector, str) and bool(selector)
+    selector_mode = (isinstance(selector, str) and bool(selector)) or isinstance(selector, dict)
     any_coordinate = x is not None or y is not None
     both_coordinates = x is not None and y is not None
     if any_coordinate and not both_coordinates:
@@ -3569,13 +3908,15 @@ def page_click(
         if not before.get("found"):
             _clear_page_challenge(target_session)
             return {
-                "status": "not_found",
+                "status": before.get("status", "not_found"),
                 "session_id": target_session,
                 "input_mode": "cdp",
                 "foreground_changed": False,
                 "challenge_detected": False,
                 "attempts": 0,
                 "target": {"selector": selector},
+                **({"matches": before["matches"]} if before.get("matches") is not None else {}),
+                **({"stage": before["stage"]} if before.get("stage") else {}),
             }
 
         resolved_x = before.get("x")
@@ -3657,15 +3998,14 @@ def page_click(
 
 @mcp.tool(
     description=(
-        "Insert text into the focused element or a CSS-selected field in a specific tab using "
-        "background CDP input; xterm containers automatically retarget their helper textarea. "
-        "Optionally clear the field and submit a key. A missing/unusable target returns "
-        "not_found without dispatching text or key events."
+        "Insert text into the focused element or a CSS/structured-locator field in a specific tab "
+        "using background CDP input; xterm containers automatically retarget their helper textarea. "
+        "Optionally clear and submit a key. Missing, ambiguous, or unusable targets dispatch nothing."
     )
 )
 def page_type(
     text: str,
-    selector: str = "",
+    selector: str | dict[str, Any] = "",
     clear: bool = False,
     submit_key: str = "",
     session_id: Optional[str] = None,
@@ -3673,8 +4013,10 @@ def page_type(
 ) -> dict[str, Any]:
     if not isinstance(text, str):
         raise InputValidationError("text must be a string")
-    if not isinstance(selector, str):
-        raise InputValidationError("selector must be a string")
+    if not isinstance(selector, (str, dict)):
+        raise InputValidationError("selector must be a CSS string or locator object")
+    if isinstance(selector, dict):
+        normalize_locator(selector)
     if not isinstance(clear, bool):
         raise InputValidationError("clear must be a boolean")
     if not isinstance(submit_key, str):
@@ -3739,13 +4081,15 @@ def page_type(
         target = {"selector": selector} if selector else {"focused_element": True}
         if not target_info.get("found"):
             return {
-                "status": "not_found",
+                "status": target_info.get("status", "not_found"),
                 "session_id": target_session,
                 "input_mode": "cdp",
                 "foreground_changed": False,
                 "target": target,
                 "target_kind": target_info.get("targetKind", "missing"),
                 "typed_chars": 0,
+                **({"matches": target_info["matches"]} if target_info.get("matches") is not None else {}),
+                **({"stage": target_info["stage"]} if target_info.get("stage") else {}),
             }
         target_kind = target_info.get("targetKind", "element")
         submit_delay_ms = (
@@ -3765,7 +4109,7 @@ def page_type(
         # Xterm forwards insertText to its backend asynchronously, so yield once
         # before Enter without breaking the single attached CDP batch.
         commands = type_commands(
-            selector,
+            selector if isinstance(selector, str) else "",
             text,
             select_all=clear,
             submit_key=submit_key or None,
@@ -3900,15 +4244,15 @@ def _parse_cookies_arg(cookies: Any) -> list[dict[str, Any]]:
     if isinstance(cookies, str):
         text = cookies.strip()
         if not text:
-            raise ValueError("cookies 为空")
+            raise ValueError("cookies must not be empty")
         try:
             cookies = json.loads(text)
         except json.JSONDecodeError as e:
-            raise ValueError(f"cookies 不是合法 JSON：{e}") from None
+            raise ValueError(f"cookies is not valid JSON: {e}") from None
     if isinstance(cookies, dict):
         cookies = [cookies]
     if not isinstance(cookies, list) or not cookies:
-        raise ValueError("cookies 必须是非空的 cookie 对象或对象列表")
+        raise ValueError("cookies must be a non-empty cookie object or list of cookie objects")
     return cookies
 
 
@@ -3916,16 +4260,16 @@ def _normalize_cookie(raw: Any, index: int) -> dict[str, Any]:
     """校验并转成 CDP Network.setCookie 的参数形状。"""
     where = f"cookies[{index}]"
     if not isinstance(raw, dict):
-        raise ValueError(f"{where} 不是对象：{type(raw).__name__}")
+        raise ValueError(f"{where} must be an object, got {type(raw).__name__}")
     name = str(raw.get("name") or "").strip()
     if not name:
-        raise ValueError(f"{where} 缺少 name")
+        raise ValueError(f"{where} is missing name")
     # 名字里带 '=' 或 ';' 会把 Cookie 头拆坏，CDP 也不会替你挡。
     if any(ch in name for ch in "=;,\r\n \t"):
-        raise ValueError(f"{where} name 含非法字符（= ; , 空白 换行）：{name!r}")
+        raise ValueError(f"{where} name contains an invalid separator or whitespace: {name!r}")
     out: dict[str, Any] = {"name": name, "value": str(raw.get("value", ""))}
     if any(ch in out["value"] for ch in ";\r\n"):
-        raise ValueError(f"{where} value 含非法字符（; 或换行）；请自行 encodeURIComponent")
+        raise ValueError(f"{where} value contains a semicolon or newline; encode it before calling set_cookies")
     for key in ("url", "domain", "path"):
         val = raw.get(key)
         if val not in (None, ""):
@@ -3941,19 +4285,19 @@ def _normalize_cookie(raw: Any, index: int) -> dict[str, Any]:
         try:
             out["expires"] = float(expires)
         except (TypeError, ValueError):
-            raise ValueError(f"{where} expires 必须是 Unix 秒时间戳，收到 {expires!r}") from None
+            raise ValueError(f"{where} expires must be a Unix timestamp in seconds, got {expires!r}") from None
     same = raw.get("sameSite", raw.get("same_site"))
     if same not in (None, ""):
         key = str(same).strip().lower()
         if key not in _SAMESITE:
             raise ValueError(
-                f"{where} sameSite 只能是 Strict/Lax/None，收到 {same!r}")
+                f"{where} sameSite must be Strict, Lax, or None; got {same!r}")
         norm = _SAMESITE[key]
         if norm is not None:
             out["sameSite"] = norm
     # SameSite=None 没有 Secure 会被浏览器整条丢掉，且不报错 —— 提前挡住。
     if out.get("sameSite") == "None" and not out.get("secure"):
-        raise ValueError(f"{where} sameSite='None' 必须同时 secure=true，否则浏览器会静默丢弃该 cookie")
+        raise ValueError(f"{where} sameSite='None' requires secure=true or the browser will reject the cookie")
     return out
 
 
@@ -4028,6 +4372,29 @@ class SitePermissionApproval(BaseModel):
     approve: StrictBool = Field(description="Approve this temporary site permission")
 
 
+# An elicitation is answered by a human, and the global tool lock is held for the
+# whole await (see _threaded_tool), so a prompt nobody answers does not just
+# stall its own tool — it wedges every other ABM tool in this process until the
+# client cancels the request. Bound the wait: an unanswered approval is exactly
+# the "declined, cancelled, or unavailable" case both callers already report as
+# requires_user_action.
+_APPROVAL_TIMEOUT_ENV = "AGENT_BROWSER_APPROVAL_TIMEOUT"
+_DEFAULT_APPROVAL_TIMEOUT = 120.0
+
+
+def _approval_timeout() -> float:
+    raw = (os.environ.get(_APPROVAL_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_APPROVAL_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %ss",
+                       _APPROVAL_TIMEOUT_ENV, raw, _DEFAULT_APPROVAL_TIMEOUT)
+        return _DEFAULT_APPROVAL_TIMEOUT
+    return value if value > 0 else _DEFAULT_APPROVAL_TIMEOUT
+
+
 async def _request_site_permission_approval(
     ctx: Context, permission: str, origin: str, duration_seconds: int
 ) -> bool:
@@ -4038,11 +4405,12 @@ async def _request_site_permission_approval(
     if profile["mode"] == "lab" and approval_key in _LAB_SITE_PERMISSION_APPROVALS:
         return True
     try:
-        result = await ctx.elicit(
-            message=("ABM requests temporary site permission: "
-                     f"allow {permission} for {origin} for {duration_seconds} seconds"),
-            schema=SitePermissionApproval,
-        )
+        with anyio.fail_after(_approval_timeout()):
+            result = await ctx.elicit(
+                message=("ABM requests temporary site permission: "
+                         f"allow {permission} for {origin} for {duration_seconds} seconds"),
+                schema=SitePermissionApproval,
+            )
         approved = (
             result.action == "accept" and result.data is not None
             and result.data.approve is True
@@ -4050,6 +4418,13 @@ async def _request_site_permission_approval(
         if approved and profile["mode"] == "lab":
             _LAB_SITE_PERMISSION_APPROVALS.add(approval_key)
         return approved
+    except TimeoutError:
+        logger.warning(
+            "Site-permission approval for %s on %s went unanswered for %ss; treating it as "
+            "declined so the tool lock is released.",
+            permission, origin, _approval_timeout(),
+        )
+        return False
     except Exception:
         return False
 
@@ -4079,8 +4454,8 @@ def _site_permission_extension_result(response: Any) -> dict[str, Any]:
     description=(
         "Temporarily set an origin-scoped browser site permission for 60-600 seconds. "
         "Only http/https origins and notifications, geolocation/location, camera, microphone, or clipboard are supported. "
-        "safe asks on every allow; lab asks once per MCP session or skips prompts only when "
-        "AGENT_BROWSER_LAB_NO_ELICIT=1. All leases restore their prior setting on expiry."
+        "safe asks on every allow; lab skips prompts by default and restores session approval only "
+        "when AGENT_BROWSER_LAB_NO_ELICIT is explicitly disabled. All leases restore their prior setting."
     )
 )
 async def set_site_permission(
@@ -4094,29 +4469,51 @@ async def set_site_permission(
     spec = _site_permission_spec(permission)
     normalized_setting = _validate_site_permission_setting(setting)
     duration = _validate_site_permission_duration(duration_seconds)
-    driver = require_driver()
-    previous_default = driver.default_session_id
-    target_sid = switch_session(session_id=session_id) if session_id is not None else switch_session()
-    client_id, tab_id = _split_session_target(target_sid)
+    def prepare() -> tuple[BrowserBridge, Optional[str], str, str, int, str]:
+        driver = require_driver()
+        previous_default = driver.default_session_id
+        target_sid = (
+            switch_session(session_id=session_id)
+            if session_id is not None
+            else switch_session()
+        )
+        try:
+            selected_origin = origin or str(_page_location(target_sid).get("url") or "")
+            normalized_origin = _normalize_site_permission_origin(selected_origin)
+        except Exception:
+            if session_id is not None:
+                driver.default_session_id = previous_default
+            raise
+        client_id, tab_id = _split_session_target(target_sid)
+        return driver, previous_default, target_sid, client_id, tab_id, normalized_origin
+
+    (
+        driver,
+        previous_default,
+        target_sid,
+        client_id,
+        tab_id,
+        normalized_origin,
+    ) = await anyio.to_thread.run_sync(prepare)
     try:
-        selected_origin = origin or str(_page_location(target_sid).get("url") or "")
-        normalized_origin = _normalize_site_permission_origin(selected_origin)
         if normalized_setting == "allow" and not await _request_site_permission_approval(
             ctx, spec["setting"], normalized_origin, duration
         ):
             return _site_permission_requires_user_action()
-        response = driver.ext_cmd(
-            {
-                "cmd": "site_permission",
-                "action": "set",
-                "tabId": tab_id,
-                "permission": spec["setting"],
-                "setting": normalized_setting,
-                "origin": normalized_origin,
-                "durationSeconds": duration,
-            },
-            client_id=client_id,
-            timeout=20.0,
+        response = await anyio.to_thread.run_sync(
+            lambda: driver.ext_cmd(
+                {
+                    "cmd": "site_permission",
+                    "action": "set",
+                    "tabId": tab_id,
+                    "permission": spec["setting"],
+                    "setting": normalized_setting,
+                    "origin": normalized_origin,
+                    "durationSeconds": duration,
+                },
+                client_id=client_id,
+                timeout=20.0,
+            )
         )
         result = _site_permission_extension_result(response)
         result.setdefault("origin", normalized_origin)
@@ -4231,7 +4628,7 @@ def set_cookies(
         page = _page_location(session_id=session_id, timeout=min(timeout, 10.0))
         if not page.get("url"):
             raise RuntimeError(
-                "无法读取当前页 URL 来确定 cookie 作用域；请在每个 cookie 里显式给 url 或 domain。")
+                "Could not read the current page URL to determine cookie scope; provide url or domain for every cookie.")
     results: list[dict[str, Any]] = []
     for cookie in items:
         params = dict(cookie)
@@ -4249,7 +4646,7 @@ def set_cookies(
             ok = data.get("success", True) if isinstance(data, dict) else True
             entry["status"] = "ok" if ok else "failed"
             if not ok:
-                entry["error"] = "CDP Network.setCookie 返回 success=false（通常是 domain/secure 与当前页不匹配）"
+                entry["error"] = "CDP Network.setCookie returned success=false; domain or secure likely conflicts with the current page"
         except Exception as e:
             entry["cdp_error"] = str(e)
             entry["method"] = "document.cookie"
@@ -4261,8 +4658,8 @@ def set_cookies(
                 # the target. Fail loudly instead of lying.
                 entry["status"] = "failed"
                 entry["error"] = (
-                    f"CDP 不可用（{e}）且指定了 tab_id={tab_id}；document.cookie 降级"
-                    "只能作用于默认标签页，无法安全降级，请去掉 tab_id 或用 session_id 重试"
+                    f"CDP is unavailable ({e}) and tab_id={tab_id} was explicit. The document.cookie fallback "
+                    "can only target the default tab; remove tab_id or retry with session_id."
                 )
             else:
                 try:
@@ -4271,12 +4668,12 @@ def set_cookies(
                     if not fb.get("ok"):
                         entry["error"] = (
                             fb.get("error")
-                            or "document.cookie 写入后回读不到：可能被 domain/secure 限制或浏览器拒绝")
+                            or "The cookie was not readable after document.cookie wrote it; domain/secure rules or the browser may have rejected it")
                     elif cookie.get("httpOnly"):
-                        entry["note"] = "已降级为 document.cookie 写入，HttpOnly 无法通过页面 JS 设置，该 cookie 不是 HttpOnly"
+                        entry["note"] = "Used the document.cookie fallback. Page JavaScript cannot set HttpOnly, so this cookie is not HttpOnly."
                 except Exception as e2:
                     entry["status"] = "failed"
-                    entry["error"] = f"CDP 与 document.cookie 都失败：{e2}"
+                    entry["error"] = f"Both CDP and document.cookie failed: {e2}"
         results.append(entry)
     ok_count = sum(1 for r in results if r.get("status") == "ok")
     status = "ok" if ok_count == len(results) else ("partial" if ok_count else "failed")
@@ -4287,7 +4684,7 @@ def set_cookies(
         "results": results,
     }
     if status != "ok":
-        out["hint"] = "部分 cookie 未写入。用 get_cookies 核对实际结果，并确认 domain/secure/sameSite 与目标站点一致。"
+        out["hint"] = "Some cookies were not written. Verify with get_cookies and confirm domain, secure, and sameSite match the target site."
     return out
 
 
@@ -4309,7 +4706,7 @@ def delete_cookies(
 ) -> dict[str, Any]:
     cookie_name = str(name or "").strip()
     if not cookie_name:
-        raise ValueError("name 不能为空")
+        raise ValueError("name must not be empty")
     params: dict[str, Any] = {"name": cookie_name}
     if url:
         params["url"] = str(url)
@@ -4321,7 +4718,7 @@ def delete_cookies(
     if scoped_to_page:
         page = _page_location(session_id=session_id, timeout=min(timeout, 10.0))
         if not page.get("url"):
-            raise RuntimeError("无法读取当前页 URL 来确定删除范围；请显式给 url 或 domain。")
+            raise RuntimeError("Could not read the current page URL to determine deletion scope; provide url or domain.")
         params["url"] = page["url"]
     out: dict[str, Any] = {"name": cookie_name, "scope": {k: v for k, v in params.items() if k != "name"},
                            "method": "cdp"}
@@ -4336,8 +4733,8 @@ def delete_cookies(
             # there lies about the named tab's cookies. Fail loudly instead.
             out["status"] = "failed"
             out["error"] = (
-                f"CDP 不可用（{e}）且指定了 tab_id={tab_id}；document.cookie 过期法"
-                "只能作用于默认标签页，无法安全降级，请去掉 tab_id 或用 session_id 重试"
+                f"CDP is unavailable ({e}) and tab_id={tab_id} was explicit. The document.cookie expiry "
+                "fallback can only target the default tab; remove tab_id or retry with session_id."
             )
             return out
         script = f"""
@@ -4361,10 +4758,10 @@ def delete_cookies(
             info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             out["status"] = "ok" if info.get("gone") else "failed"
             if not info.get("gone"):
-                out["error"] = "过期法执行后仍能读到该 cookie：可能是 HttpOnly 或作用域不匹配，请显式给 domain/path"
+                out["error"] = "The cookie remained after the expiry fallback; it may be HttpOnly or scoped differently. Provide domain and path."
         except Exception as e2:
             out["status"] = "failed"
-            out["error"] = f"CDP 与 document.cookie 都失败：{e2}"
+            out["error"] = f"Both CDP and document.cookie failed: {e2}"
     return out
 
 
@@ -4378,8 +4775,29 @@ _STORAGE_DUMP_LIMIT = 20000
 def _storage_area(area: str) -> str:
     key = str(area or "").strip().lower()
     if key not in _STORAGE_AREAS:
-        raise ValueError(f"area 只能是 'local' 或 'session'，收到 {area!r}")
+        raise ValueError(f"area must be 'local' or 'session', got {area!r}")
     return _STORAGE_AREAS[key]
+
+
+def _storage_transport_error(exc: Exception, *, read_only: bool) -> dict[str, Any]:
+    if isinstance(exc, BridgeNoResponseError):
+        error_code = exc.error_code
+        delivery_state = exc.delivery_state
+        retry_safe = read_only or exc.retry_safe
+    elif isinstance(exc, TimeoutError):
+        error_code = "timeout"
+        delivery_state = "unknown"
+        retry_safe = read_only
+    else:
+        error_code = "bridge_error"
+        delivery_state = "unknown"
+        retry_safe = read_only
+    return {
+        "error_code": error_code,
+        "delivery_state": delivery_state,
+        "retry_safe": retry_safe,
+        "retryable": retry_safe,
+    }
 
 
 @mcp.tool(
@@ -4408,7 +4826,7 @@ def storage_get(
     script = f"""
     try {{
       const s = window.{store};
-      if (!s) return JSON.stringify({{ok: false, error: '{store} 不可用'}});
+      if (!s) return JSON.stringify({{ok: false, error: '{store} is unavailable'}});
       const key = {json.dumps(key)};
       if (key !== null) {{
         const v = s.getItem(key);
@@ -4440,32 +4858,29 @@ def storage_get(
         info = json.loads(raw) if isinstance(raw, str) else (raw or {})
     except Exception as exc:
         message = str(exc)
-        is_no_response = "no-response" in message.lower() or "no response" in message.lower()
-        is_timeout = isinstance(exc, TimeoutError) or "timeout" in message.lower()
         return {
             "status": "error",
             "area": store,
             "key": key,
-            "error_code": "no_response" if is_no_response else "timeout" if is_timeout else "bridge_error",
             "error": message,
-            "retryable": True,
+            **_storage_transport_error(exc, read_only=True),
             "hint": "The storage call failed in-page; the MCP connection remains usable. Run list_tabs, then retry the same directed session once.",
         }
     if not isinstance(info, dict):
         return {"status": "error", "area": store, "error_code": "invalid_response",
-                "error": f"页面返回了意外结果：{info!r}", "retryable": True}
+                "error": f"The page returned an unexpected storage result: {info!r}", "retryable": True}
     if not info.get("ok"):
         return {"status": "error", "area": store, "error_code": "storage_unavailable",
-                "error": info.get("error") or "存储不可访问",
+                "error": info.get("error") or "Storage is inaccessible",
                 "retryable": False,
-                "hint": "第三方 Cookie/存储被拦截或页面是 sandbox/data: 上下文时会这样，换正常 http(s) 页面重试。"}
+                "hint": "This can occur when third-party storage is blocked or the page uses a sandbox/data context. Retry on a normal http(s) page."}
     out: dict[str, Any] = {"status": "success", "area": store}
     if key is not None:
         out["key"] = key
         out["found"] = bool(info.get("found"))
         out["value"] = info.get("value")
         if not out["found"]:
-            out["note"] = "该键不存在（value 为 null，与存了空字符串不同）"
+            out["note"] = "The key does not exist (value is null, which differs from a stored empty string)."
         return out
     out["items"] = info.get("items") or {}
     out["count"] = len(out["items"])
@@ -4497,7 +4912,7 @@ def storage_set(
 ) -> dict[str, Any]:
     store = _storage_area(area)
     if not isinstance(key, str) or not key:
-        raise ValueError("key 必须是非空字符串")
+        raise ValueError("key must be a non-empty string")
     encoded = False
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False)
@@ -4505,7 +4920,7 @@ def storage_set(
     script = f"""
     try {{
       const s = window.{store};
-      if (!s) return JSON.stringify({{ok: false, error: '{store} 不可用'}});
+      if (!s) return JSON.stringify({{ok: false, error: '{store} is unavailable'}});
       const k = {json.dumps(key)}, v = {json.dumps(value)};
       const existed = s.getItem(k) !== null;
       s.setItem(k, v);
@@ -4521,23 +4936,20 @@ def storage_set(
         info = json.loads(raw) if isinstance(raw, str) else (raw or {})
     except Exception as exc:
         message = str(exc)
-        is_no_response = "no-response" in message.lower() or "no response" in message.lower()
-        is_timeout = isinstance(exc, TimeoutError) or "timeout" in message.lower()
         return {
             "status": "error",
             "area": store,
             "key": key,
-            "error_code": "no_response" if is_no_response else "timeout" if is_timeout else "bridge_error",
             "error": message,
-            "retryable": True,
+            **_storage_transport_error(exc, read_only=False),
             "hint": "The write failed without closing MCP. Confirm with storage_get before retrying because a timed-out write may have landed.",
         }
     if not isinstance(info, dict) or not info.get("ok"):
         err = info.get("error") if isinstance(info, dict) else None
         return {
             "status": "failed", "area": store, "key": key,
-            "error": err or "写入后回读不一致：可能超出存储配额或被浏览器拦截",
-            "hint": "确认页面是正常 http(s) 页、未开无痕/未拦截站点数据；超配额时先删掉无用键。",
+            "error": err or "The read-back value differs after writing; storage quota or browser policy may have blocked it",
+            "hint": "Confirm this is a normal http(s) page with site data enabled; remove unused keys if the quota is full.",
         }
     out: dict[str, Any] = {
         "status": "success", "area": store, "key": key,
@@ -4545,13 +4957,14 @@ def storage_set(
         "total_keys": info.get("keys"),
     }
     if encoded:
-        out["note"] = "非字符串值已 JSON 序列化后写入"
+        out["note"] = "The non-string value was JSON-serialized before storage."
     return out
 
 
 @mcp.tool(
     description=(
-        "Capture a screenshot of the current page/tab via CDP. Returns text metadata plus an "
+        "Capture a viewport, full-page, or clipped screenshot of a page/tab via CDP with optional "
+        "JPEG/WebP quality. Returns text metadata plus an "
         "attached MCP image even when save_path is set; save_path only controls disk output. "
         "If the current model cannot consume images, it has not seen the pixels and must use "
         "scan_page, execute_js, a page-specific API, or OCR instead. Base64 is included only "
@@ -4562,9 +4975,43 @@ def capture_page_screenshot(
     session_id: Optional[str] = None,
     tab_id: Optional[int] = None,
     format: str = "png",
+    full_page: bool = False,
+    clip: Optional[dict[str, float]] = None,
+    quality: Optional[int] = None,
     save_path: str = "",
     return_base64: bool = False,
+    timeout: float = 20.0,
 ) -> CallToolResult:
+    normalized_format = str(format).strip().lower()
+    if normalized_format == "jpg":
+        normalized_format = "jpeg"
+    if normalized_format not in {"png", "jpeg", "webp"}:
+        raise ValueError("format must be png, jpeg, or webp")
+    if full_page and clip is not None:
+        raise ValueError("full_page and clip are mutually exclusive")
+    if quality is not None:
+        if normalized_format == "png":
+            raise ValueError("quality is only valid for jpeg or webp")
+        if isinstance(quality, bool) or not 0 <= int(quality) <= 100:
+            raise ValueError("quality must be between 0 and 100")
+    normalized_clip = None
+    if clip is not None:
+        if not isinstance(clip, dict):
+            raise ValueError("clip must be an object with x, y, width, and height")
+        if set(clip) - {"x", "y", "width", "height", "scale"}:
+            raise ValueError("clip accepts only x, y, width, height, and scale")
+        if not {"x", "y", "width", "height"} <= set(clip):
+            raise ValueError("clip requires x, y, width, and height")
+        try:
+            normalized_clip = {key: float(value) for key, value in clip.items()}
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("clip values must be finite numbers") from None
+        if any(not math.isfinite(value) for value in normalized_clip.values()):
+            raise ValueError("clip values must be finite numbers")
+        if normalized_clip["width"] <= 0 or normalized_clip["height"] <= 0:
+            raise ValueError("clip width and height must be greater than zero")
+        if normalized_clip.get("scale", 1.0) <= 0:
+            raise ValueError("clip scale must be greater than zero")
     driver = require_driver()
     previous_default = driver.default_session_id
     try:
@@ -4582,13 +5029,20 @@ def capture_page_screenshot(
                 f"tab_id {target_tab_id} does not match directed session_id {target_sid!r}"
             )
 
+        params: dict[str, Any] = {"format": normalized_format}
+        if quality is not None:
+            params["quality"] = int(quality)
+        if normalized_clip is not None:
+            params["clip"] = {**normalized_clip, "scale": normalized_clip.get("scale", 1.0)}
         payload: dict[str, Any] = {
             "cmd": "cdp",
             "method": "Page.captureScreenshot",
-            "params": {"format": format},
+            "params": params,
             "tabId": target_tab_id,
         }
-        response = driver.ext_cmd(payload, client_id=client_id, timeout=20.0)
+        if full_page:
+            payload["fullPage"] = True
+        response = driver.ext_cmd(payload, client_id=client_id, timeout=float(timeout))
         result = _extension_data(response)
     finally:
         if session_id is not None:
@@ -4600,16 +5054,17 @@ def capture_page_screenshot(
         b64 = data
     if not isinstance(b64, str) or not b64:
         raise RuntimeError(
-            f"截图失败：桥没返回图片数据（data={data!r}）。"
-            "确认目标 tab 是真实页面且未被调试器占用，或先用 list_tabs 确认。")
+            f"Screenshot failed because the bridge returned no image data (data={data!r}). "
+            "Confirm the target is a normal page and no other debugger owns it, or inspect it with list_tabs first.")
     try:
         raw = base64.b64decode(b64, validate=True)
     except (ValueError, base64.binascii.Error) as exc:
-        raise RuntimeError("截图失败：桥返回了无效的 base64 图片数据。") from exc
+        raise RuntimeError("Screenshot failed because the bridge returned invalid base64 image data.") from exc
 
     out: dict[str, Any] = {
         "status": "success",
-        "format": format,
+        "format": normalized_format,
+        "full_page": bool(full_page),
         "size": len(raw),
         "image_attached": True,
         "model_note": (
@@ -4633,7 +5088,7 @@ def capture_page_screenshot(
     return CallToolResult(
         content=[
             TextContent(type="text", text=json.dumps(text_metadata, ensure_ascii=False)),
-            MCPImage(data=raw, format=format).to_image_content(),
+            MCPImage(data=raw, format=normalized_format).to_image_content(),
         ],
         structuredContent=out,
     )
@@ -4642,25 +5097,103 @@ def capture_page_screenshot(
 def _pyautogui():
     # pyautogui reads no env vars; the failsafe (corner abort raising
     # FailSafeException mid-automation) must be disabled on the module itself.
-    import pyautogui
+    try:
+        import pyautogui
+    except ImportError as exc:
+        raise RuntimeError(
+            "Physical input requires the optional desktop dependencies. "
+            "Install `agent-browser-mcp[desktop]`."
+        ) from exc
+    except Exception as exc:
+        # pyautogui binds to a display while importing, so a headless or
+        # otherwise unusable session fails here with whatever its platform
+        # backend raises -- KeyError('DISPLAY'), an Xlib error, an OSError. None
+        # of those are ImportError, so catching only that reported a backend
+        # detail instead of "this machine has no usable desktop".
+        raise RuntimeError(
+            "Physical input is unavailable because the desktop session could not be "
+            f"initialised ({type(exc).__name__}: {exc}). Use the page_* tools, which "
+            "do not need a desktop."
+        ) from exc
 
     pyautogui.FAILSAFE = False
     return pyautogui
 
 
-@mcp.tool(description="Take a desktop screenshot of the whole screen using mss; useful for physical-input verification.")
-def capture_desktop_screenshot(save_path: str = "") -> dict[str, Any]:
-    import mss
-    from PIL import Image
+@mcp.tool(description="Capture the complete visible virtual desktop across all displays and return text metadata plus MCP image content; this is not a background-tab screenshot, save_path only adds a disk copy, and return_base64 is opt-in.")
+def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False) -> CallToolResult:
+    import io
+    try:
+        import mss
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "Desktop capture requires the optional desktop dependencies. "
+            "Install `agent-browser-mcp[desktop]`."
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "Desktop capture is unavailable because its imaging backend failed to load "
+            f"({type(exc).__name__}: {exc})."
+        ) from exc
 
-    path = Path(save_path).expanduser().resolve() if save_path else (ROOT / "temp_desktop.png")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with mss.mss() as sct:
-        monitor = sct.monitors[1]
-        shot = sct.grab(monitor)
-        img = Image.frombytes("RGB", shot.size, shot.rgb)
-        img.save(path)
-    return {"saved_to": str(path), "size": path.stat().st_size}
+    try:
+        with mss.mss() as sct:
+            if not sct.monitors:
+                raise RuntimeError("Desktop capture failed because no display was detected.")
+            # MSS index 0 is the virtual bounding rectangle containing every display;
+            # indexes 1..N are individual monitors.
+            monitor = sct.monitors[0]
+            shot = sct.grab(monitor)
+            img = Image.frombytes("RGB", shot.size, shot.rgb)
+            output = io.BytesIO()
+            img.save(output, format="PNG")
+            raw = output.getvalue()
+    except RuntimeError:
+        # Already an actionable message -- either the no-display check above or a
+        # backend that speaks RuntimeError. Re-wrapping would bury it.
+        raise
+    except Exception as exc:
+        # mss binds to the display in `mss.mss()` and raises ScreenShotError (not
+        # RuntimeError) on a headless or locked session; Pillow can fail on the
+        # encode. Name the cause instead of surfacing a bare backend traceback.
+        raise RuntimeError(
+            f"Desktop capture failed because the display could not be read "
+            f"({type(exc).__name__}: {exc})."
+        ) from exc
+    out: dict[str, Any] = {
+        "status": "success",
+        "format": "png",
+        "width": shot.width,
+        "height": shot.height,
+        "left": int(monitor.get("left", 0)),
+        "top": int(monitor.get("top", 0)),
+        "monitor_count": max(0, len(sct.monitors) - 1),
+        "virtual_desktop": True,
+        "size": len(raw),
+        "image_attached": True,
+        "model_note": (
+            "Pixels are attached from the currently visible OS virtual desktop across all displays, "
+            "not from a selected or background browser tab. If the current model does not support "
+            "images, it has not seen those pixels; use capture_page_screenshot for one browser tab "
+            "or structured page tools when possible."
+        ),
+    }
+    if save_path:
+        path = Path(save_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        out["saved_to"] = str(path)
+    if return_base64:
+        out["base64"] = base64.b64encode(raw).decode("ascii")
+    text_metadata = {key: value for key, value in out.items() if key != "base64"}
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(text_metadata, ensure_ascii=False)),
+            MCPImage(data=raw, format="png").to_image_content(),
+        ],
+        structuredContent=out,
+    )
 
 
 class PhysicalInputApproval(BaseModel):
@@ -4676,10 +5209,11 @@ async def _request_physical_approval(ctx: Context, summary: str) -> bool:
     if profile["mode"] == "lab" and approval_key in _LAB_PHYSICAL_APPROVALS:
         return True
     try:
-        result = await ctx.elicit(
-            message=f"ABM requests one physical input action: {summary}",
-            schema=PhysicalInputApproval,
-        )
+        with anyio.fail_after(_approval_timeout()):
+            result = await ctx.elicit(
+                message=f"ABM requests one physical input action: {summary}",
+                schema=PhysicalInputApproval,
+            )
         approved = (
             result.action == "accept" and result.data is not None
             and result.data.approve is True
@@ -4687,6 +5221,14 @@ async def _request_physical_approval(ctx: Context, summary: str) -> bool:
         if approved and profile["mode"] == "lab":
             _LAB_PHYSICAL_APPROVALS.add(approval_key)
         return approved
+    except TimeoutError:
+        # Never fall through to "approved" on a timeout, and never keep holding
+        # the tool lock waiting for a human who has walked away.
+        logger.warning(
+            "Physical-input approval (%s) went unanswered for %ss; treating it as declined.",
+            summary, _approval_timeout(),
+        )
+        return False
     except Exception:
         # Older MCP clients may not implement elicitation. Physical input is
         # deliberately unavailable in that case instead of silently proceeding.
@@ -4720,31 +5262,30 @@ async def _run_approved_physical_action(
 
     def worker() -> dict[str, Any]:
         nonlocal action_started
-        with _TOOL_LOCK:
-            def gated_action() -> dict[str, Any]:
-                nonlocal action_started
-                # Activation is itself foreground work and must wait until the
-                # lease and quiet-input check have passed.
-                action_started = False
-                activated = None
-                if should_activate:
-                    activated = _maybe_activate(activate_session, session_id)
-                    if not isinstance(activated, dict) or activated.get("on_screen") is not True:
-                        return {
-                            "status": "activation_failed",
-                            "message": (
-                                "The requested browser target could not be confirmed on screen; "
-                                "no physical input was sent."
-                            ),
-                            "activated": activated,
-                        }
-                action_started = True
-                result = action()
-                if activated:
-                    result["activated"] = activated
-                return result
+        def gated_action() -> dict[str, Any]:
+            nonlocal action_started
+            # Activation is itself foreground work and must wait until the
+            # lease and quiet-input check have passed.
+            action_started = False
+            activated = None
+            if should_activate:
+                activated = _maybe_activate(activate_session, session_id)
+                if not isinstance(activated, dict) or activated.get("on_screen") is not True:
+                    return {
+                        "status": "activation_failed",
+                        "message": (
+                            "The requested browser target could not be confirmed on screen; "
+                            "no physical input was sent."
+                        ),
+                        "activated": activated,
+                    }
+            action_started = True
+            result = action()
+            if activated:
+                result["activated"] = activated
+            return result
 
-            return physical_input.run_physical_action(summary, gated_action)
+        return physical_input.run_physical_action(summary, gated_action)
 
     try:
         return await anyio.to_thread.run_sync(worker)
@@ -4759,20 +5300,35 @@ async def _run_approved_physical_action(
 
 
 _PHYSICAL_INPUT_NOTICE = (
-    " Safe mode requires one-action approval; lab reuses one session approval or skips prompting "
-    "when AGENT_BROWSER_LAB_NO_ELICIT=1. Approval may foreground the selected browser tab. "
-    "For browser-targeted input, pass an explicit session_id (preferred)."
+    " Safe mode requires one-action approval; lab skips prompting by default and uses session "
+    "approval only when AGENT_BROWSER_LAB_NO_ELICIT is explicitly disabled. By default ABM "
+    "foregrounds and verifies the selected browser tab after the quiet-input check; prefer an "
+    "explicit session_id for browser input. activate_session='none' is only for intentional "
+    "input to the already-visible desktop or native UI."
 )
 
 
 @mcp.tool(description="Move the real mouse cursor to screen coordinates." + _PHYSICAL_INPUT_NOTICE)
-async def mouse_move(ctx: Context, x: int, y: int, duration: float = 0.0) -> dict[str, Any]:
+async def mouse_move(
+    ctx: Context,
+    x: int,
+    y: int,
+    duration: float = 0.0,
+    session_id: Optional[str] = None,
+    activate_session: Optional[str] = "current",
+) -> dict[str, Any]:
     def action() -> dict[str, Any]:
         pyautogui = _pyautogui()
         pyautogui.moveTo(x, y, duration=duration)
         return {"status": "ok", "x": x, "y": y}
 
-    return await _run_approved_physical_action(ctx, f"move cursor to ({x}, {y})", action)
+    return await _run_approved_physical_action(
+        ctx,
+        f"move cursor to ({x}, {y})",
+        action,
+        session_id=session_id,
+        activate_session=activate_session,
+    )
 
 
 def _maybe_activate(activate_session: Optional[str],
@@ -4856,6 +5412,8 @@ async def mouse_drag(
     y2: int,
     duration: float = 0.3,
     button: str = "left",
+    session_id: Optional[str] = None,
+    activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
     def action() -> dict[str, Any]:
         pyautogui = _pyautogui()
@@ -4863,7 +5421,13 @@ async def mouse_drag(
         pyautogui.dragTo(x2, y2, duration=duration, button=button)
         return {"status": "ok", "from": [x1, y1], "to": [x2, y2], "button": button}
 
-    return await _run_approved_physical_action(ctx, f"drag from ({x1}, {y1}) to ({x2}, {y2})", action)
+    return await _run_approved_physical_action(
+        ctx,
+        f"drag from ({x1}, {y1}) to ({x2}, {y2})",
+        action,
+        session_id=session_id,
+        activate_session=activate_session,
+    )
 
 
 @mcp.tool(
@@ -4902,7 +5466,12 @@ async def type_text(
 
 
 @mcp.tool(description="Send a hotkey chord like 'command,l' or 'ctrl,shift,p' via the real keyboard." + _PHYSICAL_INPUT_NOTICE)
-async def hotkey(ctx: Context, keys_csv: str) -> dict[str, Any]:
+async def hotkey(
+    ctx: Context,
+    keys_csv: str,
+    session_id: Optional[str] = None,
+    activate_session: Optional[str] = "current",
+) -> dict[str, Any]:
     keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
     if not keys:
         raise RuntimeError("keys_csv must contain at least one key")
@@ -4912,7 +5481,13 @@ async def hotkey(ctx: Context, keys_csv: str) -> dict[str, Any]:
         pyautogui.hotkey(*keys)
         return {"status": "ok", "keys": keys}
 
-    return await _run_approved_physical_action(ctx, f"send hotkey {keys_csv}", action)
+    return await _run_approved_physical_action(
+        ctx,
+        f"send hotkey {keys_csv}",
+        action,
+        session_id=session_id,
+        activate_session=activate_session,
+    )
 
 
 @mcp.tool(description="Report the current desktop mouse position and primary screen size.")
@@ -4925,6 +5500,6 @@ def pointer_info() -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    ensure_config_js()
+    configure_stdio_logging()
     get_driver()
     mcp.run(transport="stdio")

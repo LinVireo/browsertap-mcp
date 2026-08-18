@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from agent_browser_mcp import server as S
-
 
 BACKGROUND = (
     Path(__file__).resolve().parents[1]
@@ -223,6 +222,10 @@ def test_capture_extension_harness_collects_body_console_and_releases_leases():
     script = f"""
 const networkCaptures = new Map();
 const consoleCaptures = new Map();
+const runtimeExecutionContexts = new Map([[42, new Map([
+  [10, {{ id: 10, auxData: {{ isDefault: true }} }}],
+  [20, {{ id: 20, auxData: {{ isDefault: false }} }}],
+])]]);
 let attachCalls = 0;
 let detachCalls = 0;
 const dialogAttachedTabs = new Set();
@@ -253,20 +256,46 @@ async function sendDebuggerCommandWithTimeout(_lease, method) {{
   }});
   handleNetworkCaptureEvent(42, 'Network.loadingFinished', {{ requestId: 'r1', encodedDataLength: 13 }});
   await Promise.allSettled([...networkCaptures.get(42).pendingBodies]);
-  const networkStop = await handleNetworkCaptureCommand({{ method: 'stop', tabId: 42 }}, {{}});
+  const invalidNetworkStop = await handleNetworkCaptureCommand({{
+    method: 'stop', tabId: 42, urlPattern: '[',
+  }}, {{}});
+  const networkStillActive = networkCaptures.get(42)?.active || false;
+  const networkStop = await handleNetworkCaptureCommand({{
+    method: 'stop', tabId: 42, urlPattern: '(?<endpoint>api)$',
+  }}, {{}});
 
   const consoleStart = await handleConsoleCaptureCommand({{
     method: 'start', tabId: 42, maxEntries: 10, timeoutMs: 100,
   }}, {{}});
   handleConsoleCaptureEvent(42, 'Runtime.consoleAPICalled', {{
-    type: 'log', timestamp: 2, args: [{{ value: 'ABM' }}, {{ value: 7 }}],
+    type: 'log', timestamp: 2, executionContextId: 10,
+    args: [{{ value: 'ABM' }}, {{ value: 7 }}],
+  }});
+  handleConsoleCaptureEvent(42, 'Runtime.consoleAPICalled', {{
+    type: 'log', timestamp: 3, executionContextId: 20,
+    args: [{{ value: 'isolated' }}],
+  }});
+  handleConsoleCaptureEvent(42, 'Runtime.exceptionThrown', {{
+    timestamp: 4,
+    exceptionDetails: {{
+      executionContextId: 10, text: 'Uncaught',
+      exception: {{ description: 'Error: page failure' }},
+    }},
+  }});
+  handleConsoleCaptureEvent(42, 'Runtime.exceptionThrown', {{
+    timestamp: 5,
+    exceptionDetails: {{
+      executionContextId: 20, text: 'Uncaught',
+      exception: {{ description: 'Error: isolated failure' }},
+    }},
   }});
   const consoleGet = await handleConsoleCaptureCommand({{
-    method: 'get', tabId: 42, offset: 0, maxItems: 10,
+    method: 'get', tabId: 42, offset: 0, maxItems: 10, filter: 'user',
   }}, {{}});
   const consoleStop = await handleConsoleCaptureCommand({{ method: 'stop', tabId: 42 }}, {{}});
   process.stdout.write(JSON.stringify({{
-    networkStart, networkStop, consoleStart, consoleGet, consoleStop,
+    networkStart, invalidNetworkStop, networkStillActive, networkStop,
+    consoleStart, consoleGet, consoleStop,
     attachCalls, detachCalls,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
@@ -277,9 +306,14 @@ async function sendDebuggerCommandWithTimeout(_lease, method) {{
     assert completed.returncode == 0, completed.stderr
     outcome = json.loads(completed.stdout)
     request = outcome["networkStop"]["data"]["requests"][0]
+    assert outcome["invalidNetworkStop"]["code"] == "invalid_url_pattern"
+    assert "JavaScript RegExp" in outcome["invalidNetworkStop"]["error"]
+    assert outcome["networkStillActive"] is True
     assert request["status"] == 200
     assert request["body"] == "response-body"
-    assert outcome["consoleGet"]["data"]["messages"][0]["text"] == "ABM 7"
+    messages = outcome["consoleGet"]["data"]["messages"]
+    assert [message["text"] for message in messages] == ["ABM 7", "Error: page failure"]
+    assert {message["execution_context_id"] for message in messages} == {10}
     assert outcome["attachCalls"] == 2
     assert outcome["detachCalls"] == 2
 

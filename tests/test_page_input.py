@@ -23,7 +23,9 @@ def test_click_is_move_press_release():
         "Input.dispatchMouseEvent",
     ]
     assert commands[1]["params"]["type"] == "mousePressed"
+    assert commands[1]["params"]["buttons"] == 1
     assert commands[2]["params"]["type"] == "mouseReleased"
+    assert commands[2]["params"]["buttons"] == 0
 
 
 @pytest.mark.parametrize("button", ["primary", "", 1, [], {}])
@@ -52,19 +54,28 @@ def test_drag_has_bounded_intermediate_moves():
     commands = drag_commands(0, 0, 100, 50, duration=0.3)
     assert commands[0]["params"]["type"] == "mouseMoved"
     assert commands[1]["params"]["type"] == "mousePressed"
-    assert commands[-1]["params"]["type"] == "mouseReleased"
+    assert commands[-2]["params"]["type"] == "mouseReleased"
+    assert commands[-1]["params"] == {
+        "type": "mouseMoved",
+        "x": 100,
+        "y": 50,
+        "buttons": 0,
+    }
     assert 3 <= len(commands) <= 24
 
 
 @pytest.mark.parametrize(("button", "buttons"), [("left", 1), ("right", 2), ("middle", 4)])
 def test_drag_reports_the_pressed_button_bit(button, buttons):
     commands = drag_commands(0, 0, 10, 10, button=button)
+    assert commands[1]["params"]["buttons"] == buttons
     assert commands[2]["params"]["button"] == button
     assert commands[2]["params"]["buttons"] == buttons
+    assert commands[-2]["params"]["buttons"] == 0
+    assert commands[-1]["params"]["buttons"] == 0
 
 
 @pytest.mark.parametrize("duration", [-0.01, 10.01, math.nan, math.inf])
-def test_drag_rejects_duration_outside_bounds(duration):
+def test_page_drag_rejects_duration_outside_bounds(duration):
     with pytest.raises(InputValidationError):
         drag_commands(0, 0, 1, 1, duration=duration)
 
@@ -74,7 +85,7 @@ def test_press_encodes_ctrl_shift_p():
     assert [(c["params"]["type"], c["params"]["key"]) for c in commands] == [
         ("rawKeyDown", "Control"),
         ("rawKeyDown", "Shift"),
-        ("keyDown", "p"),
+        ("rawKeyDown", "p"),
         ("keyUp", "p"),
         ("keyUp", "Shift"),
         ("keyUp", "Control"),
@@ -83,8 +94,13 @@ def test_press_encodes_ctrl_shift_p():
     assert commands[3]["params"]["modifiers"] == 10
 
 
+def test_press_without_modifiers_keeps_normal_keydown():
+    commands = press_commands("a")
+    assert [command["params"]["type"] for command in commands] == ["keyDown", "keyUp"]
+
+
 @pytest.mark.parametrize("chord", ["", "ctrl", "ctrl,,p", "ctrl,wat,p", "ctrl,p,q"])
-def test_press_rejects_malformed_chords(chord):
+def test_page_press_rejects_malformed_chords(chord):
     with pytest.raises(InputValidationError):
         press_commands(chord)
 

@@ -221,7 +221,7 @@ live 测试使用共享 `scratch_session`、本地 HTTP fixture、临时下载�
 改为通过 setuptools dynamic version 读取该属性；同步脚本读取同一属性并更新 Chrome
 extension manifest。bridge 和诊断接口直接报告该运行时版本，不维护第四份常量。
 
-本轮执行 minor bump，统一为 `0.3.0`。之后使用 `scripts/finalize_change.py`：
+本轮执行 minor bump，统一为 `0.3.0`。之后使用 `python -m scripts.finalize_change`：
 
 1. 检查工作区变更和版本一致性
 2. 运行规定的离线测试和静态门禁

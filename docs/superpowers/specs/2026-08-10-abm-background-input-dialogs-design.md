@@ -2,7 +2,7 @@
 
 Date: 2026-08-10
 Status: Approved in conversation
-Upstream baseline: `https://github.com/335234131/agent-browser-mcp`
+Upstream baseline: pre-ABM repository history at the project fork point
 
 ## Context
 
@@ -67,8 +67,10 @@ site permission prompts, and browser or OS UI need distinct policies.
 
 ### 1. Real Browser Session Layer
 
-The existing extension, WebSocket bridge, `TMWebDriver`, and composite session
-IDs remain the control plane. ABM never launches another browser as a fallback.
+The existing extension, WebSocket `BrowserBridge` (called `TMWebDriver` when
+this design was written), and composite session IDs remain the control plane.
+The old import remains a compatibility alias. ABM never launches another
+browser as a fallback.
 
 `switch_tab` changes its default to `activate=false`. It retargets the bridge
 without changing the visible tab. `activate_tab` remains the explicit operation
@@ -330,4 +332,3 @@ unrelated refactor.
    or approved physical input without an unbounded retry loop.
 7. Offline tests, extension syntax checks, relevant live tests, README parity,
    and skill validation pass.
-

@@ -9,7 +9,6 @@ import pytest
 
 from agent_browser_mcp import server as S
 
-
 ROOT = Path(__file__).resolve().parents[1]
 BACKGROUND = ROOT / "src" / "agent_browser_mcp" / "chrome_extension" / "background.js"
 MANIFEST = ROOT / "src" / "agent_browser_mcp" / "chrome_extension" / "manifest.json"
@@ -37,7 +36,7 @@ def test_manifest_declares_content_settings_permission():
 def test_extension_has_no_self_reload_path():
     source = BACKGROUND.read_text(encoding="utf-8")
     assert "chrome.runtime.reload()" not in source
-    assert "tmwd-self-reload" not in source
+    assert "abm-self-reload" not in source
 
 
 def test_site_permission_tools_and_schemas_are_registered():
@@ -83,9 +82,13 @@ def test_setting_is_limited_to_browser_permission_states():
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("action,error", [("decline", None), ("cancel", None), ("accept", RuntimeError("unsupported"))])
-async def test_declined_or_unsupported_elicitation_never_sends_allow(monkeypatch, action, error):
+async def test_set_site_permission_decline_never_sends_allow(monkeypatch, action, error):
     ctx = _ElicitationContext(action=action, error=error)
     calls = []
+
+    # Force safe mode so elicitation is required (lab defaults to no_elicit=true now)
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
+    monkeypatch.delenv("AGENT_BROWSER_LAB_NO_ELICIT", raising=False)
 
     def ext_cmd(*args, **kwargs):
         calls.append((args, kwargs))
@@ -101,7 +104,7 @@ async def test_declined_or_unsupported_elicitation_never_sends_allow(monkeypatch
 
 
 @pytest.mark.anyio
-async def test_allow_forwards_only_a_normalized_origin_after_approval(monkeypatch):
+async def test_set_site_permission_allow_forwards_normalized_origin(monkeypatch):
     ctx = _ElicitationContext()
     calls = []
 
@@ -154,7 +157,7 @@ async def test_server_preserves_permission_recovery_details(monkeypatch):
     assert result["permission"] == "camera"
 
 
-def test_extension_permission_leases_are_executable_with_mocks():
+def _assert_extension_permission_leases_are_executable_with_mocks():
     """A lease records/get-restores its prior setting and removes it only after success."""
     code = f"""
 const fs = require('fs');
@@ -175,8 +178,8 @@ const chrome = {{
   storage: {{ local: {{
     async get(key) {{ return {{ [key]: saved[key] }}; }},
     async set(value) {{
-      events.push(['storage-set', (value.tmwdPermissionLeases || []).length]);
-      if (failNextStageStorage && (value.tmwdPermissionLeases || []).length > 0) {{
+      events.push(['storage-set', (value.abmPermissionLeases || []).length]);
+      if (failNextStageStorage && (value.abmPermissionLeases || []).length > 0) {{
         failNextStageStorage = false;
         throw new Error('storage unavailable');
       }}
@@ -228,12 +231,12 @@ const dialogAttachedTabs = new Set();
 eval(source.slice(start, end));
 (async () => {{
   const set = await setSitePermission({{ permission: 'camera', setting: 'allow', origin: 'https://example.test', durationSeconds: 60 }});
-  const leasesAfterSet = saved.tmwdPermissionLeases;
+  const leasesAfterSet = saved.abmPermissionLeases;
   const priorLease = JSON.parse(JSON.stringify(leasesAfterSet[0]));
   const priorAlarm = JSON.parse(JSON.stringify(activeAlarms.get(priorLease.alarmName)));
   failNextContentSetting = 'block';
   const replacementFailure = await setSitePermission({{ permission: 'camera', setting: 'block', origin: 'https://example.test', durationSeconds: 120 }});
-  const leaseAfterReplacementFailure = JSON.parse(JSON.stringify(saved.tmwdPermissionLeases[0]));
+  const leaseAfterReplacementFailure = JSON.parse(JSON.stringify(saved.abmPermissionLeases[0]));
   const alarmAfterReplacementFailure = JSON.parse(JSON.stringify(activeAlarms.get(priorLease.alarmName)));
   const effectiveAfterReplacementFailure = effectiveCameraSetting;
   const reset = await resetSitePermissionLeases({{ origin: 'https://example.test', permission: 'camera' }});
@@ -244,7 +247,7 @@ eval(source.slice(start, end));
     set, reset, storageFailure, clipboard, replacementFailure, operations, events,
     debuggerCommands, alarms, leasesAfterSet, priorLease, priorAlarm,
     leaseAfterReplacementFailure, alarmAfterReplacementFailure,
-    effectiveAfterReplacementFailure, finalLeases: saved.tmwdPermissionLeases,
+    effectiveAfterReplacementFailure, finalLeases: saved.abmPermissionLeases,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
@@ -253,7 +256,7 @@ eval(source.slice(start, end));
     result = json.loads(completed.stdout)
     assert result["set"]["ok"] is True
     assert result["leasesAfterSet"][0]["previousSetting"] == "ask"
-    assert result["alarms"][0]["name"].startswith("tmwd-permission:")
+    assert result["alarms"][0]["name"].startswith("abm-permission:")
     assert result["replacementFailure"] == {
         "ok": False,
         "error": "content setting unavailable",
@@ -298,6 +301,14 @@ eval(source.slice(start, end));
     assert result["debuggerCommands"] == []
 
 
+def test_set_site_permission_cleanup_lease_is_executable():
+    _assert_extension_permission_leases_are_executable_with_mocks()
+
+
+def test_reset_site_permissions_cleanup_lease_is_executable():
+    _assert_extension_permission_leases_are_executable_with_mocks()
+
+
 def test_extension_permission_alarm_startup_and_wake_recovery_are_executable():
     code = f"""
 const fs = require('fs');
@@ -307,7 +318,7 @@ const end = source.indexOf('async function handleExtMessage', start);
 if (start < 0 || end < 0) throw new Error('permission lease helpers not found');
 let now = 1000000;
 Date.now = () => now;
-const saved = {{ tmwdPermissionLeases: [] }};
+const saved = {{ abmPermissionLeases: [] }};
 const activeAlarms = new Map();
 const alarmListeners = [];
 const startupListeners = [];
@@ -354,20 +365,20 @@ const makeLease = (origin, suffix) => {{
   return {{
     id, origin, permission: 'camera', kind: 'content', contentSetting: 'camera',
     previousSetting: 'ask', expiresAt: now - 1,
-    alarmName: `tmwd-permission:${{id}}:${{suffix}}`, state: 'active',
+    alarmName: `abm-permission:${{id}}:${{suffix}}`, state: 'active',
   }};
 }};
 (async () => {{
   const wakeOrigin = 'https://wake.test';
   const wakeLease = makeLease(wakeOrigin, 'wake');
-  saved.tmwdPermissionLeases = [wakeLease];
+  saved.abmPermissionLeases = [wakeLease];
   effective.set(wakeOrigin, 'allow');
   activeAlarms.set(wakeLease.alarmName, {{ when: wakeLease.expiresAt }});
   const wakeResult = await installPermissionLeaseRecoveryHooks();
 
   const startupOrigin = 'https://startup.test';
   const startupLease = makeLease(startupOrigin, 'startup');
-  saved.tmwdPermissionLeases = [startupLease];
+  saved.abmPermissionLeases = [startupLease];
   effective.set(startupOrigin, 'block');
   activeAlarms.set(startupLease.alarmName, {{ when: startupLease.expiresAt }});
   const startupResult = await startupListeners[0]();
@@ -377,7 +388,7 @@ const makeLease = (origin, suffix) => {{
   const setForExpiry = await setSitePermission({{
     permission: 'camera', setting: 'allow', origin: expiryOrigin, durationSeconds: 60,
   }});
-  const expiryLease = JSON.parse(JSON.stringify(saved.tmwdPermissionLeases[0]));
+  const expiryLease = JSON.parse(JSON.stringify(saved.abmPermissionLeases[0]));
   now = expiryLease.expiresAt;
   const expiryResult = await alarmListeners[0]({{ name: expiryLease.alarmName }});
 
@@ -387,11 +398,11 @@ const makeLease = (origin, suffix) => {{
   await setSitePermission({{
     permission: 'camera', setting: 'allow', origin: retryOrigin, durationSeconds: 60,
   }});
-  const retryLease = JSON.parse(JSON.stringify(saved.tmwdPermissionLeases[0]));
+  const retryLease = JSON.parse(JSON.stringify(saved.abmPermissionLeases[0]));
   now = retryLease.expiresAt;
   failNextRestore = true;
   const failedRestore = await alarmListeners[0]({{ name: retryLease.alarmName }});
-  const retainedAfterFailure = JSON.parse(JSON.stringify(saved.tmwdPermissionLeases));
+  const retainedAfterFailure = JSON.parse(JSON.stringify(saved.abmPermissionLeases));
   const retryName = permissionRetryAlarmName(retryLease);
   const retryAlarm = JSON.parse(JSON.stringify(activeAlarms.get(retryName)));
   now = retryAlarm.when;
@@ -403,7 +414,7 @@ const makeLease = (origin, suffix) => {{
     startupResult, startupEffective: effective.get(startupOrigin),
     setForExpiry, expiryResult, expiryEffective: effective.get(expiryOrigin),
     failedRestore, retainedAfterFailure, retryAlarm, retryResult,
-    retryEffective: effective.get(retryOrigin), finalLeases: saved.tmwdPermissionLeases,
+    retryEffective: effective.get(retryOrigin), finalLeases: saved.abmPermissionLeases,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
@@ -437,7 +448,7 @@ const end = source.indexOf('async function handleExtMessage', start);
 if (start < 0 || end < 0) throw new Error('permission lease helpers not found');
 let now = 2000000;
 Date.now = () => now;
-const saved = {{ tmwdPermissionLeases: [] }};
+const saved = {{ abmPermissionLeases: [] }};
 const activeAlarms = new Map();
 const alarmCreates = [];
 const alarmListeners = [];
@@ -448,7 +459,7 @@ const chrome = {{
   storage: {{ local: {{
     async get(key) {{ return {{ [key]: saved[key] }}; }},
     async set(value) {{
-      const leases = value.tmwdPermissionLeases || [];
+      const leases = value.abmPermissionLeases || [];
       if (failReplacementCommit && leases[0]?.state === 'active') {{
         failReplacementCommit = false;
         failRollbackAllow = true;
@@ -494,14 +505,14 @@ eval(source.slice(start, end));
   const initial = await setSitePermission({{
     permission: 'camera', setting: 'allow', origin: 'https://example.test', durationSeconds: 60,
   }});
-  const priorLease = JSON.parse(JSON.stringify(saved.tmwdPermissionLeases[0]));
+  const priorLease = JSON.parse(JSON.stringify(saved.abmPermissionLeases[0]));
   const priorAlarm = JSON.parse(JSON.stringify(activeAlarms.get(priorLease.alarmName)));
   now += 10000;
   failReplacementCommit = true;
   const replacement = await setSitePermission({{
     permission: 'camera', setting: 'block', origin: 'https://example.test', durationSeconds: 120,
   }});
-  const leaseAfterFailure = JSON.parse(JSON.stringify(saved.tmwdPermissionLeases[0]));
+  const leaseAfterFailure = JSON.parse(JSON.stringify(saved.abmPermissionLeases[0]));
   const alarmAfterFailure = JSON.parse(JSON.stringify(activeAlarms.get(priorLease.alarmName)));
   const effectiveAfterFailure = effectiveSetting;
   const originalAlarmCreateCount = alarmCreates.filter(item => item.name === priorLease.alarmName).length;
@@ -510,7 +521,7 @@ eval(source.slice(start, end));
   console.log(JSON.stringify({{
     initial, priorLease, priorAlarm, replacement, leaseAfterFailure, alarmAfterFailure,
     effectiveAfterFailure, originalAlarmCreateCount, recovered,
-    effectiveAfterRecovery: effectiveSetting, finalLeases: saved.tmwdPermissionLeases,
+    effectiveAfterRecovery: effectiveSetting, finalLeases: saved.abmPermissionLeases,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """

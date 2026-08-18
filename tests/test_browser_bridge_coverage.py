@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 import io
-import os
+import json
 import queue
 import time
 from pathlib import Path
@@ -11,7 +10,17 @@ from types import SimpleNamespace
 import bottle
 import pytest
 
-from agent_browser_mcp import tmwebdriver as T
+from agent_browser_mcp import browser_bridge as T
+from agent_browser_mcp import simphtml
+
+
+def test_legacy_module_reexports_canonical_bridge() -> None:
+    from agent_browser_mcp import tmwebdriver as legacy
+
+    assert legacy.BrowserBridge is T.BrowserBridge
+    assert legacy.TMWebDriver is T.BrowserBridge
+    assert legacy.Session is T.Session
+    assert legacy.bridge_token is T.bridge_token
 
 
 class FakeSocket:
@@ -38,7 +47,7 @@ class FakeResponse:
 
 
 def driver_stub(*, remote=False):
-    driver = T.TMWebDriver.__new__(T.TMWebDriver)
+    driver = T.BrowserBridge.__new__(T.BrowserBridge)
     driver.host = "127.0.0.1"
     driver.port = 18765
     driver.sessions = {}
@@ -168,7 +177,8 @@ def test_check_link_token_accepts_empty_expected_and_rejects_wrong_token():
     assert exc.value.status_code == 401
 
 
-def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, capsys):
+def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
     ws = FakeSocket()
     session = T.Session("ws:1", {"url": "https://one", "type": "ws"}, ws)
     assert session.url == "https://one"
@@ -184,7 +194,7 @@ def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, capsys):
     assert session.http_queue is not None
     session.connect_at = time.time() - 61
     assert session.is_active() is False
-    assert "Tab disconnected" in capsys.readouterr().out
+    assert "Tab disconnected" in caplog.text
 
 
 def test_http_session_reconnect_and_unknown_type():
@@ -196,7 +206,8 @@ def test_http_session_reconnect_and_unknown_type():
     assert session.http_queue is not None
 
 
-def test_driver_registration_reconnect_and_unregister(capsys):
+def test_driver_registration_reconnect_and_unregister(caplog):
+    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
     driver = driver_stub()
     first = FakeSocket()
     info = {"url": "https://a", "type": "ws"}
@@ -210,10 +221,11 @@ def test_driver_registration_reconnect_and_unregister(capsys):
     driver._unregister_client(second)
     assert "a" not in driver.ext_clients
     assert driver.sessions["a:1"].is_active() is False
-    assert "Tab reconnected" in capsys.readouterr().out
+    assert "Tab reconnected" in caplog.text
 
 
-def test_live_default_reselects_latest_and_handles_no_sessions(capsys):
+def test_live_default_reselects_latest_and_handles_no_sessions(caplog):
+    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
     driver = driver_stub()
     dead = T.Session("c:dead", {"url": "dead", "type": "ws"}, FakeSocket())
     dead.mark_disconnected()
@@ -225,7 +237,7 @@ def test_live_default_reselects_latest_and_handles_no_sessions(capsys):
     assert driver.default_session_id == live.id
     driver.sessions.clear()
     assert driver._live_default_session_id() == live.id
-    assert "自动改用" in capsys.readouterr().out
+    assert "selected" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -251,7 +263,7 @@ def test_origin_allowlist(monkeypatch, origin, env, expected):
 
 
 def test_ws_origin_handles_missing_request_headers():
-    assert T.TMWebDriver._ws_origin(SimpleNamespace()) == ""
+    assert T.BrowserBridge._ws_origin(SimpleNamespace()) == ""
 
 
 def test_clean_sessions_removes_old_sessions_results_acks_and_clients(monkeypatch):
@@ -296,15 +308,19 @@ def test_extension_tab_snapshot_isolates_clients_and_replaces_generation():
     assert other.is_active() is True
 
 
-def test_find_and_set_session_local_paths(capsys):
+def test_find_and_set_session_local_paths(caplog):
+    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
     driver = driver_stub()
     driver._register_client("c:1", FakeSocket(), {"url": "https://a.test", "type": "ws"})
     driver._register_client("c:2", FakeSocket(), {"url": "https://a.test/2", "type": "ws"})
     driver.latest_session_id = "c:2"
     assert len(driver.find_session("a.test")) == 2
-    assert driver.set_session("a.test") == "c:1"
+    with pytest.raises(ValueError, match="matched 2 sessions") as exc:
+        driver.set_session("a.test")
+    assert "c:1" in str(exc.value)
+    assert "c:2" in str(exc.value)
+    assert driver.set_session("a.test/2") == "c:2"
     assert driver.set_session("missing") is None
-    assert "选择第一个" in capsys.readouterr().out
 
 
 def test_find_session_empty_pattern_uses_latest_or_empty():
@@ -337,6 +353,14 @@ def test_remote_command_maps_http_statuses_and_json_errors(monkeypatch, tmp_path
     with pytest.raises(ValueError, match="bad json"):
         driver._remote_cmd({"cmd": "x"})
 
+    driver._http = SimpleNamespace(
+        post=lambda *args, **kwargs: (_ for _ in ()).throw(
+            T.requests.exceptions.ReadTimeout("bridge was slow")
+        )
+    )
+    with pytest.raises(TimeoutError, match="bridge HTTP request timed out"):
+        driver._remote_cmd({"cmd": "x"}, timeout=1.25)
+
 
 def test_remote_get_sessions_diagnose_and_set_session(monkeypatch):
     driver = driver_stub(remote=True)
@@ -367,7 +391,7 @@ def test_remote_diagnose_classifies_transport_failure():
     assert result["error"] == "down"
 
 
-def test_remote_execute_js_maps_errors_and_echoed_tab(monkeypatch):
+def test_remote_execute_js_maps_errors_and_echoed_tab(monkeypatch, capsys):
     driver = driver_stub(remote=True)
     seen = []
 
@@ -379,12 +403,15 @@ def test_remote_execute_js_maps_errors_and_echoed_tab(monkeypatch):
     result = driver.execute_js("return 3", timeout=2, session_id="c:7", allow_failover=True)
     assert result["executed_tab_id"] == 7
     assert seen[0][0]["allowFailover"] == "1"
-    driver._remote_cmd = lambda *args, **kwargs: {"r": {"error": "会话未连接"}}
-    with pytest.raises(ValueError):
+    driver._remote_cmd = lambda *args, **kwargs: {
+        "r": {"error": "Session c:7 is not connected", "error_code": "session_not_connected"}
+    }
+    with pytest.raises(T.SessionNotConnectedError):
         driver.execute_js("x", session_id="c:7")
     driver._remote_cmd = lambda *args, **kwargs: {"r": {"error": "other error"}}
     with pytest.raises(Exception, match="other error"):
         driver.execute_js("x", session_id="c:7")
+    assert capsys.readouterr().out == ""
 
 
 def test_remote_ext_cmd_maps_timeout_and_other_errors():
@@ -412,12 +439,22 @@ def test_newtab_requires_operation_id_and_forwards_exact_payload():
     assert payload == {
         "cmd": "tabs",
         "method": "create",
-        "url": "http://www.baidu.com/robots.txt",
+        "url": "about:blank",
         "active": False,
         "operation_id": "op-1",
         "client_id": "edge",
     }
     assert kwargs["client_id"] == "edge"
+
+
+def test_newtab_defaults_to_background_creation():
+    driver = driver_stub()
+    calls = []
+    driver.ext_cmd = lambda payload, **kwargs: calls.append(payload) or {"data": "created"}
+
+    driver.newtab(url="https://background.test/", operation_id="op-background")
+
+    assert calls[-1]["active"] is False
 
 
 def test_newtab_does_not_retry_timeout_or_other_error():
@@ -450,9 +487,9 @@ def test_constructor_detects_remote_bridge_without_starting_servers(monkeypatch)
 
     monkeypatch.setattr(T.socket, "socket", Probe)
     monkeypatch.setattr(T.requests, "Session", HttpSession)
-    monkeypatch.setattr(T.TMWebDriver, "start_ws_server", lambda self: pytest.fail("must stay remote"))
-    monkeypatch.setattr(T.TMWebDriver, "start_http_server", lambda self: pytest.fail("must stay remote"))
-    driver = T.TMWebDriver(host="127.0.0.8", port=19000)
+    monkeypatch.setattr(T.BrowserBridge, "start_ws_server", lambda self: pytest.fail("must stay remote"))
+    monkeypatch.setattr(T.BrowserBridge, "start_http_server", lambda self: pytest.fail("must stay remote"))
+    driver = T.BrowserBridge(host="127.0.0.8", port=19000)
     assert driver.is_remote is True
     assert driver.remote == "http://127.0.0.8:19001/link"
     assert driver._http.trust_env is False
@@ -475,10 +512,10 @@ def test_constructor_starts_local_servers_when_lock_is_acquired(monkeypatch):
     calls = []
     host_lock = object()
     monkeypatch.setattr(T.socket, "socket", Probe)
-    monkeypatch.setattr(T.TMWebDriver, "_acquire_host_lock", lambda self: host_lock)
-    monkeypatch.setattr(T.TMWebDriver, "start_ws_server", lambda self: calls.append("ws"))
-    monkeypatch.setattr(T.TMWebDriver, "start_http_server", lambda self: calls.append("http"))
-    driver = T.TMWebDriver()
+    monkeypatch.setattr(T.BrowserBridge, "_acquire_host_lock", lambda self: host_lock)
+    monkeypatch.setattr(T.BrowserBridge, "start_ws_server", lambda self: calls.append("ws"))
+    monkeypatch.setattr(T.BrowserBridge, "start_http_server", lambda self: calls.append("http"))
+    driver = T.BrowserBridge()
     assert driver.is_remote is False
     assert driver._host_lock is host_lock
     assert calls == ["ws", "http"]
@@ -505,10 +542,10 @@ def test_constructor_loses_host_lock_then_waits_for_winner(monkeypatch):
 
     sleeps = []
     monkeypatch.setattr(T.socket, "socket", Probe)
-    monkeypatch.setattr(T.TMWebDriver, "_acquire_host_lock", lambda self: None)
+    monkeypatch.setattr(T.BrowserBridge, "_acquire_host_lock", lambda self: None)
     monkeypatch.setattr(T.requests, "Session", HttpSession)
     monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
-    driver = T.TMWebDriver()
+    driver = T.BrowserBridge()
     assert driver.is_remote is True
     assert sleeps == [0.25, 0.25]
 
@@ -552,6 +589,36 @@ def http_app(monkeypatch):
     monkeypatch.setattr(T.threading, "Thread", DormantThread)
     driver.start_http_server()
     return driver
+
+
+def test_stop_http_server_gives_the_port_back_and_repeats_safely(link_bridge_open):
+    """Every test bridge has to be closable.
+
+    Nothing but the owner can close this listener — the daemon exits with its
+    process instead — so if this ever became a no-op again each fixture would
+    leave a listener running for the rest of the session, and a later bridge that
+    picked the same port would find requests answered by its predecessor. The
+    fixture's own teardown calls stop again, so it must also be idempotent.
+    """
+    import socket as _socket
+
+    port = link_bridge_open.port
+    with _socket.socket() as probe:
+        probe.settimeout(0.5)
+        assert probe.connect_ex(("127.0.0.1", port)) == 0
+
+    link_bridge_open.driver.stop_http_server()
+
+    with _socket.socket() as probe:
+        probe.settimeout(0.5)
+        assert probe.connect_ex(("127.0.0.1", port)) != 0
+    link_bridge_open.driver.stop_http_server()
+
+
+def test_stop_http_server_is_a_noop_when_nothing_bound(http_app):
+    """A stubbed thread never reaches make_server; closing must not raise."""
+    assert http_app.http_server is None
+    http_app.stop_http_server()
 
 
 def test_http_hook_rejects_web_origin_and_allows_extension_or_configured_origin(
@@ -919,10 +986,10 @@ def test_ext_cmd_local_validates_route_and_drops_broken_socket():
     driver = driver_stub()
     with pytest.raises(ValueError, match="timeout"):
         driver.ext_cmd({}, timeout=0)
-    with pytest.raises(ValueError, match="ext_clients"):
+    with pytest.raises(T.ExtensionNotConnectedError, match="No browser extension"):
         driver.ext_cmd({"cmd": "tabs"})
     driver.ext_clients = {"bad": {"ws": FakeSocket(send_error=RuntimeError("closed")), "ts": 1}}
-    with pytest.raises(ValueError, match="连接已失效"):
+    with pytest.raises(T.ExtensionNotConnectedError, match="disconnected"):
         driver.ext_cmd({"cmd": "tabs"}, client_id="bad")
     assert "bad" not in driver.ext_clients
 
@@ -995,7 +1062,7 @@ def test_execute_js_local_marks_broken_socket_disconnected():
     session = _install_exec_session(
         driver, socket=FakeSocket(send_error=RuntimeError("closed"))
     )
-    with pytest.raises(ValueError, match="连接已失效"):
+    with pytest.raises(T.SessionDisconnectedError, match="disconnected"):
         driver.execute_js("return 1", session_id="c:7")
     assert session.is_active() is False
 
@@ -1010,7 +1077,7 @@ def test_execute_js_rejects_explicit_dead_tab_but_can_fail_over(monkeypatch):
 
     _install_exec_session(driver, socket=ReplySocket(), session_id="c:live")
     monkeypatch.setattr(T.time, "sleep", lambda seconds: None)
-    with pytest.raises(ValueError, match="已拒绝在其他标签页执行"):
+    with pytest.raises(T.SessionNotConnectedError, match="refused to execute"):
         driver.execute_js("sideEffect()", session_id="c:dead")
     result = driver.execute_js("sideEffect()", session_id="c:dead", allow_failover=True)
     assert result["data"] == "live"
@@ -1041,7 +1108,7 @@ def test_execute_js_rejects_missing_session_and_invalid_timeout(monkeypatch):
     with pytest.raises(ValueError, match="timeout"):
         driver.execute_js("x", timeout=0)
     monkeypatch.setattr(T.time, "sleep", lambda seconds: None)
-    with pytest.raises(ValueError, match="未连接"):
+    with pytest.raises(T.SessionNotConnectedError, match="not connected"):
         driver.execute_js("x", session_id="missing")
 
 
@@ -1062,15 +1129,20 @@ def test_execute_js_deadline_can_expire_before_dispatch(monkeypatch, session_typ
 
 
 @pytest.mark.parametrize(
-    "session_type, ack, expected",
+    "session_type, ack, expected, state, safe",
     [
-        ("ext_ws", False, "no ACK"),
-        ("ext_ws", True, "ACK received"),
-        ("http", False, "script not polled"),
-        ("http", True, "delivered but no result"),
+        # A payload written to a live socket with no ACK back is NOT provably
+        # undelivered — only the ACK-before-execute protocol says it did not run.
+        ("ext_ws", False, "no ACK", "sent_unconfirmed", True),
+        ("ext_ws", True, "ACK received", "delivered_no_result", False),
+        # An http session's queue lives in this process: never polled is proof.
+        ("http", False, "script not polled", "undelivered", True),
+        ("http", True, "delivered but no result", "delivered_no_result", False),
     ],
 )
-def test_execute_js_timeout_classifies_delivery(monkeypatch, session_type, ack, expected):
+def test_execute_js_timeout_classifies_delivery(
+    monkeypatch, session_type, ack, expected, state, safe
+):
     driver = driver_stub()
     monkeypatch.setattr(T.uuid, "uuid4", lambda: "exec-timeout")
 
@@ -1088,8 +1160,12 @@ def test_execute_js_timeout_classifies_delivery(monkeypatch, session_type, ack, 
     client = AckSocket() if session_type == "ext_ws" else AckQueue()
     sid = "c:7" if session_type == "ext_ws" else "http:1"
     _install_exec_session(driver, session_type=session_type, socket=client, session_id=sid)
-    result = driver.execute_js("slow()", timeout=0.001, session_id=sid)
+    result = driver.execute_js("slow()", timeout=0.05, session_id=sid)
     assert expected in result["result"]
+    assert result["delivery_state"] == state
+    assert result["retry_safe"] is safe
+    # Both retry-safe states must classify into the one retry policy callers use.
+    assert simphtml.no_response_kind(result) == ("undelivered" if safe else "after_ack")
 
 
 def test_execute_js_detects_reload_during_wait(monkeypatch):

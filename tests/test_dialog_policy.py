@@ -9,7 +9,6 @@ import pytest
 
 from agent_browser_mcp import server as S
 
-
 ROOT = Path(__file__).resolve().parents[1]
 BACKGROUND = ROOT / "src/agent_browser_mcp/chrome_extension/background.js"
 DISABLE_DIALOGS = ROOT / "src/agent_browser_mcp/chrome_extension/disable_dialogs.js"
@@ -73,10 +72,10 @@ vm.runInContext(disableDialogs, context);
   }} catch (error) {{
     if (error?.code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw error;
     const token = {json.dumps(scope.get("token") if scope else None)};
-    const dialogs = (Array.isArray(window.__tmwd_dialog_records)
-      ? window.__tmwd_dialog_records : []).filter(record => record.token === token);
+    const dialogs = (Array.isArray(window.__abm_dialog_records)
+      ? window.__abm_dialog_records : []).filter(record => record.token === token);
     result = {{ ok: true, data: {{
-      __tmwd_dialog_result: true,
+      __abm_dialog_result: true,
       value: null,
       dialogs,
       manual_blocked: true,
@@ -86,8 +85,8 @@ vm.runInContext(disableDialogs, context);
     result,
     after: window.after,
     nativeConfirmCalls,
-    scopesInstalled: Array.isArray(window.__tmwd_dialog_scopes),
-    suppressUntil: window.__tmwd_suppress_until ?? null,
+    scopesInstalled: Array.isArray(window.__abm_dialog_scopes),
+    suppressUntil: window.__abm_suppress_until ?? null,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
@@ -314,7 +313,7 @@ def test_execute_js_surfaces_native_manual_pause_without_a_guessed_value(monkeyp
         return {
             "status": "success",
             "js_return": {
-                "__tmwd_dialog_result": True,
+                "__abm_dialog_result": True,
                 "value": None,
                 "dialogs": [observed],
                 "status": "blocked_by_dialog",
@@ -348,7 +347,7 @@ def test_execute_js_rich_skips_only_post_monitor_for_native_dialog_pause(monkeyp
         def execute_js(self, script, timeout=15):
             return {
                 "data": {
-                    "__tmwd_dialog_result": True,
+                    "__abm_dialog_result": True,
                     "value": None,
                     "status": "blocked_by_dialog",
                     "manual_blocked": True,
@@ -424,7 +423,7 @@ def test_execute_js_rich_manual_evaluation_first_keeps_normal_monitor(monkeypatc
 
     assert result["js_return"] == 7
     assert result["transients"] == ["Saved"]
-    assert result["diff"].startswith("DOM变化量: 1")
+    assert result["diff"].startswith("DOM changes: 1")
     assert len(html_calls) == 2
     assert len(transient_calls) == 1
 
@@ -470,7 +469,7 @@ def test_execute_js_marks_only_the_user_script_with_its_policy_token(monkeypatch
     result = S.execute_js("return 1 + 1", session_id=sid)
 
     assert result["js_return"] == 2
-    assert seen == ["/*__tmwd_dialog_scope:scope-123*/\nreturn 1 + 1"]
+    assert seen == ["/*__abm_dialog_scope:scope-123*/\nreturn 1 + 1"]
 
 
 def test_execute_js_passes_explicit_session_without_parking_shared_default(monkeypatch):
@@ -555,8 +554,308 @@ def test_extension_contains_bounded_protocol_dialog_state():
 
 def test_extension_applies_policy_only_to_the_token_marked_script():
     source = BACKGROUND.read_text(encoding="utf-8")
-    assert "__tmwd_dialog_scope:" in source
+    assert "__abm_dialog_scope:" in source
     assert "dialogScopeToken" in source
+
+
+def _manual_navigation_release_harness(mode: str) -> dict:
+    """A manual beforeunload dialog that handle_dialog never comes back for.
+
+    navigateWithDialogPolicy deliberately returns while the pending still owns the
+    CDP lease, so nothing on the request path can free it: only handledSignal does.
+    Both modes here leave handle_dialog uncalled — "closed" has the user click the
+    dialog themselves, "expiry" has nobody touch it at all — and either way the
+    lease has to come back, or every later execute_js on the tab dies with
+    "debugger already attached".
+    """
+    return _run_node_harness(
+        f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const protocolDialogStates = new Map();
+const dialogAttachedTabs = new Set();
+const debuggerAttachments = new Map();
+const debuggerRecoveryPromises = new Map();
+const pendingNavigations = new Map();
+const pendingManualExecutions = new Map();
+const execDialogPolicies = new Map();
+const runtimeExecutionContexts = new Map();
+const runtimeContextWaiters = new Map();
+const dialogEventSequences = new Map();
+const manualExecutionGenerations = new Map();
+const DIALOG_STATE_TTL_MS = 30000;
+function validDialogPolicy(policy) {{
+  return policy === 'dismiss' || policy === 'accept' || policy === 'manual';
+}}
+function currentProtocolDialog(tabId) {{ return protocolDialogStates.get(tabId) || null; }}
+function rememberProtocolDialog(tabId, params) {{
+  const dialog = {{ type: params.type, message: params.message || '', url: params.url || '',
+    defaultPrompt: params.defaultPrompt || '', openedAt: Date.now() }};
+  protocolDialogStates.set(tabId, dialog);
+  return dialog;
+}}
+function debuggerTargetKey(target) {{ return `tab:${{target.tabId}}`; }}
+// Park the long retention timer instead of running it: the test decides when it
+// fires, and every other timer in this path is well under a minute.
+const realSetTimeout = setTimeout;
+const longTimers = [];
+globalThis.setTimeout = (fn, ms) => {{
+  if (Number(ms) >= 60000) {{
+    longTimers.push({{ fn, ms }});
+    return {{ parked: longTimers.length }};
+  }}
+  return realSetTimeout(fn, ms);
+}};
+let onEventListener = null;
+let onDetachListener = null;
+let onRemovedListener = null;
+let attachCalls = 0;
+let detachCalls = 0;
+let navigationSettled = false;
+let resolveNavigation;
+const navigationGate = new Promise(resolve => {{ resolveNavigation = resolve; }});
+const commands = [];
+const chrome = {{
+  debugger: {{
+    onEvent: {{ addListener(listener) {{ onEventListener = listener; }} }},
+    onDetach: {{ addListener(listener) {{ onDetachListener = listener; }} }},
+    attach() {{ attachCalls += 1; return Promise.resolve(); }},
+    detach() {{ detachCalls += 1; return Promise.resolve(); }},
+    sendCommand(target, method, params = {{}}) {{
+      commands.push({{ tabId: target.tabId, method, params }});
+      if (method === 'Page.enable') return Promise.resolve({{}});
+      if (method === 'Page.navigate') {{
+        queueMicrotask(() => onEventListener({{ tabId: 42 }}, 'Page.javascriptDialogOpening', {{
+          type: 'beforeunload', message: 'Leave?', url: 'https://old.example/',
+        }}));
+        return navigationGate.then(value => {{ navigationSettled = true; return value; }});
+      }}
+      throw new Error('unexpected command: ' + method);
+    }},
+  }},
+  tabs: {{
+    onRemoved: {{ addListener(listener) {{ onRemovedListener = listener; }} }},
+    async get() {{
+      return navigationSettled
+        ? {{ url: 'https://new.example/', pendingUrl: '', title: 'New' }}
+        : {{ url: 'https://old.example/', pendingUrl: '', title: 'Old' }};
+    }},
+  }},
+}};
+eval(source.slice(
+  source.indexOf('function handleDebuggerEvent'),
+  source.indexOf('async function handleExtMessage'),
+));
+(async () => {{
+  const first = await navigateWithDialogPolicy({{
+    tabId: 42, url: 'https://new.example/', beforeunload: 'manual', timeoutMs: 1000,
+  }});
+  const pendingAfterFirst = pendingNavigations.has(42);
+  const refsAfterFirst = debuggerAttachments.get('tab:42')?.refs || 0;
+  const retentionTimers = longTimers.map(timer => timer.ms);
+  if ({json.dumps(mode)} === 'closed') {{
+    // The user clicked "Leave" in the browser: the navigation completes and Chrome
+    // reports the dialog closed. handle_dialog is never called.
+    resolveNavigation({{ frameId: 'new-frame' }});
+    onEventListener({{ tabId: 42 }}, 'Page.javascriptDialogClosed', {{}});
+  }} else {{
+    // Nobody ever answers: Page.navigate stays pending forever, so the cleanup
+    // Promise.all cannot be what releases the lease.
+    longTimers.forEach(timer => timer.fn());
+  }}
+  for (let i = 0; i < 50 && pendingNavigations.has(42); i += 1) {{
+    await new Promise(resolve => realSetTimeout(resolve, 0));
+  }}
+  process.stdout.write(JSON.stringify({{
+    first, pendingAfterFirst, refsAfterFirst, retentionTimers,
+    pendingAtEnd: pendingNavigations.has(42),
+    refsAtEnd: debuggerAttachments.get('tab:42')?.refs ?? null,
+    attachCalls, detachCalls, navigationSettled,
+    handleCommands: commands.filter(c => c.method === 'Page.handleJavaScriptDialog').length,
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    )
+
+
+@pytest.mark.parametrize("mode", ["closed", "expiry"])
+def test_manual_navigation_lease_is_released_without_handle_dialog(mode):
+    outcome = _manual_navigation_release_harness(mode)
+
+    assert outcome["first"]["data"]["status"] == "blocked_by_dialog"
+    assert outcome["pendingAfterFirst"] is True
+    assert outcome["refsAfterFirst"] == 1
+    # One armed retention timer, and it is the only long timer in this path.
+    assert outcome["retentionTimers"] == [120000]
+    assert outcome["pendingAtEnd"] is False
+    assert outcome["detachCalls"] == 1
+    # Either the entry is gone from the lease map or it is there holding no refs;
+    # both mean the lease was handed back.
+    assert outcome["refsAtEnd"] in (None, 0)
+    # Neither path may answer the dialog on the user's behalf.
+    assert outcome["handleCommands"] == 0
+    if mode == "expiry":
+        assert outcome["navigationSettled"] is False
+
+
+def test_manual_navigation_retention_timer_is_actually_armed():
+    """releaseNavigationPending has always cleared pending.releaseTimer.
+
+    Nothing ever assigned it, so the clearTimeout was dead code and the retention
+    was unbounded. Guard both halves so they cannot drift apart again.
+    """
+    source = BACKGROUND.read_text(encoding="utf-8")
+    assert "const MANUAL_DIALOG_RETENTION_MS = 120000;" in source
+    assert "pending.releaseTimer = setTimeout(" in source
+    assert "clearTimeout(pending.releaseTimer);" in source
+    closed = source[
+        source.index("if (method === 'Page.javascriptDialogClosed')"):
+        source.index("if (method !== 'Page.javascriptDialogOpening') return;")
+    ]
+    assert "resolveHandled" in closed
+
+
+def _dialog_scope_builder_harness(script: str) -> dict:
+    return _run_node_harness(
+        f"""
+const fs = require('fs');
+const background = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const builderStart = background.indexOf('function buildExecScript');
+const builderEnd = background.indexOf('\\nfunction buildPageScript', builderStart);
+if (builderStart < 0 || builderEnd < 0) throw new Error('buildExecScript not found');
+eval(background.slice(builderStart, builderEnd));
+{script}
+"""
+    )
+
+
+@pytest.mark.parametrize(
+    ("timeout_ms", "expected"),
+    [(3000, 13000), (None, 25000), (120000, 130000), (0, 25000), (500, 11000)],
+)
+def test_dialog_scope_window_follows_the_command_budget(timeout_ms, expected):
+    """A flat 120s window kept answering the user's own dialogs long after the
+    command that asked for it had finished."""
+    scope = {"token": "t1", "policy": "dismiss"}
+    if timeout_ms is not None:
+        scope["timeoutMs"] = timeout_ms
+    outcome = _dialog_scope_builder_harness(
+        f"""
+const scope = {json.dumps(scope)};
+process.stdout.write(JSON.stringify({{
+  window: dialogScopeWindowMs(scope),
+  inPreamble: buildExecScript('1', 'return null;', scope)
+    .includes('Date.now() + ' + dialogScopeWindowMs(scope)),
+  inSubframe: buildSubframeScopeScript(scope)
+    .includes('Date.now() + ' + dialogScopeWindowMs(scope)),
+}}));
+"""
+    )
+    assert outcome["window"] == expected
+    assert outcome["inPreamble"] is True
+    assert outcome["inSubframe"] is True
+
+
+@pytest.mark.parametrize("policy", ["manual", None])
+def test_subframe_scope_script_is_inert_without_an_answering_policy(policy):
+    scope = None if policy is None else {"token": "t1", "policy": policy}
+    outcome = _dialog_scope_builder_harness(
+        f"""
+process.stdout.write(JSON.stringify({{
+  script: buildSubframeScopeScript({json.dumps(scope)}),
+}}));
+"""
+    )
+    assert outcome["script"] == "void 0"
+
+
+def test_subframe_scope_makes_an_iframe_dialog_answerable():
+    """disable_dialogs.js runs in every frame and reads the scope out of its own
+    window; the exec preamble only lands in the top frame.
+
+    Without the sub-frame registration an iframe's confirm() falls through to the
+    native dialog and blocks the injection that was supposed to be dialog-proof.
+    """
+    outcome = _run_node_harness(
+        f"""
+const fs = require('fs');
+const vm = require('vm');
+const background = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const disableDialogs = fs.readFileSync({json.dumps(str(DISABLE_DIALOGS))}, 'utf8');
+const builderStart = background.indexOf('function buildExecScript');
+const builderEnd = background.indexOf('\\nfunction buildPageScript', builderStart);
+eval(background.slice(builderStart, builderEnd));
+
+// One vm context per frame, because that is the whole point: each frame has its
+// own window, so the top frame's scope list is invisible here.
+function makeFrame() {{
+  const counters = {{ nativeConfirmCalls: 0 }};
+  const document = {{
+    createElement() {{ return {{ style: {{}}, remove() {{}}, textContent: '' }}; }},
+    body: {{ appendChild() {{}} }},
+    documentElement: {{ appendChild() {{}} }},
+  }};
+  const window = {{
+    document,
+    alert() {{}},
+    confirm() {{ counters.nativeConfirmCalls += 1; return true; }},
+    prompt(_msg, value) {{ return value ?? ''; }},
+  }};
+  window.window = window;
+  const context = vm.createContext({{
+    window, document,
+    console: {{ log() {{}} }},
+    setTimeout() {{ return 0; }},
+    Date, Math, JSON, Array, Object, String, Error,
+    NodeList: function NodeList() {{}},
+    HTMLCollection: function HTMLCollection() {{}},
+  }});
+  vm.runInContext(disableDialogs, context);
+  return {{ window, context, counters }};
+}}
+
+const scope = {{ token: 'scope-1', policy: 'dismiss', timeoutMs: 5000 }};
+const unscoped = makeFrame();
+const scoped = makeFrame();
+vm.runInContext(buildSubframeScopeScript(scope), scoped.context);
+
+process.stdout.write(JSON.stringify({{
+  unscopedAnswer: vm.runInContext("window.confirm('really?')", unscoped.context),
+  unscopedNativeCalls: unscoped.counters.nativeConfirmCalls,
+  scopedAnswer: vm.runInContext("window.confirm('really?')", scoped.context),
+  scopedNativeCalls: scoped.counters.nativeConfirmCalls,
+  scopedRecords: (scoped.window.__abm_dialog_records || []).map(r => r.token),
+}}));
+"""
+    )
+    # No scope in this frame: the native dialog is what runs, exactly as it must
+    # during ordinary browsing.
+    assert outcome["unscopedNativeCalls"] == 1
+    assert outcome["unscopedAnswer"] is True
+    # Scope registered: dismiss answers false and the native dialog never opens.
+    assert outcome["scopedNativeCalls"] == 0
+    assert outcome["scopedAnswer"] is False
+    assert outcome["scopedRecords"] == ["scope-1"]
+
+
+def test_exec_injection_reaches_every_frame_but_returns_the_top_one():
+    source = BACKGROUND.read_text(encoding="utf-8")
+    inject = source[
+        source.index("      const inject = async () => {"):
+        source.index("      try {\n        // First attempt WITHOUT touching CSP.")
+    ]
+    assert "target: { tabId, allFrames: true }" in inject
+    assert "buildSubframeScopeScript(dialogScope)" in inject
+    # The caller's code must still run in the top frame only, and the result must
+    # be selected by frame id rather than by position.
+    assert "window.top === window ? await eval(s) : eval(sub)" in inject
+    assert "entry?.frameId === 0" in inject
+
+
+def test_extension_scope_records_expire_with_their_command():
+    source = BACKGROUND.read_text(encoding="utf-8")
+    assert "expiresAt: Date.now() + dialogScopeWindowMs({ timeoutMs })," in source
+    assert "Date.now() + 120000" not in source
 
 
 def _native_manual_cdp_harness(
@@ -1054,6 +1353,95 @@ def test_beforeunload_manual_keeps_owner_until_explicit_handle(action):
     }]
 
 
+def test_navigation_retries_page_enable_before_dispatching_exactly_once():
+    outcome = _run_node_harness(
+        f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const protocolDialogStates = new Map();
+const dialogAttachedTabs = new Set();
+const debuggerAttachments = new Map();
+const debuggerRecoveryPromises = new Map();
+const pendingNavigations = new Map();
+const pendingManualExecutions = new Map();
+const manualExecutionGenerations = new Map();
+const execDialogPolicies = new Map();
+const runtimeExecutionContexts = new Map();
+const runtimeContextWaiters = new Map();
+const dialogEventSequences = new Map();
+const DIALOG_STATE_TTL_MS = 30000;
+function validDialogPolicy(policy) {{
+  return policy === 'dismiss' || policy === 'accept' || policy === 'manual';
+}}
+function currentProtocolDialog(tabId) {{ return protocolDialogStates.get(tabId) || null; }}
+function rememberProtocolDialog(tabId, params) {{
+  const dialog = {{ type: params.type, message: params.message || '', url: params.url || '',
+    defaultPrompt: params.defaultPrompt || '', openedAt: Date.now() }};
+  protocolDialogStates.set(tabId, dialog);
+  return dialog;
+}}
+function debuggerTargetKey(target) {{ return `tab:${{target.tabId}}`; }}
+let onEventListener = null;
+let onDetachListener = null;
+let onRemovedListener = null;
+let attachCalls = 0;
+let detachCalls = 0;
+let pageEnableCalls = 0;
+let navigationCalls = 0;
+let navigated = false;
+const chrome = {{
+  debugger: {{
+    onEvent: {{ addListener(listener) {{ onEventListener = listener; }} }},
+    onDetach: {{ addListener(listener) {{ onDetachListener = listener; }} }},
+    attach() {{ attachCalls += 1; return Promise.resolve(); }},
+    detach() {{ detachCalls += 1; return Promise.resolve(); }},
+    sendCommand(target, method) {{
+      if (method === 'Page.enable') {{
+        pageEnableCalls += 1;
+        if (pageEnableCalls === 1) return new Promise(() => {{}});
+        return Promise.resolve({{}});
+      }}
+      if (method === 'Page.navigate') {{
+        navigationCalls += 1;
+        navigated = true;
+        return Promise.resolve({{ frameId: 'new-frame' }});
+      }}
+      throw new Error('unexpected command: ' + method);
+    }},
+  }},
+  tabs: {{
+    onRemoved: {{ addListener(listener) {{ onRemovedListener = listener; }} }},
+    async get() {{
+      return navigated
+        ? {{ url: 'https://new.example/', pendingUrl: '', title: 'New' }}
+        : {{ url: 'https://old.example/', pendingUrl: '', title: 'Old' }};
+    }},
+  }},
+}};
+eval(source.slice(
+  source.indexOf('function handleDebuggerEvent'),
+  source.indexOf('async function handleExtMessage'),
+));
+(async () => {{
+  const result = await navigateWithDialogPolicy({{
+    tabId: 42, url: 'https://new.example/', beforeunload: 'dismiss', timeoutMs: 6000,
+  }});
+  process.stdout.write(JSON.stringify({{
+    result, attachCalls, detachCalls, pageEnableCalls, navigationCalls,
+    pendingAtEnd: pendingNavigations.has(42),
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    )
+    assert outcome["result"]["ok"] is True
+    assert outcome["result"]["data"]["status"] == "ok"
+    assert outcome["attachCalls"] == 2
+    assert outcome["detachCalls"] == 2
+    assert outcome["pageEnableCalls"] == 2
+    assert outcome["navigationCalls"] == 1
+    assert outcome["pendingAtEnd"] is False
+
+
 @pytest.mark.parametrize("mode", ["evaluation", "failure"])
 def test_native_manual_evaluation_settlement_clears_pending_and_owning_lease(mode):
     outcome = _native_manual_cdp_harness(mode)
@@ -1143,6 +1531,14 @@ def test_manual_cleanup_hooks_cover_detach_tab_removal_and_main_frame_replacemen
         source.index("chrome.debugger.onDetach.addListener"):
         source.index("chrome.tabs.onRemoved.addListener")
     ]
+    detach_handler = source[
+        source.index("function handleDebuggerDetach"):
+        source.index("function boundedCdpTimeout")
+    ]
+    tab_cleanup = source[
+        source.index("function clearDebuggerTabState"):
+        source.index("function rejectPendingDebuggerCommands")
+    ]
     removed = source[
         source.index("chrome.tabs.onRemoved.addListener"):
         source.index("function currentExecDialogPolicy")
@@ -1151,7 +1547,9 @@ def test_manual_cleanup_hooks_cover_detach_tab_removal_and_main_frame_replacemen
         source.index("function handleDebuggerEvent"):
         source.index("chrome.debugger.onEvent.addListener")
     ]
-    assert "cancelManualExecution" in detach
+    assert "handleDebuggerDetach" in detach
+    assert "clearDebuggerTabState" in detach_handler
+    assert "cancelManualExecution" in tab_cleanup
     assert "cancelManualExecution" in removed
     assert "Page.frameNavigated" in handler
     assert "cancelManualExecution" in handler
@@ -1182,7 +1580,7 @@ process.stdout.write(JSON.stringify({{ timeout, handleFailure }}));
     assert outcome["handleFailure"] == "dialog_handle_failed"
 
 
-def test_extension_dialog_debugger_paths_detach_in_finally():
+def test_handle_dialog_extension_debugger_paths_detach_in_finally():
     source = BACKGROUND.read_text(encoding="utf-8")
     for function_name in ("handleProtocolDialog", "navigateWithDialogPolicy"):
         match = re.search(
@@ -1229,7 +1627,7 @@ def test_injected_confirm_has_no_unconditional_accept():
 
 def test_injected_dialog_observations_are_bounded_and_policy_driven():
     source = DISABLE_DIALOGS.read_text(encoding="utf-8")
-    assert "__tmwd_dialog_records" in source
+    assert "__abm_dialog_records" in source
     assert "slice(" in source or "shift()" in source
     assert "defaultPrompt" in source
     assert "openedAt" in source

@@ -108,13 +108,16 @@ class TestDialogPolicy:
         assert prompt["js_return"] == "typed text"
         assert prompt["dialog"]["defaultPrompt"] == "typed text"
 
-    def test_beforeunload_dismiss_then_accept(self, scratch_session):
+    def test_open_url_beforeunload_dismiss_then_accept_and_cleanup(self, scratch_session):
         original_active = next(
             (tab for tab in self._all_tabs(scratch_session) if tab.get("active")), None
         )
         client_id = str(scratch_session).rsplit(":", 1)[0]
         try:
             goto(scratch_session, STATIC, "h1")
+            activated = S.activate_tab(scratch_session)
+            assert activated["status"] == "ok"
+            assert activated["activated_session_id"] == scratch_session
             S.execute_js(
                 """
                 document.body.insertAdjacentHTML(
@@ -248,7 +251,15 @@ class TestScrollPage:
                           timeout=20)
         assert r["status"] == "not_found"
         assert r["selector"] == "#not-a-real-element"
-        assert "无匹配" in r["note"]
+        assert "did not match" in r["note"]
+
+    def test_scroll_page_cleanup_restores_top(self, scratch_session):
+        goto(scratch_session, DOCS, "h1")
+        try:
+            S.scroll_page(to="bottom", session_id=scratch_session, timeout=20)
+        finally:
+            restored = S.scroll_page(to="top", session_id=scratch_session, timeout=20)
+        assert restored["scroll_y"] == 0
 
 
 class TestScanPageLinks:
@@ -305,7 +316,7 @@ class TestScanPageOffscreen:
         goto(scratch_session, DOCS, "h1")
         scan = S.scan_page(session_id=scratch_session, maxchars=60000, timeout=30)
         # The base-url marker is an internal detail and must not reach the agent.
-        assert "tmwd-base:" not in scan["content"]
+        assert "abm-base:" not in scan["content"]
 
 
 class TestNavigationOutcome:
@@ -327,7 +338,7 @@ class TestNavigationOutcome:
             assert rr["status"] == "success"
             assert "reloaded" not in str(rr.get("js_return"))
 
-    def test_plain_return_still_works(self, scratch_session):
+    def test_execute_js_plain_return_still_works(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
         rr = S.execute_js("return 1+1", session_id=scratch_session,
                           no_monitor=True, timeout=15)
@@ -336,22 +347,25 @@ class TestNavigationOutcome:
 
 
 class TestExplicitSessionPipeline:
-    def test_monitored_execute_stays_on_explicit_session(self, driver, scratch_session):
+    def test_monitored_execute_stays_on_explicit_session(self, scratch_session):
         """Every monitor/readback roundtrip must remain pinned to the named tab."""
-        client_id = str(scratch_session).rsplit(":", 1)[0]
-        other_sessions = [
-            tab for tab in S.compact_tabs(fresh=True)
-            if tab["id"] != scratch_session
-            and str(tab["id"]).rsplit(":", 1)[0] == client_id
-        ]
-        if not other_sessions:
-            pytest.skip("need another connected tab in the scratch tab's browser")
-        other_session = other_sessions[0]["id"]
-        previous_default = driver.default_session_id
+        server_driver = S.require_driver()
+        created = S.open_new_tab(
+            "https://example.com/?abm-explicit-other=211",
+            timeout=20,
+            active=False,
+            session_id=scratch_session,
+        )
+        other_session = created.get("session_id")
+        previous_default = server_driver.default_session_id
         marker = "abm-explicit-session-211"
         try:
+            assert created["status"] == "ok"
+            assert created["owned"] is True
+            assert other_session
+            S.wait_for(selector="h1", timeout=20, session_id=other_session)
             goto(scratch_session, STATIC, "h1")
-            driver.default_session_id = other_session
+            server_driver.default_session_id = other_session
             result = S.execute_js(
                 f"document.body.dataset.abmExplicitTarget = '{marker}'; return document.title",
                 session_id=scratch_session,
@@ -360,7 +374,7 @@ class TestExplicitSessionPipeline:
             )
             assert result["status"] in ("ok", "success")
             assert str(result["tab_id"]) == str(scratch_session).rsplit(":", 1)[-1]
-            assert driver.default_session_id == other_session
+            assert server_driver.default_session_id == other_session
 
             scratch_marker = S.execute_js(
                 "return document.body.dataset.abmExplicitTarget || null",
@@ -376,9 +390,11 @@ class TestExplicitSessionPipeline:
             )
             assert scratch_marker["js_return"] == marker
             assert other_marker["js_return"] is None
-            assert driver.default_session_id == other_session
+            assert server_driver.default_session_id == other_session
         finally:
-            driver.default_session_id = previous_default
+            server_driver.default_session_id = previous_default
+            if other_session:
+                S.close_tabs(other_session, owner_id=created.get("owner_id"))
 
 
 class TestNewTabGeneration:
@@ -414,7 +430,217 @@ class TestNewTabGeneration:
 
 
 class TestBackgroundPageInput:
-    def test_events_reach_scratch_without_raising_it(self, scratch_session):
+    def test_never_activated_tab_receives_background_input(self, scratch_session):
+        original_active = next(
+            (tab for tab in S.list_all_tabs(session_id=scratch_session).get("data", [])
+             if tab.get("active")),
+            None,
+        )
+        created = S.open_new_tab(
+            "https://example.com/?abm-never-activated-input=1",
+            timeout=20,
+            active=False,
+            session_id=scratch_session,
+        )
+        background_sid = created.get("session_id")
+        try:
+            assert created["status"] == "ok"
+            assert created["owned"] is True
+            assert background_sid
+            S.wait_for(selector="h1", timeout=20, session_id=background_sid)
+            S.execute_js(
+                """
+                document.body.innerHTML = '<button id="never-active-button">Click</button>';
+                window.__neverActiveEvents = [];
+                document.addEventListener('click', event => {
+                  window.__neverActiveEvents.push({type: event.type, id: event.target.id});
+                }, true);
+                return true;
+                """,
+                session_id=background_sid,
+                no_monitor=True,
+                timeout=15,
+            )
+
+            clicked = S.page_click(
+                selector="#never-active-button",
+                session_id=background_sid,
+                timeout=15,
+            )
+            observed = S.execute_js(
+                "return JSON.stringify(window.__neverActiveEvents)",
+                session_id=background_sid,
+                no_monitor=True,
+                timeout=15,
+            )
+
+            assert clicked["status"] == "success"
+            assert clicked["foreground_changed"] is False
+            assert json.loads(observed["js_return"]) == [
+                {"type": "click", "id": "never-active-button"}
+            ]
+            if original_active is not None:
+                tabs = S.list_all_tabs(session_id=scratch_session).get("data", [])
+                assert next(
+                    tab.get("active") for tab in tabs
+                    if tab.get("id") == original_active["id"]
+                ) is True
+        finally:
+            if background_sid:
+                S.close_tabs(background_sid, owner_id=created.get("owner_id"))
+
+    def test_page_click_structured_locators_execute_against_real_dom(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        setup = S.execute_js(
+            """
+            document.body.innerHTML = `
+              <button id="role-target" aria-label="Role target">role</button>
+              <button id="text-target">Text target</button>
+              <label for="label-target">Email address</label>
+              <input id="label-target">
+              <button id="disabled-target" disabled>Disabled target</button>
+              <button id="aria-disabled-target" aria-disabled="true">ARIA disabled</button>
+              <button class="duplicate">Duplicate target</button>
+              <button class="duplicate">Duplicate target</button>
+              <div id="open-host"></div>
+              <div id="closed-host"></div>
+              <iframe id="opaque-frame" sandbox srcdoc="<button>Opaque</button>"></iframe>
+            `;
+            window.__locatorEvents = [];
+            const record = value => window.__locatorEvents.push(value);
+            document.querySelector('#role-target').addEventListener('click', () => record('role'));
+            document.querySelector('#text-target').addEventListener('click', () => record('text'));
+            const openRoot = document.querySelector('#open-host').attachShadow({mode: 'open'});
+            openRoot.innerHTML = `
+              <button id="shadow-button" aria-label="Shadow target">shadow</button>
+              <label for="shadow-input">Shadow field</label>
+              <input id="shadow-input">
+            `;
+            openRoot.querySelector('#shadow-button').addEventListener('click', () => record('shadow'));
+            document.querySelector('#closed-host').attachShadow({mode: 'closed'});
+
+            const outer = document.createElement('iframe');
+            outer.id = 'outer-frame';
+            outer.style.cssText = 'display:block;margin:80px 0 0 260px;width:520px;height:260px;border:12px solid black';
+            document.body.appendChild(outer);
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error('locator iframe setup timed out')), 5000);
+              outer.onload = () => {
+                const outerDoc = outer.contentDocument;
+                outerDoc.body.style.margin = '0';
+                const inner = outerDoc.createElement('iframe');
+                inner.id = 'inner-frame';
+                inner.style.cssText = 'display:block;margin:55px 0 0 140px;width:260px;height:120px;border:8px solid blue';
+                inner.onload = () => {
+                  clearTimeout(timer);
+                  const innerDoc = inner.contentDocument;
+                  innerDoc.body.innerHTML = '<button id="deep-button" aria-label="Deep target" style="margin:24px;width:120px;height:44px">deep</button>';
+                  innerDoc.querySelector('#deep-button').addEventListener('click', () => record('deep'));
+                  resolve(JSON.stringify({ready: true}));
+                };
+                outerDoc.body.appendChild(inner);
+                inner.src = 'about:blank';
+              };
+              outer.src = 'about:blank';
+            });
+            """,
+            session_id=scratch_session,
+            no_monitor=True,
+            timeout=15,
+        )
+        assert json.loads(setup["js_return"]) == {"ready": True}
+
+        assert S.page_click(
+            selector={"role": "button", "name": "Role target", "exact": True},
+            session_id=scratch_session,
+        )["status"] == "success"
+        assert S.page_click(
+            selector={"text": "Text target", "exact": True},
+            session_id=scratch_session,
+        )["status"] == "success"
+        assert S.page_click(
+            selector={
+                "role": "button",
+                "name": "Deep target",
+                "exact": True,
+                "frame": [{"css": "#outer-frame"}, {"css": "#inner-frame"}],
+            },
+            session_id=scratch_session,
+        )["status"] == "success"
+        assert S.page_click(
+            selector={
+                "role": "button",
+                "name": "Shadow target",
+                "exact": True,
+                "shadow": ["#open-host"],
+            },
+            session_id=scratch_session,
+        )["status"] == "success"
+
+        typed = S.page_type(
+            "top-level",
+            selector={"label": "Email address"},
+            clear=True,
+            session_id=scratch_session,
+        )
+        shadow_typed = S.page_type(
+            "inside-shadow",
+            selector={"label": "Shadow field", "shadow": ["#open-host"]},
+            clear=True,
+            session_id=scratch_session,
+        )
+        assert typed["status"] == shadow_typed["status"] == "success"
+
+        failures = {
+            "missing": S.page_click(
+                selector={"css": "#missing-target"}, session_id=scratch_session
+            ),
+            "ambiguous": S.page_click(
+                selector={"text": "Duplicate target", "exact": True},
+                session_id=scratch_session,
+            ),
+            "closed": S.page_click(
+                selector={"css": "button", "shadow": ["#closed-host"]},
+                session_id=scratch_session,
+            ),
+            "cross_origin": S.page_click(
+                selector={"css": "button", "frame": [{"css": "#opaque-frame"}]},
+                session_id=scratch_session,
+            ),
+            "disabled": S.page_click(
+                selector="#disabled-target", session_id=scratch_session
+            ),
+            "aria_disabled": S.page_click(
+                selector={"css": "#aria-disabled-target"}, session_id=scratch_session
+            ),
+        }
+        assert failures["missing"]["status"] == "not_found"
+        assert failures["ambiguous"]["status"] == "ambiguous"
+        assert failures["closed"]["status"] == "closed_shadow_root"
+        assert failures["cross_origin"]["status"] == "cross_origin_frame"
+        assert failures["disabled"]["status"] == "not_interactable"
+        assert failures["aria_disabled"]["status"] == "not_interactable"
+
+        observed = S.execute_js(
+            """
+            const root = document.querySelector('#open-host').shadowRoot;
+            return JSON.stringify({
+              events: window.__locatorEvents,
+              topValue: document.querySelector('#label-target').value,
+              shadowValue: root.querySelector('#shadow-input').value,
+            });
+            """,
+            session_id=scratch_session,
+            no_monitor=True,
+            timeout=15,
+        )
+        assert json.loads(observed["js_return"]) == {
+            "events": ["role", "text", "deep", "shadow"],
+            "topValue": "top-level",
+            "shadowValue": "inside-shadow",
+        }
+
+    def test_page_drag_events_reach_scratch_without_raising_it(self, scratch_session):
         def all_tabs():
             reply = S.list_all_tabs(session_id=scratch_session)
             return reply.get("data") or reply.get("result", {}).get("data", [])
@@ -589,6 +815,123 @@ class TestBackgroundPageInput:
                     timeout=15.0,
                 )
 
+    def test_page_type_autofocuses_single_xterm_from_body(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        tabs_before = S.list_all_tabs(session_id=scratch_session).get("data", [])
+        active_before = next((tab["id"] for tab in tabs_before if tab.get("active")), None)
+        setup = S.execute_js(
+            """
+            document.body.innerHTML = `
+              <div class="xterm">
+                <div class="xterm-screen">
+                  <textarea class="xterm-helper-textarea"
+                            aria-label="Terminal input"></textarea>
+                </div>
+              </div>`;
+            const helper = document.querySelector('.xterm-helper-textarea');
+            window.__abmXtermEvents = [];
+            for (const type of ['focus', 'beforeinput', 'input']) {
+              helper.addEventListener(type, event => {
+                window.__abmXtermEvents.push({
+                  type,
+                  data: event.data || null,
+                  value: helper.value,
+                });
+              });
+            }
+            document.body.tabIndex = -1;
+            helper.blur();
+            document.body.focus();
+            return JSON.stringify({
+              active: document.activeElement.tagName,
+              helpers: document.querySelectorAll('.xterm-helper-textarea').length,
+            });
+            """,
+            session_id=scratch_session,
+            no_monitor=True,
+            timeout=15,
+        )
+        assert json.loads(setup["js_return"]) == {"active": "BODY", "helpers": 1}
+
+        result = S.page_type("ABM_FIRST_INPUT_OK", session_id=scratch_session)
+        observed = S.execute_js(
+            """
+            const helper = document.querySelector('.xterm-helper-textarea');
+            return JSON.stringify({
+              active: document.activeElement === helper,
+              value: helper.value,
+              events: window.__abmXtermEvents,
+            });
+            """,
+            session_id=scratch_session,
+            no_monitor=True,
+            timeout=15,
+        )
+        tabs_after = S.list_all_tabs(session_id=scratch_session).get("data", [])
+        active_after = next((tab["id"] for tab in tabs_after if tab.get("active")), None)
+        state = json.loads(observed["js_return"])
+
+        assert result["status"] == "success"
+        assert result["foreground_changed"] is False
+        assert result["target_kind"] == "xterm"
+        assert result["typed_chars"] == len("ABM_FIRST_INPUT_OK")
+        assert active_after == active_before
+        assert state["active"] is True
+        assert state["value"] == "ABM_FIRST_INPUT_OK"
+        assert any(event["type"] == "focus" for event in state["events"])
+        assert any(
+            event["type"] == "input" and event["data"] == "ABM_FIRST_INPUT_OK"
+            for event in state["events"]
+        )
+
+    def test_page_type_structured_locator_executes_in_background(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        S.execute_js(
+            "document.body.innerHTML='<label for=abm-field>ABM field</label>' + "
+            "'<input id=abm-field>'; return true",
+            session_id=scratch_session,
+            no_monitor=True,
+        )
+
+        result = S.page_type(
+            "background-value",
+            selector={"label": "ABM field"},
+            clear=True,
+            session_id=scratch_session,
+        )
+        value = S.execute_js(
+            "return document.querySelector('#abm-field').value",
+            session_id=scratch_session,
+            no_monitor=True,
+        )
+
+        assert result["status"] == "success"
+        assert result["foreground_changed"] is False
+        assert value["js_return"] == "background-value"
+
+    def test_page_press_dispatches_chord_in_background(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        S.execute_js(
+            "document.body.innerHTML='<input id=abm-key-target value=abcdef>'; "
+            "document.querySelector('#abm-key-target').focus(); "
+            "window.__abmKeys=[]; document.addEventListener('keydown', "
+            "e => window.__abmKeys.push([e.key,e.ctrlKey]), true); return true",
+            session_id=scratch_session,
+            no_monitor=True,
+        )
+
+        result = S.page_press("ctrl,a", session_id=scratch_session)
+        observed = S.execute_js(
+            "return JSON.stringify(window.__abmKeys)",
+            session_id=scratch_session,
+            no_monitor=True,
+        )
+
+        assert result["status"] == "success"
+        assert result["foreground_changed"] is False
+        keys = json.loads(observed["js_return"])
+        assert ["a", True] in keys
+
 
 class TestFailoverRefusal:
     def test_dead_session_is_refused_not_redirected(self, driver):
@@ -598,12 +941,12 @@ class TestFailoverRefusal:
             driver.execute_js("return 1", timeout=5,
                               session_id="chrome_nonexistent:999999")
         msg = str(exc.value)
-        assert "未连接" in msg
+        assert "not connected" in msg
         # And it should tell the caller what it could have used instead.
         if driver.get_all_sessions():
-            assert "switch_tab" in msg or "活动会话" in msg
+            assert "switch_tab" in msg or "Active sessions" in msg
 
-    def test_reads_do_not_silently_switch_tabs_either(self, driver):
+    def test_scan_page_does_not_silently_switch_tabs(self, driver):
         """Reading is side-effect free, but silently returning a DIFFERENT page
         than the caller asked for is its own wrong answer, so get_main_block
         defaults to no failover too."""
@@ -614,9 +957,17 @@ class TestFailoverRefusal:
             driver.default_session_id = "chrome_nonexistent:999999"
             with pytest.raises(Exception) as exc:
                 simphtml.get_main_block(driver, timeout=10)
-            assert "未连接" in str(exc.value)
+            assert "not connected" in str(exc.value)
         finally:
             driver.default_session_id = prev
+
+    def test_get_cookies_refuses_a_dead_explicit_session(self):
+        with pytest.raises(Exception):
+            S.get_cookies(session_id="chrome_nonexistent:999999")
+
+    def test_switch_tab_refuses_a_dead_explicit_session(self):
+        with pytest.raises(Exception):
+            S.switch_tab(session_id="chrome_nonexistent:999999")
 
     def test_failover_is_available_when_explicitly_asked_for(self, driver, scratch_session):
         """The escape hatch still works for a caller that genuinely wants any
@@ -627,7 +978,11 @@ class TestFailoverRefusal:
         try:
             driver.default_session_id = "chrome_nonexistent:999999"
             block = simphtml.get_main_block(driver, timeout=25, allow_failover=True)
-            assert isinstance(block, str) and len(block) > 50
+            # The target is deliberately "any live tab", so its exact DOM and
+            # serialized length are unconstrained.  A non-empty block proves
+            # the explicitly requested failover reached a live page.
+            assert isinstance(block, str)
+            assert block.strip()
         finally:
             driver.default_session_id = prev
 
@@ -654,7 +1009,7 @@ class TestActivateTab:
                 return t["active"]
         return None
 
-    def test_activate_really_raises_the_tab(self, driver, scratch_session):
+    def test_activate_tab_really_raises_the_tab(self, driver, scratch_session):
         """The report is not the proof — check Chrome agrees."""
         S.activate_tab(session_id=scratch_session)
         assert self._is_active(scratch_session) is True
@@ -673,7 +1028,7 @@ class TestActivateTab:
         assert "activation_failed" not in r
         assert self._is_active(others[0]["id"]) is True
 
-    def test_opting_out_leaves_the_screen_alone(self, driver, scratch_session):
+    def test_switch_tab_opt_out_leaves_the_screen_alone(self, driver, scratch_session):
         """activate=false still has to re-target the bridge, just without
         stealing the user's foreground tab."""
         S.activate_tab(session_id=scratch_session)
@@ -686,29 +1041,104 @@ class TestActivateTab:
         assert "activated" not in r
         assert self._is_active(scratch_session) is True  # untouched
 
+    def test_activate_tab_cleanup_restores_original_active_tab(self, scratch_session):
+        tabs = S.list_all_tabs(session_id=scratch_session).get("data", [])
+        original = next((tab for tab in tabs if tab.get("active")), None)
+        if original is None:
+            pytest.skip("no active tab to restore")
+        client_id = str(scratch_session).rsplit(":", 1)[0]
+        try:
+            S.activate_tab(session_id=scratch_session)
+            assert self._is_active(scratch_session) is True
+        finally:
+            S.require_driver().ext_cmd(
+                {"cmd": "tabs", "method": "switch", "tabId": original["id"]},
+                client_id=client_id,
+                timeout=15.0,
+            )
+        assert self._is_active(f"{client_id}:{original['id']}") is True
+
 
 class TestCookiesAndStorage:
-    def test_cookie_roundtrip(self, scratch_session):
+    def test_set_cookies_success(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        r = S.set_cookies({"name": "live_test", "value": "v1", "path": "/"},
-                          session_id=scratch_session)
-        assert r["status"] == "ok", r
-        g = S.get_cookies(session_id=scratch_session)
-        vals = [c["value"] for c in (g.get("data") or []) if c["name"] == "live_test"]
-        assert vals == ["v1"], vals
-        d = S.delete_cookies("live_test", session_id=scratch_session)
-        assert d["status"] == "ok", d
-        g2 = S.get_cookies(session_id=scratch_session)
-        assert not [c for c in (g2.get("data") or []) if c["name"] == "live_test"]
+        name = "abm_set_cookies_success"
+        try:
+            result = S.set_cookies(
+                {"name": name, "value": "v1", "path": "/"},
+                session_id=scratch_session,
+            )
+            assert result["status"] == "ok", result
+        finally:
+            S.delete_cookies(name, session_id=scratch_session)
 
-    def test_storage_roundtrip(self, scratch_session):
+    def test_set_cookies_cleanup_removes_fixture_cookie(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        name = "abm_set_cookies_cleanup"
+        S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
+        try:
+            assert any(
+                cookie["name"] == name
+                for cookie in S.get_cookies(session_id=scratch_session).get("data", [])
+            )
+        finally:
+            S.delete_cookies(name, session_id=scratch_session)
+        assert not any(
+            cookie["name"] == name
+            for cookie in S.get_cookies(session_id=scratch_session).get("data", [])
+        )
+
+    def test_get_cookies_success(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        name = "abm_get_cookies_success"
+        S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
+        try:
+            cookies = S.get_cookies(session_id=scratch_session).get("data", [])
+            assert [cookie["value"] for cookie in cookies if cookie["name"] == name] == ["v1"]
+        finally:
+            S.delete_cookies(name, session_id=scratch_session)
+
+    def test_delete_cookies_success(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        name = "abm_delete_cookies_success"
+        S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
+        result = S.delete_cookies(name, session_id=scratch_session)
+        assert result["status"] == "ok", result
+
+    def test_delete_cookies_cleanup_leaves_no_fixture_cookie(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        name = "abm_delete_cookies_cleanup"
+        S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
+        try:
+            S.delete_cookies(name, session_id=scratch_session)
+        finally:
+            S.delete_cookies(name, session_id=scratch_session)
+        assert not any(
+            cookie["name"] == name
+            for cookie in S.get_cookies(session_id=scratch_session).get("data", [])
+        )
+
+    def test_storage_set_roundtrip(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
         s = S.storage_set("lk", "lv", session_id=scratch_session)
         assert s["status"] == "success", s
         r = S.storage_get("lk", session_id=scratch_session)
         assert r["found"] and r["value"] == "lv"
 
-    def test_storage_dump_all(self, scratch_session):
+    def test_storage_set_cleanup_removes_fixture_key(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        S.storage_set("abm_cleanup", "value", session_id=scratch_session)
+        try:
+            assert S.storage_get("abm_cleanup", session_id=scratch_session)["found"]
+        finally:
+            S.execute_js(
+                "localStorage.removeItem('abm_cleanup'); return true",
+                session_id=scratch_session,
+                no_monitor=True,
+            )
+        assert not S.storage_get("abm_cleanup", session_id=scratch_session)["found"]
+
+    def test_storage_get_dump_all(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
         S.storage_set("lk2", "lv2", session_id=scratch_session)
         r = S.storage_get(session_id=scratch_session)

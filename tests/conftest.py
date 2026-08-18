@@ -21,7 +21,7 @@ if str(SRC) not in sys.path:
 def _free_port_base() -> int:
     """A port p where p, p+1 and p+2 are all free.
 
-    TMWebDriver takes three consecutive ports (WS, /link, host lock), so a
+    BrowserBridge takes three consecutive ports (WS, /link, host lock), so a
     single bind test is not enough. Random high ports, retried, rather than
     anything near 18765: a test must never collide with the daemon the user has
     running, let alone bind over it.
@@ -61,14 +61,16 @@ class _TestBridge:
 
 
 def _spawn_test_bridge(token, monkeypatch):
-    """A real in-process TMWebDriver host on throwaway ports.
+    """A real in-process BrowserBridge host on throwaway ports.
 
     In-process, not a subprocess, so nothing can outlive the test run and start
-    competing with the user's daemon for the real ports.
+    competing with the user's daemon for the real ports. Callers must close it
+    (see the link_bridge fixtures): a listener left running for the rest of the
+    session is what _free_port_base's exclusive probe exists to survive.
     """
     import time
 
-    from agent_browser_mcp.tmwebdriver import TMWebDriver, TOKEN_AUTH_ENV, TOKEN_ENV
+    from agent_browser_mcp.browser_bridge import TOKEN_AUTH_ENV, TOKEN_ENV, BrowserBridge
 
     if token:
         monkeypatch.delenv(TOKEN_AUTH_ENV, raising=False)
@@ -77,7 +79,7 @@ def _spawn_test_bridge(token, monkeypatch):
         monkeypatch.delenv(TOKEN_ENV, raising=False)
         monkeypatch.setenv(TOKEN_AUTH_ENV, "off")
     base = _free_port_base()
-    d = TMWebDriver.__new__(TMWebDriver)
+    d = BrowserBridge.__new__(BrowserBridge)
     d.host, d.port = "127.0.0.1", base
     d.sessions, d.results, d.acks = {}, {}, {}
     d.default_session_id = d.latest_session_id = None
@@ -95,6 +97,7 @@ def _spawn_test_bridge(token, monkeypatch):
                 break
         time.sleep(0.05)
     else:
+        d.stop_http_server()
         pytest.skip(f"test bridge never bound 127.0.0.1:{base + 1}")
     return _TestBridge(d, base)
 
@@ -102,21 +105,29 @@ def _spawn_test_bridge(token, monkeypatch):
 @pytest.fixture
 def link_bridge_auth(monkeypatch):
     """A test bridge that requires a token (the value tests/test_link_auth use)."""
-    return _spawn_test_bridge("s3cret-token", monkeypatch)
+    bridge = _spawn_test_bridge("s3cret-token", monkeypatch)
+    try:
+        yield bridge
+    finally:
+        bridge.driver.stop_http_server()
 
 
 @pytest.fixture
 def link_bridge_open(monkeypatch):
     """A test bridge with authentication explicitly disabled."""
-    return _spawn_test_bridge(None, monkeypatch)
+    bridge = _spawn_test_bridge(None, monkeypatch)
+    try:
+        yield bridge
+    finally:
+        bridge.driver.stop_http_server()
 
 
 @pytest.fixture(scope="session")
 def driver():
-    """A TMWebDriver talking to an already-running bridge, or skip."""
-    from agent_browser_mcp.tmwebdriver import TMWebDriver
+    """A BrowserBridge talking to an already-running bridge, or skip."""
+    from agent_browser_mcp.browser_bridge import BrowserBridge
 
-    d = TMWebDriver()
+    d = BrowserBridge()
     try:
         sessions = d.get_all_sessions()
     except Exception as e:  # bridge not up
@@ -133,9 +144,9 @@ def scratch_session(driver):
     Opening a tab per test would litter the user's browser; every live test
     navigates this one instead.
     """
-    from agent_browser_mcp import server as S
-
     import time
+
+    from agent_browser_mcp import server as S
 
     result = S.open_new_tab("https://example.com/")
     if result.get("status") == "unknown" or not result.get("owned"):

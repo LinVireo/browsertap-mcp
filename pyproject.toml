@@ -1,42 +1,89 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-browser-mcp"
 dynamic = ["version"]
-description = "Real-browser MCP server with TMWebDriver/CDP bridge, screenshots, cookies, and physical input"
+description = "Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, cookies, and physical input"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
+  { name = "zhea" }
+]
+maintainers = [
   { name = "0xlinn" }
 ]
-keywords = ["mcp", "browser automation", "chrome", "cdp", "tmwebdriver", "claude-code"]
+keywords = ["mcp", "browser automation", "chrome", "cdp", "browser bridge", "claude-code"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
   "Topic :: Software Development :: Libraries",
   "Topic :: Utilities"
 ]
 dependencies = [
-  "mcp",
-  "requests",
-  "beautifulsoup4",
-  "bottle",
-  "simple-websocket-server",
-  "pyautogui",
-  "mss",
-  "pillow",
-  "tomli>=2.0; python_version < '3.11'"
+  "mcp>=1.27,<2",
+  # server.py imports both directly (anyio.to_thread for the tool lock, pydantic
+  # for the tool models), so they are declared rather than relied on as `mcp`
+  # transitives: a future mcp release is free to drop or repin either one.
+  "anyio>=4.5",
+  "pydantic>=2.11,<3",
+  "requests>=2.33.1",
+  "beautifulsoup4>=4.14.3",
+  "bottle>=0.13.4",
+  "simple-websocket-server>=0.4.4",
 ]
 
 [project.optional-dependencies]
+desktop = [
+  "pyautogui>=0.9.54",
+  "mss>=10.1.0",
+  "pillow>=12.2.0",
+]
 dev = [
   "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "build>=1.2",
+  "ruff>=0.12",
+  # Only the release tooling reads pyproject.toml (scripts/versioning.py and the
+  # packaging tests). The installed package never imports it, so it is not a
+  # runtime dependency of `pip install agent-browser-mcp`.
+  "tomli>=2.0; python_version < '3.11'",
 ]
+
+[tool.coverage.run]
+branch = true
+# `scripts` holds the release tooling that produces the acceptance score, so it
+# is measured too. Note that a `--cov=<pkg>` flag on the pytest command line
+# REPLACES this list rather than adding to it: the release and CI commands pass
+# `--cov=agent_browser_mcp` explicitly, so they measure only the package. Adding
+# `--cov=scripts` there would fold the release tooling into `--cov-fail-under`,
+# which currently lands at 82.53% combined (package 89.1%, scripts 67.5%) and
+# would fail the 85 gate; ~185 more covered units are needed first.
+source = ["agent_browser_mcp", "scripts"]
+omit = ["*/chrome_extension/*"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]
+fail_under = 85
+show_missing = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+# Preserve compact legacy control-flow formatting while enforcing correctness,
+# imports, and new-code quality across the whole repository.
+ignore = ["E402", "E701", "E702", "E741"]
 
 [project.urls]
 Homepage = "https://github.com/0xlinn/agent-browser-mcp"
@@ -57,7 +104,10 @@ version = {attr = "agent_browser_mcp.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_browser_mcp = ["chrome_extension/*"]
+agent_browser_mcp = ["chrome_extension/*", "chrome_extension/_locales/*/*.json"]
+
+[tool.setuptools.exclude-package-data]
+agent_browser_mcp = ["chrome_extension/config.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

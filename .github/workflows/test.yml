@@ -1,0 +1,91 @@
+name: ABM offline gates
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# One in-flight run per ref. Re-pushing a branch cancels the previous run
+# instead of racing it, so the newest commit owns the gate result.
+concurrency:
+  group: offline-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,desktop]"
+      - name: Check Python lint
+        if: matrix.python-version == '3.13'
+        run: python -m ruff check src tests scripts
+      - name: Compile Python sources
+        run: python -m compileall -q src
+      - name: Prepare evidence directory
+        run: mkdir -p artifacts
+      - name: Run offline tests with coverage
+        run: >-
+          python -m pytest tests -q
+          --cov=agent_browser_mcp
+          --cov-fail-under=85
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-report=json:artifacts/coverage.json
+          --junitxml=artifacts/offline-junit.xml
+      - name: Check tool behavior coverage
+        run: >-
+          python -m scripts.tool_coverage_report --format markdown
+          --output artifacts/tool-coverage-offline.json
+      - name: Check documentation and versions
+        run: python -m scripts.check_tool_docs --format markdown
+      - name: Check SemVer bump on release branches
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/') && github.event.before != '0000000000000000000000000000000000000000'
+        run: python -m scripts.versioning check-bump --base "${{ github.event.before }}"
+      - name: Build distributions
+        run: python -m build --wheel --sdist --outdir artifacts/dist
+      - name: Check distribution contents
+        run: python -m scripts.check_distribution artifacts/dist
+      - name: Check installed dependency consistency
+        run: python -m pip check
+      # The evidence chain is only meaningful if something other than the release
+      # operator's own machine exercises it. CI seals the artifacts it just
+      # generated and immediately re-validates the seal, so a broken manifest
+      # writer or validator fails here rather than at release time. Committed
+      # artifacts are not used: `artifacts/` is gitignored, so this always runs
+      # against a clean checkout plus this run's own output.
+      - name: Seal and verify this run's evidence
+        if: matrix.python-version == '3.13'
+        run: >-
+          python -m scripts.evidence_manifest &&
+          python -m scripts.evidence_manifest --check
+      # Scored for visibility only. The live-Chrome gates cannot pass on a
+      # headless runner, so a non-zero exit is expected and must not fail the job.
+      - name: Score offline acceptance gates (informational)
+        if: matrix.python-version == '3.13'
+        continue-on-error: true
+        run: python -m scripts.acceptance_report --output artifacts/acceptance-report.md
+      - name: Upload gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abm-offline-${{ matrix.python-version }}
+          path: artifacts/
+          if-no-files-found: ignore

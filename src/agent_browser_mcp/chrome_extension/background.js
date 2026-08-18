@@ -22,10 +22,9 @@ async function reinjectAllTabs() {
   for (const tab of tabs) {
     if (!tab.id || !isScriptable(tab.url)) continue;
     try {
-      // config.js defines TID which content.js reads; must load in order.
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: true },
-        files: ['config.js', 'content.js'],
+        files: ['content.js'],
       });
     } catch (_) {
       // Restricted pages (web store, chrome://, PDF viewer) reject injection;
@@ -49,6 +48,7 @@ const dialogEventSequences = new Map();
 const manualExecutionGenerations = new Map();
 const networkCaptures = new Map();
 const consoleCaptures = new Map();
+const keepalivePorts = new Map();
 let nextDialogScope = 1;
 let nextManualExecutionGeneration = 1;
 const DEFAULT_CDP_TIMEOUT_MS = 20000;
@@ -60,7 +60,7 @@ const MAX_CDP_TIMEOUT_MS = 120000;
 // lifecycle with a generation that survives service-worker eviction (session
 // storage lasts for the browser session) so open_new_tab never accepts a stale
 // registration merely because the numeric id matches.
-const TAB_GENERATIONS_KEY = 'tmwdTabGenerationsV1'; // gitleaks:allow - storage key, not a credential
+const TAB_GENERATIONS_KEY = 'abmTabGenerationsV1'; // gitleaks:allow - storage key, not a credential
 const tabGenerations = new Map();
 const tabGenerationAssignments = new Map();
 let tabGenerationsLoadPromise = null;
@@ -70,7 +70,7 @@ let nextTabGeneration = 1;
 // Native tab creation is a two-step side effect (create, then record the
 // result). Persist the operation before create so a service-worker restart
 // can reconcile an in-flight operation without issuing a second create.
-const CREATE_OPERATIONS_KEY = 'tmwdCreateOperationsV1'; // gitleaks:allow - storage key, not a credential
+const CREATE_OPERATIONS_KEY = 'abmCreateOperationsV1'; // gitleaks:allow - storage key, not a credential
 const CREATE_OPERATION_MAX_RECORDS = 256;
 const CREATE_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
 const createOperations = new Map();
@@ -134,7 +134,7 @@ async function loadCreateOperations() {
       }
       pruneCreateOperations();
     } catch (error) {
-      console.log('[TMWD-WS] create operation storage unavailable', error);
+      console.log('[ABM-WS] create operation storage unavailable', error);
       throw error;
     }
     return createOperations;
@@ -194,7 +194,7 @@ function persistTabGenerations() {
   const snapshot = Object.fromEntries(tabGenerations);
   tabGenerationWriteQueue = tabGenerationWriteQueue
     .then(() => area.set({ [TAB_GENERATIONS_KEY]: snapshot }))
-    .catch(error => console.log('[TMWD-WS] tab generation persistence unavailable', error));
+    .catch(error => console.log('[ABM-WS] tab generation persistence unavailable', error));
   return tabGenerationWriteQueue;
 }
 
@@ -295,8 +295,12 @@ async function closeTabsWithGenerations(tabIds, expected) {
 }
 
 // --- Temporary, origin-scoped site-permission leases ----------------------
-const PERMISSION_LEASES_KEY = 'tmwdPermissionLeases';
-const PERMISSION_ALARM_PREFIX = 'tmwd-permission:';
+const PERMISSION_LEASES_KEY = 'abmPermissionLeases';
+// Pre-ABM key names. Only chrome.storage.local values need this: the session
+// area dies with the browser, so a renamed session key simply starts empty.
+const LEGACY_PERMISSION_LEASES_KEY = 'tmwdPermissionLeases';
+const LEGACY_PERMISSION_ALARM_PREFIX = 'tmwd-permission:';
+const PERMISSION_ALARM_PREFIX = 'abm-permission:';
 const PERMISSION_LEASE_STAGED = 'staged';
 const PERMISSION_LEASE_ACTIVE = 'active';
 const SITE_PERMISSION_SETTINGS = new Set(['allow', 'block', 'ask']);
@@ -359,8 +363,24 @@ async function schedulePermissionRetry(lease) {
 
 async function loadPermissionLeases() {
   const stored = await chrome.storage.local.get(PERMISSION_LEASES_KEY);
-  const leases = stored[PERMISSION_LEASES_KEY];
-  return Array.isArray(leases) ? leases.filter(lease => lease && typeof lease === 'object') : [];
+  let leases = stored[PERMISSION_LEASES_KEY];
+  if (!Array.isArray(leases)) {
+    // Migration from the pre-ABM key name, read only when the current key holds
+    // nothing. A lease records the site permission value that was in effect
+    // BEFORE automation raised it, so a lease that becomes unreadable leaves
+    // the user's browser permanently elevated with no record of what to restore.
+    const legacyStored = await chrome.storage.local.get(LEGACY_PERMISSION_LEASES_KEY);
+    const legacy = legacyStored[LEGACY_PERMISSION_LEASES_KEY];
+    if (!Array.isArray(legacy)) return [];
+    leases = legacy;
+    try {
+      await chrome.storage.local.set({ [PERMISSION_LEASES_KEY]: legacy });
+      await chrome.storage.local.remove?.(LEGACY_PERMISSION_LEASES_KEY);
+    } catch (_) {
+      // Keep serving the legacy data; the next call retries the copy.
+    }
+  }
+  return leases.filter(lease => lease && typeof lease === 'object');
 }
 
 async function savePermissionLeases(leases) {
@@ -489,7 +509,11 @@ async function restoreExpiredPermissionLeases() {
 
 function installPermissionLeaseRecoveryHooks() {
   chrome.alarms.onAlarm.addListener(async alarm => {
-    if (alarm?.name?.startsWith(PERMISSION_ALARM_PREFIX)) {
+    // Alarms outlive the rename, so an already-scheduled restore still carries
+    // the pre-ABM prefix. Match both or that lease's deadline passes unnoticed
+    // and the elevated permission is never handed back.
+    if (alarm?.name?.startsWith(PERMISSION_ALARM_PREFIX) ||
+        alarm?.name?.startsWith(LEGACY_PERMISSION_ALARM_PREFIX)) {
       return await restoreExpiredPermissionLeases();
     }
   });
@@ -841,6 +865,43 @@ function networkCaptureSnapshot(capture, includeRequests = true) {
   return result;
 }
 
+function filterNetworkCaptureEntries(entries, msg = {}) {
+  const pattern = typeof msg.urlPattern === 'string' && msg.urlPattern ? msg.urlPattern : '';
+  let matcher = null;
+  if (pattern) {
+    try {
+      matcher = new RegExp(pattern);
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'invalid_url_pattern',
+        error: `url_pattern is not a valid JavaScript RegExp: ${error?.message || String(error)}`,
+      };
+    }
+  }
+  const resourceType = typeof msg.resourceType === 'string' ? msg.resourceType.toLowerCase() : '';
+  const statusMin = Number.isInteger(msg.statusMin) ? msg.statusMin : null;
+  const statusMax = Number.isInteger(msg.statusMax) ? msg.statusMax : null;
+  const includeBodies = msg.includeResponseBodies !== false;
+  const filtered = entries.filter(entry => {
+    if (matcher && !matcher.test(String(entry.url || ''))) return false;
+    if (resourceType && String(entry.type || '').toLowerCase() !== resourceType) return false;
+    if (statusMin !== null && (!Number.isFinite(entry.status) || entry.status < statusMin)) return false;
+    if (statusMax !== null && (!Number.isFinite(entry.status) || entry.status > statusMax)) return false;
+    return true;
+  }).map(entry => {
+    if (includeBodies) return entry;
+    const copy = { ...entry };
+    delete copy.body;
+    delete copy.body_size;
+    delete copy.body_truncated;
+    delete copy.base64_encoded;
+    delete copy.body_error;
+    return copy;
+  });
+  return { ok: true, entries: filtered };
+}
+
 function consoleCaptureSnapshot(capture, includeMessages = true) {
   const result = {
     status: capture.active ? 'capturing' : 'stopped',
@@ -974,6 +1035,7 @@ function handleConsoleCaptureEvent(tabId, method, params = {}) {
       url: details.url || '',
       line_number: details.lineNumber,
       column_number: details.columnNumber,
+      execution_context_id: details.executionContextId,
       stack_trace: details.stackTrace || null,
     };
   }
@@ -1037,6 +1099,8 @@ async function handleNetworkCaptureCommand(msg, sender) {
   if (msg.method === 'stop') {
     const capture = networkCaptures.get(tabId);
     if (!capture) return { ok: true, data: { status: 'not_running', tab_id: tabId, requests: [] } };
+    const filtered = filterNetworkCaptureEntries(capture.entries, msg);
+    if (!filtered.ok) return filtered;
     capture.active = false;
     capture.stoppedAt ||= Date.now();
     const lease = capture.debuggerLease;
@@ -1045,15 +1109,22 @@ async function handleNetworkCaptureCommand(msg, sender) {
     // event invalidates captures still present in the map; a normal stop must
     // not be mislabeled as an unexpected "debugger detached" failure.
     networkCaptures.delete(tabId);
-    // Release this capture's lease before waiting for response bodies. That
-    // synchronously rejects only commands owned by this lease and clears their
-    // watchdogs, so a late body timeout cannot invalidate another capture that
-    // is sharing the same debugger attachment (for example Console capture).
+    // Release this capture's lease BEFORE waiting for response bodies, and
+    // accept that bodies still in flight at stop time come back as body_error.
+    // That is the deliberate trade: releasing first synchronously rejects only
+    // the commands owned by this lease and clears their watchdogs, so a late
+    // body timeout cannot call forceInvalidateDebuggerAttachment on a debugger
+    // attachment shared with another capture (Console) on the same tab and tear
+    // that one down too. Waiting first would keep the bodies but let one slow
+    // response kill a co-tenant capture.
     if (lease) try { await detachAbmDebugger(lease); } catch (_) {}
     if (capture.pendingBodies.size) {
       await Promise.allSettled([...capture.pendingBodies]);
     }
-    return { ok: true, data: networkCaptureSnapshot(capture, true) };
+    const snapshot = networkCaptureSnapshot(capture, false);
+    snapshot.requests = filtered.entries;
+    snapshot.filtered = Boolean(msg.urlPattern || msg.resourceType || msg.statusMin !== undefined || msg.statusMax !== undefined || msg.includeResponseBodies === false);
+    return { ok: true, data: snapshot };
   }
   return { ok: false, code: 'unknown_method', error: `Unknown network_capture method: ${msg.method}` };
 }
@@ -1106,13 +1177,29 @@ async function handleConsoleCaptureCommand(msg, sender) {
     }
     const offset = boundedCaptureInteger(msg.offset, 0, 0, capture.messages.length);
     const maxItems = boundedCaptureInteger(msg.maxItems, 200, 1, 1000);
-    const total = capture.messages.length;
-    const messages = capture.messages.slice(offset, offset + maxItems);
+    let pool = capture.messages;
+    let filtered = false;
+    if (msg.filter === 'user') {
+      const contexts = runtimeExecutionContexts.get(tabId);
+      const defaultIds = new Set();
+      if (contexts) {
+        for (const ctx of contexts.values()) {
+          if (ctx.auxData?.isDefault) defaultIds.add(ctx.id);
+        }
+      }
+      pool = capture.messages.filter(m =>
+        m.execution_context_id != null && defaultIds.has(m.execution_context_id)
+      );
+      filtered = true;
+    }
+    const total = pool.length;
+    const messages = pool.slice(offset, offset + maxItems);
     const data = {
       ...consoleCaptureSnapshot(capture, false),
       messages,
       offset,
       total,
+      filtered,
       next_offset: offset + messages.length < total ? offset + messages.length : null,
       truncated: offset + messages.length < total,
     };
@@ -1176,6 +1263,15 @@ function handleDebuggerEvent(source, method, params) {
   }
   if (method === 'Page.javascriptDialogClosed') {
     protocolDialogStates.delete(tabId);
+    // The dialog can also be closed by the user clicking it, or by anything else
+    // attached to this tab. handledSignal is what releases a retained manual
+    // navigation lease and handle_dialog is its only other resolver, so without
+    // this the lease would sit attached until the retention timer expires.
+    const closedPending = pendingNavigations.get(tabId);
+    if (closedPending?.action === 'manual' && closedPending.dialog &&
+        !closedPending.released && closedPending.resolveHandled) {
+      closedPending.resolveHandled({ kind: 'closed' });
+    }
     return;
   }
   if (method !== 'Page.javascriptDialogOpening') return;
@@ -1222,43 +1318,18 @@ function handleDebuggerEvent(source, method, params) {
 chrome.debugger.onEvent.addListener(handleDebuggerEvent);
 
 chrome.debugger.onDetach.addListener((source) => {
-  if (!source.tabId) return;
-  const key = debuggerTargetKey(source);
-  const attachment = debuggerAttachments.get(key);
-  if (attachment) {
-    attachment.attached = false;
-    attachment.invalidated = true;
-    attachment.invalidationReason = 'debugger detached';
-    attachment.refs = 0;
-    rejectPendingDebuggerCommands(attachment, 'debugger detached');
-    if (debuggerAttachments.get(key) === attachment) {
-      debuggerAttachments.delete(key);
-    }
-  }
-  dialogAttachedTabs.delete(source.tabId);
-  protocolDialogStates.delete(source.tabId);
-  const navigationPending = pendingNavigations.get(source.tabId) || null;
-  dialogEventSequences.delete(source.tabId);
-  manualExecutionGenerations.delete(source.tabId);
-  runtimeExecutionContexts.delete(source.tabId);
-  if (typeof markCaptureTabInvalidated === 'function') {
-    markCaptureTabInvalidated(source.tabId, 'debugger detached');
-  }
-  if (navigationPending) {
-    void cancelNavigationPending(
-      source.tabId, 'debugger detached', navigationPending,
-    );
-  }
-  void cancelManualExecution(source.tabId, 'debugger detached');
+  void handleDebuggerDetach(source);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  const attachment = debuggerAttachments.get(`tab:${tabId}`);
+  const attachment = debuggerAttachmentForTarget({ tabId });
   if (attachment) {
     attachment.invalidationReason = 'tab removed';
     attachment.refs = 0;
     rejectPendingDebuggerCommands(attachment, 'tab removed');
-    debuggerAttachments.delete(`tab:${tabId}`);
+    if (debuggerAttachments.get(attachment.key) === attachment) {
+      debuggerAttachments.delete(attachment.key);
+    }
   }
   dialogAttachedTabs.delete(tabId);
   protocolDialogStates.delete(tabId);
@@ -1309,10 +1380,167 @@ function claimManualExecDialogPolicy(tabId, source) {
 }
 
 function debuggerTargetKey(target) {
-  if (target.tabId) return `tab:${target.tabId}`;
-  if (target.targetId) return `target:${target.targetId}`;
-  if (target.extensionId) return `extension:${target.extensionId}`;
+  if (target?.tabId) return `tab:${target.tabId}`;
+  if (target?.targetId) return `target:${target.targetId}`;
+  if (target?.extensionId) return `extension:${target.extensionId}`;
   throw new Error('debugger target is missing an identifier');
+}
+
+function debuggerTargetAliases(target) {
+  const aliases = new Set();
+  if (target?.tabId) aliases.add(`tab:${target.tabId}`);
+  if (target?.targetId) aliases.add(`target:${target.targetId}`);
+  if (target?.extensionId) aliases.add(`extension:${target.extensionId}`);
+  return aliases;
+}
+
+function debuggerAttachmentForAliases(aliases) {
+  for (const attachment of debuggerAttachments.values()) {
+    if ([...aliases].some(alias => attachment.aliases?.has(alias))) return attachment;
+  }
+  return null;
+}
+
+async function resolveDebuggerTargetIdentity(target) {
+  const original = { ...target };
+  const aliases = debuggerTargetAliases(original);
+  if (original.tabId || typeof chrome?.debugger?.getTargets !== 'function') {
+    return {
+      key: debuggerTargetKey(original),
+      target: original,
+      aliases,
+      tabId: original.tabId || null,
+    };
+  }
+  let targets = [];
+  try {
+    targets = await chrome.debugger.getTargets();
+  } catch (_) {
+    return {
+      key: debuggerTargetKey(original),
+      target: original,
+      aliases,
+      tabId: null,
+    };
+  }
+  let match = null;
+  if (original.targetId) {
+    match = targets.find(item => item?.id === original.targetId || item?.targetId === original.targetId) || null;
+  } else if (original.extensionId) {
+    const candidates = targets.filter(item => item?.extensionId === original.extensionId);
+    match = candidates.find(item => item?.type === 'background_page') ||
+      (candidates.length === 1 ? candidates[0] : null);
+  }
+  if (!match) {
+    return {
+      key: debuggerTargetKey(original),
+      target: original,
+      aliases,
+      tabId: null,
+    };
+  }
+  const targetId = match.id || match.targetId || original.targetId || null;
+  const tabId = match.tabId || null;
+  if (targetId) aliases.add(`target:${targetId}`);
+  if (tabId) aliases.add(`tab:${tabId}`);
+  if (match.extensionId) aliases.add(`extension:${match.extensionId}`);
+  const canonicalTarget = tabId ? { tabId } : (targetId ? { targetId } : original);
+  return {
+    key: debuggerTargetKey(canonicalTarget),
+    target: canonicalTarget,
+    aliases,
+    tabId,
+  };
+}
+
+function debuggerAttachmentForTarget(target) {
+  const aliases = debuggerTargetAliases(target);
+  return debuggerAttachments.get(debuggerTargetKey(target)) ||
+    debuggerAttachmentForAliases(aliases);
+}
+
+function debuggerDetachMarkers() {
+  const now = Date.now();
+  const entries = (debuggerDetachMarkers.entries || []).filter(
+    marker => marker.expiresAt > now,
+  );
+  debuggerDetachMarkers.entries = entries;
+  return entries;
+}
+
+function rememberDebuggerDetach(attachment) {
+  const aliases = new Set(attachment?.aliases || []);
+  for (const alias of debuggerTargetAliases(attachment?.target || {})) aliases.add(alias);
+  const marker = {
+    attachment,
+    attachEpoch: attachment?.attachEpoch,
+    aliases,
+    expiresAt: Date.now() + 5000,
+  };
+  debuggerDetachMarkers().push(marker);
+  return marker;
+}
+
+function forgetDebuggerDetach(marker) {
+  if (!marker) return;
+  const entries = debuggerDetachMarkers();
+  const index = entries.indexOf(marker);
+  if (index >= 0) entries.splice(index, 1);
+}
+
+async function detachDebuggerFromChrome(attachment) {
+  const detachMarker = rememberDebuggerDetach(attachment);
+  try {
+    return await Promise.race([
+      chrome.debugger.detach(attachment.target),
+      new Promise(resolve => setTimeout(resolve, 1000)),
+    ]);
+  } catch (error) {
+    forgetDebuggerDetach(detachMarker);
+    throw error;
+  }
+}
+
+function consumeDebuggerDetach(source) {
+  const aliases = debuggerTargetAliases(source || {});
+  const entries = debuggerDetachMarkers();
+  const index = entries.findIndex(
+    marker => [...aliases].some(alias => marker.aliases.has(alias)),
+  );
+  return index >= 0 ? entries.splice(index, 1)[0] : null;
+}
+
+function handleDebuggerDetach(source) {
+  const currentAttachment = debuggerAttachmentForTarget(source || {});
+  const expectedMarker = consumeDebuggerDetach(source);
+  const expectedAttachment = expectedMarker?.attachment || null;
+  const eventBelongsToCurrent = expectedAttachment === currentAttachment &&
+    expectedMarker?.attachEpoch === currentAttachment?.attachEpoch;
+  if (expectedMarker && currentAttachment && !eventBelongsToCurrent) {
+    if (expectedAttachment !== currentAttachment) {
+      expectedAttachment.attached = false;
+      expectedAttachment.invalidated = true;
+      expectedAttachment.invalidationReason = 'debugger detached';
+      expectedAttachment.refs = 0;
+      rejectPendingDebuggerCommands(expectedAttachment, 'debugger detached');
+    }
+    return;
+  }
+  const attachment = currentAttachment || expectedAttachment;
+  const tabId = source?.tabId || attachment?.target?.tabId || null;
+  if (attachment) {
+    attachment.attached = false;
+    attachment.invalidated = true;
+    attachment.invalidationReason = 'debugger detached';
+    attachment.refs = 0;
+    rejectPendingDebuggerCommands(attachment, 'debugger detached');
+    if (debuggerAttachments.get(attachment.key) === attachment) {
+      debuggerAttachments.delete(attachment.key);
+    }
+  }
+  if (!tabId) return;
+  manualExecutionGenerations.delete(tabId);
+  clearDebuggerTabState(tabId, 'debugger detached');
 }
 
 function boundedCdpTimeout(value, fallback = 20000, minimum = 100) {
@@ -1383,36 +1611,143 @@ function rejectPendingDebuggerCommandsForLease(attachment, lease, reason) {
   }
 }
 
-async function attachAbmDebugger(target) {
-  const key = debuggerTargetKey(target);
+function debuggerAttachTimeoutError(timeoutMs, stage = '') {
+  const detail = stage ? ` while ${stage}` : '';
+  const error = new Error(`cdp_timeout: debugger attach exceeded ${timeoutMs}ms${detail}`);
+  error.code = 'cdp_timeout';
+  error.method = 'chrome.debugger.attach';
+  error.timeoutMs = timeoutMs;
+  return error;
+}
+
+function rejectPendingDebuggerAttach(attachment, error) {
+  if (!attachment || attachment.attachSettled || attachment.attachTimedOut) return;
+  attachment.attachTimedOut = true;
+  attachment.attachTimeoutError = error;
+  if (debuggerRecoveryPromises.get(attachment.key) === attachment.recoveryPromise) {
+    debuggerRecoveryPromises.delete(attachment.key);
+  }
+  attachment.rejectAttach?.(error);
+}
+
+function debuggerAttachRemainingMs(deadlineEpochMs, timeoutMs, stage) {
+  const remaining = Math.floor(deadlineEpochMs - Date.now());
+  if (remaining > 0) return remaining;
+  throw debuggerAttachTimeoutError(timeoutMs, stage);
+}
+
+async function waitForDebuggerAttachStage(
+  promise, deadlineEpochMs, timeoutMs, stage,
+) {
+  const remaining = debuggerAttachRemainingMs(deadlineEpochMs, timeoutMs, stage);
+  let timer = null;
+  const watchdog = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(debuggerAttachTimeoutError(timeoutMs, stage)),
+      remaining,
+    );
+  });
+  try {
+    return await Promise.race([promise, watchdog]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function attachAbmDebugger(target, timeoutMs = 20000) {
+  const boundedAttachTimeout = boundedCdpTimeout(timeoutMs, 20000, 1);
+  return await attachAbmDebuggerBeforeDeadline(
+    target, Date.now() + boundedAttachTimeout, boundedAttachTimeout,
+  );
+}
+
+async function attachAbmDebuggerBeforeDeadline(
+  target, deadlineEpochMs, boundedAttachTimeout,
+) {
+  const identity = await waitForDebuggerAttachStage(
+    Promise.resolve().then(() => resolveDebuggerTargetIdentity(target)),
+    deadlineEpochMs,
+    boundedAttachTimeout,
+    'resolving the target',
+  );
+  let attachment = debuggerAttachments.get(identity.key) ||
+    debuggerAttachmentForAliases(identity.aliases);
+  const key = attachment?.key || identity.key;
   const activeRecovery = debuggerRecoveryPromises.get(key);
   if (activeRecovery) {
-    await activeRecovery;
-    return await attachAbmDebugger(target);
+    try {
+      await waitForDebuggerAttachStage(
+        activeRecovery, deadlineEpochMs, boundedAttachTimeout,
+        'waiting for debugger recovery',
+      );
+    } catch (error) {
+      if (debuggerFailureCode(error) === 'cdp_timeout') {
+        if (debuggerRecoveryPromises.get(key) === activeRecovery) {
+          debuggerRecoveryPromises.delete(key);
+        }
+        if (attachment) {
+          rejectPendingDebuggerAttach(attachment, error);
+          void forceInvalidateDebuggerAttachment(
+            attachment, error.message,
+          ).catch(() => {});
+        }
+      }
+      throw error;
+    }
+    return await attachAbmDebuggerBeforeDeadline(
+      target, deadlineEpochMs, boundedAttachTimeout,
+    );
   }
-  let attachment = debuggerAttachments.get(key);
   if (attachment?.detachingPromise) {
-    try { await attachment.detachingPromise; } catch (_) {}
-    return await attachAbmDebugger(target);
+    try {
+      await waitForDebuggerAttachStage(
+        attachment.detachingPromise, deadlineEpochMs, boundedAttachTimeout,
+        'waiting for debugger detach',
+      );
+    } catch (error) {
+      if (debuggerFailureCode(error) === 'cdp_timeout') {
+        void forceInvalidateDebuggerAttachment(
+          attachment, error.message,
+        ).catch(() => {});
+        throw error;
+      }
+    }
+    return await attachAbmDebuggerBeforeDeadline(
+      target, deadlineEpochMs, boundedAttachTimeout,
+    );
   }
   if (!attachment) {
     attachment = {
       key,
-      target: { ...target },
+      target: { ...identity.target },
+      aliases: new Set(identity.aliases),
       refs: 0,
       attached: false,
       invalidated: false,
       invalidationReason: null,
       generation: `${Date.now()}-${Math.random()}`,
+      attachEpoch: `${Date.now()}-${Math.random()}`,
       detachingPromise: null,
       attachPromise: null,
+      attachAbortPromise: null,
+      rejectAttach: null,
+      attachSettled: false,
+      attachTimedOut: false,
+      attachTimeoutError: null,
+      recoveryPromise: null,
       pendingCommands: new Set(),
     };
     debuggerAttachments.set(key, attachment);
+    attachment.attachAbortPromise = new Promise((_, reject) => {
+      attachment.rejectAttach = reject;
+    });
     const rawAttach = () => chrome.debugger.attach(attachment.target, '1.3');
     attachment.attachPromise = Promise.resolve()
       .then(rawAttach)
       .catch(async (error) => {
+        if (attachment.attachTimedOut) {
+          throw attachment.attachTimeoutError || error;
+        }
         if (debuggerFailureCode(error) !== 'debugger_conflict') throw error;
         // A service-worker restart can lose our in-memory lease map while
         // Chrome still considers this extension attached. Detach is scoped to
@@ -1428,6 +1763,9 @@ async function attachAbmDebugger(target) {
             // callers get the correct close-the-competing-debugger guidance.
             throw error;
           }
+          if (attachment.attachTimedOut) {
+            throw attachment.attachTimeoutError;
+          }
           attachment.invalidated = false;
           attachment.invalidationReason = null;
           attachment.detachingPromise = null;
@@ -1436,8 +1774,10 @@ async function attachAbmDebugger(target) {
           // attachment, so restore them before those leases begin issuing work.
           attachment.refs = waitingRefs;
           debuggerAttachments.set(key, attachment);
+          attachment.attachEpoch = `${Date.now()}-${Math.random()}`;
           await rawAttach();
         })();
+        attachment.recoveryPromise = recovery;
         debuggerRecoveryPromises.set(key, recovery);
         try {
           await recovery;
@@ -1447,15 +1787,56 @@ async function attachAbmDebugger(target) {
           }
         }
       })
-      .then(() => {
+      .then(async () => {
+        if (attachment.attachTimedOut || debuggerAttachments.get(key) !== attachment) {
+          // The caller already received a bounded timeout. If this abandoned
+          // attach completes later, detach it unless a newer lease now owns
+          // the same target; detaching in that case would tear down valid work.
+          attachment.attached = true;
+          const replacement = debuggerAttachments.get(key) ||
+            debuggerAttachmentForAliases(attachment.aliases);
+          if (!replacement) {
+            try { await detachDebuggerFromChrome(attachment); } catch (_) {}
+          }
+          attachment.attached = false;
+          if (attachment.target.tabId && !replacement) {
+            dialogAttachedTabs.delete(attachment.target.tabId);
+          }
+          throw attachment.attachTimeoutError || debuggerAttachTimeoutError(
+            boundedAttachTimeout,
+          );
+        }
         attachment.attached = true;
+        attachment.attachSettled = true;
         if (attachment.target.tabId) dialogAttachedTabs.add(attachment.target.tabId);
       });
+  } else {
+    for (const alias of identity.aliases) attachment.aliases.add(alias);
   }
   attachment.refs += 1;
   const lease = { attachment, generation: attachment.generation, released: false };
+  let attachTimer = null;
   try {
-    await attachment.attachPromise;
+    const remaining = debuggerAttachRemainingMs(
+      deadlineEpochMs, boundedAttachTimeout, 'calling chrome.debugger.attach',
+    );
+    const watchdog = new Promise((_, reject) => {
+      attachTimer = setTimeout(() => {
+        if (attachment.attachSettled || attachment.attachTimedOut) return;
+        const error = debuggerAttachTimeoutError(boundedAttachTimeout);
+        rejectPendingDebuggerAttach(attachment, error);
+        // Invalidation removes the poisoned shared promise immediately. The
+        // late-completion branch above cleans up a Chrome attach that arrives
+        // after the caller has already moved on.
+        void forceInvalidateDebuggerAttachment(
+          attachment, error.message,
+        ).catch(() => {});
+        reject(error);
+      }, remaining);
+    });
+    await Promise.race([
+      attachment.attachPromise, attachment.attachAbortPromise, watchdog,
+    ]);
     return lease;
   } catch (error) {
     lease.released = true;
@@ -1464,6 +1845,8 @@ async function attachAbmDebugger(target) {
       debuggerAttachments.delete(key);
     }
     throw error;
+  } finally {
+    if (attachTimer !== null) clearTimeout(attachTimer);
   }
 }
 
@@ -1486,10 +1869,7 @@ async function detachAbmDebugger(lease, force = false, excludedCommand = null) {
   attachment.detachingPromise = (async () => {
     try {
       if (attachment.attached) {
-        await Promise.race([
-          chrome.debugger.detach(attachment.target),
-          new Promise(resolve => setTimeout(resolve, 1000)),
-        ]);
+        await detachDebuggerFromChrome(attachment);
       }
     } finally {
       attachment.attached = false;
@@ -1513,9 +1893,6 @@ async function forceInvalidateDebuggerAttachment(
   attachment.invalidated = true;
   attachment.invalidationReason = reason;
   attachment.refs = 0;
-  if (debuggerAttachments.get(attachment.key) === attachment) {
-    debuggerAttachments.delete(attachment.key);
-  }
   rejectPendingDebuggerCommands(attachment, reason, triggeringCommand);
   if (attachment.target.tabId) clearDebuggerTabState(attachment.target.tabId, reason);
   attachment.invalidatingPromise = detachAbmDebugger(
@@ -1599,7 +1976,8 @@ async function handleProtocolDialog(msg) {
     // explicit accept/dismiss through the owning lease instead; it already has
     // Page enabled and is released only after navigation + handledSignal settle.
     if (owningNavigation?.action === 'manual' && owningNavigation.dialog &&
-        owningNavigation.debuggerLease && !owningNavigation.released) {
+        owningNavigation.debuggerLease && !owningNavigation.released &&
+        !owningNavigation.debuggerLease.attachment?.invalidated) {
       debuggerLease = owningNavigation.debuggerLease;
       borrowedNavigationLease = true;
     } else {
@@ -1665,6 +2043,12 @@ function classifyNavigationOutcome({
   return 'ok';
 }
 
+// How long a manual beforeunload dialog may keep holding the CDP lease that
+// issued Page.navigate. That retention is deliberate (see
+// scheduleManualNavigationRelease) and outlives the navigate command, so it needs
+// its own ceiling rather than the command's deadline.
+const MANUAL_DIALOG_RETENTION_MS = 120000;
+
 async function releaseNavigationPending(pending) {
   if (!pending) return;
   if (pending.releasePromise) return await pending.releasePromise;
@@ -1689,6 +2073,25 @@ async function releaseNavigationPending(pending) {
 function scheduleManualNavigationRelease(pending) {
   if (!pending || pending.releasePromise || pending.cleanupPromise ||
       !pending.navigationPromise || !pending.handledSignal) return;
+  // navigateWithDialogPolicy returns while this pending still owns the lease, so
+  // nothing on the request path can free it: handledSignal is settled only by
+  // handle_dialog or by Page.javascriptDialogClosed. If neither ever arrives —
+  // the caller walked away, the event was dropped, the service worker was
+  // evicted and revived — the lease stays attached and every later execute_js on
+  // this tab fails with "debugger already attached". Bound the retention the
+  // same way pendingManualExecutions bounds its own armed state.
+  pending.releaseTimer = setTimeout(() => {
+    if (pendingNavigations.get(pending.tabId) === pending) {
+      void cancelNavigationPending(
+        pending.tabId, 'manual dialog ownership expired before it was handled', pending,
+      );
+    } else {
+      // Superseded by a newer navigate on this tab: the map no longer points
+      // here, so cancelNavigationPending would decline and this lease would stay
+      // attached for good. Hand it back directly.
+      void releaseNavigationPending(pending);
+    }
+  }, MANUAL_DIALOG_RETENTION_MS);
   pending.cleanupPromise = Promise.all([
     pending.navigationPromise,
     pending.handledSignal,
@@ -1704,19 +2107,58 @@ async function cancelNavigationPending(tabId, reason, expectedPending = null) {
   return true;
 }
 
+function navigationDeadlineRemaining(deadlineEpochMs, stage) {
+  const remaining = Math.floor(deadlineEpochMs - Date.now());
+  if (remaining >= 100) return remaining;
+  const error = new Error(`cdp_timeout: navigation deadline exhausted ${stage}`);
+  error.code = 'cdp_timeout';
+  throw error;
+}
+
+async function enablePageForNavigation(tabId, deadlineEpochMs) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let lease = null;
+    try {
+      lease = await attachAbmDebugger({ tabId });
+      const remaining = navigationDeadlineRemaining(
+        deadlineEpochMs, 'before Page.enable',
+      );
+      await sendDebuggerCommandWithTimeout(
+        lease,
+        'Page.enable',
+        {},
+        Math.min(remaining, 2500),
+        1,
+      );
+      return lease;
+    } catch (error) {
+      lastError = error;
+      if (lease) {
+        try { await detachAbmDebugger(lease); } catch (_) {}
+      }
+      const code = debuggerFailureCode(error);
+      const retryable = code === 'cdp_timeout' || code === 'debugger_detached';
+      if (attempt > 0 || !retryable || deadlineEpochMs - Date.now() < 150) {
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError || new Error('cdp_error: Page.enable failed before navigation');
+}
+
 async function navigateWithDialogPolicy(msg) {
   const tabId = Number(msg.tabId);
   const action = msg.beforeunload;
   if (!Number.isInteger(tabId)) return { ok: false, error: 'navigate requires tabId' };
   if (!validDialogPolicy(action)) return { ok: false, error: 'invalid beforeunload action' };
+  const deadlineEpochMs = Date.now() + boundedCdpTimeout(msg.timeoutMs, 15000);
   let debuggerLease = null;
   let pending = null;
   try {
     const beforeTab = await chrome.tabs.get(tabId);
-    debuggerLease = await attachAbmDebugger({ tabId });
-    await sendDebuggerCommandWithTimeout(
-      debuggerLease, 'Page.enable', {}, boundedCdpTimeout(msg.timeoutMs),
-    );
+    debuggerLease = await enablePageForNavigation(tabId, deadlineEpochMs);
     let resolveDialog;
     const dialogPromise = new Promise(resolve => { resolveDialog = resolve; });
     let resolveHandled;
@@ -1739,14 +2181,21 @@ async function navigateWithDialogPolicy(msg) {
     pending.cancelSignal = new Promise(resolve => { resolveCancel = resolve; });
     pending.resolveCancel = resolveCancel;
     pendingNavigations.set(tabId, pending);
+    const navigationBudget = navigationDeadlineRemaining(
+      deadlineEpochMs, 'before Page.navigate',
+    );
     const navigationPromise = sendDebuggerCommandWithTimeout(
       debuggerLease, 'Page.navigate', { url: msg.url },
-      boundedCdpTimeout(msg.timeoutMs),
+      navigationBudget,
+      1,
     ).then(value => ({ kind: 'navigation', value })).catch(error => ({
       kind: 'error', error: error.message || String(error),
     }));
     pending.navigationPromise = navigationPromise;
-    const waitMs = Math.max(100, Math.min(Number(msg.timeoutMs) || 15000, 30000));
+    const waitMs = Math.min(
+      navigationDeadlineRemaining(deadlineEpochMs, 'before navigation wait'),
+      30000,
+    );
     let first = await Promise.race([
       navigationPromise,
       dialogPromise.then(dialog => ({ kind: 'dialog', dialog })),
@@ -1755,9 +2204,13 @@ async function navigateWithDialogPolicy(msg) {
     ]);
     // Page.navigate can resolve just before the dialog event is delivered.
     if (first.kind === 'navigation' && !pending.dialog) {
+      const dialogGraceMs = Math.min(
+        navigationDeadlineRemaining(deadlineEpochMs, 'before dialog grace'),
+        250,
+      );
       first = await Promise.race([
         dialogPromise.then(dialog => ({ kind: 'dialog', dialog })),
-        new Promise(resolve => setTimeout(() => resolve(first), 250)),
+        new Promise(resolve => setTimeout(() => resolve(first), dialogGraceMs)),
       ]);
     }
     const dialog = pending.dialog || (first.kind === 'dialog' ? first.dialog : null);
@@ -1770,9 +2223,15 @@ async function navigateWithDialogPolicy(msg) {
     let navigationKind = first.kind;
     let navigationError = first.kind === 'error' ? first.error : null;
     if (dialog && action === 'accept') {
+      const acceptWaitMs = Math.min(
+        navigationDeadlineRemaining(deadlineEpochMs, 'before accepted navigation wait'),
+        3000,
+      );
       const completed = await Promise.race([
         navigationPromise,
-        new Promise(resolve => setTimeout(() => resolve({ kind: 'timeout' }), 3000)),
+        new Promise(resolve => setTimeout(
+          () => resolve({ kind: 'timeout' }), acceptWaitMs,
+        )),
       ]);
       navigationKind = completed.kind;
       navigationError = completed.kind === 'error' ? completed.error : null;
@@ -1780,7 +2239,7 @@ async function navigateWithDialogPolicy(msg) {
     }
     let tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!dialog || action === 'accept') {
-      const settleUntil = Date.now() + 3000;
+      const settleUntil = Math.min(Date.now() + 3000, deadlineEpochMs);
       while (tab && Date.now() < settleUntil) {
         const currentUrl = tab.pendingUrl || tab.url || '';
         if (currentUrl && (currentUrl !== beforeTab.url || currentUrl === msg.url)) break;
@@ -2033,7 +2492,9 @@ async function createTabAck(msg) {
       // Creation acknowledgement must not wait for the destination document.
       tab = await chrome.tabs.create({
         url: pending.url,
-        active: msg.active !== false,
+        // New automation tabs stay out of the user's way unless the caller
+        // explicitly requests foreground work.
+        active: msg.active === true,
       });
       try { generation = await tabGenerationFor(tab.id); } catch (_) {}
       if (!generation) generation = await scheduleNewTabGeneration(tab.id);
@@ -2101,7 +2562,7 @@ async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'site_permission') {
     // Keep operation failures in a successful bridge envelope so the server
     // can return structured unsupported/error results instead of losing them
-    // in TMWebDriver's generic extension exception path.
+    // in BrowserBridge's generic extension exception path.
     if (msg.action === 'set') return { ok: true, data: await setSitePermission(msg) };
     if (msg.action === 'reset') return { ok: true, data: await resetSitePermissionLeases(msg) };
     return { ok: true, data: { ok: false, error: 'invalid site permission action' } };
@@ -2126,7 +2587,7 @@ async function handleExtMessage(msg, sender) {
       token,
       policy: msg.policy,
       timeoutMs,
-      expiresAt: Date.now() + 120000,
+      expiresAt: Date.now() + dialogScopeWindowMs({ timeoutMs }),
       source: msg.policy === 'manual' && typeof msg.source === 'string'
         ? msg.source : null,
       claimed: false,
@@ -2450,7 +2911,21 @@ async function handleExtMessage(msg, sender) {
     'network_capture', 'console', 'downloads', 'bridge_status',
   ];
   if (msg.cmd === 'bridge_status') {
-    return { ok: true, data: { version: '2026.08.12-pass2-final', knownCommands } };
+    const extensionVersion = chrome.runtime.getManifest().version;
+    return { ok: true, data: {
+      version: '2026.08.12-pass2-final',
+      extension_version: extensionVersion,
+      manifest_version: extensionVersion,
+      protocol_version: 3,
+      capabilities: {
+        structured_locator: true,
+        console_user_filter: true,
+        network_stop_filter: true,
+        full_page_screenshot: true,
+        content_command_channel_removed: true,
+      },
+      knownCommands,
+    } };
   }
   return {
     ok: false,
@@ -2463,27 +2938,47 @@ async function handleExtMessage(msg, sender) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // tmwd_ping has its own dedicated listener below that answers synchronously;
+  // abm_ping has its own dedicated listener below that answers synchronously;
   // letting it fall through to handleExtMessage would race two sendResponse
   // calls on the same message and log a noisy "Unknown cmd". Skip it here.
-  if (msg && msg.cmd === 'tmwd_ping') return false;
-  handleExtMessage(msg, sender).then(sendResponse);
+  if (msg && msg.cmd === 'abm_ping') return false;
+  // A rejection here used to leave sendResponse uncalled, hanging the caller
+  // until it gave up on its own. Not every branch of handleExtMessage is
+  // exception-safe (chrome.storage in the site_permission path can reject), so
+  // convert any throw into the same {ok:false} envelope every other path uses.
+  handleExtMessage(msg || {}, sender).then(sendResponse, (error) => {
+    sendResponse({
+      ok: false,
+      code: 'handler_exception',
+      error: error?.message || String(error),
+    });
+  });
   return true;
 });
 
 async function handleCookies(msg, sender) {
   try {
-    // A page-driven request (via the TID channel) must not name an arbitrary
-    // site: the page only gets to read cookies for its own origin, not
-    // whatever URL it stuffed into msg.url. WS-bridge calls have no sender.tab
-    // and may name any tab. This is what stops a compromised page from reading
-    // the user's mail/bank cookies through this extension.
+    // Runtime messages are origin-bound to their sender tab. Bridge calls have
+    // no sender tab and may target the tab named by the authenticated channel.
     let url = (sender && sender.tab) ? sender.tab.url : (msg.url || null);
     if (!url && msg.tabId) {
       const tab = await chrome.tabs.get(msg.tabId);
       url = tab.url;
     }
-    const origin = url.match(/^https?:\/\/[^\/]+/)[0];
+    // Validate before touching chrome.cookies. A chrome://, edge://, file:// or
+    // empty URL used to reach `url.match(...)[0]` and throw a bare TypeError
+    // ("Cannot read properties of null"), which surfaced to the popup user as
+    // an internal error instead of an explanation. Kept self-contained (no
+    // isScriptable) so this handler stays independently testable.
+    const originMatch = typeof url === 'string' ? url.match(/^https?:\/\/[^\/]+/) : null;
+    if (!originMatch) {
+      return {
+        ok: false,
+        code: 'unsupported_url_scheme',
+        error: 'Cookies are only available for HTTP(S) pages.',
+      };
+    }
+    const origin = originMatch[0];
     const all = await chrome.cookies.getAll({ url });
     const part = await chrome.cookies.getAll({ url, partitionKey: { topLevelSite: origin } }).catch(() => []);
     const merged = [...all];
@@ -2504,6 +2999,39 @@ function batchDeadlineRemainingMs(msg, stage) {
   const error = new Error(`cdp_timeout: batch deadline exhausted ${stage}`);
   error.code = 'cdp_timeout';
   throw error;
+}
+
+async function attachDebuggerForBatch(tabId, msg, command) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const remaining = batchDeadlineRemainingMs(
+      msg, `before debugger attach attempt ${attempt + 1}`,
+    );
+    const requested = boundedCdpTimeout(command.timeoutMs ?? msg.timeoutMs);
+    let attachBudget = attempt === 0 ? Math.min(requested, 5000) : requested;
+    if (remaining !== null) {
+      const responseReserve = remaining > 1000 ? 250 : 1;
+      const usable = Math.max(1, remaining - responseReserve);
+      attachBudget = Math.min(attachBudget, usable);
+      if (attempt === 0 && usable > 1000) {
+        attachBudget = Math.min(attachBudget, Math.floor(usable / 2));
+      }
+    }
+    try {
+      return await attachAbmDebugger({ tabId }, attachBudget);
+    } catch (error) {
+      lastError = error;
+      if (attempt > 0 || debuggerFailureCode(error) !== 'cdp_timeout') throw error;
+      const retryRemaining = batchDeadlineRemainingMs(
+        msg, 'after debugger attach timeout',
+      );
+      if (retryRemaining !== null && retryRemaining <= 250) throw error;
+      // No CDP command has been dispatched yet, so this is the one page-input
+      // failure that is safe to retry automatically.
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError;
 }
 
 async function handleBatch(msg, sender) {
@@ -2531,7 +3059,7 @@ async function handleBatch(msg, sender) {
             attachedTabId = null;
             await detachAbmDebugger(previousLease);
           }
-          debuggerLease = await attachAbmDebugger({ tabId });
+          debuggerLease = await attachDebuggerForBatch(tabId, msg, c);
           attachedTabId = tabId;
           batchDeadlineRemainingMs(msg, `after attaching for ${c.method}`);
         }
@@ -2557,7 +3085,14 @@ async function handleBatch(msg, sender) {
         : 'ABM invalidated and detached the timed-out debugger lease; retry once on the same tab.',
     };
   } finally {
-    if (debuggerLease) try { await detachAbmDebugger(debuggerLease); } catch (_) {}
+    if (debuggerLease) {
+      try {
+        const needsForce = debuggerLease.attachment?.invalidated;
+        await detachAbmDebugger(debuggerLease, needsForce);
+      } catch (_) {}
+      debuggerLease = null;
+      attachedTabId = null;
+    }
   }
 }
 
@@ -2579,8 +3114,24 @@ async function handleCDP(msg, sender) {
   let debuggerLease = null;
   try {
     debuggerLease = await attachAbmDebugger(target);
+    let params = msg.params || {};
+    if (msg.method === 'Page.captureScreenshot' && msg.fullPage === true) {
+      const metrics = await sendDebuggerCommandWithTimeout(
+        debuggerLease, 'Page.getLayoutMetrics', {}, boundedCdpTimeout(msg.timeoutMs),
+      );
+      const size = metrics?.cssContentSize || metrics?.contentSize;
+      if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height) ||
+          size.width <= 0 || size.height <= 0) {
+        throw new Error('full-page screenshot could not resolve document dimensions');
+      }
+      params = {
+        ...params,
+        captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
+      };
+    }
     const result = await sendDebuggerCommandWithTimeout(
-      debuggerLease, msg.method, msg.params || {}, boundedCdpTimeout(msg.timeoutMs),
+      debuggerLease, msg.method, params, boundedCdpTimeout(msg.timeoutMs),
     );
     return { ok: true, data: result };
   } catch (e) {
@@ -2643,37 +3194,38 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
     // confirm() dialogs, which is the very bug this was meant to fix.
     //
     // Each command captures its OWN deadline. Two concurrent commands used to
-    // share one window.__tmwd_suppress_until slot: whichever finished first
+    // share one window.__abm_suppress_until slot: whichever finished first
     // zeroed it, un-suppressing the dialog while the other command's script
     // was still mid-flight. Only the command that set the CURRENT value may
     // clear it.
-    const _tmwdHasDialogScope = ${JSON.stringify(hasDialogScope)};
-    const _tmwdDeadline = _tmwdHasDialogScope ? Date.now() + 120000 : 0;
-    const _tmwdDialogToken = ${JSON.stringify(dialogToken)};
-    if (_tmwdHasDialogScope) {
-      const _tmwdDialogScope = {
-        token: _tmwdDialogToken,
+    const _abmHasDialogScope = ${JSON.stringify(hasDialogScope)};
+    const _abmDeadline = _abmHasDialogScope
+      ? Date.now() + ${dialogScopeWindowMs(dialogScope)} : 0;
+    const _abmDialogToken = ${JSON.stringify(dialogToken)};
+    if (_abmHasDialogScope) {
+      const _abmDialogScope = {
+        token: _abmDialogToken,
         policy: ${JSON.stringify(dialogPolicy)},
-        deadline: _tmwdDeadline,
+        deadline: _abmDeadline,
       };
-      const _tmwdScopes = Array.isArray(window.__tmwd_dialog_scopes)
-        ? window.__tmwd_dialog_scopes : [];
-      _tmwdScopes.push(_tmwdDialogScope);
-      window.__tmwd_dialog_scopes = _tmwdScopes;
-      window.__tmwd_suppress_until = Math.max(
-        _tmwdDeadline,
-        ..._tmwdScopes.map(scope => Number(scope.deadline) || 0),
+      const _abmScopes = Array.isArray(window.__abm_dialog_scopes)
+        ? window.__abm_dialog_scopes : [];
+      _abmScopes.push(_abmDialogScope);
+      window.__abm_dialog_scopes = _abmScopes;
+      window.__abm_suppress_until = Math.max(
+        _abmDeadline,
+        ..._abmScopes.map(scope => Number(scope.deadline) || 0),
       );
     }
-    const _tmwdRecords = () => (Array.isArray(window.__tmwd_dialog_records)
-      ? window.__tmwd_dialog_records : [])
-      .filter(record => record.token === _tmwdDialogToken);
+    const _abmRecords = () => (Array.isArray(window.__abm_dialog_records)
+      ? window.__abm_dialog_records : [])
+      .filter(record => record.token === _abmDialogToken);
     try {
       const rawJsCode = ${JSON.stringify(code)}.trim();
-      const _tmwdExecSourceUrl = ${JSON.stringify(execSourceUrl)};
-      const _tmwdWithSourceUrl = c => _tmwdExecSourceUrl
-        ? c + '\\n//# sourceURL=' + _tmwdExecSourceUrl : c;
-      const jsCode = _tmwdWithSourceUrl(rawJsCode);
+      const _abmExecSourceUrl = ${JSON.stringify(execSourceUrl)};
+      const _abmWithSourceUrl = c => _abmExecSourceUrl
+        ? c + '\\n//# sourceURL=' + _abmExecSourceUrl : c;
+      const jsCode = _abmWithSourceUrl(rawJsCode);
       const lines = rawJsCode.split(/\\r?\\n/).filter(l => l.trim());
       const lastLine = lines.length > 0 ? lines[lines.length - 1].trim() : '';
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
@@ -2689,32 +3241,83 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
             // after its first expression and silently skip the later work.
             r = await (new AsyncFunction(jsCode))();
           } else if (e instanceof SyntaxError && /await/i.test(e.message)) {
-            r = await (new AsyncFunction(_tmwdWithSourceUrl(_air(rawJsCode))))();
+            r = await (new AsyncFunction(_abmWithSourceUrl(_air(rawJsCode))))();
           } else throw e;
         }
       }
       const processed = smartProcessResult(r);
-      if (_tmwdHasDialogScope) {
+      if (_abmHasDialogScope) {
         return { ok: true, data: {
-          __tmwd_dialog_result: true,
+          __abm_dialog_result: true,
           value: processed,
-          dialogs: _tmwdRecords(),
+          dialogs: _abmRecords(),
         } };
       }
       return { ok: true, data: processed };
     } catch (e) {
       ${errorHandler}
     } finally {
-      if (_tmwdHasDialogScope && Array.isArray(window.__tmwd_dialog_scopes)) {
-        window.__tmwd_dialog_scopes = window.__tmwd_dialog_scopes
-          .filter(scope => scope.token !== _tmwdDialogToken && Date.now() < scope.deadline);
-        window.__tmwd_suppress_until = window.__tmwd_dialog_scopes.reduce(
+      if (_abmHasDialogScope && Array.isArray(window.__abm_dialog_scopes)) {
+        window.__abm_dialog_scopes = window.__abm_dialog_scopes
+          .filter(scope => scope.token !== _abmDialogToken && Date.now() < scope.deadline);
+        window.__abm_suppress_until = window.__abm_dialog_scopes.reduce(
           (latest, scope) => Math.max(latest, Number(scope.deadline) || 0), 0
         );
-      } else if (_tmwdHasDialogScope && window.__tmwd_suppress_until === _tmwdDeadline) {
-        window.__tmwd_suppress_until = 0;
+      } else if (_abmHasDialogScope && window.__abm_suppress_until === _abmDeadline) {
+        window.__abm_suppress_until = 0;
       }
     }
+  })()`;
+}
+
+// Lifetime for one dialog scope, derived from the budget the caller asked for.
+// This used to be a flat 120s in both the extension record and the injected
+// preamble, so a 3-second execute_js kept alert/confirm/prompt answered on the
+// user's behalf for nearly two minutes of ordinary browsing afterwards — the
+// exact failure the deadline mechanism exists to prevent.
+//
+// The grace is added AFTER the ceiling, never clamped into it: the scope has to
+// outlive the command a little, because the extension-side record is stamped
+// when set_dialog_policy arrives while the page-side deadline starts later, when
+// the injection actually lands, and a script may run right up to its deadline.
+// Clamping the sum would leave a max-budget command with no grace at all.
+const DIALOG_SCOPE_GRACE_MS = 10000;
+const DIALOG_SCOPE_MAX_BUDGET_MS = 120000;  // same ceiling set_dialog_policy applies
+
+function dialogScopeWindowMs(scope) {
+  const requested = Number(scope?.timeoutMs);
+  const budget = Number.isFinite(requested) && requested > 0
+    ? Math.min(Math.floor(requested), DIALOG_SCOPE_MAX_BUDGET_MS) : 15000;
+  return Math.max(1000, budget) + DIALOG_SCOPE_GRACE_MS;
+}
+
+// The scope registration for frames that the exec preamble never reaches.
+// disable_dialogs.js runs in EVERY frame (manifest all_frames: true) and
+// activeScope() reads window.__abm_dialog_scopes out of its own frame's window,
+// but the preamble above only lands in the top frame. Without this an iframe's
+// confirm() falls through to the native dialog and blocks the very injection
+// that was supposed to be dialog-proof, with nothing reporting why.
+//
+// Sub-frame scopes are not explicitly cleared: activeScope() drops expired
+// entries as it reads, so the deadline is what bounds them. That is the whole
+// reason the deadline is derived from the command budget.
+function buildSubframeScopeScript(dialogScope) {
+  const active = Boolean(
+    dialogScope?.token &&
+    (dialogScope.policy === 'dismiss' || dialogScope.policy === 'accept')
+  );
+  if (!active) return 'void 0';
+  const scope = {
+    token: String(dialogScope.token),
+    policy: dialogScope.policy,
+  };
+  return `(() => {
+    const _abmScope = ${JSON.stringify(scope)};
+    _abmScope.deadline = Date.now() + ${dialogScopeWindowMs(dialogScope)};
+    const _abmScopes = Array.isArray(window.__abm_dialog_scopes)
+      ? window.__abm_dialog_scopes : [];
+    _abmScopes.push(_abmScope);
+    window.__abm_dialog_scopes = _abmScopes;
   })()`;
 }
 
@@ -2735,7 +3338,7 @@ function buildCdpScript(code, dialogScope = null, sourceUrl = null) {
 function manualExecutionResult(status, dialog = null) {
   const blocked = status === 'blocked_by_dialog';
   return { ok: true, data: {
-    __tmwd_dialog_result: true,
+    __abm_dialog_result: true,
     value: null,
     dialogs: dialog ? [dialog] : [],
     dialog,
@@ -2751,7 +3354,7 @@ function manualExecutionResult(status, dialog = null) {
 function manualRawSyntaxError(error) {
   const message = error?.message || String(error);
   return { ok: true, data: {
-    __tmwd_dialog_result: true,
+    __abm_dialog_result: true,
     value: null,
     dialogs: [],
     dialog: null,
@@ -2950,7 +3553,10 @@ async function executeManualScript(tabId, code, dialogScope) {
     }
     return first.result;
   } catch (error) {
-    await cancelManualExecution(tabId, error.message || String(error));
+    // Scope the cancel to OUR pending record. releaseManualExecution removes it
+    // from the map before this function returns, so an unscoped cancel here
+    // would tear down whatever newer manual execution now owns the tab.
+    await cancelManualExecution(tabId, error.message || String(error), pending);
     return manualExecutionError(error);
   }
 }
@@ -2991,7 +3597,50 @@ function cspRuleIdFor(tabId) {
     const ours = rules.filter(r => r.id >= CSP_RULE_BASE).map(r => r.id);
     if (ours.length) {
       await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ours });
-      console.log('[TMWD] cleared', ours.length, 'stale CSP rule(s)');
+      console.log('[ABM] cleared', ours.length, 'stale CSP rule(s)');
+    }
+  } catch (_) { /* API unavailable: nothing to clean */ }
+})();
+
+// The same leak, one layer down: an eviction mid-command loses
+// debuggerAttachments while Chrome keeps this extension attached to the tab. The
+// user is left with a permanent "…is debugging this browser" infobar, and CDP
+// state that command left enabled (Page/Runtime/Network domains) never goes
+// away. attachAbmDebugger recovers from that reactively — debugger_conflict ->
+// force detach -> re-attach — but only for a tab something attaches again; an
+// orphan nobody touches again survives until the browser restarts.
+//
+// chrome.debugger.detach is scoped to the calling extension, the same property
+// the conflict recovery relies on, so a target owned by DevTools or another
+// extension just rejects the call. Nothing here can take over someone's session.
+// It goes through detachDebuggerFromChrome for the same reason every other detach
+// does — the marker attributes the resulting onDetach event, and the wrapper
+// bounds a detach that never answers.
+(async () => {
+  try {
+    if (typeof chrome?.debugger?.getTargets !== 'function') return;
+    const targets = await chrome.debugger.getTargets();
+    let released = 0;
+    for (const target of targets || []) {
+      if (!target?.attached) continue;
+      const descriptor = target.tabId
+        ? { tabId: target.tabId }
+        : (target.id ? { targetId: target.id } : null);
+      if (!descriptor) continue;
+      // Re-checked per target immediately before detaching, not once up front:
+      // getTargets is async, so a command that woke this worker may have taken a
+      // fresh lease on this very tab meanwhile, and tearing that down would kill
+      // live work. The residual window is one detach round trip, and losing it
+      // only sends the attach down the reactive conflict-recovery path it
+      // already has.
+      if (debuggerAttachmentForTarget(descriptor)) continue;
+      try {
+        await detachDebuggerFromChrome({ target: descriptor });
+        released += 1;
+      } catch (_) { /* not ours: DevTools or another extension owns this target */ }
+    }
+    if (released) {
+      console.log('[ABM] released', released, 'stale debugger attachment(s)');
     }
   } catch (_) { /* API unavailable: nothing to clean */ }
 })();
@@ -3020,7 +3669,7 @@ async function withCspOff(tabId, fn) {
     } catch (e) {
       // Not fatal: injection may still succeed on pages without CSP, and the
       // CDP fallback bypasses CSP entirely.
-      console.log('[TMWD] CSP rule add failed:', e.message);
+      console.log('[ABM] CSP rule add failed:', e.message);
     }
   }
   try {
@@ -3042,19 +3691,116 @@ async function withCspOff(tabId, fn) {
   }
 }
 
-// --- WebSocket Client for TMWebDriver ---
+// --- WebSocket client for BrowserBridge ---
 let ws = null;
 let connectInFlight = false;
 // Last time the bridge answered our ping with a pong. A half-open zombie
 // socket stays readyState===OPEN and accepts send() without error, so pong
 // silence is the only reliable "this TCP connection is actually dead" signal.
 let lastPongAt = 0;
-const WS_URL = 'ws://127.0.0.1:18765';
-const HTTP_PROBE = 'http://127.0.0.1:18766/link';
+const DEFAULT_BRIDGE_PORT = 18765;
+const MIN_BRIDGE_PORT = 1024;
+const MAX_BRIDGE_PORT = 65533;
+let bridgePort = DEFAULT_BRIDGE_PORT;
+let WS_URL = `ws://127.0.0.1:${bridgePort}`;
+let HTTP_PROBE = `http://127.0.0.1:${bridgePort + 1}/link`;
+let bridgeConfigLoaded = false;
+
+function bridgeStatusMessage() {
+  return {
+    type: 'abm_status',
+    ws: Boolean(ws && ws.readyState === WebSocket.OPEN),
+  };
+}
+
+function postBridgeStatus(port) {
+  try { port.postMessage(bridgeStatusMessage()); } catch (_) {}
+}
+
+let bridgeStatusBroadcastQueue = Promise.resolve();
+
+function broadcastBridgeStatus() {
+  const status = bridgeStatusMessage();
+  for (const port of keepalivePorts.values()) {
+    try { port.postMessage(status); } catch (_) {}
+  }
+  // A service-worker eviction closes every Port. When the alarm wakes this
+  // worker again, tabs.sendMessage reaches the still-valid content script
+  // without requiring a page timer to recreate its old Port.
+  bridgeStatusBroadcastQueue = bridgeStatusBroadcastQueue
+    .then(async () => {
+      const tabs = await chrome.tabs.query({});
+      const currentStatus = bridgeStatusMessage();
+      await Promise.allSettled(tabs.map((tab) => {
+        if (!tab.id || !isScriptable(tab.url)) return null;
+        return chrome.tabs.sendMessage(
+          tab.id, currentStatus, { frameId: 0 },
+        );
+      }));
+    })
+    .catch(() => {});
+}
+
+function parseBridgePort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= MIN_BRIDGE_PORT && port <= MAX_BRIDGE_PORT
+    ? port
+    : DEFAULT_BRIDGE_PORT;
+}
+
+function applyBridgePort(value) {
+  bridgePort = parseBridgePort(value);
+  WS_URL = `ws://127.0.0.1:${bridgePort}`;
+  HTTP_PROBE = `http://127.0.0.1:${bridgePort + 1}/link`;
+}
+
+async function loadBridgePort() {
+  try {
+    const stored = await chrome.storage.local.get('abm_port');
+    if (stored.abm_port !== undefined) {
+      applyBridgePort(stored.abm_port);
+      return;
+    }
+    // Carry a port saved under the pre-ABM key over once, so an install that
+    // was already pointed at a non-default bridge does not silently fall back
+    // to 18765 and appear disconnected after the upgrade.
+    const legacy = await chrome.storage.local.get('tmwd_port');
+    applyBridgePort(legacy.tmwd_port);
+    if (legacy.tmwd_port !== undefined) {
+      try {
+        await chrome.storage.local.set({ abm_port: bridgePort });
+        await chrome.storage.local.remove?.('tmwd_port');
+      } catch (_) { /* retried on the next worker start */ }
+    }
+  } catch (e) {
+    console.error('[ABM-WS] bridge port storage unavailable, using default', e);
+    applyBridgePort(DEFAULT_BRIDGE_PORT);
+  } finally {
+    bridgeConfigLoaded = true;
+  }
+}
+
+const bridgeConfigReady = loadBridgePort();
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.abm_port) return;
+  const nextPort = parseBridgePort(changes.abm_port.newValue);
+  if (nextPort === bridgePort) return;
+  applyBridgePort(nextPort);
+  const previous = ws;
+  ws = null;
+  broadcastBridgeStatus();
+  connectInFlight = false;
+  lastPongAt = 0;
+  stopKeepalive();
+  try { previous?.close(); } catch (_) {}
+  ensureConnected('port-changed');
+});
 
 // --- Browser identity: distinguishes Chrome vs Edge vs multiple profiles ---
 // Without this, Chrome tab 456 and Edge tab 456 collide into one server session.
 let CLIENT_ID = null;
+let clientIdPromise = null;
 function getBrowserType() {
   const ua = navigator.userAgent;
   if (ua.includes('Edg/')) return 'edge';       // must test before Chrome; Edge UA also has 'Chrome/'
@@ -3064,27 +3810,58 @@ function getBrowserType() {
 }
 async function getClientId() {
   if (CLIENT_ID) return CLIENT_ID;
-  // storage MUST NOT be able to sink the whole registration path: if the
-  // permission is missing or the API throws, a missing clientId only costs us
-  // cross-restart id stability, whereas an exception here kills ext_ready /
-  // tabs_update entirely (server registers 0 sessions). Degrade, don't crash.
+  // Cache the in-flight promise, not just the resolved value. ext_ready (on WS
+  // open) and tabs_update (on any tab event) both call this, and on a cold worker
+  // they overlap routinely: both would miss storage, both would mint a random id,
+  // and both would write it. Last write wins, so the earlier caller keeps
+  // announcing an id the profile no longer has — and the client id is half of
+  // every session id the server holds, so the server ends up with two client
+  // namespaces for one browser and the losing one's sessions are unreachable.
+  // Same in-flight-promise guard loadCreateOperations already uses.
+  if (clientIdPromise) return await clientIdPromise;
+  clientIdPromise = (async () => {
+    // storage MUST NOT be able to sink the whole registration path: if the
+    // permission is missing or the API throws, a missing clientId only costs us
+    // cross-restart id stability, whereas an exception here kills ext_ready /
+    // tabs_update entirely (server registers 0 sessions). Degrade, don't crash.
+    try {
+      const s = await chrome.storage.local.get('abm_client_id');
+      if (s.abm_client_id) { CLIENT_ID = s.abm_client_id; return CLIENT_ID; }
+      // Reuse the id saved under the pre-ABM key rather than minting a new one:
+      // the client id is half of every session id the caller holds, so changing
+      // it would invalidate every remembered session across the rename.
+      const legacy = await chrome.storage.local.get('tmwd_client_id');
+      if (legacy.tmwd_client_id) {
+        CLIENT_ID = legacy.tmwd_client_id;
+        try {
+          await chrome.storage.local.set({ abm_client_id: CLIENT_ID });
+          await chrome.storage.local.remove?.('tmwd_client_id');
+        } catch (_) { /* retried on the next worker start */ }
+        return CLIENT_ID;
+      }
+      // Per-profile: chrome.storage.local is isolated per profile, so two profiles of the
+      // same browser get distinct ids too.
+      CLIENT_ID = getBrowserType() + '_' + Math.random().toString(36).slice(2, 8);
+      await chrome.storage.local.set({ abm_client_id: CLIENT_ID });
+    } catch (e) {
+      console.error('[ABM-WS] storage unavailable, using ephemeral clientId', e);
+      if (!CLIENT_ID) CLIENT_ID = getBrowserType() + '_' + Math.random().toString(36).slice(2, 8);
+    }
+    return CLIENT_ID;
+  })();
   try {
-    const s = await chrome.storage.local.get('tmwd_client_id');
-    if (s.tmwd_client_id) { CLIENT_ID = s.tmwd_client_id; return CLIENT_ID; }
-    // Per-profile: chrome.storage.local is isolated per profile, so two profiles of the
-    // same browser get distinct ids too.
-    CLIENT_ID = getBrowserType() + '_' + Math.random().toString(36).slice(2, 8);
-    await chrome.storage.local.set({ tmwd_client_id: CLIENT_ID });
-  } catch (e) {
-    console.error('[TMWD-WS] storage unavailable, using ephemeral clientId', e);
-    if (!CLIENT_ID) CLIENT_ID = getBrowserType() + '_' + Math.random().toString(36).slice(2, 8);
+    return await clientIdPromise;
+  } finally {
+    // Never cache a failure forever. The body degrades to an ephemeral id rather
+    // than throwing, so this only matters if it fails outright — in which case
+    // the next caller should get to try again.
+    if (!CLIENT_ID) clientIdPromise = null;
   }
-  return CLIENT_ID;
 }
 
 function scheduleProbe() {
   // MV3 clamps sub-minute alarms aggressively; also wake via tabs/events below.
-  chrome.alarms.create('tmwd-ws-probe', { delayInMinutes: 0.5, periodInMinutes: 1 });
+  chrome.alarms.create('abm-ws-probe', { delayInMinutes: 0.5, periodInMinutes: 1 });
 }
 
 // Keep the SW alive while the WS is connected.
@@ -3110,6 +3887,7 @@ function scheduleKeepalive() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       stopKeepalive();
       ws = null;
+      broadcastBridgeStatus();
       ensureConnected('keepalive-lost');
       scheduleProbe(); // alarm keeps retrying even if this worker is evicted
       return;
@@ -3118,9 +3896,10 @@ function scheduleKeepalive() {
     // won't surface the dead peer for minutes, so we'd keep pushing tabs into a
     // black hole. No pong across ~3 ticks => treat the socket as dead.
     if (lastPongAt && Date.now() - lastPongAt > 55000) {
-      console.log('[TMWD-WS] pong timeout, forcing reconnect');
+      console.log('[ABM-WS] pong timeout, forcing reconnect');
       try { ws.close(); } catch (_) {}
       ws = null;
+      broadcastBridgeStatus();
       lastPongAt = 0;
       stopKeepalive();
       ensureConnected('keepalive-pong-timeout');
@@ -3137,8 +3916,9 @@ function scheduleKeepalive() {
       // write alone were not enough.
       chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError; });
     } catch (e) {
-      console.log('[TMWD-WS] keepalive ping failed:', e.message);
+      console.log('[ABM-WS] keepalive ping failed:', e.message);
       ws = null;
+      broadcastBridgeStatus();
       stopKeepalive();
       ensureConnected('keepalive-send-failed');
       scheduleProbe();
@@ -3151,7 +3931,7 @@ function stopKeepalive() {
 }
 
 async function isServerAlive() {
-  // Probe HTTP side (18766), not the WS port (18765 returns 426 and may confuse fetch).
+  // Probe the HTTP side (base+1), not the WS port (which returns 426 to fetch).
   try {
     const ctrl = new AbortController();
     setTimeout(() => ctrl.abort(), 1500);
@@ -3167,7 +3947,7 @@ async function isServerAlive() {
     try {
       const ctrl2 = new AbortController();
       setTimeout(() => ctrl2.abort(), 800);
-      await fetch('http://127.0.0.1:18765/', { signal: ctrl2.signal });
+      await fetch(`http://127.0.0.1:${bridgePort}/`, { signal: ctrl2.signal });
       return true; // any response including 426 means port is open
     } catch (e2) {
       return false;
@@ -3176,13 +3956,17 @@ async function isServerAlive() {
 }
 
 function ensureConnected(reason) {
+  if (!bridgeConfigLoaded) {
+    void bridgeConfigReady.finally(() => ensureConnected(reason));
+    return;
+  }
   if (ws && ws.readyState <= 1) return;
-  console.log('[TMWD-WS] ensureConnected:', reason || '');
+  console.log('[ABM-WS] ensureConnected:', reason || '');
   connectWS();
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'tmwd-ws-keepalive') {
+  if (alarm.name === 'abm-ws-keepalive') {
     // Legacy alarm from older installs. The ping/zombie/re-register logic now
     // lives in the setInterval keepalive (alarms can't fire faster than 60s,
     // so they could never hold the worker up). Keep this as a recovery path:
@@ -3191,16 +3975,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       scheduleKeepalive();
     } else {
       ws = null;
+      broadcastBridgeStatus();
       ensureConnected('keepalive-lost');
       scheduleProbe();
     }
-    chrome.alarms.clear('tmwd-ws-keepalive');
+    chrome.alarms.clear('abm-ws-keepalive');
   }
-  if (alarm.name === 'tmwd-ws-probe') {
+  if (alarm.name === 'abm-ws-probe') {
     if (ws && ws.readyState <= 1) return; // Already connected/connecting
     // Always attempt WS; isServerAlive is only a log hint (HTTP probe is unreliable).
     const alive = await isServerAlive();
-    console.log('[TMWD-WS] probe tick, httpAlive=', alive);
+    console.log('[ABM-WS] probe tick, httpAlive=', alive);
     ensureConnected('alarm-probe');
   }
 });
@@ -3208,12 +3993,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 async function handleWsExec(data) {
   const tabId = data.tabId;
   const dialogScopeMatch = typeof data.code === 'string'
-    ? data.code.match(/\/\*__tmwd_dialog_scope:([A-Za-z0-9._-]+)\*\//)
+    ? data.code.match(/\/\*__abm_dialog_scope:([A-Za-z0-9._-]+)\*\//)
     : null;
   const dialogScopeToken = dialogScopeMatch ? dialogScopeMatch[1] : null;
   const dialogScope = currentExecDialogPolicy(tabId, dialogScopeToken) ||
     (!dialogScopeToken ? claimManualExecDialogPolicy(tabId, data.code) : null);
-  console.log('[TMWD-WS] Exec request', data.id, 'on tab', tabId);
+  console.log('[ABM-WS] Exec request', data.id, 'on tab', tabId);
   // Same dead-socket hazard as onmessage, with a wider window: script exec plus
   // the CDP fallback can run for seconds while the bridge restarts under us.
   const sock = ws;
@@ -3229,7 +4014,7 @@ async function handleWsExec(data) {
   // otherwise a form submit / purchase executes here, the retry runs it again,
   // and the agent sees a clean success on a double execution.
   if (!send({ type: 'ack', id: data.id })) {
-    console.log('[TMWD-WS] ACK undeliverable, skipping exec so the retry stays safe', data.id);
+    console.log('[ABM-WS] ACK undeliverable, skipping exec so the retry stays safe', data.id);
     return;
   }
   if (!tabId) {
@@ -3252,15 +4037,28 @@ async function handleWsExec(data) {
       res = await executeManualScript(tabId, data.code, dialogScope);
     } else {
       const inject = async () => {
+        // allFrames so the dialog scope reaches the sub-frames whose own
+        // disable_dialogs.js would otherwise fall through to a native dialog and
+        // block this injection (see buildSubframeScopeScript). The caller's code
+        // still runs in the top frame only — sub-frames evaluate the scope
+        // registration and nothing else.
         const result = await chrome.scripting.executeScript({
-          target: { tabId },
+          target: { tabId, allFrames: true },
           world: 'MAIN',
-          func: async (s) => await eval(s),
-          args: [buildPageScript(data.code, dialogScope)]
+          func: async (s, sub) => (window.top === window ? await eval(s) : eval(sub)),
+          args: [
+            buildPageScript(data.code, dialogScope),
+            buildSubframeScopeScript(dialogScope),
+          ]
         });
-        let r = result[0]?.result;
+        // Pick the top frame by id, not by position: with allFrames the order of
+        // the results array is not specified. One entry means a single-frame page,
+        // where there is nothing to disambiguate.
+        const top = result.find(entry => entry?.frameId === 0)
+          || (result.length === 1 ? result[0] : undefined);
+        let r = top?.result;
         if (r === null || r === undefined) {
-          console.log('[TMWD-WS] executeScript returned null/undefined, treating as CSP issue');
+          console.log('[ABM-WS] executeScript returned null/undefined, treating as CSP issue');
           r = { ok: false, error: { name: 'Error', message: 'executeScript returned null (possible CSP or context issue)', stack: '' }, csp: true };
         }
         return r;
@@ -3274,18 +4072,18 @@ async function handleWsExec(data) {
         // Only a CSP-flavoured failure justifies relaxing the header, and then
         // only for this tab, for this one retry.
         if (res && !res.ok && res.csp) {
-          console.log('[TMWD-WS] retrying injection with CSP relaxed for tab', tabId);
+          console.log('[ABM-WS] retrying injection with CSP relaxed for tab', tabId);
           try { res = await withCspOff(tabId, inject); } catch (e) {
-            console.log('[TMWD-WS] CSP-relaxed retry failed:', e.message);
+            console.log('[ABM-WS] CSP-relaxed retry failed:', e.message);
           }
         }
       } catch (e) {
-        console.log('[TMWD-WS] scripting.executeScript failed:', e.message);
+        console.log('[ABM-WS] scripting.executeScript failed:', e.message);
         res = { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' }, csp: true };
       }
       // CDP fallback for CSP-restricted pages
       if (res && !res.ok && res.csp) {
-        console.log('[TMWD-WS] CDP fallback for tab', tabId);
+        console.log('[ABM-WS] CDP fallback for tab', tabId);
         const wrappedCode = buildCdpScript(data.code, dialogScope);
         let cdpLease = null;
         try {
@@ -3343,7 +4141,8 @@ function connectWS() {
   if (connectInFlight) return;
   connectInFlight = true;
   ws = null;
-  console.log('[TMWD-WS] Connecting to', WS_URL);
+  broadcastBridgeStatus();
+  console.log('[ABM-WS] Connecting to', WS_URL);
   // Capture the socket we are about to create. Every handler below closes over
   // `self`, not the global `ws`: a reconnect may have replaced `ws` with a new
   // socket by the time this one's onclose/onerror fires, and the old handler
@@ -3353,8 +4152,9 @@ function connectWS() {
     self = new WebSocket(WS_URL);
     ws = self;
   } catch (e) {
-    console.error('[TMWD-WS] Constructor error:', e);
+    console.error('[ABM-WS] Constructor error:', e);
     ws = null;
+    broadcastBridgeStatus();
     connectInFlight = false;
     scheduleProbe();
     return;
@@ -3372,7 +4172,8 @@ function connectWS() {
     clearTimeout(connectTimer);
     if (ws !== self) return; // a newer socket owns the slot
     connectInFlight = false;
-    console.log('[TMWD-WS] Connected!');
+    console.log('[ABM-WS] Connected!');
+    broadcastBridgeStatus();
     // Seed the pong clock so the zombie watchdog has a baseline; the bridge's
     // first pong (within a keepalive tick) refreshes it. Without a seed the
     // watchdog's `lastPongAt &&` guard would never arm.
@@ -3397,9 +4198,9 @@ function connectWS() {
           generation: await tabGenerationFor(t.id),
         })))
       }));
-      console.log('[TMWD-WS] Sent ext_ready with', tabs.length, 'tabs as', clientId);
+      console.log('[ABM-WS] Sent ext_ready with', tabs.length, 'tabs as', clientId);
     } catch (e) {
-      console.error('[TMWD-WS] ext_ready failed', e);
+      console.error('[ABM-WS] ext_ready failed', e);
     }
   };
   ws.onmessage = async (event) => {
@@ -3441,15 +4242,31 @@ function connectWS() {
       // a real parse failure is not. The old wording blamed parsing for both.
       const dead = !sock || sock.readyState !== WebSocket.OPEN;
       console[dead ? 'log' : 'error'](
-        dead ? '[TMWD-WS] bridge went away mid-request, reply dropped'
-             : '[TMWD-WS] message handling error', e);
+        dead ? '[ABM-WS] bridge went away mid-request, reply dropped'
+             : '[ABM-WS] message handling error', e);
+      // Logging alone left the bridge with no reply at all, so the Python side
+      // waited out its full timeout for a request that had already failed.
+      // Answer with an error whenever we still know which request this was.
+      if (!dead) {
+        try {
+          const failedId = JSON.parse(event.data)?.id;
+          if (failedId) {
+            reply({
+              type: 'error',
+              id: failedId,
+              error: { name: e?.name || 'Error', message: e?.message || String(e) },
+            });
+          }
+        } catch (_) { /* unparseable frame: no id to answer */ }
+      }
     }
   };
   ws.onclose = () => {
     clearTimeout(connectTimer);
     if (ws !== self) return; // a newer connection owns the slot; leave it be
-    console.log('[TMWD-WS] Disconnected');
+    console.log('[ABM-WS] Disconnected');
     ws = null;
+    broadcastBridgeStatus();
     connectInFlight = false;
     // Stop holding the worker alive for a socket that's gone; the probe alarm
     // takes over reconnect duty and survives eviction.
@@ -3457,27 +4274,39 @@ function connectWS() {
     scheduleProbe();
   };
   ws.onerror = (e) => {
-    console.error('[TMWD-WS] Error:', e);
+    console.error('[ABM-WS] Error:', e);
     // onclose will fire after this, which triggers reconnect
   };
 }
 
 // Initial connect + wake-up hooks
 void installPermissionLeaseRecoveryHooks();
-ensureConnected('boot');
+void bridgeConfigReady.finally(() => ensureConnected('boot'));
 chrome.runtime.onStartup.addListener(() => {
   ensureConnected('onStartup');
 });
 chrome.runtime.onInstalled.addListener(() => {
   ensureConnected('onInstalled');
 });
-// Long-lived port from content scripts. Establishing a port is a stronger SW
-// wake signal than sendMessage — and merely re-instantiating the dead SW runs
-// this file top-to-bottom, hitting ensureConnected('boot') above. We also kick
-// a connect here so a freshly-woken SW re-registers tabs without waiting for
-// the next 5s poll.
+// Port from content scripts. Establishing it wakes the SW and provides direct
+// status delivery while the worker is alive. Alarm recovery also broadcasts
+// through tabs.sendMessage, so content scripts never need a page timer.
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'tmwd_keepalive') return;
+  if (port.name !== 'abm_keepalive') return;
+  const tabId = port.sender?.tab?.id;
+  const frameId = Number.isInteger(port.sender?.frameId) ? port.sender.frameId : 0;
+  const portKey = Number.isInteger(tabId) ? `${tabId}:${frameId}` : null;
+  if (portKey) {
+    const previous = keepalivePorts.get(portKey);
+    if (previous && previous !== port) {
+      try { previous.disconnect(); } catch (_) {}
+    }
+    keepalivePorts.set(portKey, port);
+  }
+  port.onMessage.addListener((message) => {
+    if (message?.type === 'abm_status_request') postBridgeStatus(port);
+  });
+  postBridgeStatus(port);
   ensureConnected('port-connect');
   if (ws && ws.readyState === WebSocket.OPEN) {
     try { sendTabsUpdate(); } catch (_) {}
@@ -3485,12 +4314,17 @@ chrome.runtime.onConnect.addListener((port) => {
   // Consume lastError: when the content page enters bfcache Chrome closes this
   // port and sets lastError ("moved into back/forward cache"). Not reading it
   // logs an "Unchecked runtime.lastError" warning every navigation. The content
-  // side re-opens the port on its next poll / pageshow, so nothing to do here.
-  port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
+  // next background status change reaches the page through tabs.sendMessage.
+  port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError;
+    if (portKey && keepalivePorts.get(portKey) === port) {
+      keepalivePorts.delete(portKey);
+    }
+  });
 });
 // Popup / content can poke SW awake
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg && msg.cmd === 'tmwd_ping') {
+  if (msg && msg.cmd === 'abm_ping') {
     ensureConnected('runtime-message');
     // Badge click / content-script poll is a free chance to re-register tabs
     // against a bridge that restarted while our socket looked healthy.
@@ -3514,7 +4348,10 @@ async function sendTabsUpdate() {
   // right before sending rather than trusting the earlier readyState.
   const sock = ws;
   try {
-    const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url) && !/streamlit/i.test(t.title));
+    // Must match the ext_ready filter exactly. A leftover title-based exclusion
+    // here made any tab whose title happened to contain a hard-coded keyword
+    // register on connect and then silently vanish on the next update tick.
+    const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
     if (!sock || sock.readyState !== WebSocket.OPEN) return;
     const clientId = await getClientId();
     if (!sock || sock.readyState !== WebSocket.OPEN) return;
@@ -3530,7 +4367,12 @@ async function sendTabsUpdate() {
       })))
     }));
   } catch (e) {
-    console.error('[TMWD-WS] tabs_update failed', e);
+    // Same benign/real split as onmessage: the bridge restarting under us is
+    // routine (the next keepalive tick re-pushes tabs), a real failure is not.
+    const dead = !sock || sock.readyState !== WebSocket.OPEN;
+    console[dead ? 'log' : 'error'](
+      dead ? '[ABM-WS] tabs_update dropped, bridge went away mid-update'
+           : '[ABM-WS] tabs_update failed', e);
   }
 }
 chrome.tabs.onUpdated.addListener((_, changeInfo) => {
