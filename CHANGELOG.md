@@ -6,6 +6,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+### Added
+
+- The two agent skills now ship as package data, so a plain
+  `pip install agent-browser-mcp` carries them, and a new
+  `agent-browser-mcp skill-path` prints the directory that holds them as
+  `<name>/SKILL.md`. They previously lived only under `docs/` in a repository
+  checkout and were excluded from both the wheel and the source archive, so
+  anyone who installed the package could not reach them at all. Point a skill
+  manager at that directory instead of copying the files; a copy stops receiving
+  updates on the next upgrade without reporting anything.
+
+### Changed
+
+- `scripts/check_distribution.py` now *requires* both skills in the wheel and the
+  source archive and still refuses a `SKILL.md` anywhere else in either one, so a
+  build that drops them cannot ship a `skill-path` command that resolves to an
+  empty directory.
+
 ## [0.3.12] - 2026-08-19
 
 ### Fixed

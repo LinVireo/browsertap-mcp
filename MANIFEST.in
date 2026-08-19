@@ -12,7 +12,10 @@ recursive-include docs USAGE.md USAGE.zh-CN.md TROUBLESHOOTING.md TROUBLESHOOTIN
 recursive-include examples *.json *.yaml
 recursive-include .github/workflows *.yml
 exclude SKILL.md
-exclude docs/browser-mcp-default.SKILL.md
+# Kept after the bare `exclude` above so the ordering reads unambiguously: a
+# stray `SKILL.md` dropped in the repository root is a caller's own copy and
+# stays out, while the two packaged agent skills ship as package data.
+recursive-include src/agent_browser_mcp/skills SKILL.md
 include pyproject.toml
 include MANIFEST.in
 recursive-include scripts *.py

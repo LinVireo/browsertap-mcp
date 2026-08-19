@@ -18,12 +18,19 @@ REQUIRED_WHEEL_SUFFIXES = (
     "/agent_browser_mcp/chrome_extension/popup.js",
     "/agent_browser_mcp/chrome_extension/_locales/en/messages.json",
     "/agent_browser_mcp/chrome_extension/_locales/zh_CN/messages.json",
+    # Required, not merely permitted: `agent-browser-mcp skill-path` points a
+    # caller's skill manager at these files, so a wheel that drops them ships a
+    # command that resolves to an empty directory.
+    "/agent_browser_mcp/skills/browser-mcp-default/SKILL.md",
+    "/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md",
 )
 REQUIRED_SDIST_SUFFIXES = (
     "/.gitignore",
     "/CONTRIBUTING.zh-CN.md",
     "/src/agent_browser_mcp/browser_bridge.py",
     "/src/agent_browser_mcp/tmwebdriver.py",
+    "/src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md",
+    "/src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md",
     "/.github/workflows/live.yml",
     "/.github/workflows/test.yml",
     "/examples/claude-desktop-config.json",
@@ -44,6 +51,21 @@ def _normalise(name: str) -> str:
     return "/" + normalised.lstrip("/")
 
 
+def _is_packaged_skill(path: str) -> bool:
+    """True for a shipped agent skill at ``agent_browser_mcp/skills/<name>/SKILL.md``.
+
+    Matched by shape rather than by name so a skill added later ships without
+    editing this gate, while a copy dropped anywhere else -- a caller's own
+    installed mirror, a stray root file -- is still refused.
+    """
+    marker = "/agent_browser_mcp/skills/"
+    index = path.find(marker)
+    if index < 0:
+        return False
+    tail = path[index + len(marker):]
+    return tail.count("/") == 1 and tail.endswith("/SKILL.md")
+
+
 def _forbidden_reason(name: str) -> str | None:
     path = _normalise(name)
     basename = path.rsplit("/", 1)[-1].lower()
@@ -55,8 +77,8 @@ def _forbidden_reason(name: str) -> str | None:
         return "environment secrets file"
     if basename.endswith(".har"):
         return "browser network capture"
-    if basename == "skill.md" or basename.endswith(".skill.md"):
-        return "machine/caller-specific agent skill"
+    if (basename == "skill.md" or basename.endswith(".skill.md")) and not _is_packaged_skill(path):
+        return "agent skill outside the packaged skills directory"
     if basename.startswith("cookie") and basename.endswith(".json"):
         return "cookie export"
     for segment in ("/.agent-browser-mcp/", "/artifacts/", "/out/", "/screenshots/"):

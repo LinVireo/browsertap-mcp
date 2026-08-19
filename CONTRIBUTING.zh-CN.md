@@ -88,16 +88,36 @@ offline JUnit、覆盖率、工具证据，以及各一份 wheel/source archive�
 
 1. `README.md` 与 `README.zh-CN.md` 中作为权威列表的 55 个工具说明；
 2. 工具自身的 MCP `description=` 文本；
-3. 仓库内的调用方契约 `docs/browser-mcp-default.SKILL.md`。
+3. 调用方契约 `src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md`
+   （先调哪个工具、什么时候必须带 `session_id`）；
+4. `src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md`
+   （桥本身连不上时调用方该怎么恢复）。
 
-维护者还应同步本机已安装的调用方 skill 副本。默认文档门禁校验四件事：仓库内的规范
-skill 副本、工具注册、文档里的参数与默认值，以及版本一致性；它不校验本机已安装的副本。
-维护者可显式使用 `python -m scripts.check_tool_docs --check-installed-skills` 核对
-Agent、Codex 与 Claude 的已安装副本。
+两份 skill 互相引用，因此各自按「一组副本」独立做哈希校验 —— 只更新其中一份，读者会被
+指向已经不成立的说明。两份都不得写入本机专属路径或只对某台机器成立的断言；写了绝对路径
+会被 `tests/test_documentation_contract.py` 拦下。
 
-调用方 skill 是源码仓库的维护契约，不是 Python 包运行时数据。
-`docs/browser-mcp-default.SKILL.md` 保留在 Git 中用于审阅和同步，但明确排除在 wheel 与
-source distribution 之外。不得写入本机专属路径或只对某台机器成立的断言。
+它们以 package data 形式随包发布，因此 `pip install agent-browser-mcp` 就带着它们，
+`agent-browser-mcp skill-path` 会打印存放目录（形如 `<name>/SKILL.md`）。`MANIFEST.in`
+的规则与 `pyproject.toml` 的 `package-data` 通配**两者都必需**：前者管 source archive，
+后者管 wheel；只写一处会得到「sdist 里有、wheel 里没有」，而 `pip install` 用的正是 wheel。
+`scripts/check_distribution.py` 要求两个归档里都有这两份文件，并拒绝归档中其他位置出现的
+`SKILL.md`。
+
+skill 管理器应**指向随包发布的那个目录**，不要复制文件。复制出来的副本在内容恰好一致期间
+看不出问题，之后就静默收不到更新 —— 哈希校验就是为了抓这种漂移。如果确实保留了副本，在加
+`--check-installed-skills` 的同时给出副本所在目录：
+
+```bash
+python -m scripts.check_tool_docs --check-installed-skills \
+    --skill-mirror /path/to/installed/skills
+# 或：AGENT_BROWSER_SKILL_MIRRORS="dir1:dir2" python -m scripts.check_tool_docs --check-installed-skills
+```
+
+每个目录下应有 `<skill-name>/SKILL.md`。agent 客户端把 skill 装在哪属于本机配置，
+本仓库不记录这些路径；只加开关却不给目录会直接失败，不会静默通过。不加任何开关的默认门禁
+校验四件事：随包发布的 skill、工具注册、文档里的参数与默认值，以及版本一致性 —— 也就是
+没有已安装副本的贡献者能验证的全部内容。
 
 ## 版本与发布卫生
 

@@ -208,6 +208,7 @@ mcp_servers:
 ```bash
 agent-browser-mcp                      # 运行 MCP 服务(stdio)
 agent-browser-mcp extension-path       # 打印未打包扩展的目录
+agent-browser-mcp skill-path           # 打印随包发布的 agent skill 所在目录
 agent-browser-mcp doctor               # 诊断本地环境,输出 JSON
 agent-browser-mcp bridge               # 在前台运行桥
 agent-browser-mcp print-hermes-config  # 打印 Hermes 配置片段
@@ -222,6 +223,28 @@ ABM 首次使用时创建 `~/.agent-browser-mcp/bridge-token`，bridge 和所有
 关闭浏览器或编辑器不会轮换 token。卸载扩展或重装 Python 包时会保留该文件，因此重装后可以
 继续使用。若需彻底清除用户数据，应先停止所有 ABM bridge 进程，再删除整个
 `~/.agent-browser-mcp` 目录；下次启动时会生成新 token。
+
+### Agent skill（可选）
+
+ABM 随包发布两份 skill，用来告诉调用方的 agent 该怎么驱动它。它们就是普通 Markdown，
+**完全可选** —— 不装也不影响任何工具。它们补的是工具描述装不下的那部分判断：先调哪个工具、
+什么时候必须带 `session_id`、哪些标签页属于用户因此不能碰。
+
+```bash
+agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skills
+```
+
+该目录下有：
+
+| Skill | 作用 |
+|---|---|
+| `browser-mcp-default/SKILL.md` | 调用契约：动手前先选定目标；要改动页面就自己开标签页，收尾时关掉；遇到 `no_response` / `switched_session` / `bridge_error` 怎么处理。 |
+| `abm-bridge-recovery/SKILL.md` | 传输层本身出问题时的恢复流程：三个组件里到底哪个是旧的，以及对应的那一次重启或重新加载。 |
+
+请把客户端的 skill 管理器**指向这个目录**，不要复制文件。复制出来的副本在内容恰好一致期间
+看不出问题，等你升级包之后就静默收不到更新了。如果确实保留了副本，可以用
+`python -m scripts.check_tool_docs --check-installed-skills --skill-mirror DIR`
+与随包原件比对，并指出是哪一份漂了。
 
 ### 卸载
 

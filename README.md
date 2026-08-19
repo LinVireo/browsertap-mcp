@@ -211,6 +211,7 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](docs/USAGE.md): 
 ```bash
 agent-browser-mcp                      # run the MCP server (stdio)
 agent-browser-mcp extension-path       # print the unpacked extension directory
+agent-browser-mcp skill-path           # print the directory holding the shipped agent skills
 agent-browser-mcp doctor               # diagnose the local setup, as JSON
 agent-browser-mcp bridge               # run the bridge in the foreground
 agent-browser-mcp print-hermes-config  # print a Hermes config snippet
@@ -228,6 +229,31 @@ the browser extension or reinstalling the Python package deliberately leaves the
 file in place, so a reinstall continues to work. A full user-data purge may delete the
 whole `~/.agent-browser-mcp` directory only after all ABM bridge processes have stopped;
 the next start then creates a new token.
+
+### Agent skills (optional)
+
+ABM ships two skills that tell a calling agent how to drive it. They are ordinary
+Markdown and completely optional — every tool works without them. What they add is
+the judgement the tool descriptions cannot carry: which tool to reach for first,
+when `session_id` is mandatory, and which tabs belong to you and must be left
+alone.
+
+```bash
+agent-browser-mcp skill-path   # e.g. .../site-packages/agent_browser_mcp/skills
+```
+
+That directory contains:
+
+| Skill | What it is for |
+|---|---|
+| `browser-mcp-default/SKILL.md` | The calling contract: pick a target before acting, open your own tab for anything that mutates a page, close it in cleanup, and how to react to `no_response` / `switched_session` / `bridge_error`. |
+| `abm-bridge-recovery/SKILL.md` | Recovery when the transport itself is down: which of the three components is stale, and the one restart or reload that fixes it. |
+
+Point your client's skill manager **at that directory** rather than copying the
+files. A copy looks correct for as long as the contents happen to agree, then
+silently stops receiving updates when you upgrade the package. If you keep copies
+anyway, `python -m scripts.check_tool_docs --check-installed-skills --skill-mirror
+DIR` compares them against the shipped originals and names whichever one drifted.
 
 ### Uninstall
 

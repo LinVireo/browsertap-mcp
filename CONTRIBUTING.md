@@ -107,17 +107,44 @@ in the same change:
 
 1. `README.md` and `README.zh-CN.md` (the authoritative 55-tool table);
 2. the tool's MCP `description=` text;
-3. `docs/browser-mcp-default.SKILL.md` (the checked-in caller contract).
+3. `src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md` (the caller
+   contract: which tool to call first, when `session_id` is mandatory);
+4. `src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md` (what a caller
+   follows when the bridge itself is unreachable).
 
-Maintainers also synchronize the installed copies of the caller skill. The
-default documentation gate verifies the canonical repository copy, tool
-registration, documented parameters, and version consistency. Maintainers can
-add `--check-installed-skills` to verify the Agent, Codex, and Claude copies.
+The two skills cross-reference each other, so each is hash-checked as its own
+group of copies — a reader who receives an update for only one of them gets
+pointed at advice that no longer matches. Keep both free of machine-specific
+paths or claims; `tests/test_documentation_contract.py` fails on an absolute path.
 
-The caller skill is a source-repository maintenance contract, not Python package
-runtime data. `docs/browser-mcp-default.SKILL.md` remains in Git for review and
-synchronization but is deliberately excluded from wheel and source distribution
-archives. Keep it free of machine-specific paths or claims.
+They ship as package data, so `pip install agent-browser-mcp` carries them and
+`agent-browser-mcp skill-path` prints the directory that holds them as
+`<name>/SKILL.md`. Both the `MANIFEST.in` rule and the `package-data` glob in
+`pyproject.toml` are required: they are what put the files in the source archive
+and the wheel respectively, and having only one produces an sdist that carries
+the skills and a wheel that does not — which is the half `pip install` uses.
+`scripts/check_distribution.py` requires them in both archives and refuses a
+`SKILL.md` anywhere else in either one.
+
+Point a skill manager at the shipped directory instead of copying the files. A
+copy reads as correct for as long as the contents agree and then silently stops
+receiving updates; that is the drift the hash check exists to catch. If you do
+keep copies, pass `--check-installed-skills` together with the directories that
+hold them:
+
+```bash
+python -m scripts.check_tool_docs --check-installed-skills \
+    --skill-mirror /path/to/installed/skills
+# or: AGENT_BROWSER_SKILL_MIRRORS="dir1:dir2" python -m scripts.check_tool_docs --check-installed-skills
+```
+
+Each directory is expected to contain `<skill-name>/SKILL.md`. Where an agent
+client installs its skills is machine configuration, so this repository does not
+record those paths; requesting the comparison without naming a directory fails
+rather than silently passing. The default gate — no flag — checks the shipped
+copies, tool registration, documented parameters and defaults, and version
+consistency, which is everything a contributor without installed copies can
+verify.
 
 ## Version and release hygiene
 

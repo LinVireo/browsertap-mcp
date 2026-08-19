@@ -4,16 +4,29 @@ import json
 import re
 from pathlib import Path
 
-import pytest
-
-from scripts.check_tool_docs import build_report, report_ok
+from scripts.check_tool_docs import SKILL_ROOT, build_report, report_ok
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# A drive letter followed by a separator: `D:\venvs\...`, `C:/Users/...`. The
+# lookbehind keeps URL schemes (`http://`, `chrome://`) out of the pattern.
+_LOCAL_PATH_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]\S*")
+
+
+def _shipped_skills() -> list[Path]:
+    """The agent skills as the release actually carries them.
+
+    Discovered rather than listed: they are package data now, so a skill added
+    later is covered by every check below without editing this file.
+    """
+    return sorted(SKILL_ROOT.glob("*/SKILL.md"))
+
 
 def test_tool_docs_and_caller_skill_are_synchronized():
-    if not (ROOT / "docs" / "browser-mcp-default.SKILL.md").is_file():
-        pytest.skip("caller skill is a repository-only maintenance contract")
+    # No skip: the skills ship inside the package, so an absent one is a
+    # packaging regression that would leave `agent-browser-mcp skill-path`
+    # pointing at an empty directory.
+    assert _shipped_skills(), f"no <name>/SKILL.md under {SKILL_ROOT}"
     report = build_report()
     assert report_ok(report), report
 
@@ -138,13 +151,20 @@ def test_public_maintenance_commands_use_module_invocation():
 
 
 def test_canonical_caller_skill_is_not_machine_specific():
-    path = ROOT / "docs" / "browser-mcp-default.SKILL.md"
-    if not path.is_file():
-        pytest.skip("caller skill is a repository-only maintenance contract")
-    skill = path.read_text(encoding="utf-8")
+    paths = _shipped_skills()
+    assert paths, f"no <name>/SKILL.md under {SKILL_ROOT}"
 
-    for local_claim in ("本机已移除", "用户本机", "本机一人使用", "本机默认"):
-        assert local_claim not in skill
+    for path in paths:
+        skill = path.read_text(encoding="utf-8")
+        label = f"{path.parent.name}/{path.name}"
+
+        for local_claim in ("本机已移除", "用户本机", "本机一人使用", "本机默认"):
+            assert local_claim not in skill, f"{label} states a machine-local fact"
+        # These skills are written from the maintainer's machine, where the
+        # absolute paths happen to work. A reader on any other machine follows
+        # them into a directory that does not exist.
+        drive_paths = sorted(set(_LOCAL_PATH_RE.findall(skill)))
+        assert not drive_paths, f"{label} carries absolute local path(s) {drive_paths}"
 
 
 def test_user_facing_docs_carry_no_pre_unification_version_numbers():
@@ -156,19 +176,22 @@ def test_user_facing_docs_carry_no_pre_unification_version_numbers():
     in these files, so any `2.x.y` here is a leftover ABM version.
     """
     stale = re.compile(r"(?<![\w.])2\.\d+\.\d+(?![\w.])")
-    for name in (
-        "README.md",
-        "README.zh-CN.md",
-        "docs/USAGE.md",
-        "docs/USAGE.zh-CN.md",
-        "docs/TROUBLESHOOTING.md",
-        "docs/TROUBLESHOOTING.zh-CN.md",
-        "docs/browser-mcp-default.SKILL.md",
-    ):
-        path = ROOT / name
+    paths = [
+        ROOT / "README.md",
+        ROOT / "README.zh-CN.md",
+        ROOT / "docs" / "USAGE.md",
+        ROOT / "docs" / "USAGE.zh-CN.md",
+        ROOT / "docs" / "TROUBLESHOOTING.md",
+        ROOT / "docs" / "TROUBLESHOOTING.zh-CN.md",
+    ]
+    # The agent skills are the most likely place for a stale extension version
+    # to survive, because they tell a reader which build to compare against.
+    paths += _shipped_skills()
+    for path in paths:
         if not path.is_file():
             continue
         found = sorted(set(stale.findall(path.read_text(encoding="utf-8"))))
+        name = path.relative_to(ROOT).as_posix()
         assert not found, f"{name} still references pre-unification version(s) {found}"
 
 

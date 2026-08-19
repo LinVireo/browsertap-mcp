@@ -304,26 +304,68 @@ def test_every_module_the_package_imports_is_a_declared_dependency():
 
 
 
-def test_distribution_contract_rejects_caller_skill_from_sdist(tmp_path):
+def test_distribution_contract_ships_packaged_skills_but_rejects_stray_copies(tmp_path):
+    """The skills ship *from one place only*.
+
+    `agent-browser-mcp skill-path` points a caller's skill manager at
+    `agent_browser_mcp/skills/`, so that copy is required. A second copy
+    somewhere else in the archive is a caller's own installed mirror or a
+    leftover, and it drifts from the shipped one without anything failing.
+    """
     sdist = tmp_path / "agent_browser_mcp-0.3.4.tar.gz"
     _write_sdist(
         sdist,
         *_sdist_names(),
         "agent_browser_mcp-0.3.4/docs/browser-mcp-default.SKILL.md",
+        "agent_browser_mcp-0.3.4/SKILL.md",
     )
 
     assert validate_archive(sdist) == [
         "agent_browser_mcp-0.3.4/docs/browser-mcp-default.SKILL.md: "
-        "machine/caller-specific agent skill"
+        "agent skill outside the packaged skills directory",
+        "agent_browser_mcp-0.3.4/SKILL.md: "
+        "agent skill outside the packaged skills directory",
     ]
 
 
-def test_manifest_explicitly_excludes_caller_skills():
+def test_distribution_contract_requires_every_packaged_skill_in_the_wheel(tmp_path):
+    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    dropped = "agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md"
+    assert dropped in _wheel_names(), "the recovery skill is no longer a required wheel member"
+    _write_wheel(
+        wheel,
+        [
+            "agent_browser_mcp/server.py",
+            *(name for name in _wheel_names() if name != dropped),
+        ],
+    )
+
+    failures = validate_archive(wheel)
+
+    assert [failure for failure in failures if dropped in failure], failures
+
+
+def test_manifest_ships_the_packaged_agent_skills():
     root = Path(__file__).resolve().parents[1]
     manifest = (root / "MANIFEST.in").read_text(encoding="utf-8")
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
 
+    # A bare root-level `SKILL.md` is still refused: that one is a caller's own
+    # copy dropped in the checkout, not part of the release.
     assert "exclude SKILL.md" in manifest
-    assert "exclude docs/browser-mcp-default.SKILL.md" in manifest
+    assert "recursive-include src/agent_browser_mcp/skills SKILL.md" in manifest
+    # sdist and wheel take different routes into the archive, so shipping needs
+    # both the MANIFEST rule above and the package-data glob below. Getting only
+    # one produces a source archive that carries the skills and a wheel that
+    # does not, which is the half that `pip install` actually uses.
+    assert '"skills/*/SKILL.md"' in pyproject
+    # Discovered rather than listed: a skill added later has to be reachable
+    # through those two rules without editing this test.
+    shipped_skills = sorted(
+        path.parent.name
+        for path in (root / "src" / "agent_browser_mcp" / "skills").glob("*/SKILL.md")
+    )
+    assert shipped_skills, "expected at least one agent skill under src/agent_browser_mcp/skills/"
     assert "include CONTRIBUTING.zh-CN.md" in manifest
 
 

@@ -242,8 +242,8 @@ CI 比较基线分支：源代码或工具行为变化而版本未增加时失�
 3. 工具 `description=`
 4. `browser-mcp-default/SKILL.md`
 
-`.agents` 与 `.codex` 的 junction 需要一致；独立的 `.claude` 副本由同步脚本更新，最后
-校验三处 MD5。
+已安装的调用方 skill 副本需与仓库内的规范副本一致，最后校验各处 MD5。副本装在哪属于
+本机配置，不记录在仓库里。
 
 新增自动检查脚本验证：
 

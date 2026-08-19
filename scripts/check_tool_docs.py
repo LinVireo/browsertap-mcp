@@ -11,47 +11,88 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
-USER_HOME = Path.home()
-# Only the first entry ships with the repository and is the canonical source;
-# the rest are the maintainer's *installed* caller-skill copies, which is why
-# checking them is opt-in (`--check-installed-skills`) rather than part of the
-# release gate — a contributor's machine has no reason to have them.
+# Each agent skill is checked as a *group* of paths that must all hash alike:
+# the canonical copy shipped with the package, plus any mirror the caller points
+# at.
 #
-# Those copies come from a skill manager that keeps one real file per skill and
-# links each client directory to it, so on a healthy install the three entries
-# below are aliases of the same file. They are still listed separately on
-# purpose: a client directory holding a detached *real* copy instead of a link
-# is exactly the failure this check exists to catch, because it reads as fine
-# for as long as the contents happen to agree and then silently stops receiving
-# updates. The store path is machine configuration and has moved before, so
-# treat a `skill_missing_external_files` entry as "re-read where the store is",
-# not as "the file was deleted".
-SKILL_PATHS = (
-    ROOT / "docs" / "browser-mcp-default.SKILL.md",
-    USER_HOME / ".cc-switch" / "skills" / "browser-mcp-default" / "SKILL.md",
-    USER_HOME / ".codex" / "skills" / "browser-mcp-default" / "SKILL.md",
-    USER_HOME / ".claude" / "skills" / "browser-mcp-default" / "SKILL.md",
-)
+# The canonical copy lives inside the package rather than under `docs/` so that
+# `agent-browser-mcp skill-path` resolves it from a plain `pip install`. A
+# reader who only ever installs the wheel gets the same document a contributor
+# reviews.
+#
+# The mirrors are deliberately NOT hardcoded. Where an agent client installs its
+# skills is the machine operator's business, not this project's, so naming those
+# directories here would publish someone's local layout and go stale the moment
+# they reorganize it. Pass `--skill-mirror DIR` (repeatable) or set
+# `AGENT_BROWSER_SKILL_MIRRORS` to a path-separator-separated list of directories
+# that each contain `<skill-name>/SKILL.md`.
+#
+# A mirror is worth checking because it is usually a link back to one shared
+# file: if a client directory ever holds a detached *real* copy instead, it reads
+# as fine for as long as the contents happen to agree and then silently stops
+# receiving updates. That silent drift is the whole reason for the hash compare.
+SKILL_MIRRORS_ENV = "AGENT_BROWSER_SKILL_MIRRORS"
+SKILL_ROOT = ROOT / "src" / "agent_browser_mcp" / "skills"
+# `browser-mcp-default` tells a calling agent how to drive the tools;
+# `abm-bridge-recovery` tells it how to get the bridge back when the transport
+# itself is down. They cross-reference each other, so a reader who receives an
+# update for only one of them gets pointed at advice that no longer matches.
+SKILL_NAMES = ("browser-mcp-default", "abm-bridge-recovery")
+
+
+def _canonical_skill(name: str) -> Path:
+    return SKILL_ROOT / name / "SKILL.md"
+
+
+def _skill_mirrors(explicit: list[str] | None = None) -> list[Path]:
+    raw = explicit if explicit else [
+        item
+        for item in os.environ.get(SKILL_MIRRORS_ENV, "").split(os.pathsep)
+        if item.strip()
+    ]
+    return [Path(item).expanduser() for item in raw]
+
+
+def _skill_group(name: str, mirrors: list[Path]) -> tuple[Path, ...]:
+    return (_canonical_skill(name), *(mirror / name / "SKILL.md" for mirror in mirrors))
 
 from agent_browser_mcp import server as S
 from scripts.versioning import validate_versions
 from tests.tool_coverage_manifest import TOOL_COVERAGE
 
 TOOL_LINE_RE = re.compile(r"^- \*\*([a-z][a-z0-9_]*)\*\*", re.MULTILINE)
-REQUIRED_SKILL_TEXT = (
-    "filter='user'",
-    "network_capture_stop",
-    "full_page",
-    "clip",
-    "quality",
-    "reload_extension_required",
-    "AGENT_BROWSER_LAB_NO_ELICIT=1",
-)
+# Phrases each skill must keep. These are the claims a caller acts on blindly,
+# so losing one silently changes another agent's behaviour rather than failing
+# a test somewhere visible.
+REQUIRED_SKILL_TEXT = {
+    "browser-mcp-default": (
+        "filter='user'",
+        "network_capture_stop",
+        "full_page",
+        "clip",
+        "quality",
+        "reload_extension_required",
+        "AGENT_BROWSER_LAB_NO_ELICIT=1",
+        # The recovery skill owns transport failures; without this pointer a
+        # caller retries the MCP layer against a dead bridge instead.
+        "[[abm-bridge-recovery]]",
+    ),
+    "abm-bridge-recovery": (
+        "agent-browser-mcp doctor",
+        # Version advice must be derived at runtime, never a literal, because
+        # the extension and the package share one version now.
+        "get_setup_status.package_version",
+        # ...and the way back to the calling contract.
+        "[[browser-mcp-default]]",
+    ),
+}
 REQUIRED_DEFAULT_PARAMETERS = {
     "scan_page": {"cutlist", "maxchars", "timeout"},
     "scroll_page": {"to", "timeout"},
@@ -129,7 +170,7 @@ def _mentions_default(block: str, parameter: str, value: Any) -> bool:
     return False
 
 
-def _skill_hashes(paths: tuple[Path, ...]) -> dict[str, str]:
+def _skill_hashes(paths: Iterable[Path]) -> dict[str, str]:
     return {
         str(path): hashlib.md5(path.read_bytes()).hexdigest()
         for path in paths
@@ -140,19 +181,53 @@ async def _registered_tools() -> list[Any]:
     return await S.mcp.list_tools()
 
 
-def build_report(*, check_installed_skills: bool = False) -> dict[str, Any]:
+def build_report(
+    *,
+    check_installed_skills: bool = False,
+    skill_mirrors: list[str] | None = None,
+) -> dict[str, Any]:
     tools = asyncio.run(_registered_tools())
     registered = {tool.name: tool for tool in tools}
     readmes = {name: _read(ROOT / name) for name in ("README.md", "README.zh-CN.md")}
-    canonical_skill = SKILL_PATHS[0]
-    external_skill_paths = SKILL_PATHS[1:]
-    checked_skill_paths = SKILL_PATHS if check_installed_skills else SKILL_PATHS[:1]
-    missing_files = [str(path) for path in checked_skill_paths if not path.is_file()]
-    missing_external_files = [str(path) for path in external_skill_paths if not path.is_file()]
-    canonical_missing = not canonical_skill.is_file()
-    existing_skill_paths = tuple(path for path in checked_skill_paths if path.is_file())
-    hashes = _skill_hashes(existing_skill_paths)
-    skills_text = _read(canonical_skill) if not canonical_missing else ""
+    mirrors = _skill_mirrors(skill_mirrors) if check_installed_skills else []
+    canonical_skills = {name: _canonical_skill(name) for name in SKILL_NAMES}
+    checked_groups = {name: _skill_group(name, mirrors) for name in SKILL_NAMES}
+    missing_files = sorted(
+        str(path)
+        for group in checked_groups.values()
+        for path in group
+        if not path.is_file()
+    )
+    missing_external_files = sorted(
+        str(path)
+        for group in checked_groups.values()
+        for path in group[1:]
+        if not path.is_file()
+    )
+    canonical_missing = sorted(
+        name for name, path in canonical_skills.items() if not path.is_file()
+    )
+    hashes = _skill_hashes(
+        path for group in checked_groups.values() for path in group if path.is_file()
+    )
+    # One verdict per skill: a mismatch names the document whose copies drifted,
+    # which is the only actionable part. Comparing every path in one flat set
+    # would report the two skills as "different from each other", which they
+    # are supposed to be.
+    skill_mismatched = sorted(
+        name
+        for name, group in checked_groups.items()
+        if len({hashes[str(path)] for path in group if path.is_file()}) > 1
+    )
+    skills_text = {
+        name: (_read(path) if path.is_file() else "")
+        for name, path in canonical_skills.items()
+    }
+    missing_skill_text = {
+        name: missing
+        for name, required in REQUIRED_SKILL_TEXT.items()
+        if (missing := [item for item in required if item not in skills_text.get(name, "")])
+    }
     missing_params = {
         readme_name: {
             tool_name: sorted(
@@ -200,8 +275,6 @@ def build_report(*, check_installed_skills: bool = False) -> dict[str, Any]:
     }
     documented = {name: _documented_tools(ROOT / name) for name in readmes}
     registered_set = set(registered)
-    skill_mismatched = bool(hashes) and len(set(hashes.values())) != 1
-    missing_skill_text = [item for item in REQUIRED_SKILL_TEXT if item not in skills_text]
     try:
         versions = validate_versions(ROOT)
         version_error = None
@@ -235,6 +308,10 @@ def build_report(*, check_installed_skills: bool = False) -> dict[str, Any]:
         "skill_hashes": hashes,
         "skill_hash_mismatch": skill_mismatched,
         "skill_missing_text": missing_skill_text,
+        "skill_mirrors": [str(mirror) for mirror in mirrors],
+        # Asking for the mirror check and getting no mirrors is a failure, not a
+        # pass: an empty list silently checks nothing while reading as green.
+        "skill_mirrors_unset": check_installed_skills and not mirrors,
         "versions": versions,
         "version_error": version_error,
         "check_installed_skills": check_installed_skills,
@@ -245,7 +322,8 @@ def report_ok(report: dict[str, Any]) -> bool:
     skill_ok = (
         not report["skill_missing_files"] and
         not report["skill_hash_mismatch"] and
-        not report["skill_missing_text"]
+        not report["skill_missing_text"] and
+        not report.get("skill_mirrors_unset")
     )
     return (
         report["registered"] == report["expected_registered"] == 55
@@ -267,10 +345,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check-installed-skills",
         action="store_true",
-        help="also require the maintainer's installed Agent/Codex/Claude skill copies to match",
+        help=(
+            "also require installed mirrors of the agent skills to match; "
+            f"point at them with --skill-mirror or {SKILL_MIRRORS_ENV}"
+        ),
+    )
+    parser.add_argument(
+        "--skill-mirror",
+        action="append",
+        metavar="DIR",
+        help=(
+            "directory holding installed skill copies as <skill-name>/SKILL.md "
+            "(repeatable; overrides the environment variable)"
+        ),
     )
     args = parser.parse_args(argv)
-    report = build_report(check_installed_skills=args.check_installed_skills)
+    report = build_report(
+        check_installed_skills=args.check_installed_skills,
+        skill_mirrors=args.skill_mirror,
+    )
     if args.format == "markdown":
         print("# ABM Tool Documentation Contract")
         print()
@@ -284,9 +377,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"- skill_missing_files={report['skill_missing_files']}")
         print(f"- skill_hash_mismatch={report['skill_hash_mismatch']}")
         print(f"- skill_missing_text={report['skill_missing_text']}")
+        print(f"- skill_mirrors={len(report['skill_mirrors'])} checked")
         print(f"- versions={report['versions']}")
     else:
         print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report.get("skill_mirrors_unset"):
+        print(
+            f"--check-installed-skills was requested but no mirror was given; "
+            f"pass --skill-mirror DIR or set {SKILL_MIRRORS_ENV}.",
+            file=sys.stderr,
+        )
     return 0 if report_ok(report) else 1
 
 

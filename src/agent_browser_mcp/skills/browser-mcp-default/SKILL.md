@@ -124,6 +124,19 @@ hotkey(keys_csv="ctrl,c", session_id=B)
 - capture、截图、PDF 或任意 CDP 返回 `cdp_timeout` 时，ABM 已强制 invalidate/detach；先 `list_tabs` 验证桥仍活，再最多重试一次无副作用调用。`debugger_conflict` 表示 DevTools/其他 debugger 占用，关闭竞争者后再试。
 - 不要并发驱动同一个 tab 的多条一次性 CDP 操作；Network/Console capture 本身会共享 ABM 的引用计数 attachment。
 
+### 页面内容读不出（分享页/SPA 前端不渲染）→ 抓包找 API 复用 token 直调
+
+前端不渲染 ≠ 数据不存在。分享页/SPA 常因 Turnstile/登录态/风控故意不把正文渲染进 DOM，但服务器 API 数据完整（实测 DeepSeek 分享页：`/api/v0/share/content?share_id=...` 返回 200/659KB，前端 main 区域为空）。固定链路：
+
+1. 打开页面 → `scan_page` 确认「有壳无正文」（记录可见字符数做证据，别判定 ABM 坏）。
+2. `network_capture_start(include_bodies=true, max_body_bytes=2000000)` → `open_url` 同 URL 重载。
+3. `network_capture_stop(url_pattern=/api/)` 找候选：返回 200 且 body_size 最大的 JSON，路径常含 share/content/detail/history/messages。
+4. 从该请求提取完整 headers：`authorization` Bearer、`x-client-*` 自定义头、Referer、UA。
+5. PowerShell `Invoke-RestMethod` 原样复制 URL + headers 直调 → 递归找 messages/content 数组 → 按 role（USER/ASSISTANT）重组 → 落盘。
+6. 失败回退：403/401 → 重载页面重抓新 token；参数加密 → `execute_js` hook fetch/XHR 找生成逻辑；跨域 → `execute_js` 页面内 fetch 同源 API（自动带 cookie）。
+
+硬规则：内容读不出先走这条链，不许另起 headless/Playwright 兜底；token 现抓现用，不写进任何文件当长期凭证。
+
 ## 截图不等于模型看见了页面
 
 `capture_page_screenshot` 会返回文本元数据和 MCP `ImageContent`;可用 `full_page=true`、`clip={x,y,width,height,scale}`，JPEG/WebP 可带 `quality`;传 `save_path` 只会额外落盘,

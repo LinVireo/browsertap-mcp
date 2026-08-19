@@ -7,6 +7,7 @@ import sys
 
 from . import __version__
 from .server import (
+    agent_skills_dir,
     chrome_extension_dir,
     configure_stdio_logging,
     get_driver,
@@ -19,6 +20,19 @@ from .server import (
 def cmd_extension_path() -> int:
     path = chrome_extension_dir()
     print(path)
+    return 0
+
+
+def cmd_skill_path() -> int:
+    directory = agent_skills_dir()
+    print(directory)
+    # The names go to stderr so the stdout line stays a single scriptable path,
+    # matching `extension-path`, while a human still learns what is in there.
+    names = sorted(child.parent.name for child in directory.glob("*/SKILL.md"))
+    if names:
+        print(f"skills: {', '.join(names)}", file=sys.stderr)
+    else:
+        print(f"no <name>/SKILL.md found under {directory}", file=sys.stderr)
     return 0
 
 
@@ -140,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("extension-path", help="Print the unpacked Chrome extension path")
+    sub.add_parser(
+        "skill-path",
+        help="Print the directory holding the shipped agent skills as <name>/SKILL.md",
+    )
     sub.add_parser("doctor", help="Run local diagnostics and print JSON status")
     sub.add_parser("print-hermes-config", help="Print a ready-to-paste Hermes MCP config snippet")
     bridge = sub.add_parser("bridge", help="Run or manage the browser bridge daemon")
@@ -155,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "extension-path":
         return cmd_extension_path()
+    if args.command == "skill-path":
+        return cmd_skill_path()
     if args.command == "doctor":
         return cmd_doctor()
     if args.command == "print-hermes-config":

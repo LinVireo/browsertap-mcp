@@ -104,7 +104,13 @@ version = {attr = "agent_browser_mcp.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_browser_mcp = ["chrome_extension/*", "chrome_extension/_locales/*/*.json"]
+agent_browser_mcp = [
+  "chrome_extension/*",
+  "chrome_extension/_locales/*/*.json",
+  # The agent skills ship with the package so `agent-browser-mcp skill-path`
+  # resolves from a plain `pip install`, not only from a repository checkout.
+  "skills/*/SKILL.md",
+]
 
 [tool.setuptools.exclude-package-data]
 agent_browser_mcp = ["chrome_extension/config.js"]

@@ -361,6 +361,17 @@ def chrome_extension_dir() -> Path:
     return ROOT / "chrome_extension"
 
 
+def agent_skills_dir() -> Path:
+    """Directory holding the shipped agent skills as ``<name>/SKILL.md``.
+
+    Package data rather than a repository-only document, so the path resolves
+    the same from a checkout and from a plain ``pip install``. A caller points
+    its skill manager at this directory instead of copying the files, which is
+    what keeps an installed copy from silently drifting from the release.
+    """
+    return ROOT / "skills"
+
+
 def _port_open(host: str, port: int) -> bool:
     with socket.socket() as sock:
         sock.settimeout(1)
