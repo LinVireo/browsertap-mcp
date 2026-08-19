@@ -462,7 +462,9 @@ def test_pid_alive_windows_kernel32_outcomes(
         CloseHandle=_Callable(lambda value: closed.append(value) or 1),
     )
     monkeypatch.setattr(P.sys, "platform", "win32")
-    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(kernel32=kernel32))
+    monkeypatch.setattr(
+        P.ctypes, "windll", types.SimpleNamespace(kernel32=kernel32), raising=False
+    )
 
     assert P._pid_alive(123) is expected
     if handle:
@@ -471,7 +473,7 @@ def test_pid_alive_windows_kernel32_outcomes(
 
 def test_pid_alive_windows_probe_failure_is_conservative(monkeypatch):
     monkeypatch.setattr(P.sys, "platform", "win32")
-    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace())
+    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(), raising=False)
 
     assert P._pid_alive(123) is True
 
@@ -899,7 +901,7 @@ def test_windows_pointer_position_handles_api_failure(monkeypatch, result):
         return 0
 
     user32 = types.SimpleNamespace(GetCursorPos=_Callable(get_cursor))
-    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(user32=user32))
+    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(user32=user32), raising=False)
 
     assert P._windows_pointer_position() == (None, None)
 
@@ -1030,7 +1032,7 @@ def test_last_input_marker_tolerates_windows_api_failure(monkeypatch, outcome):
 
     user32 = types.SimpleNamespace(GetLastInputInfo=_Callable(get_last_input))
     monkeypatch.setattr(P.sys, "platform", "win32")
-    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(user32=user32))
+    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(user32=user32), raising=False)
     monkeypatch.setattr(P, "_pointer_position", lambda: (45, 67))
 
     assert P.last_input_marker() == (None, 45, 67)
@@ -1069,7 +1071,9 @@ def test_last_input_marker_windows_uses_fake_user32(monkeypatch):
             return 1
 
     monkeypatch.setattr(P.sys, "platform", "win32")
-    monkeypatch.setattr(P.ctypes, "windll", types.SimpleNamespace(user32=FakeUser32()))
+    monkeypatch.setattr(
+        P.ctypes, "windll", types.SimpleNamespace(user32=FakeUser32()), raising=False
+    )
 
     assert P.last_input_marker() == (1234, 45, 67)
 

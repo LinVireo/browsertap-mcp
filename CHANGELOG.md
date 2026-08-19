@@ -48,6 +48,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   `ScreenShotError` instead of saying the machine has no usable desktop and that
   the `page_*` tools do not need one.
 
+- Let the offline suite run on a non-Windows machine. Five physical-input tests
+  installed a fake `ctypes.windll`, which the standard library defines only on
+  Windows, so `monkeypatch.setattr` raised `AttributeError` and 11 cases failed
+  on any POSIX runner — including the Linux CI this repository ships. They now
+  create the attribute instead of requiring it, which keeps the Windows-only
+  branches covered everywhere rather than skipping them off Windows.
+
 ### Added
 
 - Regressions for the worker-restart debugger sweep, concurrent client-id
