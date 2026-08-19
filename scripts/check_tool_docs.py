@@ -17,9 +17,23 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 USER_HOME = Path.home()
+# Only the first entry ships with the repository and is the canonical source;
+# the rest are the maintainer's *installed* caller-skill copies, which is why
+# checking them is opt-in (`--check-installed-skills`) rather than part of the
+# release gate — a contributor's machine has no reason to have them.
+#
+# Those copies come from a skill manager that keeps one real file per skill and
+# links each client directory to it, so on a healthy install the three entries
+# below are aliases of the same file. They are still listed separately on
+# purpose: a client directory holding a detached *real* copy instead of a link
+# is exactly the failure this check exists to catch, because it reads as fine
+# for as long as the contents happen to agree and then silently stops receiving
+# updates. The store path is machine configuration and has moved before, so
+# treat a `skill_missing_external_files` entry as "re-read where the store is",
+# not as "the file was deleted".
 SKILL_PATHS = (
     ROOT / "docs" / "browser-mcp-default.SKILL.md",
-    USER_HOME / ".agents" / "skills" / "browser-mcp-default" / "SKILL.md",
+    USER_HOME / ".cc-switch" / "skills" / "browser-mcp-default" / "SKILL.md",
     USER_HOME / ".codex" / "skills" / "browser-mcp-default" / "SKILL.md",
     USER_HOME / ".claude" / "skills" / "browser-mcp-default" / "SKILL.md",
 )
