@@ -36,9 +36,14 @@ junit*.xml
 coverage.xml
 
 # local agent/acceptance material
+#
+# `AGENTS.md` itself is tracked: it is the contributor-facing document every
+# agent reads. Machine-specific notes -- absolute paths, which browser profile is
+# in use, how one maintainer's skill manager is wired -- go in `AGENTS.local.md`,
+# which stays untracked so that none of it reaches a public tree.
 .superpowers/
 artifacts/
-AGENTS.md
+AGENTS.local.md
 CLAUDE.md
 BUGREPORT.md
 SPEC.md
@@ -56,6 +61,20 @@ docs/superpowers/plans/
 /_*.json
 /_*.txt
 /_*.md
+
+# local MCP client wiring
+#
+# This project is an MCP server, so a maintainer testing it naturally drops a
+# client config into the repository root. Those files carry an absolute
+# interpreter path and sometimes an API key in `env`, which is machine
+# configuration and occasionally a secret -- neither belongs in a public tree.
+# `.claude/` and `.github/` are deliberately not ignored: agent skills and
+# workflows are part of the published surface.
+.mcp.json
+.vscode/
+.idea/
+.cursor/mcp.json
+.gemini/settings.json
 
 # local test/build caches that are safe to regenerate
 htmlcov/

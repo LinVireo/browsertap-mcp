@@ -16,6 +16,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   anyone who installed the package could not reach them at all. Point a skill
   manager at that directory instead of copying the files; a copy stops receiving
   updates on the next upgrade without reporting anything.
+- `AGENTS.md` is now part of the published tree: a machine-neutral contributor
+  guide covering the three-process reload rules, tab-id volatility, the
+  physical-input activation default, and the MV3 alarm floor. The release gates
+  fail if an absolute local path reaches it.
 
 ### Changed
 

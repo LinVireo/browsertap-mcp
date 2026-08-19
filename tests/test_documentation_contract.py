@@ -167,6 +167,34 @@ def test_canonical_caller_skill_is_not_machine_specific():
         assert not drive_paths, f"{label} carries absolute local path(s) {drive_paths}"
 
 
+def test_published_agent_guide_is_not_machine_specific():
+    """`AGENTS.md` ships; `AGENTS.local.md` is where machine detail belongs.
+
+    The published guide grew out of one maintainer's notebook and carried
+    absolute interpreter paths plus the layout of that machine's skill manager.
+    A reader who had just cloned the repository followed those into directories
+    that do not exist, and the layout went stale as soon as the machine was
+    reorganised. The split only holds while the ignore rule keeps the local half
+    untracked, so that is asserted here too rather than trusted.
+    """
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    found = sorted(set(_LOCAL_PATH_RE.findall(text)))
+    assert not found, f"AGENTS.md carries absolute local path(s) {found}"
+
+    rules = {line.strip() for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    assert "AGENTS.local.md" in rules
+    assert "AGENTS.md" not in rules, "AGENTS.md is meant to ship, not to be ignored"
+    assert "AGENTS.local.md" in text, "AGENTS.md has to say where machine-local notes go"
+
+    # The guide tells a contributor which files to edit alongside a tool change.
+    # Naming them by path means a moved skill has to break here loudly instead of
+    # sending the next reader to a path that no longer exists.
+    for path in _shipped_skills():
+        reference = path.relative_to(ROOT).as_posix()
+        assert reference in text, f"AGENTS.md does not point at {reference}"
+
+
+
 def test_user_facing_docs_carry_no_pre_unification_version_numbers():
     """The extension used to version itself separately (2.x).
 
