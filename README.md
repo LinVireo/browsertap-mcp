@@ -492,6 +492,8 @@ permission, and physical-input recovery procedures, see the dedicated
 
 ABM is maintained by `0xlinn`. The original repository copyright attribution remains with `zhea` in [LICENSE](LICENSE); these are distinct maintenance and copyright roles. The canonical public repository for this distribution is `0xlinn/agent-browser-mcp`.
 
+This distribution is a fork of [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp), branched at commit `04cc1f1` (2026-04-15). It has diverged substantially since: 46 commits, 81 files changed, and +38,096/-1,105 lines against that fork point, growing the tracked tree from 19 files to 82. The upstream snapshot shipped no test suite, documentation set, or CI configuration. The MCP tool surface, the bridge and its token authentication, the Chrome extension, the release evidence pipeline, and both READMEs were rewritten or written from scratch here. Attribution is kept because the lineage is real, not because the current code is close to it.
+
 The browser automation core here was extracted from [GenericAgent](https://github.com/lsdefine/GenericAgent)'s browser stack and repackaged as an MCP server. Thanks to that project and its author for the original implementation.
 
 Derived from or adapted from GenericAgent:

@@ -1,7 +1,7 @@
 # ABM Background-Safe Input, Dialog, and Permission Design
 
 Date: 2026-08-10
-Status: Approved in conversation
+Status: Accepted
 Upstream baseline: pre-ABM repository history at the project fork point
 
 ## Context

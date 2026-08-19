@@ -523,6 +523,8 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 
 ABM 由 `0xlinn` 维护。原仓库版权归属仍按 [LICENSE](LICENSE) 中的 `zhea` 保留；维护者与原始版权归属是两个不同角色。本发行版的权威公开仓库为 `0xlinn/agent-browser-mcp`。
 
+本发行版基于 [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp) 二次开发，分叉点为 `04cc1f1`（2026-04-15）。此后差异已经很大：相对分叉点 46 个提交、81 个文件变更、+38,096 / -1,105 行，跟踪文件数由 19 增至 82。上游快照不包含测试套件、文档集与 CI 配置；MCP 工具面、bridge 及其 token 鉴权、Chrome 扩展、发布证据链与两份 README 均在此重写或从零编写。保留致谢是因为来源关系属实，而非当前代码与其接近。
+
 这里的浏览器自动化核心是从 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器栈中提取出来、重新封装成 MCP 服务的。感谢该项目及其作者提供的原始实现。
 
 以下部分来自或改编自 GenericAgent:

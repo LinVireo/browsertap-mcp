@@ -37,7 +37,6 @@ elicitation；需要逐次确认的使用者显式切换到 `safe`。
   Cookie、Storage 和 URL 等待
 - Python 服务核心文件约 4942 行，扩展 service worker 约 3576 行
 - Python 包版本为 `0.2.2`，扩展版本为 `2.1.3`
-- 工作区已有 Console filter、页面点击和自动化 profile 等未提交修改，本阶段保留并兼容
 
 ## 稳定 API 边界
 
