@@ -182,6 +182,20 @@ agent-browser-mcp bridge --restart
 This migration does not require restarting Chrome. The extension reconnects to
 the new bridge in the background.
 
+### The status keeps asking for a restart or reload that changes nothing
+
+Compare `package_version` against `bridge_version` and `extension_version`. If a
+component is *newer* than `package_version`, the stale build is the MCP server
+process itself, and `get_setup_status` reports `status: stale_package` with
+`action: restart_mcp_session`. This is the normal outcome of upgrading the
+package while an MCP session is live: the files on disk are new, but the running
+process still holds the version it imported at startup.
+
+Restart the MCP session or client. Restarting the bridge or reloading the
+extension cannot clear it — both re-read the same new files and report the same
+mismatch, which is why `restart_bridge_required` and
+`reload_extension_required` are both false in this state.
+
 ## Browser interaction problems
 
 ### A tab remains `blocked_by_dialog` or `busy`

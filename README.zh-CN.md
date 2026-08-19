@@ -345,7 +345,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 <details>
 <summary><b>标签页与导航</b></summary>
 
-- **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `agent-browser-mcp bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload。无参数
+- **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `agent-browser-mcp bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。无参数
 - **get_automation_profile** —— 查看当前 MCP 进程使用 `lab` 还是 `safe` profile
 - **set_automation_profile** —— 切换当前 MCP 进程的 `lab|safe` profile;覆盖值不会持久化或重载扩展
   - `mode`(string):`lab` 或 `safe`

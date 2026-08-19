@@ -48,6 +48,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   `ScreenShotError` instead of saying the machine has no usable desktop and that
   the `page_*` tools do not need one.
 
+- Gave `get_setup_status` a direction so its recovery advice can converge. It
+  compared component versions with a bare `!=`, which cannot tell "the bridge is
+  older" from "the bridge is newer and this process is older", so upgrading the
+  package while an MCP session was live produced `stale_bridge` /
+  `restart_bridge` — advice that never clears, because a restarted bridge
+  re-reads the same new files and reports the same mismatch. The same held for
+  `reload_extension` against a user who had just reloaded. A newer component now
+  reports `status: stale_package` with `action: restart_mcp_session` and a new
+  `restart_mcp_session_required` flag, and leaves `restart_bridge_required` and
+  `reload_extension_required` false. Protocol skew is judged the same way, and a
+  version that cannot be ordered keeps the old conservative verdict.
 - Let the offline suite run on a non-Windows machine. Five physical-input tests
   installed a fake `ctypes.windll`, which the standard library defines only on
   Windows, so `monkeypatch.setattr` raised `AttributeError` and 11 cases failed

@@ -86,7 +86,13 @@ def cmd_doctor() -> int:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     # Surface the one-line verdict last so it's the first thing the eye lands on.
     final_diag = payload.get("diagnosis", diag)
-    if payload.get("action") == "reload_extension":
+    if payload.get("action") == "restart_mcp_session":
+        print(
+            "\n[!!] stale_package: A component is newer than this process. Restart the MCP "
+            "session/client; restarting the bridge or reloading the extension cannot fix it.",
+            file=sys.stderr,
+        )
+    elif payload.get("action") == "reload_extension":
         print("\n[!!] stale_extension: Reload Agent Browser MCP Bridge once in chrome://extensions.", file=sys.stderr)
     elif payload.get("action") == "restart_bridge":
         print(

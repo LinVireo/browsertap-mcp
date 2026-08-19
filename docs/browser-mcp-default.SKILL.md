@@ -191,7 +191,7 @@ hotkey(keys_csv="ctrl,c", session_id=B)
 ## 出问题了怎么办
 
 - 工具挂住 / `list_tabs` 拿不到 tab / `get_setup_status` 转圈 / 报连不上桥 —— **不是本 skill 的事，转 [[abm-bridge-recovery]]** 分层排错（一条 `agent-browser-mcp doctor` 直接判定是哪种故障 + 怎么修）。别在这里反复重试。
-- **升级后先看版本诊断**：`get_setup_status` 返回 package/bridge/extension/protocol 版本。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍占端口的旧 bridge 必须执行 `agent-browser-mcp bridge --restart`。只有 `reload_extension_required=true` 才需要用户在扩展页手动 Reload unpacked extension。
+- **升级后先看版本诊断**：`get_setup_status` 返回 package/bridge/extension/protocol 版本。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍占端口的旧 bridge 必须执行 `agent-browser-mcp bridge --restart`。只有 `reload_extension_required=true` 才需要用户在扩展页手动 Reload unpacked extension。若拿到 `status: stale_package` / `action: restart_mcp_session`（某个组件比运行中的服务**更新**），过期的是 MCP 进程自己：让用户重启 MCP 会话，**别叫他重启 bridge 或重载扩展**，那两步只会再报同一个不匹配。
 - **报 401 / unauthorized**：bridge 与 MCP 没有读到同一个持久 token。默认唯一真源是 `~/.agent-browser-mcp/bridge-token`，各编辑器无需配置；文件已存在时残留的 `AGENT_BROWSER_BRIDGE_TOKEN` 也不能覆盖它。先按 [[abm-bridge-recovery]] 的「成因 6」确认 token 文件路径；默认路径一致时重启升级前的旧 bridge 一次，不要逐个适配或重启编辑器。
 - **tab 卡住，每次调用都返回 `blocked_by_dialog` / `busy`**：`manual` 对话框策略留下了一个开着的原生对话框 + 后面暂停的执行。在那个 `session_id` 上调 `handle_dialog(action="accept")` 或 `"dismiss"` 释放。期间其它 tab 正常工作。
 - **物理输入返回 `requires_user_action` 且从不弹批准**：客户端不支持 elicitation。优先改用 `page_*`；私有 lab 明确接受风险时可设置 `AGENT_BROWSER_LAB_NO_ELICIT=1` 并重启 MCP 进程。

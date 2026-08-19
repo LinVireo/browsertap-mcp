@@ -152,6 +152,17 @@ agent-browser-mcp bridge --restart
 
 这一迁移不需要重启 Chrome；扩展会在后台重新连接新 bridge。
 
+### 状态反复要求重启或重新加载，但做了没有变化
+
+比较 `package_version` 与 `bridge_version`、`extension_version`。若某个组件**比
+`package_version` 更新**，说明过期的是 MCP 服务进程本身，此时 `get_setup_status` 报
+`status: stale_package`、`action: restart_mcp_session`。这是"MCP 会话仍在运行时升级了包"
+的正常结果：磁盘上的文件已经是新版，而运行中的进程仍持有启动时导入的版本。
+
+应重启 MCP 会话或客户端。重启 bridge 或重新加载扩展都无法消除该状态 —— 两者都会重新读取
+同一批新文件并再次报告同一个不匹配，因此这种状态下 `restart_bridge_required` 与
+`reload_extension_required` 均为 false。
+
 ## 浏览器交互问题
 
 ### 标签页持续返回 `blocked_by_dialog` 或 `busy`

@@ -802,6 +802,41 @@ _EXTENSION_PROTOCOL_VERSION = 3
 _REQUIRED_EXTENSION_CAPABILITIES = {"content_command_channel_removed"}
 
 
+def _version_order(value: Any) -> tuple[int, ...] | None:
+    """Parse a dotted version for ordering, or None when it cannot be ordered.
+
+    Only the leading numeric run of each component is read, so `0.3.13rc1`
+    orders as `(0, 3, 13)` -- enough to answer "older or newer" for the builds
+    this project ships together. Anything unparseable returns None so callers
+    fall back to plain inequality instead of inventing a direction.
+    """
+    if not isinstance(value, str):
+        return None
+    parts: list[int] = []
+    for component in value.strip().split("."):
+        digits = re.match(r"\d+", component)
+        if digits is None:
+            break
+        parts.append(int(digits.group()))
+    return tuple(parts) or None
+
+
+def _component_is_newer(component: Any) -> bool:
+    """True only when `component` is a strictly newer build than this process.
+
+    The package, bridge, and extension ship as one version, so the mismatch a
+    user normally hits is a component that is *older* -- restart it or reload
+    it and the mismatch clears. The reverse direction means this process is the
+    stale one: the files on disk are already new, so a restarted bridge or a
+    reloaded extension just reports the new version again and the advice never
+    converges. Distinguishing the two is the whole point of this helper; a bare
+    `!=` reports "reload the extension" to someone who just reloaded it.
+    """
+    running = _version_order(__version__)
+    reported = _version_order(component)
+    return bool(running and reported and reported > running)
+
+
 @mcp.tool(
     description=(
         "Return the active safe/lab automation profile. Lab is the default and skips elicitation "
@@ -873,20 +908,38 @@ def get_setup_status() -> dict[str, Any]:
         except Exception as e:
             extension_status_error = extension_status_error or str(e)
 
-    restart_bridge_required = bridge_version != __version__
+    # Direction matters. A component that is *newer* than this process cannot be
+    # repaired by restarting or reloading it, so those two flags stay false and
+    # the verdict names the stale side instead: this MCP server process.
+    bridge_is_newer = _component_is_newer(bridge_version)
+    extension_is_newer = _component_is_newer(extension_version)
+    protocol_is_newer = (
+        isinstance(protocol_version, int)
+        and not isinstance(protocol_version, bool)
+        and protocol_version > _EXTENSION_PROTOCOL_VERSION
+    )
+    package_is_stale = bridge_is_newer or extension_is_newer or protocol_is_newer
+
+    restart_bridge_required = bridge_version != __version__ and not bridge_is_newer
     missing_extension_capabilities = sorted(
         capability
         for capability in _REQUIRED_EXTENSION_CAPABILITIES
         if extension_capabilities.get(capability) is not True
     )
     reload_extension_required = (
-        extension_version != __version__
-        or protocol_version != _EXTENSION_PROTOCOL_VERSION
-        or bool(missing_extension_capabilities)
+        (extension_version != __version__ and not extension_is_newer)
+        or (protocol_version != _EXTENSION_PROTOCOL_VERSION and not protocol_is_newer)
+        # A newer extension that no longer advertises a capability this build
+        # requires is also a stale-package problem: reloading cannot add back
+        # something the newer extension deliberately dropped.
+        or (bool(missing_extension_capabilities) and not extension_is_newer)
     )
     if bridge_error or diagnosis.get("cause") == "bridge_unreachable":
         component_status = "bridge_unreachable"
         component_action = "restart_bridge"
+    elif package_is_stale:
+        component_status = "stale_package"
+        component_action = "restart_mcp_session"
     elif restart_bridge_required:
         component_status = "stale_bridge"
         component_action = "restart_bridge"
@@ -908,6 +961,7 @@ def get_setup_status() -> dict[str, Any]:
         "missing_extension_capabilities": missing_extension_capabilities,
         "restart_bridge_required": restart_bridge_required,
         "reload_extension_required": reload_extension_required,
+        "restart_mcp_session_required": package_is_stale,
         "extension_name": "Agent Browser MCP Bridge",
         "extension_path": str(chrome_extension_dir()),
         "tmwebdriver_host": _DRIVER_HOST,
@@ -924,6 +978,15 @@ def get_setup_status() -> dict[str, Any]:
             "The bridge runs as a detached daemon; this MCP server auto-starts it when missing.",
         ],
     }
+    if package_is_stale:
+        # Lead with the only action that can clear this, because the two flags a
+        # reader reaches for first are both false here.
+        status["notes"].insert(
+            0,
+            "A component reports a newer version than this MCP server process. "
+            "Restart the MCP session or client so it loads the installed build; "
+            "restarting the bridge or reloading the extension cannot clear it.",
+        )
     if bridge_error:
         status["bridge_error"] = bridge_error
     if extension_status_error:

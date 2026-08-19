@@ -324,7 +324,7 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
 <details>
 <summary><b>Tabs and navigation</b></summary>
 
-- **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `agent-browser-mcp bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload. No parameters.
+- **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `agent-browser-mcp bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. No parameters.
 - **get_automation_profile** — inspect whether the current MCP process uses `lab` or `safe`.
 - **set_automation_profile** — switch the current MCP process between `lab|safe`; the override is not persisted and does not reload the extension.
   - `mode` (string): `lab` or `safe`

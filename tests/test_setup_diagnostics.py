@@ -122,6 +122,93 @@ def test_setup_status_requires_removed_content_command_channel(monkeypatch):
     ]
 
 
+def test_setup_status_blames_this_process_when_components_are_newer(monkeypatch):
+    """A bare `!=` sent the user round a loop they could not exit.
+
+    Upgrading the package while an MCP session is live leaves this process on
+    the old `__version__` while the bridge and extension on disk are already
+    new. The old code answered `stale_bridge` / `restart_bridge`, but a restart
+    re-reads the same new files and reports the same mismatch, and the same held
+    for `reload_extension` after the user had just reloaded it. The stale build
+    is this process, so that is what the verdict has to name.
+    """
+    result = _status(
+        monkeypatch,
+        {
+            "cause": "healthy",
+            "ok": True,
+            "bridge_version": "99.0.0",
+            "extension_version": "99.0.0",
+            "protocol_version": 3,
+            "extension_capabilities": {"content_command_channel_removed": True},
+        },
+    )
+
+    assert result["status"] == "stale_package"
+    assert result["action"] == "restart_mcp_session"
+    assert result["restart_mcp_session_required"] is True
+    # Neither of these can clear the mismatch, so neither may ask for it.
+    assert result["restart_bridge_required"] is False
+    assert result["reload_extension_required"] is False
+    assert "Restart the MCP session or client" in result["notes"][0]
+
+
+def test_setup_status_still_blames_an_older_component_not_this_process(monkeypatch):
+    """The common direction must keep its existing verdict."""
+    result = _status(
+        monkeypatch,
+        {
+            "cause": "healthy",
+            "ok": True,
+            "bridge_version": "0.0.1",
+            "extension_version": __version__,
+            "protocol_version": 3,
+            "extension_capabilities": {"content_command_channel_removed": True},
+        },
+    )
+
+    assert result["status"] == "stale_bridge"
+    assert result["action"] == "restart_bridge"
+    assert result["restart_mcp_session_required"] is False
+
+
+def test_setup_status_blames_this_process_for_a_newer_protocol(monkeypatch):
+    """Protocol skew has the same two directions as a version string."""
+    result = _status(
+        monkeypatch,
+        {"cause": "healthy", "ok": True, "bridge_version": __version__},
+        {
+            "extension_version": __version__,
+            "protocol_version": S._EXTENSION_PROTOCOL_VERSION + 1,
+            "capabilities": {"content_command_channel_removed": True},
+        },
+    )
+
+    assert result["status"] == "stale_package"
+    assert result["action"] == "restart_mcp_session"
+    assert result["reload_extension_required"] is False
+
+
+def test_setup_status_falls_back_to_inequality_for_unorderable_versions(monkeypatch):
+    """An unparseable version cannot be given a direction, so it must not be
+    guessed into `stale_package`: the conservative answer is the old one."""
+    result = _status(
+        monkeypatch,
+        {
+            "cause": "healthy",
+            "ok": True,
+            "bridge_version": "not-a-version",
+            "extension_version": __version__,
+            "protocol_version": 3,
+            "extension_capabilities": {"content_command_channel_removed": True},
+        },
+    )
+
+    assert result["status"] == "stale_bridge"
+    assert result["restart_bridge_required"] is True
+    assert result["restart_mcp_session_required"] is False
+
+
 def test_setup_status_preserves_unreachable_bridge_as_primary_action(monkeypatch):
     driver = _Driver(
         {"cause": "bridge_unreachable", "ok": False, "error": "refused"},
