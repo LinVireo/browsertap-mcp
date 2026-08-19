@@ -13,6 +13,41 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 - 默认部署面向单操作员；多 Agent 通过显式 session 与 owner 契约隔离。
 - 桥故障时走 **abm-bridge-recovery** / `agent-browser-mcp doctor`，不换别的 browser 产品。
 
+## 固定套路（照抄执行，禁止临场发挥）
+
+模型翻车基本都发生在"自己解释错误语义"上。下面两类表是**唯一正确响应**，见到即做，不推理、不换路、不重试第二次。
+
+### 高频流程模板（链路固定，步数固定）
+
+| 场景 | 固定链路 |
+|---|---|
+| 只读抓取 | `list_tabs` → 借 U（记 `original_url`）或 `open_new_tab` → `scan_page(session_id=...)` → 需要数据再 `execute_js(session_id=...)` → 借用的还原 URL；owned 的带 `owner_id` 关 |
+| 表单交互 | `list_tabs` → `open_new_tab`（记 session+generation+owner）→ `wait_for_url` → `scan_page` → `page_type`/`page_click`（每次带 session_id）→ `wait_for_url` → `close_tabs(session_id, owner_id=...)` |
+| 下载附件 | `download_file(url=..., session_id=...)`。禁 `?dl=1`、禁页面 fetch、禁裸 `Page.navigate` 猜目录 |
+| 验证码页 | 同 tab `page_click` 一次 → `challenge_stalled` → **立刻交还用户，停手报告**。不另起浏览器、不跑长 `execute_js` |
+| 长页读取 | `scan_page` → `scroll_page(to=...)` → 再 `scan_page`（±5000px 窗口外内容必须滚动后再扫） |
+
+### 错误语义 → 唯一动作
+
+| 见到 | 唯一动作 |
+|---|---|
+| `no_response` / `switched_session` | `list_tabs` → `switch_tab` 重定位 → 只重试**无副作用**操作；有副作用脚本必须先 `scan_page` 确认未落地 |
+| `busy` | 等 10 秒重试**一次**；再 `busy` 就停手报告，不循环不删锁 |
+| `blocked_by_dialog` | `handle_dialog(action="accept"|"dismiss")` 释放，然后继续 |
+| `challenge_stalled` | 停，把 tab 交还用户 |
+| `requires_user_action` / `input_activity_detected` | 改用 `page_*`，或停手 |
+| `cdp_timeout` / `debugger_detached` | `list_tabs` 验桥活 → 重试一次无副作用调用 |
+| `debugger_conflict` | 让用户关 DevTools/竞争 debugger，再原调用重试 |
+| `401` / `unauthorized` | 转 [[abm-bridge-recovery]] 成因 6（token 文件不一致），不重启浏览器不重装扩展 |
+| `Unknown command: downloads` | 目标浏览器扩展旧了：`chrome://extensions` 手动 Reload，不重启桥 |
+
+### 硬禁止（以前能跑、现在必炸）
+
+- `execute_js` 里 `setTimeout`/sleep 硬等 → 改 `wait_for` / `wait_for_url`
+- 重放可能已执行的副作用脚本（`no_response` 后盲重试）
+- 对 Turnstile/登录盾页跑长 `execute_js`
+- 页面 `fetch` 下载附件
+
 ## 标准动手流程
 
 1. **先定位目标 tab**：`list_tabs`（每个 tab 带 `browser` 字段 chrome/edge/opera + 一个 session id）。
