@@ -9,9 +9,12 @@ from pathlib import Path
 from scripts.evidence_manifest import write_manifest
 from scripts.versioning import (
     ROOT,
+    VersionError,
     bump_version,
+    latest_release_tag,
     read_source_version,
     sync_versions,
+    validate_version_bump,
     validate_versions,
 )
 
@@ -129,6 +132,29 @@ def _run_gates(skip_live: bool) -> None:
         )
 
 
+def _check_version_bump() -> None:
+    """Refuse to finalize production changes that reuse the last release's number.
+
+    ``.github/workflows/test.yml`` runs this check against the previous push, so
+    it never fires on a repository that has not been pushed -- which is exactly
+    when a round of changes is most likely to keep the version it started with.
+    The baseline here is the last release tag, and the comparison covers the
+    working tree because the finalizer runs before the change set is committed.
+    """
+    tag = latest_release_tag(ROOT)
+    if tag is None:
+        print("No release tag to compare against; skipping the version-increment check.")
+        return
+    try:
+        result = validate_version_bump(ROOT, tag, include_worktree=True)
+    except VersionError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        f"Version increment checked against {tag}: base={result['base']} "
+        f"target={result['current']} production_changed={result['production_changed']}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Synchronize the target ABM version, then run all change-set gates against it"
@@ -141,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     target = current if args.bump == "none" else bump_version(current, args.bump)
     changed = sync_versions(ROOT, target)
     validate_versions(ROOT)
+    _check_version_bump()
     archived = _archive_previous_outputs()
     _run_gates(skip_live=args.skip_live)
     _run(sys.executable, "-m", "pytest", "tests/test_versioning.py", "-q")

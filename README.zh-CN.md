@@ -11,7 +11,7 @@
 `agent-browser-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.3.12**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.3.13**。
 
 当页面级输入无法完成操作时，ABM 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`

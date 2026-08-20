@@ -157,6 +157,13 @@ verify.
   applies only to pushes on `release/*` branches, where release coordination can
   own the shared version and changelog files without forcing every contributor
   into conflicts.
+- `python -m scripts.finalize_change` runs the same increment check locally,
+  against the last release tag and against the **working tree**. CI compares a
+  push against the commit before it, which never fires in a repository that has
+  not been pushed, and a commit-range comparison sees nothing at all while a
+  change set is still uncommitted — so a round of real behaviour changes could be
+  finalized under the number it started with. The local check refuses that. It
+  reports the baseline it used and skips only when the repository has no tag yet.
 - `python -m scripts.finalize_change` synchronizes the requested target version before
   running the gate. Never edit a version after finalization without rerunning
   the complete test, coverage, documentation, build, and distribution pipeline
@@ -182,7 +189,8 @@ has actually happened.
 `.github/workflows/release.yml` builds, gates, and uploads. It never runs on a
 push: the triggers are a manual run and a published GitHub Release. The reason
 is that an upload cannot be undone — a filename on PyPI can never be reused, so
-a bad `0.3.12` burns that version number permanently and the fix is `0.3.13`.
+a bad upload burns that version number permanently and the only fix is to
+release the next patch.
 
 Three things have to exist before the workflow can upload, and none of them can
 be created from inside this repository:

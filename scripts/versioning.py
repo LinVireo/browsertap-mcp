@@ -306,18 +306,29 @@ def validate_version_increment(
     return production_changed
 
 
-def validate_version_bump(root: Path, base_ref: str) -> dict[str, object]:
-    root = Path(root).resolve()
+def latest_release_tag(root: Path = ROOT) -> str | None:
+    """The newest tag reachable from HEAD, or None when the repository has none.
+
+    The local finalizer has no equivalent of a CI push event to compare against,
+    so it uses the last release as the baseline. A repository with no tag yet has
+    nothing to compare against, which is not a failure.
+    """
+    completed = subprocess.run(
+        ("git", "describe", "--tags", "--abbrev=0"),
+        cwd=Path(root),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() or None
+
+
+def _version_at_ref(root: Path, ref: str) -> str:
     try:
-        source_at_base = subprocess.run(
-            ("git", "show", f"{base_ref}:src/agent_browser_mcp/_version.py"),
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout
-        changed_output = subprocess.run(
-            ("git", "diff", "--name-only", f"{base_ref}...HEAD"),
+        source = subprocess.run(
+            ("git", "show", f"{ref}:src/agent_browser_mcp/_version.py"),
             cwd=root,
             text=True,
             capture_output=True,
@@ -325,12 +336,11 @@ def validate_version_bump(root: Path, base_ref: str) -> dict[str, object]:
         ).stdout
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() or exc.stdout.strip() or str(exc)
-        raise VersionError(f"cannot compare version against {base_ref!r}: {detail}") from exc
+        raise VersionError(f"cannot compare version against {ref!r}: {detail}") from exc
     try:
-        module = ast.parse(source_at_base, filename=f"{base_ref}:_version.py")
+        module = ast.parse(source, filename=f"{ref}:_version.py")
     except SyntaxError as exc:
         raise VersionError(f"base version source is invalid: {exc}") from exc
-    base_version = None
     for node in module.body:
         if (
             isinstance(node, ast.Assign)
@@ -341,12 +351,46 @@ def validate_version_bump(root: Path, base_ref: str) -> dict[str, object]:
             and isinstance(node.value, ast.Constant)
             and isinstance(node.value.value, str)
         ):
-            base_version = node.value.value
-            break
-    if base_version is None:
-        raise VersionError("base version source does not assign __version__")
+            return node.value.value
+    raise VersionError("base version source does not assign __version__")
+
+
+def _changed_paths_since(root: Path, ref: str, *, include_worktree: bool) -> list[str]:
+    """Paths that differ from ``ref``.
+
+    ``include_worktree`` compares the *working tree* rather than ``HEAD``, which
+    is what the local finalizer needs: it runs before the change set is
+    committed, and a commit-range diff would report a production change set of
+    nothing and let the version stand still.
+    """
+    revisions = (ref,) if include_worktree else (f"{ref}...HEAD",)
+    commands = [("git", "diff", "--name-only", *revisions)]
+    if include_worktree:
+        commands.append(("git", "ls-files", "--others", "--exclude-standard"))
+    paths: set[str] = set()
+    for command in commands:
+        try:
+            output = subprocess.run(
+                command,
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+            raise VersionError(f"cannot compare version against {ref!r}: {detail}") from exc
+        paths.update(line.strip() for line in output.splitlines() if line.strip())
+    return sorted(paths)
+
+
+def validate_version_bump(
+    root: Path, base_ref: str, *, include_worktree: bool = False
+) -> dict[str, object]:
+    root = Path(root).resolve()
+    base_version = _version_at_ref(root, base_ref)
     current_version = read_source_version(root)
-    changed_paths = [line.strip() for line in changed_output.splitlines() if line.strip()]
+    changed_paths = _changed_paths_since(root, base_ref, include_worktree=include_worktree)
     production_changed = validate_version_increment(base_version, current_version, changed_paths)
     return {
         "base": base_version,
@@ -366,13 +410,19 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("version")
     check_bump = subparsers.add_parser("check-bump")
     check_bump.add_argument("--base", required=True)
+    check_bump.add_argument(
+        "--worktree",
+        action="store_true",
+        help="compare the working tree instead of HEAD, for a check that runs before the commit",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "check":
         print(json.dumps(validate_versions(ROOT), sort_keys=True))
         return 0
     if args.command == "check-bump":
-        print(json.dumps(validate_version_bump(ROOT, args.base), sort_keys=True))
+        result = validate_version_bump(ROOT, args.base, include_worktree=args.worktree)
+        print(json.dumps(result, sort_keys=True))
         return 0
     current = read_source_version(ROOT)
     target = bump_version(current, args.part) if args.command == "bump" else args.version

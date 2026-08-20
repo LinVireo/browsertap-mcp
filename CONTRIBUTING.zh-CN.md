@@ -128,6 +128,11 @@ python -m scripts.check_tool_docs --check-installed-skills \
 - 普通 pull request 不需要提升发布版本。CI 的版本增量门禁仅适用于 `release/*` 分支的
   push，使发布协调者统一管理共享版本与 CHANGELOG 文件，避免所有贡献者在这些文件上
   产生冲突。
+- `python -m scripts.finalize_change` 会在本地跑同一条增量检查，基线取最近一个发布 tag，
+  比较对象是**工作树**。CI 那条是拿一次 push 与它前一个提交比，仓库从未 push 过时它永远
+  不触发；而提交范围比较在改动尚未提交时看到的是"什么都没改" —— 于是一整轮真实行为变更
+  可能沿用起始版本号被封存。本地这条会直接拒绝，并打印它用的基线；仅在仓库还没有任何 tag
+  时跳过。
 - `python -m scripts.finalize_change` 会先同步目标版本，再针对该版本运行门禁。
   finalization 后不得修改版本；确需修改时，必须在准确的最终源码树上重新运行测试、
   覆盖率、文档、构建和发行检查。
@@ -147,7 +152,7 @@ python -m scripts.check_tool_docs --check-installed-skills \
 
 `.github/workflows/release.yml` 负责构建、门禁与上传。它**不会**被 push 触发，只能手动
 运行或由已发布的 GitHub Release 触发。原因是上传不可撤销：PyPI 上的文件名永不可复用，
-错误的 `0.3.12` 会永久占掉这个版本号，只能改用 `0.3.13`。
+一次错误的上传会永久占掉那个版本号，只能改用下一个 patch 版本。
 
 上传之前必须先具备三样东西，且都无法从本仓库内部创建：
 

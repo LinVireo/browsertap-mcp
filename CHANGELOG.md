@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-08-20
+
 ### Added
 
 - The two agent skills now ship as package data, so a plain
@@ -30,6 +32,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- `page_click`, `page_type`, `page_press` and `page_drag` now prove the page holds
+  focus before the first input goes out, which stops the silent miss these tools
+  had on a tab that had never been focused. Chrome discards `Input.*` aimed at
+  such a tab, and `Emulation.setFocusEmulationEnabled` acknowledges before the
+  renderer has applied it, so an input dispatched right after the flag was
+  dropped while every CDP command still reported success -- measured at roughly
+  one miss in eight on a freshly opened tab. The batch now carries the flag, a
+  `document.hasFocus()` probe and the input together: the probe is the renderer
+  round trip the flag needs, and its answer is the proof. A `false` reading is
+  reported as `page input may not have landed` and the input is **not** re-sent,
+  because by then the events are already out and a repeat could double the
+  click; check the page instead. Sampling focus after the dispatch cannot detect
+  this, as it reads `true` by then either way.
 - The CDP fallback used for CSP-restricted pages now retries once when the
   debugger attach itself never landed, which is the common one-off failure and
   cannot have run the caller's script. It deliberately does **not** retry after
@@ -65,6 +80,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - The fork-divergence paragraph in both READMEs no longer quotes exact commit and
   line counts that went stale within a release; it names the command that prints
   the current figure instead.
+- Every GitHub reference now points at `LinVireo/agent-browser-mcp`. The account
+  was renamed from `0xlinn`; GitHub redirects the old paths, but the canonical
+  URL in the metadata an index renders should be the current one.
 
 ## [0.3.12] - 2026-08-19
 
@@ -319,5 +337,6 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.12...HEAD
+[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.13...HEAD
+[0.3.13]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/LinVireo/agent-browser-mcp/releases/tag/v0.3.12

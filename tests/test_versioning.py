@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,10 @@ from agent_browser_mcp import __version__
 from scripts.versioning import (
     VersionError,
     bump_version,
+    latest_release_tag,
     read_source_version,
     sync_versions,
+    validate_version_bump,
     validate_version_increment,
     validate_versions,
 )
@@ -144,6 +147,86 @@ def test_production_changes_require_a_strict_version_increment():
     )
     with pytest.raises(VersionError, match="did not increase"):
         validate_version_increment("0.3.0", "0.3.0", ["scripts/finalize_change.py"])
+
+
+def _tagged_repo(root: Path, version: str, tag: str) -> None:
+    """A throwaway repository whose single commit is a tagged release."""
+
+    def run(*args: str) -> None:
+        subprocess.run(("git", *args), cwd=root, check=True, capture_output=True, text=True)
+
+    package = root / "src" / "agent_browser_mcp"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "_version.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    (package / "server.py").write_text("VALUE = 1\n", encoding="utf-8")
+    run("init", "-q")
+    run("config", "user.email", "abm-test@example.invalid")
+    run("config", "user.name", "ABM Test")
+    run("config", "commit.gpgsign", "false")
+    run("add", "-A")
+    run("commit", "-q", "-m", "release")
+    run("tag", tag)
+
+
+def test_uncommitted_production_changes_still_require_a_version_increment(tmp_path):
+    """The finalizer runs before the commit, so the check must see the worktree.
+
+    A commit-range comparison reports an empty change set for a round that is
+    still uncommitted, which is how a release kept the previous version number
+    while carrying real behaviour changes: the only wiring for this check was a
+    CI push event, and nothing had been pushed.
+    """
+    _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
+    (tmp_path / "src" / "agent_browser_mcp" / "server.py").write_text(
+        "VALUE = 2\n", encoding="utf-8"
+    )
+
+    assert latest_release_tag(tmp_path) == "v0.3.0"
+
+    committed_only = validate_version_bump(tmp_path, "v0.3.0")
+    assert committed_only["production_changed"] is False
+    assert committed_only["changed_paths"] == []
+
+    with pytest.raises(VersionError, match="did not increase"):
+        validate_version_bump(tmp_path, "v0.3.0", include_worktree=True)
+
+
+def test_worktree_comparison_counts_untracked_production_files(tmp_path):
+    _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
+    (tmp_path / "src" / "agent_browser_mcp" / "added.py").write_text("X = 1\n", encoding="utf-8")
+
+    with pytest.raises(VersionError, match="did not increase"):
+        validate_version_bump(tmp_path, "v0.3.0", include_worktree=True)
+
+    (tmp_path / "src" / "agent_browser_mcp" / "_version.py").write_text(
+        '__version__ = "0.3.1"\n', encoding="utf-8"
+    )
+    bumped = validate_version_bump(tmp_path, "v0.3.0", include_worktree=True)
+
+    assert bumped["base"] == "0.3.0"
+    assert bumped["current"] == "0.3.1"
+    assert "src/agent_browser_mcp/added.py" in bumped["changed_paths"]
+
+
+def test_untagged_repository_has_no_baseline_to_compare_against(tmp_path):
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True, capture_output=True)
+
+    assert latest_release_tag(tmp_path) is None
+
+
+def test_finalizer_checks_the_version_increment_before_running_gates():
+    module = ast.parse((ROOT / "scripts" / "finalize_change.py").read_text(encoding="utf-8"))
+    main = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    calls = [
+        node.func.id
+        for node in ast.walk(main)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+
+    assert calls.index("sync_versions") < calls.index("_check_version_bump")
+    assert calls.index("_check_version_bump") < calls.index("_run_gates")
 
 
 def test_finalizer_synchronizes_version_before_running_gates():

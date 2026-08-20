@@ -12,7 +12,7 @@ English | [中文文档](https://github.com/LinVireo/agent-browser-mcp/blob/main
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.3.12**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.3.13**.
 
 It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 
