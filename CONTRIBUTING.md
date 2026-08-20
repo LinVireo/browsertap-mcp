@@ -173,6 +173,61 @@ verify.
 - Upload wheel and source-distribution files as GitHub Release assets. Do not
   commit them, local acceptance reports, or live-browser evidence to Git.
 
+## Publishing to PyPI
+
+The package is not on PyPI yet. `pip install agent-browser-mcp` therefore does
+not work, and both READMEs say so; that sentence changes only once the upload
+has actually happened.
+
+`.github/workflows/release.yml` builds, gates, and uploads. It never runs on a
+push: the triggers are a manual run and a published GitHub Release. The reason
+is that an upload cannot be undone — a filename on PyPI can never be reused, so
+a bad `0.3.12` burns that version number permanently and the fix is `0.3.13`.
+
+Three things have to exist before the workflow can upload, and none of them can
+be created from inside this repository:
+
+1. A PyPI account with the project name `agent-browser-mcp` available or already
+   owned. Check <https://pypi.org/project/agent-browser-mcp/> first; a name in
+   use by someone else cannot be taken over.
+2. A **Trusted Publisher** on PyPI for this repository
+   (`LinVireo/agent-browser-mcp`), workflow `release.yml`, environment `pypi`.
+   Trusted Publishing means the workflow exchanges a short-lived GitHub OIDC
+   token for the upload credential at request time, so no API token is stored in
+   the repository — there is nothing to leak and nothing to rotate. Repeat the
+   same setup on TestPyPI with environment `testpypi`.
+3. GitHub environments named `pypi` and `testpypi`. Add a required reviewer to
+   `pypi`: the environment is the last point at which a human confirms an upload
+   that cannot be reversed.
+
+Then, in order:
+
+```bash
+# 1. Prove the tree and the archives are releasable, locally.
+python -m scripts.finalize_change --bump none
+python -m scripts.evidence_manifest --check
+
+# 2. Rehearse on TestPyPI (Actions -> ABM publish to PyPI -> index: testpypi),
+#    then install from there into a throwaway virtual environment. Dependencies
+#    come from the real index; only this package comes from the rehearsal one.
+python -m pip install --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ "agent-browser-mcp[desktop]"
+
+# 3. Publish for real by publishing the GitHub Release for the tag.
+```
+
+The workflow re-runs the offline suite, the documentation checks,
+`scripts.check_distribution` (required files, no machine-local data, and the
+metadata the index needs to render and classify the release) and
+`twine check --strict` against the exact archives it is about to upload. Run
+`python -m twine check --strict dist/*` locally too if you built archives by
+hand: it is the only check that renders the long description the way the index
+will, and the last one that is still free.
+
+A tag pointing at a commit other than the one the acceptance evidence was sealed
+on publishes something nobody verified. Confirm `git rev-parse HEAD` matches the
+`verified_at` commit in the sealed report before creating the Release.
+
 ## Pull request checklist
 
 - The diff is scoped to the stated behavior and preserves unrelated local work.

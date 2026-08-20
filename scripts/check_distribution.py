@@ -32,6 +32,7 @@ REQUIRED_SDIST_SUFFIXES = (
     "/src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md",
     "/src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md",
     "/.github/workflows/live.yml",
+    "/.github/workflows/release.yml",
     "/.github/workflows/test.yml",
     "/examples/claude-desktop-config.json",
     "/examples/cursor-mcp.json",
@@ -125,6 +126,69 @@ def _metadata_version(text: str) -> str | None:
     return None
 
 
+def _metadata_headers(text: str) -> list[tuple[str, str]]:
+    """Parse the header block of RFC822 core metadata into ``(key, value)``.
+
+    Stops at the first blank line: everything after it is the long description,
+    which is Markdown and routinely contains lines that look like headers.
+    Continuation lines (a folded value) are appended to the previous field.
+    """
+    headers: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            break
+        if line[:1] in (" ", "\t") and headers:
+            key, value = headers[-1]
+            headers[-1] = (key, value + " " + line.strip())
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        headers.append((key.strip().lower(), value.strip()))
+    return headers
+
+
+def _publishing_violations(text: str, member: str) -> list[str]:
+    """Check the fields a public index needs to render and classify the release.
+
+    None of these can be caught by installing the wheel, which is why they ship
+    broken so easily: a missing ``Description-Content-Type`` renders the README
+    as plain text, a missing ``Requires-Python`` offers the wheel to
+    interpreters it cannot run on, and a version number can never be reused on
+    PyPI, so noticing after the upload means burning it.
+    """
+    headers = _metadata_headers(text)
+    values: dict[str, list[str]] = {}
+    for key, value in headers:
+        values.setdefault(key, []).append(value)
+    violations = []
+    for field in ("metadata-version", "name", "summary", "requires-python"):
+        if not values.get(field):
+            violations.append(f"{member}: core metadata has no {field} field")
+    content_type = (values.get("description-content-type") or [""])[0]
+    if not content_type.startswith("text/markdown"):
+        violations.append(
+            f"{member}: description-content-type is {content_type!r}, so the index "
+            "would render README.md as plain text"
+        )
+    license_fields = values.get("license-expression") or values.get("license") or []
+    if not license_fields:
+        violations.append(f"{member}: core metadata declares no license")
+    if not any(url.lower().startswith("homepage,") for url in values.get("project-url", [])):
+        violations.append(f"{member}: core metadata has no Homepage project URL")
+    classifiers = values.get("classifier", [])
+    for prefix in (
+        "Development Status ::",
+        "Intended Audience ::",
+        "Programming Language :: Python :: 3.10",
+        "Operating System ::",
+        "Topic ::",
+    ):
+        if not any(entry.startswith(prefix) for entry in classifiers):
+            violations.append(f"{member}: no {prefix!r} classifier in core metadata")
+    return violations
+
+
 def _read_metadata(path: Path) -> tuple[str, str] | None:
     """Return ``(member_name, text)`` for an archive's core metadata file."""
     if path.suffix == ".whl":
@@ -155,12 +219,14 @@ def _read_metadata(path: Path) -> tuple[str, str] | None:
 
 
 def _version_violations(path: Path) -> list[str]:
-    """Cross-check the filename version against the archive's own metadata.
+    """Check the archive's own core metadata against the filename and the index.
 
     Nothing else in the release chain reads the built metadata, so a stale
     ``dist-info`` (a rebuild that reused an old wheel, or a bumped source
     version that never made it into the archive) would otherwise ship silently:
     the filename would show the new version while installers report the old one.
+    The publishing fields are checked from the same read -- see
+    ``_publishing_violations`` for why they cannot wait until upload time.
     """
     expected = filename_version(path)
     if expected is None:
@@ -180,7 +246,7 @@ def _version_violations(path: Path) -> list[str]:
             f"{member}: metadata version {declared!r} does not match "
             f"filename version {expected!r}"
         ]
-    return []
+    return _publishing_violations(text, member)
 
 
 def validate_archive(path: Path) -> list[str]:

@@ -140,6 +140,50 @@ python -m scripts.check_tool_docs --check-installed-skills \
 - wheel 与 source distribution 应作为 GitHub Release 资产上传。不要把它们、本地验收
   报告或 live 浏览器证据提交到 Git。
 
+## 发布到 PyPI
+
+本包尚未发布到 PyPI，因此 `pip install agent-browser-mcp` 现在不可用，两份 README 也
+如此写明；那句话只有在真正上传成功之后才改。
+
+`.github/workflows/release.yml` 负责构建、门禁与上传。它**不会**被 push 触发，只能手动
+运行或由已发布的 GitHub Release 触发。原因是上传不可撤销：PyPI 上的文件名永不可复用，
+错误的 `0.3.12` 会永久占掉这个版本号，只能改用 `0.3.13`。
+
+上传之前必须先具备三样东西，且都无法从本仓库内部创建：
+
+1. 一个 PyPI 账号，且项目名 `agent-browser-mcp` 可用或已归属自己。先查
+   <https://pypi.org/project/agent-browser-mcp/>；已被他人占用的名字无法接管。
+2. PyPI 上为本仓库配置的 **Trusted Publisher**：仓库 `LinVireo/agent-browser-mcp`、
+   workflow `release.yml`、environment `pypi`。Trusted Publishing 的含义是 workflow 在
+   请求时用短期 GitHub OIDC token 换取上传凭据，仓库里不存任何 API token —— 没有可泄露
+   的东西，也不需要轮换。TestPyPI 上按同样方式再配一份，environment 用 `testpypi`。
+3. GitHub 上名为 `pypi` 与 `testpypi` 的 environment。给 `pypi` 加上 required reviewer：
+   environment 是人工确认这次不可逆上传的最后一道关口。
+
+然后按顺序执行：
+
+```bash
+# 1. 先在本地证明这棵树和构建出的归档可发布。
+python -m scripts.finalize_change --bump none
+python -m scripts.evidence_manifest --check
+
+# 2. 先在 TestPyPI 演练（Actions -> ABM publish to PyPI -> index: testpypi），再装进一个
+#    一次性虚拟环境验证。依赖仍从正式索引取，只有本包来自演练索引。
+python -m pip install --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ "agent-browser-mcp[desktop]"
+
+# 3. 发布该 tag 对应的 GitHub Release，完成正式上传。
+```
+
+workflow 会针对**即将上传的那批归档**重跑离线测试、文档检查、
+`scripts.check_distribution`（必需文件、无本机数据，以及索引渲染与分类所需的元数据）
+与 `twine check --strict`。手工构建过归档的话，本地也跑一次
+`python -m twine check --strict dist/*`：只有它会按索引的方式渲染长描述，而且是最后一次
+还免费的检查。
+
+tag 指向的提交若不是封存验收证据的那个提交，发布出去的就是没人验证过的东西。创建 Release
+之前先确认 `git rev-parse HEAD` 与封存报告里的 `verified_at` 一致。
+
 ## Pull Request 检查表
 
 - diff 只覆盖声明的行为，并保留无关的本地改动。

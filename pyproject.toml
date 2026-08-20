@@ -13,16 +13,32 @@ authors = [
   { name = "zhea" }
 ]
 maintainers = [
-  { name = "0xlinn" }
+  { name = "LinVireo" }
 ]
 keywords = ["mcp", "browser automation", "chrome", "cdp", "browser bridge", "claude-code"]
 classifiers = [
+  # Trove classifiers are what an index search filters on, so the ones that
+  # matter for finding this package at all -- maturity, audience, every
+  # supported interpreter -- are listed individually rather than left to the
+  # bare "Python :: 3". `scripts.check_distribution` asserts the built metadata
+  # still carries them; PyPI accepts only names from
+  # https://pypi.org/classifiers/ and rejects an upload with an unknown one.
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Environment :: Console",
+  "Environment :: Web Environment",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
   "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Testing",
   "Topic :: Utilities"
 ]
 dependencies = [
@@ -49,6 +65,11 @@ dev = [
   "pytest-cov>=5.0",
   "build>=1.2",
   "ruff>=0.12",
+  # Reads the built archives, not the source tree: `twine check --strict` is the
+  # only local way to learn that the index would refuse the long description
+  # before an upload burns the version number, since a filename can never be
+  # reused on PyPI.
+  "twine>=5.0",
   # Only the release tooling reads pyproject.toml (scripts/versioning.py and the
   # packaging tests). The installed package never imports it, so it is not a
   # runtime dependency of `pip install agent-browser-mcp`.
@@ -86,9 +107,14 @@ select = ["E4", "E7", "E9", "F", "I"]
 ignore = ["E402", "E701", "E702", "E741"]
 
 [project.urls]
-Homepage = "https://github.com/0xlinn/agent-browser-mcp"
-Repository = "https://github.com/0xlinn/agent-browser-mcp"
-Issues = "https://github.com/0xlinn/agent-browser-mcp/issues"
+Homepage = "https://github.com/LinVireo/agent-browser-mcp"
+Repository = "https://github.com/LinVireo/agent-browser-mcp"
+Issues = "https://github.com/LinVireo/agent-browser-mcp/issues"
+Changelog = "https://github.com/LinVireo/agent-browser-mcp/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.md"
+# The index page is the first place a reader looks for where to send a report,
+# and it is the one link that must not go through a public issue.
+Security = "https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md"
 
 [project.scripts]
 agent-browser-mcp = "agent_browser_mcp.cli:main"

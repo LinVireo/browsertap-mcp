@@ -20,6 +20,31 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   guide covering the three-process reload rules, tab-id volatility, the
   physical-input activation default, and the MV3 alarm floor. The release gates
   fail if an absolute local path reaches it.
+- A publish workflow (`.github/workflows/release.yml`) that builds, gates and
+  uploads the distributions through PyPI Trusted Publishing, defaulting to
+  TestPyPI and reachable only from a manual run or a published GitHub Release.
+  No API token is stored in the repository. The package is still not on PyPI;
+  `CONTRIBUTING.md` lists the one-time account setup that only the maintainer can
+  do, and the READMEs keep saying `pip install agent-browser-mcp` does not work
+  yet.
+
+### Fixed
+
+- The CDP fallback used for CSP-restricted pages now retries once when the
+  debugger attach itself never landed, which is the common one-off failure and
+  cannot have run the caller's script. It deliberately does **not** retry after
+  the command went out: `Detached while handling command` means the script may
+  already have executed, and the tab has since committed a new document, so a
+  retry would run it a second time somewhere else. That case now says so in the
+  error message and reports `code` and `dispatched`.
+- Failover no longer prefers the most recently registered tab. A session
+  registers when its tab is *created*, so the freshest entry named the tab most
+  likely to still be loading -- and running there lost the debugger to the next
+  commit. Failover now prefers a tab that has been registered long enough to
+  have settled, keeps the previous order within that set, and falls back to the
+  old rule unchanged when nothing has settled yet. This only affects calls that
+  named no tab or explicitly allowed any tab; a caller-named dead tab is still
+  refused.
 
 ### Changed
 
@@ -27,6 +52,19 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   source archive and still refuses a `SKILL.md` anywhere else in either one, so a
   build that drops them cannot ship a `skill-path` command that resolves to an
   empty directory.
+- `scripts/check_distribution.py` also checks the built core metadata for the
+  fields a public index needs: a Markdown `Description-Content-Type` (without it
+  the index renders the README as plain text), `Requires-Python`, a licence, a
+  Homepage URL, and the maturity, audience, platform and per-interpreter
+  classifiers an index search filters on. None of these can be caught by
+  installing the wheel, and a PyPI filename can never be reused, so noticing
+  after an upload costs the version number.
+- Both READMEs link with absolute URLs. They are the package's long description
+  on an index page, where a relative link resolves against the index host and
+  404s, taking the usage guide, the security policy and the licence with it.
+- The fork-divergence paragraph in both READMEs no longer quotes exact commit and
+  line counts that went stale within a release; it names the command that prints
+  the current figure instead.
 
 ## [0.3.12] - 2026-08-19
 
@@ -281,5 +319,5 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/0xlinn/agent-browser-mcp/compare/v0.3.12...HEAD
-[0.3.12]: https://github.com/0xlinn/agent-browser-mcp/releases/tag/v0.3.12
+[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.12...HEAD
+[0.3.12]: https://github.com/LinVireo/agent-browser-mcp/releases/tag/v0.3.12

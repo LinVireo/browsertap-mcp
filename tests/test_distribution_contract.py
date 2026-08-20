@@ -26,25 +26,45 @@ from scripts.check_distribution import (
 )
 
 
-def _core_metadata(version: str) -> str:
+def _core_metadata(version: str, *, drop: str = "", replace: tuple[str, str] | None = None) -> str:
     """Minimal but realistic RFC822 core metadata.
 
     Real wheels and sdists always carry this file, and the distribution check
-    cross-reads its ``Version:`` against the filename, so fixtures have to
-    include it or they stop resembling anything the builder produces.
+    cross-reads its ``Version:`` and its publishing fields against the filename
+    and the index requirements, so fixtures have to include them or they stop
+    resembling anything the builder produces. ``drop`` removes every line
+    starting with that prefix and ``replace`` rewrites one line, which is how the
+    tests below build an archive that is broken in exactly one way.
     """
-    return (
-        "Metadata-Version: 2.1\n"
-        f"Name: agent-browser-mcp\nVersion: {version}\n"
-        "\nlong description body\n"
-    )
+    lines = [
+        "Metadata-Version: 2.4",
+        "Name: agent-browser-mcp",
+        f"Version: {version}",
+        "Summary: Real-browser MCP server",
+        "License-Expression: MIT",
+        "Project-URL: Homepage, https://github.com/LinVireo/agent-browser-mcp",
+        "Classifier: Development Status :: 4 - Beta",
+        "Classifier: Intended Audience :: Developers",
+        "Classifier: Programming Language :: Python :: 3.10",
+        "Classifier: Operating System :: Microsoft :: Windows",
+        "Classifier: Topic :: Utilities",
+        "Requires-Python: >=3.10",
+        "Description-Content-Type: text/markdown",
+    ]
+    if drop:
+        lines = [line for line in lines if not line.startswith(drop)]
+    if replace is not None:
+        prefix, replacement = replace
+        lines = [replacement if line.startswith(prefix) else line for line in lines]
+    return "\n".join(lines) + "\n\nlong description body\n"
 
 
-def _write_sdist(path: Path, *names: str, version: str = "0.3.4") -> None:
+def _write_sdist(path: Path, *names: str, version: str = "0.3.4", metadata: str | None = None) -> None:
     prefix = f"agent_browser_mcp-{version}"
     members = list(names)
     pkg_info = f"{prefix}/PKG-INFO"
-    contents = {pkg_info: _core_metadata(version).encode("utf-8")}
+    text = metadata if metadata is not None else _core_metadata(version)
+    contents = {pkg_info: text.encode("utf-8")}
     with tarfile.open(path, "w:gz") as archive:
         for name in (*members, pkg_info):
             data = contents.get(name, b"test")
@@ -53,12 +73,14 @@ def _write_sdist(path: Path, *names: str, version: str = "0.3.4") -> None:
             archive.addfile(info, BytesIO(data))
 
 
-def _write_wheel(path: Path, names, *, version: str = "0.3.4") -> None:
+def _write_wheel(path: Path, names, *, version: str = "0.3.4", metadata: str | None = None) -> None:
     metadata_name = f"agent_browser_mcp-{version}.dist-info/METADATA"
     with zipfile.ZipFile(path, "w") as archive:
         for name in names:
             archive.writestr(name, "")
-        archive.writestr(metadata_name, _core_metadata(version))
+        archive.writestr(
+            metadata_name, metadata if metadata is not None else _core_metadata(version)
+        )
 
 
 def _wheel_names() -> list[str]:
@@ -197,6 +219,122 @@ def test_distribution_contract_rejects_archive_without_core_metadata(tmp_path):
     assert validate_archive(wheel) == [
         "distribution does not contain exactly one core metadata file"
     ]
+
+
+def test_distribution_contract_rejects_a_long_description_the_index_cannot_render(tmp_path):
+    """`Description-Content-Type` is the field that fails silently everywhere else.
+
+    Drop it and the wheel installs perfectly while the index shows the README as
+    one wall of literal Markdown. A PyPI filename can never be reused, so
+    noticing after the upload costs the version number.
+    """
+    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, _wheel_names(), metadata=_core_metadata("0.3.4", drop="Description-"))
+
+    assert validate_archive(wheel) == [
+        "agent_browser_mcp-0.3.4.dist-info/METADATA: description-content-type is '', "
+        "so the index would render README.md as plain text"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("drop", "expected"),
+    (
+        ("Summary:", "core metadata has no summary field"),
+        ("Requires-Python:", "core metadata has no requires-python field"),
+        ("License-Expression:", "core metadata declares no license"),
+        ("Project-URL: Homepage", "core metadata has no Homepage project URL"),
+        ("Classifier: Development Status", "no 'Development Status ::' classifier"),
+        ("Classifier: Intended Audience", "no 'Intended Audience ::' classifier"),
+        (
+            "Classifier: Programming Language :: Python :: 3.10",
+            "no 'Programming Language :: Python :: 3.10' classifier",
+        ),
+    ),
+)
+def test_distribution_contract_requires_publishable_metadata(tmp_path, drop, expected):
+    """Each of these is a live index requirement or a search filter.
+
+    An unclassified release is not findable and an absent `Requires-Python` is
+    offered to interpreters that cannot run it, and neither shows up in any test
+    that merely installs the wheel.
+    """
+    sdist = tmp_path / "agent_browser_mcp-0.3.4.tar.gz"
+    _write_sdist(sdist, *_sdist_names(), metadata=_core_metadata("0.3.4", drop=drop))
+
+    issues = validate_archive(sdist)
+
+    assert len(issues) == 1
+    assert expected in issues[0]
+
+
+def test_distribution_contract_reads_headers_and_not_the_markdown_body(tmp_path):
+    """The long description is Markdown and routinely contains header-like lines.
+
+    `Summary: ...` inside a fenced example must not satisfy the check, and a
+    folded (continued) real header must still count as present.
+    """
+    metadata = (
+        "Metadata-Version: 2.4\n"
+        "Name: agent-browser-mcp\n"
+        "Version: 0.3.4\n"
+        "Summary: one line\n"
+        "  continued by folding\n"
+        "License-Expression: MIT\n"
+        "Project-URL: Homepage, https://example.invalid/abm\n"
+        "Classifier: Development Status :: 4 - Beta\n"
+        "Classifier: Intended Audience :: Developers\n"
+        "Classifier: Programming Language :: Python :: 3.10\n"
+        "Classifier: Operating System :: Microsoft :: Windows\n"
+        "Classifier: Topic :: Utilities\n"
+        "Requires-Python: >=3.10\n"
+        "Description-Content-Type: text/markdown\n"
+        "\n"
+        "# README\n"
+        "Classifier: Development Status :: 1 - Planning\n"
+        "Requires-Python: >=9.9\n"
+    )
+    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, _wheel_names(), metadata=metadata)
+
+    assert validate_archive(wheel) == []
+
+    body_only = metadata.replace("Summary: one line\n  continued by folding\n", "")
+    stripped = tmp_path / "other-0.3.4-py3-none-any.whl"
+    _write_wheel(stripped, _wheel_names(), metadata=body_only)
+
+    assert validate_archive(stripped) == [
+        "agent_browser_mcp-0.3.4.dist-info/METADATA: core metadata has no summary field"
+    ]
+
+
+def test_shipped_distributions_carry_publishable_metadata():
+    """The real pyproject must satisfy the gate, not just the fixtures.
+
+    Guards the failure mode where a classifier is dropped from `pyproject.toml`
+    and every fixture-based test keeps passing because it builds its own
+    metadata.
+    """
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)["project"]
+
+    classifiers = project["classifiers"]
+    for prefix in (
+        "Development Status ::",
+        "Intended Audience ::",
+        "Operating System ::",
+        "Topic ::",
+    ):
+        assert any(entry.startswith(prefix) for entry in classifiers), prefix
+    # Every interpreter the package claims to support needs its own classifier;
+    # `requires-python` alone is not what the index filters on.
+    assert project["requires-python"] == ">=3.10"
+    for minor in ("3.10", "3.11", "3.12", "3.13"):
+        assert f"Programming Language :: Python :: {minor}" in classifiers
+    assert project["urls"]["Homepage"].startswith("https://")
+    assert project["readme"] == "README.md"
+    assert project["license"] == "MIT"
 
 
 def test_build_and_runtime_dependencies_have_compatible_bounds():
@@ -485,6 +623,56 @@ def test_extension_locales_define_every_key_the_extension_asks_for():
 def test_live_runner_is_scoped_to_canonical_repository_and_environment():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "live.yml").read_text(encoding="utf-8")
-    assert "if: github.repository == '0xlinn/agent-browser-mcp'" in workflow
+    assert "if: github.repository == 'LinVireo/agent-browser-mcp'" in workflow
     assert "environment: abm-live" in workflow
     assert "sys.path.insert" not in workflow
+
+
+def test_publish_workflow_cannot_fire_by_accident_and_stores_no_upload_token():
+    """An upload to PyPI is irreversible: the filename can never be reused.
+
+    So the publish path must not be reachable from a push, must go through an
+    environment (that is where a required reviewer is configured), and must get
+    its credential from Trusted Publishing rather than a stored secret.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+    triggers = workflow.split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in triggers
+    assert "\n  push:" not in triggers
+    assert "pull_request:" not in triggers
+
+    assert "if: github.repository == 'LinVireo/agent-browser-mcp'" in workflow
+    assert "needs: build" in workflow
+    assert "environment: ${{" in workflow
+    assert "id-token: write" in workflow
+    # A stored API token is the thing Trusted Publishing exists to remove; if one
+    # appears here it is a leak waiting to happen and a rotation nobody will do.
+    assert "password:" not in workflow
+    assert "PYPI_API_TOKEN" not in workflow
+    assert "secrets." not in workflow
+    # The gates run against the archives that will actually be uploaded, in the
+    # only window where a metadata or rendering fault is still fixable.
+    build_stage = workflow.split("publish:", 1)[0]
+    assert "python -m scripts.check_distribution dist" in build_stage
+    assert "python -m twine check --strict dist/*" in build_stage
+    assert "--cov-fail-under=85" in build_stage
+    assert build_stage.index("python -m build --wheel --sdist") < build_stage.index(
+        "python -m scripts.check_distribution dist"
+    )
+
+
+def test_publish_workflow_defaults_to_the_index_that_can_be_undone():
+    """TestPyPI is the default because a mistake there costs nothing.
+
+    Reaching the real index takes either an explicit choice of `pypi` or a
+    published GitHub Release, both of which are deliberate acts.
+    """
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+    inputs = workflow.split("options:", 1)[0]
+    assert "default: testpypi" in inputs
+    assert "repository-url: https://test.pypi.org/legacy/" in workflow
+    assert "if: github.event_name == 'release' || inputs.index == 'pypi'" in workflow

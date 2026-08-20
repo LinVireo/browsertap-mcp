@@ -1,0 +1,108 @@
+name: ABM publish to PyPI
+
+# Nothing here runs on a push. Publishing is a deliberate act with an
+# irreversible result -- a PyPI filename can never be reused, so a wrong upload
+# burns that version number for good -- so the only triggers are a manual run
+# and a published GitHub Release.
+on:
+  workflow_dispatch:
+    inputs:
+      index:
+        description: Which index to upload to
+        type: choice
+        default: testpypi
+        options:
+          - testpypi
+          - pypi
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: abm-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and check distributions
+    runs-on: ubuntu-latest
+    if: github.repository == 'LinVireo/agent-browser-mcp'
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install package and development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,desktop]"
+      # A release must not ship a tree that fails its own gates. This is the
+      # offline suite only: the live-Chrome gates need a real browser and are a
+      # separate, self-hosted workflow.
+      - name: Run offline tests with coverage
+        run: >-
+          python -m pytest tests -q
+          --cov=agent_browser_mcp
+          --cov-fail-under=85
+      - name: Check documentation and versions
+        run: python -m scripts.check_tool_docs --format markdown
+      - name: Build distributions
+        run: python -m build --wheel --sdist --outdir dist
+      # `check_distribution` reads what is inside the archives -- required files,
+      # no machine-local data, and the publishing metadata the index needs.
+      - name: Check distribution contents and metadata
+        run: python -m scripts.check_distribution dist
+      # `twine check` is the other half: it renders the long description the way
+      # the index will. Only a built archive can be checked this way, and only
+      # before the upload -- afterwards the version is spent.
+      - name: Check the rendered long description
+        run: python -m twine check --strict dist/*
+      # The version the archives carry is what the index will hold forever, so it
+      # is printed here rather than inferred from the tag by a reader later.
+      - name: Report the version being published
+        run: python -c "import pathlib; print('\n'.join(p.name for p in sorted(pathlib.Path('dist').iterdir())))"
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: abm-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Upload to ${{ github.event_name == 'release' && 'pypi' || inputs.index }}
+    needs: build
+    runs-on: ubuntu-latest
+    # The environment is the approval gate: configure required reviewers on it so
+    # a human confirms before an upload that cannot be undone. It is also where
+    # the PyPI Trusted Publisher is scoped -- see CONTRIBUTING.md, "Publishing to
+    # PyPI", for the one-time setup this workflow assumes.
+    environment: ${{ github.event_name == 'release' && 'pypi' || inputs.index }}
+    permissions:
+      # Trusted Publishing exchanges this short-lived OIDC token for an upload
+      # token at request time. No API token is stored in the repository, so there
+      # is none to leak or rotate.
+      id-token: write
+    timeout-minutes: 15
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: abm-dist
+          path: dist/
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+      - name: Publish to PyPI
+        if: github.event_name == 'release' || inputs.index == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
