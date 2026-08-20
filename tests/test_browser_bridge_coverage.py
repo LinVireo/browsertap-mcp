@@ -1085,6 +1085,56 @@ def test_execute_js_rejects_explicit_dead_tab_but_can_fail_over(monkeypatch):
     assert result["switched_session"] == "c:live"
 
 
+def _failover_pool(driver, ages):
+    """Register one session per (id, age-in-seconds) pair and return them in order."""
+    now = time.time()
+    pool = []
+    for session_id, age in ages:
+        session = T.Session(session_id, {"url": "https://x", "type": "ext_ws", "tab_id": 1}, FakeSocket())
+        session.connect_at = now - age
+        driver.sessions[session_id] = session
+        pool.append(session)
+    return pool
+
+
+def test_failover_skips_a_tab_that_only_just_registered():
+    driver = driver_stub()
+    settled, fresh = _failover_pool(driver, [("c:settled", 30.0), ("c:fresh", 0.0)])
+    driver.latest_session_id = fresh.id
+    # The newest tab is the worst substitute: it registered at document_idle, so
+    # its next commit detaches the CDP fallback's debugger mid-command.
+    assert driver._pick_failover_session([settled, fresh]) is settled
+
+
+def test_failover_keeps_the_old_order_when_nothing_has_settled():
+    driver = driver_stub()
+    first, second = _failover_pool(driver, [("c:a", 0.0), ("c:b", 0.1)])
+    driver.latest_session_id = second.id
+    # A browser that just started has no settled tab at all. Refusing there would
+    # be worse than the race, so the previous rule still applies unchanged.
+    assert driver._pick_failover_session([first, second]) is second
+    driver.latest_session_id = "c:gone"
+    assert driver._pick_failover_session([first, second]) is second
+
+
+def test_failover_still_prefers_the_newest_among_settled_tabs():
+    driver = driver_stub()
+    older, newer = _failover_pool(driver, [("c:older", 90.0), ("c:newer", 5.0)])
+    driver.latest_session_id = newer.id
+    assert driver._pick_failover_session([older, newer]) is newer
+
+
+def test_failover_tolerates_a_session_without_connect_at():
+    driver = driver_stub()
+    legacy = T.Session("c:legacy", {"url": "https://x", "type": "ext_ws", "tab_id": 1}, FakeSocket())
+    del legacy.connect_at
+    driver.sessions[legacy.id] = legacy
+    driver.latest_session_id = legacy.id
+    # connect_at missing reads as epoch 0, i.e. settled -- never as "skip me",
+    # which would leave failover with an empty candidate list.
+    assert driver._pick_failover_session([legacy]) is legacy
+
+
 def test_execute_js_implicit_default_reselects_live_session(monkeypatch):
     driver = driver_stub()
 

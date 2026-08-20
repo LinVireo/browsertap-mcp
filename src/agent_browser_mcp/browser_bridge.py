@@ -49,6 +49,12 @@ class ExtensionNotConnectedError(ValueError):
 # retry_safe, and 'delivered_no_result'/'navigated' are never retry-safe.
 RETRY_SAFE_DELIVERY_STATES = frozenset({'undelivered', 'sent_unconfirmed'})
 
+# How long a tab must have been registered before failover will prefer it. A
+# content script connects around document_idle, i.e. before the page has settled,
+# so a session that appeared a moment ago names a tab that is probably still
+# loading. See BrowserBridge._pick_failover_session for what that broke.
+FAILOVER_SETTLE_SECONDS = 2.0
+
 
 class BridgeNoResponseError(RuntimeError):
     """A command has no result, with explicit delivery and retry semantics."""
@@ -762,6 +768,32 @@ class BrowserBridge:
         self.default_session_id = chosen.id
         return chosen.id
 
+    def _pick_failover_session(self, pool):
+        """Pick the live tab least likely to vanish mid-command.
+
+        Reached only when the caller named no target, or explicitly allowed any
+        tab, so there is no preference left to honour except survival. This used
+        to prefer `latest_session_id`, which is exactly backwards: a session
+        registers when its tab is *created*, so the freshest entry is the one
+        still loading, and running there loses the CDP fallback's debugger to
+        the commit that follows ("Detached while handling command"). Live runs
+        reproduced that against a browser someone was using, while the same test
+        passed against an idle one.
+
+        So prefer candidates that have been registered long enough to have
+        finished loading, and keep the previous order *inside* that set — a
+        settled newest tab still wins, and a browser with nothing settled yet
+        behaves exactly as before rather than refusing.
+        """
+        now = time.time()
+        settled = [
+            s for s in pool
+            if now - float(getattr(s, 'connect_at', 0.0) or 0.0) >= FAILOVER_SETTLE_SECONDS
+        ]
+        candidates = settled or pool
+        latest = self.sessions.get(self.latest_session_id)
+        return latest if latest in candidates else candidates[-1]
+
     def execute_js(self, code, timeout=15, session_id=None, allow_failover=False) -> Any:
         """Run JS in a tab.
 
@@ -835,8 +867,7 @@ class BrowserBridge:
                     want_client = str(session_id).rsplit(':', 1)[0] if session_id and ':' in str(session_id) else None
                     same_client = [s for s in alive_sessions if want_client and str(s.id).startswith(want_client + ':')]
                     pool = same_client or alive_sessions
-                    latest = self.sessions.get(self.latest_session_id)
-                    session = latest if latest in pool else pool[-1]
+                    session = self._pick_failover_session(pool)
                     logger.warning(
                         "Session %s is disconnected; switched to active session %s",
                         session_id,

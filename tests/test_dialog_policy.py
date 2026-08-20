@@ -28,7 +28,7 @@ def _run_node_harness(source: str) -> dict:
 
 
 def _exec_script_harness(code: str, scope: dict | None) -> dict:
-    return _run_node_harness(
+    outcome = _run_node_harness(
         f"""
 const fs = require('fs');
 const vm = require('vm');
@@ -67,10 +67,16 @@ vm.runInContext(disableDialogs, context);
     {json.dumps(scope)},
   );
   let result;
+  let harnessTimedOut = false;
   try {{
-    result = await vm.runInContext(expression, context, {{ timeout: 250 }});
+    // Only a hang guard. Every script this harness runs settles in
+    // microseconds, so the ceiling is generous: a tight one (250ms) turned
+    // machine load into a fake "the extension returns a different shape now"
+    // failure, because the catch below substitutes an envelope.
+    result = await vm.runInContext(expression, context, {{ timeout: 5000 }});
   }} catch (error) {{
     if (error?.code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw error;
+    harnessTimedOut = true;
     const token = {json.dumps(scope.get("token") if scope else None)};
     const dialogs = (Array.isArray(window.__abm_dialog_records)
       ? window.__abm_dialog_records : []).filter(record => record.token === token);
@@ -83,6 +89,7 @@ vm.runInContext(disableDialogs, context);
   }}
   process.stdout.write(JSON.stringify({{
     result,
+    harnessTimedOut,
     after: window.after,
     nativeConfirmCalls,
     scopesInstalled: Array.isArray(window.__abm_dialog_scopes),
@@ -91,6 +98,13 @@ vm.runInContext(disableDialogs, context);
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
     )
+    if outcome.get("harnessTimedOut"):
+        pytest.fail(
+            "the Node vm hit this harness's 5s hang guard. buildExecScript "
+            "settles in microseconds here, so this is a saturated machine, not "
+            "a change in what the extension returns -- re-run when idle."
+        )
+    return outcome
 
 
 @pytest.mark.parametrize("policy", ["dismiss", "accept", "manual"])

@@ -2148,6 +2148,64 @@ async function enablePageForNavigation(tabId, deadlineEpochMs) {
   throw lastError || new Error('cdp_error: Page.enable failed before navigation');
 }
 
+// The exec path's CSP fallback. Retries once, and ONLY for a failure that
+// provably happened before the script was dispatched: attaching to a tab that
+// is still loading loses the debugger to the next commit, and one lost attach
+// used to fail the whole call ("CDP fallback failed: Detached while handling
+// command" — seen in live runs against a browser someone was using).
+//
+// A detach *after* Runtime.evaluate went out is deliberately NOT retried. The
+// evaluation may already have run, and the document it ran in is gone, so
+// re-sending arbitrary caller JS is how "submit the order" happens twice, on a
+// page the caller never named. That case reports the code instead, so the
+// caller can tell "the page navigated out from under this" from "CDP is broken"
+// and decide for itself whether repeating is safe.
+async function runCdpExecFallback(tabId, wrappedCode) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let lease = null;
+    let dispatched = false;
+    try {
+      lease = await attachAbmDebugger({ tabId });
+      dispatched = true;
+      const cdpRes = await sendDebuggerCommandWithTimeout(lease, 'Runtime.evaluate', {
+        expression: wrappedCode, awaitPromise: true, returnByValue: true
+      }, DEFAULT_CDP_TIMEOUT_MS);
+      if (cdpRes.exceptionDetails) {
+        const desc = cdpRes.exceptionDetails.exception?.description || 'CDP Error';
+        return { ok: false, error: { name: 'Error', message: desc, stack: desc } };
+      }
+      return cdpRes.result.value;
+    } catch (cdpErr) {
+      lastError = cdpErr;
+      const code = debuggerFailureCode(cdpErr);
+      const retryable = !dispatched && code !== 'cdp_error';
+      if (attempt > 0 || !retryable) {
+        let message = 'CDP fallback failed: ' + (cdpErr?.message || String(cdpErr));
+        if (dispatched && code === 'debugger_detached') {
+          message += ' (the tab navigated while the script was in flight; ABM did'
+            + ' not re-run it because it may already have executed)';
+        }
+        return { ok: false, error: { name: 'Error', message, stack: '', code, dispatched } };
+      }
+      console.log('[ABM-WS] CDP fallback attach failed (' + code + '), one retry for tab', tabId);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    } finally {
+      if (lease) { try { await detachAbmDebugger(lease); } catch (_) {} }
+    }
+  }
+  return {
+    ok: false,
+    error: {
+      name: 'Error',
+      message: 'CDP fallback failed: ' + (lastError?.message || 'attach did not succeed'),
+      stack: '',
+      code: debuggerFailureCode(lastError),
+      dispatched: false,
+    },
+  };
+}
+
 async function navigateWithDialogPolicy(msg) {
   const tabId = Number(msg.tabId);
   const action = msg.beforeunload;
@@ -4084,24 +4142,7 @@ async function handleWsExec(data) {
       // CDP fallback for CSP-restricted pages
       if (res && !res.ok && res.csp) {
         console.log('[ABM-WS] CDP fallback for tab', tabId);
-        const wrappedCode = buildCdpScript(data.code, dialogScope);
-        let cdpLease = null;
-        try {
-          cdpLease = await attachAbmDebugger({ tabId });
-          const cdpRes = await sendDebuggerCommandWithTimeout(cdpLease, 'Runtime.evaluate', {
-            expression: wrappedCode, awaitPromise: true, returnByValue: true
-          }, DEFAULT_CDP_TIMEOUT_MS);
-          if (cdpRes.exceptionDetails) {
-            const desc = cdpRes.exceptionDetails.exception?.description || 'CDP Error';
-            res = { ok: false, error: { name: 'Error', message: desc, stack: desc } };
-          } else {
-            res = cdpRes.result.value;
-          }
-        } catch (cdpErr) {
-          res = { ok: false, error: { name: 'Error', message: 'CDP fallback failed: ' + cdpErr.message, stack: '' } };
-        } finally {
-          if (cdpLease) try { await detachAbmDebugger(cdpLease); } catch (_) {}
-        }
+        res = await runCdpExecFallback(tabId, buildCdpScript(data.code, dialogScope));
       }
     }
     // Grace period for async tab creation (e.g. link click with target=_blank)

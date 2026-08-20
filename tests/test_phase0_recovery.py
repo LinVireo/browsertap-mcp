@@ -398,7 +398,10 @@ async def test_resolve_leave_dialog_no_dialog_returns_without_physical_fallback(
         ctx=SimpleNamespace(), session_id="chrome:profile:7"
     )
 
-    assert time.monotonic() - started < 0.2
+    # Loose on purpose: the failure mode this guards is a physical-Enter
+    # fallback or a re-armed 15s default, both an order of magnitude away. A
+    # 0.2s ceiling here tripped on scheduler noise under coverage.
+    assert time.monotonic() - started < 1.0
     assert result["status"] == "no_dialog"
     assert result["resolution"] == "none"
     assert result["url"] == "https://example.test/"
@@ -1019,7 +1022,11 @@ def test_open_new_tab_reconciliation_passes_one_total_deadline(monkeypatch):
     result = S.open_new_tab("https://deadline.test/", timeout=0.12)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.25
+    # `assert timeout <= 0.12` inside the driver above is the contract: every
+    # reconciliation call gets a slice of the one budget, never a fresh one.
+    # This wall clock is only a backstop against a re-armed 15s default, so it
+    # is loose -- a 0.25s ceiling tripped on load under coverage.
+    assert elapsed < 1.0
     assert result["status"] == "unknown"
     assert result["may_have_created"] is False
     assert result["retry_safe"] is True
@@ -3316,7 +3323,11 @@ eval(source.slice(start, end));
         {"status": "rejected", "code": "cdp_timeout", "timeoutMs": 20},
         {"status": "rejected", "code": "cdp_timeout", "timeoutMs": 20},
     ]
-    assert outcome["elapsedMs"] < 500
+    # The `failures` list above is the contract (each attach rejected at its
+    # own 20ms timeout). This ceiling only proves the code did not fall back
+    # to the multi-second default, so it is loose: a 500ms bound measured
+    # inside a loaded Node process is close enough to trip on noise.
+    assert outcome["elapsedMs"] < 2000
     assert outcome["afterTimeout"] == {
         "attachCalls": 1,
         "detachCalls": 0,
@@ -3384,7 +3395,11 @@ eval(source.slice(start, end));
     assert completed.returncode == 0, completed.stderr
     outcome = json.loads(completed.stdout)
     assert outcome["failure"] == {"code": "cdp_timeout", "timeoutMs": 20}
-    assert outcome["elapsedMs"] < 500
+    # The `failures` list above is the contract (each attach rejected at its
+    # own 20ms timeout). This ceiling only proves the code did not fall back
+    # to the multi-second default, so it is loose: a 500ms bound measured
+    # inside a loaded Node process is close enough to trip on noise.
+    assert outcome["elapsedMs"] < 2000
     assert outcome["attachCalls"] == (1 if pending_stage == "detach" else 2)
     assert outcome["detachCalls"] == 1
     assert outcome["trackedAttachments"] == 0
@@ -3455,7 +3470,11 @@ eval(source.slice(start, end));
     )
     assert completed.returncode == 0, completed.stderr
     outcome = json.loads(completed.stdout)
-    assert outcome["elapsedMs"] < 500
+    # The `failures` list above is the contract (each attach rejected at its
+    # own 20ms timeout). This ceiling only proves the code did not fall back
+    # to the multi-second default, so it is loose: a 500ms bound measured
+    # inside a loaded Node process is close enough to trip on noise.
+    assert outcome["elapsedMs"] < 2000
     assert outcome["failures"] == [
         {"status": "rejected", "code": "cdp_timeout", "timeoutMs": 20},
         {"status": "rejected", "code": "cdp_timeout", "timeoutMs": 20},
@@ -3806,6 +3825,103 @@ eval(source.slice(start, end));
     assert outcome["detachCalls"] == 1
     assert outcome["tracked"] == 0
     assert outcome["recoveries"] == 0
+
+
+def _cdp_exec_fallback_source() -> str:
+    source = BACKGROUND.read_text(encoding="utf-8")
+    classify_start = source.index("function debuggerFailureCode(error) {")
+    classify_end = source.index("\n\nfunction clearDebuggerTabState", classify_start)
+    fallback_start = source.index("async function runCdpExecFallback(")
+    fallback_end = source.index("\n\nasync function navigateWithDialogPolicy", fallback_start)
+    return source[classify_start:classify_end] + "\n" + source[fallback_start:fallback_end]
+
+
+def _cdp_fallback_outcome(*, attach_js, evaluate_js=None):
+    """Drive the real runCdpExecFallback with a scripted debugger."""
+    evaluate_js = evaluate_js or "return { result: { value: { ok: true, data: 'ran' } } };"
+    script = f"""
+console.log = () => {{}};
+const DEFAULT_CDP_TIMEOUT_MS = 5000;
+let attachCalls = 0;
+let evaluateCalls = 0;
+let detachCalls = 0;
+async function attachAbmDebugger({{ tabId }}) {{
+  attachCalls += 1;
+  {attach_js}
+}}
+async function sendDebuggerCommandWithTimeout() {{
+  evaluateCalls += 1;
+  {evaluate_js}
+}}
+async function detachAbmDebugger() {{ detachCalls += 1; }}
+{_cdp_exec_fallback_source()}
+(async () => {{
+  const res = await runCdpExecFallback(11, 'return 1');
+  process.stdout.write(JSON.stringify({{ res, attachCalls, evaluateCalls, detachCalls }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    return _run_node_script(script)
+
+
+def test_cdp_exec_fallback_retries_an_attach_that_never_dispatched():
+    """A CSP page's fallback used to die on the first attach failure.
+
+    Attaching races anything else that touches the debugger (another ABM command
+    finishing, DevTools closing), and a lost race there means the caller's script
+    never ran at all -- so retrying is safe and fixes a whole class of one-off
+    'CDP fallback failed' returns.
+    """
+    outcome = _cdp_fallback_outcome(
+        attach_js="""
+  if (attachCalls === 1) throw new Error('Another debugger is already attached');
+  return { tabId };
+""",
+    )
+    assert outcome["attachCalls"] == 2
+    assert outcome["evaluateCalls"] == 1
+    assert outcome["res"] == {"ok": True, "data": "ran"}
+
+
+def test_cdp_exec_fallback_never_reruns_a_script_that_may_have_executed():
+    """The retry stops at the attach stage on purpose.
+
+    'Detached while handling command' arrives *after* Runtime.evaluate went out,
+    so the caller's JS may already have run -- and by then the tab has committed a
+    new document, so a retry would run it a second time somewhere else. Report
+    instead, and say why in the message.
+    """
+    outcome = _cdp_fallback_outcome(
+        attach_js="return { tabId };",
+        evaluate_js="throw new Error('Detached while handling command');",
+    )
+    assert outcome["attachCalls"] == 1
+    assert outcome["evaluateCalls"] == 1
+    assert outcome["res"]["error"]["code"] == "debugger_detached"
+    assert outcome["res"]["error"]["dispatched"] is True
+    assert "may already have executed" in outcome["res"]["error"]["message"]
+
+
+def test_cdp_exec_fallback_reports_a_second_attach_failure_with_its_code():
+    outcome = _cdp_fallback_outcome(
+        attach_js="throw new Error('Another debugger is already attached');",
+    )
+    assert outcome["attachCalls"] == 2
+    assert outcome["evaluateCalls"] == 0
+    assert outcome["detachCalls"] == 0
+    assert outcome["res"]["ok"] is False
+    assert outcome["res"]["error"]["code"] == "debugger_conflict"
+    assert outcome["res"]["error"]["dispatched"] is False
+
+
+def test_cdp_exec_fallback_does_not_retry_an_error_a_retry_cannot_fix():
+    """cdp_error is the bucket for 'this tab cannot be debugged' -- a closed tab,
+    a chrome:// URL, a policy block. Retrying only doubles the latency."""
+    outcome = _cdp_fallback_outcome(
+        attach_js="throw new Error('No tab with given id 11');",
+    )
+    assert outcome["attachCalls"] == 1
+    assert outcome["res"]["error"]["code"] == "cdp_error"
+    assert outcome["res"]["error"]["dispatched"] is False
 
 
 def test_worker_restart_sweep_releases_only_orphaned_debugger_attachments():
