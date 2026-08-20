@@ -263,9 +263,13 @@ def test_page_input_tools_do_not_activate_and_restore_default(monkeypatch):
     ]
     assert all(batch["cmd"] == "batch" for batch in batches)
     assert all(session_id == "c:target" for _, session_id, _ in calls)
-    focused_batch = batches[2]
-    assert [command["method"] for command in focused_batch["commands"][:2]] == [
+    focused_batch = next(
+        batch for batch in batches
+        if any(command["method"] == "Input.insertText" for command in batch["commands"])
+    )
+    assert [command["method"] for command in focused_batch["commands"][:3]] == [
         "Emulation.setFocusEmulationEnabled",
+        "Runtime.evaluate",
         "Input.insertText",
     ]
     resolver_scripts = [script for script, _, _ in calls if script.lstrip().startswith("(() =>")]
@@ -350,8 +354,13 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
     # The reserve makes the retry reachable; the total still fits one deadline.
     assert len(driver.timeouts) == 2
     assert result["abm_retried"] is True
-    assert elapsed < 0.30
     assert sum(driver.timeouts) <= 0.16
+    # The budgets above are the contract -- they read what the code handed the
+    # driver, so they hold under any machine load. This wall clock is only a
+    # backstop for a retry sleeping outside the recorded timeout, whose failure
+    # mode is a re-armed 15s default, so the ceiling is loose on purpose. A
+    # tight one (0.30s) failed for scheduler noise under coverage instrumentation.
+    assert elapsed < 1.0
 
 
 def test_undelivered_retry_split_reserves_a_reachable_retry_window():
@@ -370,7 +379,7 @@ def test_undelivered_retry_split_reserves_a_reachable_retry_window():
     assert (first, reserve) == (0.0, 0.0)
 
 
-def test_driver_ack_does_not_restart_execute_js_deadline():
+def test_driver_ack_does_not_restart_execute_js_deadline(monkeypatch):
     driver = BrowserBridge.__new__(BrowserBridge)
     driver.is_remote = False
     driver.results = {}
@@ -378,6 +387,7 @@ def test_driver_ack_does_not_restart_execute_js_deadline():
     driver.default_session_id = "c:1"
     driver.latest_session_id = "c:1"
     driver.clean_sessions = lambda: None
+    clock = [0.0]
 
     class Socket:
         def send_message(self, payload):
@@ -391,15 +401,25 @@ def test_driver_ack_does_not_restart_execute_js_deadline():
     )
     driver.sessions = {"c:1": session}
 
-    started = time.monotonic()
+    # A virtual clock instead of a wall-clock ceiling: an ACK that re-armed the
+    # deadline would keep polling past `timeout`, and the assertion below sees
+    # that exactly, with no dependence on machine load. The wall-clock version
+    # of this test (elapsed < 0.23 for a 0.14 budget) had only 0.09s of slack
+    # and tripped under coverage instrumentation.
+    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "agent_browser_mcp.browser_bridge.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
     result = driver.execute_js("return new Promise(() => {})", timeout=0.14, session_id="c:1")
-    elapsed = time.monotonic() - started
 
     assert "ACK received" in result["result"]
     assert result["error_code"] == "no_response"
     assert result["delivery_state"] == "delivered_no_result"
     assert result["retry_safe"] is False
-    assert elapsed < 0.23
+    # 0.14 = the whole budget and not one slice more; a restart would double it.
+    assert clock[0] == pytest.approx(0.14, abs=0.011)
 
 
 def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
@@ -631,12 +651,13 @@ def test_page_type_uses_already_validated_session_for_input(monkeypatch):
     batch = json.loads(calls[1][0])
     assert [command["method"] for command in batch["commands"]] == [
         "Emulation.setFocusEmulationEnabled",
+        "Runtime.evaluate",
         "Input.insertText",
         "Runtime.evaluate",
         "Input.dispatchKeyEvent",
         "Input.dispatchKeyEvent",
     ]
-    assert batch["commands"][2]["params"]["awaitPromise"] is True
+    assert batch["commands"][3]["params"]["awaitPromise"] is True
     assert driver.default_session_id == "c:previous"
 
 
@@ -690,7 +711,7 @@ def test_page_input_batch_carries_the_same_absolute_deadline(monkeypatch):
 
         def ext_cmd(self, payload, client_id=None, timeout=15.0):
             calls.append((payload, client_id, timeout))
-            return {"data": [{}, {"ok": True}]}
+            return {"data": [{}, {"result": {"value": True}}, {"ok": True}]}
 
     calls = []
     monkeypatch.setattr(S, "require_driver", lambda: _D())
@@ -715,11 +736,126 @@ def test_page_input_batch_carries_the_same_absolute_deadline(monkeypatch):
             "method": "Emulation.setFocusEmulationEnabled",
             "params": {"enabled": True},
         },
+        {
+            "cmd": "cdp",
+            "method": "Runtime.evaluate",
+            "params": {"expression": "document.hasFocus()", "returnByValue": True},
+        },
         {"cmd": "cdp", "method": "Input.insertText", "params": {"text": "x"}},
     ]
     assert client_id == "c"
     assert timeout == pytest.approx(0.2)
     assert result["result"] == [{"ok": True}]
+
+
+def test_page_input_proves_focus_before_the_first_input_command(monkeypatch):
+    """Focus emulation ACKs before the renderer has applied it, and an Input.*
+    event that arrives in that window is dropped with nothing reported anywhere.
+    The probe supplies the renderer round trip the flag needs, so it has to sit
+    between the two -- and in the same batch, because a separate one would cost
+    another debugger attach per input."""
+
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            batches.append([command["method"] for command in payload["commands"]])
+            return {"data": [{}, {"result": {"value": True}}, {}, {}]}
+
+    batches = []
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+
+    result = S._run_page_input(
+        [
+            {"cmd": "cdp", "method": "Input.dispatchKeyEvent", "params": {}},
+            {"cmd": "cdp", "method": "Input.dispatchKeyEvent", "params": {}},
+        ],
+        "c:42",
+        5.0,
+        session_validated=True,
+    )
+
+    assert result["status"] == "success"
+    assert batches == [
+        [
+            "Emulation.setFocusEmulationEnabled",
+            "Runtime.evaluate",
+            "Input.dispatchKeyEvent",
+            "Input.dispatchKeyEvent",
+        ]
+    ]
+    # The prelude is internal bookkeeping, not something the caller asked for.
+    assert result["result"] == [{}, {}]
+
+
+def test_page_input_reports_that_an_unfocused_dispatch_may_not_have_landed(
+    monkeypatch,
+):
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            batches.append([command["method"] for command in payload["commands"]])
+            return {"data": [{}, {"result": {"value": False}}, {}]}
+
+    batches = []
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+
+    # Reporting success here is the one outcome that must never happen: Chrome
+    # accepts these events and throws them away without telling anyone.
+    with pytest.raises(RuntimeError, match="may not have landed"):
+        S._run_page_input(
+            [{"cmd": "cdp", "method": "Input.dispatchMouseEvent", "params": {}}],
+            "c:42",
+            5.0,
+            session_validated=True,
+        )
+
+    # One dispatch only -- a repeat could double the click.
+    assert len(batches) == 1
+
+
+def test_page_input_proceeds_when_the_route_cannot_prove_focus(monkeypatch):
+    """An older extension or an embedded fake answers the batch without a usable
+    Runtime.evaluate result. That is not evidence of an unfocused page and must
+    not turn a working route into a hard failure."""
+
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            batches.append([command["method"] for command in payload["commands"]])
+            return {"data": [{"ok": True}]}
+
+    batches = []
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+
+    result = S._run_page_input(
+        [{"cmd": "cdp", "method": "Input.dispatchKeyEvent", "params": {}}],
+        "c:42",
+        5.0,
+        session_validated=True,
+    )
+
+    assert result["status"] == "success"
+    assert len(batches) == 1
+    assert result["result"] == [{"ok": True}]
+
+
+@pytest.mark.parametrize(
+    "reply, expected",
+    [
+        ({"ok": True}, None),
+        ([{}], None),
+        ([{}, "boom"], None),
+        ([{}, {"ok": True}], None),
+        ([{}, {"result": {"type": "undefined"}}], None),
+        ([{}, {"result": {"type": "boolean", "value": False}}], False),
+        ([{}, {"result": {"type": "boolean", "value": True}}], True),
+    ],
+)
+def test_focus_proof_value_only_reports_a_real_answer(reply, expected):
+    assert S._focus_proof_value(reply) is expected
 
 
 def test_page_input_timeout_is_not_replayed_through_page_route(monkeypatch):

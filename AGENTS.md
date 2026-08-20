@@ -122,6 +122,29 @@ screen at all**. `_activate()` therefore tries to un-minimise first and then
 reports `on_screen` honestly. Treat `on_screen: false` as "this input will miss",
 never as success.
 
+The CDP tools (`page_click`, `page_type`, `page_press`, `page_drag`) do not touch
+the mouse and do not raise the tab, but they have the same failure shape one
+layer down. Chrome discards `Input.*` events aimed at a tab that never received
+focus, and `Emulation.setFocusEmulationEnabled` **ACKs before the renderer has
+applied it** -- so an input dispatched right after it is dropped, every CDP
+command still returns success, and nothing anywhere reports a problem. Measured
+on a freshly opened tab: roughly one silent miss in eight; `document.hasFocus()`
+sampled just before the dispatch predicted it exactly.
+
+`_run_page_input` therefore sends `Emulation.setFocusEmulationEnabled`, then a
+`Runtime.evaluate("document.hasFocus()")`, then the input -- all in **one**
+batch. That middle command is not a debug leftover: it is the renderer round trip
+the flag needs in order to be in effect by the time the input goes out, and its
+answer is the proof. Two rules survive any change here:
+
+- **Do not split it into two batches.** Each batch attaches and detaches its own
+  debugger, and a detach immediately followed by a re-attach on the same tab
+  wedges the service worker: measured as the whole batch timing out at 15 s
+  instead of the ~0.16 s it takes now.
+- **Do not "fix" a false reading by re-sending the input.** By then the events
+  are already out; a repeat could double the click. Report that it may not have
+  landed and let the caller check the page, exactly as the timeout path does.
+
 ## 5. MV3 `chrome.alarms` has a 60-second floor
 
 Passing a smaller value raises **no error**; Chrome silently rounds it up. That
@@ -164,12 +187,26 @@ Because this lives in the bridge, a change here needs a bridge restart
 ## 7. Running the tests
 
 ```bash
-# offline: no browser, no bridge, no network. Seconds.
+# offline: no browser, no bridge, no network. Under two minutes.
 python -m pytest tests/ -q
 
-# live: needs the bridge running and the extension connected. ~105 s.
+# live: needs the bridge running and the extension connected. Four minutes or so.
 python -m pytest tests/ -q -m live
 ```
+
+Two things decide whether the live run means anything, and skipping either wastes
+the whole run:
+
+- **Leave the browser alone.** With someone opening and closing tabs, failover
+  can pick a tab that is still loading and the CDP fallback loses its debugger
+  mid-command. Measured: browser in use → 8 minutes and one failure; idle
+  browser → 4 m 15 s, 54 passed.
+- **Do not work on the machine during the coverage round.** Instrumentation
+  roughly doubles the wall clock. The tests that used to fail as a group there
+  now assert the budget the code hands downstream instead of the elapsed time,
+  so the class is mostly gone -- but a remaining wall-clock assertion is a loose
+  backstop, not a performance target. Re-run on an idle machine before treating
+  a timing failure as a defect.
 
 The live suite **touches the human's foreground tab**. Note the active tab before
 you start and put it back afterwards:

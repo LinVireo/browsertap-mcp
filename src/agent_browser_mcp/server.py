@@ -3749,6 +3749,39 @@ def _blocked_page_challenge_attempts(session_id: str, marker: str) -> int | None
         return attempts
 
 
+_FOCUS_EMULATION_COMMAND = {
+    "cmd": "cdp",
+    "method": "Emulation.setFocusEmulationEnabled",
+    "params": {"enabled": True},
+}
+# A renderer round trip, and its answer is the proof.  document.hasFocus() is
+# the only thing that separates "the renderer will route this input" from
+# "Chrome will drop it and report success anyway".
+_FOCUS_PROOF_COMMAND = {
+    "cmd": "cdp",
+    "method": "Runtime.evaluate",
+    "params": {"expression": "document.hasFocus()", "returnByValue": True},
+}
+
+
+def _focus_proof_value(result: Any) -> Optional[bool]:
+    """The probed focus state, or None when the route did not really answer.
+
+    Older extensions and the embedded test doubles return a shorter or synthetic
+    result list.  Those must not be read as "unfocused", which would turn a
+    compatible route into a hard failure.
+    """
+    if not isinstance(result, list) or len(result) < 2:
+        return None
+    probe = result[1]
+    if not isinstance(probe, dict):
+        return None
+    value = probe.get("result")
+    if not isinstance(value, dict) or "value" not in value:
+        return None
+    return bool(value["value"])
+
+
 def _run_page_input(
     commands: list[dict[str, Any]],
     session_id: Optional[str],
@@ -3765,14 +3798,16 @@ def _run_page_input(
     # renderer input-capable without activating the tab or changing the user's
     # foreground page.  Keep it in this same batch so attach/lease ordering is
     # atomic and do not expose the internal setup result to callers.
-    input_commands = [
-        {
-            "cmd": "cdp",
-            "method": "Emulation.setFocusEmulationEnabled",
-            "params": {"enabled": True},
-        },
-        *commands,
-    ]
+    #
+    # Enabling it is not enough: the command ACKs before the renderer has
+    # applied it, and an Input.* event that arrives inside that window is
+    # discarded with nothing reported anywhere -- measured on a freshly opened
+    # tab as a ~1-in-8 silent miss, exactly the failure this file must never
+    # produce.  The probe supplies the renderer round trip the flag needs and
+    # its answer proves the state.  It belongs in this same batch: a separate
+    # one would cost a second debugger attach per input, which is slower and one
+    # more thing that can time out mid-sequence.
+    input_commands = [_FOCUS_EMULATION_COMMAND, _FOCUS_PROOF_COMMAND, *commands]
     if deadline is None:
         deadline = time.monotonic() + timeout
     driver = require_driver()
@@ -3791,62 +3826,83 @@ def _run_page_input(
             target_session = (
                 switch_session(session_id=session_id) if directed else switch_session()
             )
-        wall_now_ms = time.time() * 1000
-        remaining = max(0.0, deadline - time.monotonic())
-        if remaining <= 0:
-            raise TimeoutError("page input deadline exhausted before batch dispatch")
-        payload = {
-            "cmd": "batch",
-            "commands": input_commands,
-            # The extension uses the absolute deadline to stop a batch whose
-            # transport ACK or an earlier CDP command consumed the budget.
-            "deadlineEpochMs": int(wall_now_ms + remaining * 1000),
-            "timeoutMs": max(1, int(remaining * 1000)),
-        }
         ext_cmd = getattr(driver, "ext_cmd", None)
-        if callable(ext_cmd):
-            client_id, tab_id = _split_session_target(target_session)
-            payload["tabId"] = tab_id
-            try:
-                # A batch is an extension command, not page JavaScript. Sending it
-                # over the browser-level socket avoids relying on a background
-                # tab's content-script ACK while retaining the exact target tab.
-                response = ext_cmd(
-                    payload,
-                    client_id=client_id,
-                    timeout=remaining,
+
+        def dispatch(batch_commands: list[dict[str, Any]]) -> Any:
+            """Send one batch to the resolved tab and unwrap the reply."""
+            wall_now_ms = time.time() * 1000
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError(
+                    "page input deadline exhausted before batch dispatch"
                 )
-            except BaseException as exc:
-                fallback_budget = max(0.0, deadline - time.monotonic())
-                # Only an explicit old-router rejection proves the mutation did
-                # not run. A timeout or transport failure is ambiguous and must
-                # never replay clicks, keys, or drags through another route.
-                if not _unknown_command_error(exc) or fallback_budget <= 0:
-                    raise
+            payload = {
+                "cmd": "batch",
+                "commands": batch_commands,
+                # The extension uses the absolute deadline to stop a batch whose
+                # transport ACK or an earlier CDP command consumed the budget.
+                "deadlineEpochMs": int(wall_now_ms + remaining * 1000),
+                "timeoutMs": max(1, int(remaining * 1000)),
+            }
+            if callable(ext_cmd):
+                client_id, tab_id = _split_session_target(target_session)
+                payload["tabId"] = tab_id
+                try:
+                    # A batch is an extension command, not page JavaScript. Sending
+                    # it over the browser-level socket avoids relying on a
+                    # background tab's content-script ACK while retaining the exact
+                    # target tab.
+                    response = ext_cmd(
+                        payload,
+                        client_id=client_id,
+                        timeout=remaining,
+                    )
+                except BaseException as exc:
+                    fallback_budget = max(0.0, deadline - time.monotonic())
+                    # Only an explicit old-router rejection proves the mutation did
+                    # not run. A timeout or transport failure is ambiguous and must
+                    # never replay clicks, keys, or drags through another route.
+                    if not _unknown_command_error(exc) or fallback_budget <= 0:
+                        raise
+                    response = exec_js(
+                        json.dumps(payload),
+                        session_id=target_session,
+                        timeout=fallback_budget,
+                    )
+            else:  # Compatibility for older embedded/fake drivers.
                 response = exec_js(
-                    json.dumps(payload),
-                    session_id=target_session,
-                    timeout=fallback_budget,
+                    json.dumps(payload), session_id=target_session, timeout=remaining
                 )
-        else:  # Compatibility for older embedded/fake drivers.
-            response = exec_js(
-                json.dumps(payload), session_id=target_session, timeout=remaining
-            )
-        result = response.get("data") if isinstance(response, dict) else response
-        if isinstance(result, dict) and result.get("ok") is False:
+            unwrapped = response.get("data") if isinstance(response, dict) else response
+            if isinstance(unwrapped, dict) and unwrapped.get("ok") is False:
+                raise RuntimeError(
+                    "page input batch failed: "
+                    f"{unwrapped.get('error') or 'unknown extension error'}"
+                )
+            return unwrapped
+
+        result = dispatch(input_commands)
+        if _focus_proof_value(result) is False:
+            # The probe ran between enabling focus emulation and the first
+            # Input.* command, so a false answer means Chrome had nowhere to
+            # route these events.  Say so: the alternative is the silent
+            # "reported success, nothing happened" miss.  Do not replay them --
+            # like the timeout path above, a repeat could double the action.
             raise RuntimeError(
-                f"page input batch failed: {result.get('error') or 'unknown extension error'}"
+                "page input may not have landed: the target page did not hold "
+                "focus when the events were dispatched, so Chrome can drop them "
+                "without reporting anything. Check the page before retrying."
             )
-        # The focus-emulation command is an internal prelude.  Current
-        # extensions return one result per command; retain compatibility with
-        # older/fake routes that return a shorter synthetic list.
+        # The focus prelude is internal.  Current extensions return one result
+        # per command; retain compatibility with older/fake routes that return a
+        # shorter synthetic list.
         if (
             isinstance(result, list)
             and len(result) == len(input_commands)
             and result
             and result[0] == {}
         ):
-            result = result[1:]
+            result = result[2:]
         return {
             "status": "success",
             "session_id": target_session,
