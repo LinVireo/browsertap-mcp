@@ -60,6 +60,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   old rule unchanged when nothing has settled yet. This only affects calls that
   named no tab or explicitly allowed any tab; a caller-named dead tab is still
   refused.
+- The bridge now records a tab's disconnect once instead of on every extension
+  snapshot. The snapshot sweep re-stamped the timestamp a few times a second, so
+  the ten-minute reap in `clean_sessions` was never reached: a daemon kept one
+  session per tab ever closed for as long as it ran, and re-logged every one of
+  them. Measured on an hour-old daemon, 97% of the log was that repetition, and
+  the tab whose disconnect was still being re-reported had been closed an hour
+  earlier -- which matters because the log rotates at 5 MB, so a real failure
+  scrolls out of the only place a detached daemon records one.
 
 ### Changed
 

@@ -308,6 +308,36 @@ def test_extension_tab_snapshot_isolates_clients_and_replaces_generation():
     assert other.is_active() is True
 
 
+def test_a_closed_tab_is_reported_once_and_can_still_be_reaped(caplog):
+    """The snapshot sweep must not keep a dead session looking freshly dead.
+
+    Extensions push a tab snapshot every few seconds, and every one of them
+    re-runs the sweep over the whole table. Re-stamping `disconnect_at` there
+    held `clean_sessions` permanently short of its reap window, so a daemon that
+    outlives every MCP session accumulated one session per tab ever closed and
+    re-logged all of them forever.
+    """
+    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
+    driver = driver_stub()
+    client = FakeSocket()
+    driver._apply_extension_tabs("one", "chrome", [{"id": 1, "url": "https://gone"}], client)
+
+    driver._apply_extension_tabs("one", "chrome", [], client)
+    first_seen = driver.sessions["one:1"].disconnect_at
+    assert first_seen is not None
+    for _ in range(5):
+        driver._apply_extension_tabs("one", "chrome", [], client)
+
+    assert driver.sessions["one:1"].disconnect_at == first_seen
+    assert caplog.text.count("Tab disconnected: https://gone") == 1
+
+    driver.sessions["one:1"].disconnect_at = time.time() - 700
+    driver._apply_extension_tabs("one", "chrome", [], client)
+    driver.clean_sessions()
+
+    assert "one:1" not in driver.sessions
+
+
 def test_find_and_set_session_local_paths(caplog):
     caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
     driver = driver_stub()

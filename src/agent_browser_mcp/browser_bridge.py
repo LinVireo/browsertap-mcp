@@ -258,6 +258,14 @@ class Session:
         self.connect_at = time.time()
         self.disconnect_at = None
     def mark_disconnected(self):
+        # Records the transition, not the state: callers re-run this over the
+        # whole table on every extension snapshot, so a tab that is already
+        # gone would be re-stamped a few times a second. That kept
+        # `now - disconnect_at` under `clean_sessions`'s reap window forever,
+        # so dead sessions were never dropped from a daemon that outlives every
+        # MCP session -- and their log lines buried everything else.
+        if self.disconnect_at is not None:
+            return
         logger.info("Tab disconnected: %s (session=%s)", self.url, self.id)
         self.disconnect_at = time.time()
 
