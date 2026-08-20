@@ -10,7 +10,7 @@ Chrome/Edge。桥连或"浏览器探测"中断时按此恢复。**调用语义�
 ——那些属于守则；这里只管"连不上/挂住了怎么恢复"。
 
 给人看的完整排错手册（本文件随包发布，读者手上可能没有仓库目录，所以给 URL）：
-<https://github.com/0xlinn/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md>
+<https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md>
 （中文 `docs/TROUBLESHOOTING.zh-CN.md`）。本文件只保留 agent 需要**自己动手**的那部分。
 
 ## 关键原则

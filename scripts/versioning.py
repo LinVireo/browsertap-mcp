@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CHANGELOG_RELEASE_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$", re.MULTILINE)
 CHANGELOG_UNRELEASED_RE = re.compile(r"^## \[Unreleased\]\s*$", re.MULTILINE)
-CHANGELOG_REPOSITORY = "https://github.com/0xlinn/agent-browser-mcp"
+CHANGELOG_REPOSITORY = "https://github.com/LinVireo/agent-browser-mcp"
 VersionPart = Literal["patch", "minor"]
 README_VERSION_PATTERNS = {
     "README.md": re.compile(

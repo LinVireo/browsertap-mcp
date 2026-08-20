@@ -1,12 +1,12 @@
 # agent-browser-mcp
 
-[English](README.md) | 中文文档
+[English](https://github.com/LinVireo/agent-browser-mcp/blob/main/README.md) | 中文文档
 
-[![离线 CI](https://github.com/0xlinn/agent-browser-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/0xlinn/agent-browser-mcp/actions/workflows/test.yml)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![离线 CI](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE)
 
-[使用指南](docs/USAGE.zh-CN.md) · [故障排查](docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](SECURITY.md) · [贡献指南](CONTRIBUTING.zh-CN.md) · [变更记录](CHANGELOG.md)
+[使用指南](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md) · [贡献指南](https://github.com/LinVireo/agent-browser-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/agent-browser-mcp/blob/main/CHANGELOG.md)
 
 `agent-browser-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
@@ -51,7 +51,7 @@ profile 对物理输入进行询问；默认 `lab` profile 免询问执行，也
 **Windows PowerShell**
 
 ```powershell
-git clone https://github.com/0xlinn/agent-browser-mcp.git
+git clone https://github.com/LinVireo/agent-browser-mcp.git
 Set-Location agent-browser-mcp
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
@@ -61,7 +61,7 @@ python -m venv .venv
 **Linux 或 macOS**
 
 ```bash
-git clone https://github.com/0xlinn/agent-browser-mcp.git
+git clone https://github.com/LinVireo/agent-browser-mcp.git
 cd agent-browser-mcp
 python -m venv .venv
 ./.venv/bin/python -m pip install -e ".[desktop]"
@@ -181,7 +181,7 @@ mcp_servers:
 
 若标签页列表为空，运行 `agent-browser-mcp doctor`。
 
-需要减少对用户操作的影响时，请先阅读 [`docs/USAGE.zh-CN.md`](docs/USAGE.zh-CN.md)。其中说明
+需要减少对用户操作的影响时，请先阅读 [`docs/USAGE.zh-CN.md`](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.zh-CN.md)。其中说明
 后台标签页、前台页面和桌面截图的区别，以及多模态模型的适用场景。
 
 ## 配置
@@ -191,7 +191,7 @@ mcp_servers:
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `AGENT_BROWSER_TMWD_HOST` | `127.0.0.1` | 桥的绑定地址 |
-| `AGENT_BROWSER_TMWD_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为单 bridge 锁 socket。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](docs/TROUBLESHOOTING.zh-CN.md)。 |
+| `AGENT_BROWSER_TMWD_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为单 bridge 锁 socket。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
 | `AGENT_BROWSER_NO_SPAWN` | 未设置 | 设为 `1` 后 MCP 服务不自动启动 bridge，适用于由运维流程单独管理 bridge 的环境 |
 | `AGENT_BROWSER_BRIDGE_AUTH` | 启用 | 仅在明确可信的本机兼容环境中设为 `off`。默认 ABM 使用持久用户 token 保护 `/link`。 |
 | `AGENT_BROWSER_BRIDGE_TOKEN_FILE` | `~/.agent-browser-mcp/bridge-token` | 覆盖共享 token 文件位置。各编辑器不需要分别配置 token。 |
@@ -245,6 +245,21 @@ agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skil
 看不出问题，等你升级包之后就静默收不到更新了。如果确实保留了副本，可以用
 `python -m scripts.check_tool_docs --check-installed-skills --skill-mirror DIR`
 与随包原件比对，并指出是哪一份漂了。
+
+### 升级
+
+升级要做三件事，不是一件：三个部分不会同时变成新版，而第 3 步漏掉不会有任何报错。
+
+1. 更新包 —— 发布到 PyPI 后用 `pip install -U agent-browser-mcp`，源码安装则 `git pull`。
+   新建的 MCP 会话立即生效。
+2. `agent-browser-mcp bridge --restart`。守护进程常驻、活得比每个 MCP 会话都长，不重启就
+   一直用旧代码。
+3. 打开 `chrome://extensions`，在扩展上点一次**重新加载**。磁盘上的文件已经换了，但 Chrome
+   仍在跑先前加载的构建，且没有任何命令能让它重读。
+
+`agent-browser-mcp doctor` 会指出哪一部分是旧的，并给出唯一有效的动作：
+`reload_extension`、`restart_bridge` 或 `restart_mcp_session`。另外两个不起作用，所以照这个
+字段做，别三件一起做。
 
 ### 卸载
 
@@ -356,7 +371,7 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 `contentSettings`、`declarativeNetRequest`、`management`、`bookmarks`、`downloads` 以及
 `<all_urls>`。`declarativeNetRequest` 仅在指定标签页执行依赖 eval 的命令期间临时移除 CSP
 响应头；规则为 session 级、带引用计数，并在 cleanup 中删除，不是全浏览器持久关闭 CSP。
-完整权限与 loopback 威胁模型见[安全说明](SECURITY.md)。
+完整权限与 loopback 威胁模型见[安全说明](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md)。
 
 ## 工具列表
 
@@ -540,13 +555,13 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 ## 故障排查
 
 应先运行 `agent-browser-mcp doctor`。连接、版本、对话框、权限和物理输入相关的恢复流程见
-[故障排查指南](docs/TROUBLESHOOTING.zh-CN.md)。
+[故障排查指南](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
 
 ## 致谢
 
-ABM 由 `0xlinn` 维护。原仓库版权归属仍按 [LICENSE](LICENSE) 中的 `zhea` 保留；维护者与原始版权归属是两个不同角色。本发行版的权威公开仓库为 `0xlinn/agent-browser-mcp`。
+ABM 由 `LinVireo` 维护。原仓库版权归属仍按 [LICENSE](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE) 中的 `zhea` 保留；维护者与原始版权归属是两个不同角色。本发行版的权威公开仓库为 `LinVireo/agent-browser-mcp`。
 
-本发行版基于 [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp) 二次开发，分叉点为 `04cc1f1`（2026-04-15）。此后差异已经很大：相对分叉点 46 个提交、81 个文件变更、+38,096 / -1,105 行，跟踪文件数由 19 增至 82。上游快照不包含测试套件、文档集与 CI 配置；MCP 工具面、bridge 及其 token 鉴权、Chrome 扩展、发布证据链与两份 README 均在此重写或从零编写。保留致谢是因为来源关系属实，而非当前代码与其接近。
+本发行版基于 [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp) 二次开发，分叉点为 `04cc1f1`（2026-04-15）。此后差异已经很大：相对分叉点超过 50 个提交、数万行改动，跟踪文件数由 19 增至 80 以上——当前数字用 `git diff --shortstat 04cc1f1..HEAD` 现查。上游快照不包含测试套件、文档集与 CI 配置；MCP 工具面、bridge 及其 token 鉴权、Chrome 扩展、发布证据链与两份 README 均在此重写或从零编写。保留致谢是因为来源关系属实，而非当前代码与其接近。
 
 这里的浏览器自动化核心是从 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器栈中提取出来、重新封装成 MCP 服务的。感谢该项目及其作者提供的原始实现。
 

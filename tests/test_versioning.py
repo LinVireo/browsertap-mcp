@@ -80,8 +80,8 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "## [Unreleased]\n\n"
         "### Changed\n\n- Pending change.\n\n"
         "## [0.1.0] - 2026-01-01\n\n- Initial release.\n\n"
-        "[Unreleased]: https://github.com/0xlinn/agent-browser-mcp/compare/v0.1.0...HEAD\n"
-        "[0.1.0]: https://github.com/0xlinn/agent-browser-mcp/releases/tag/v0.1.0\n",
+        "[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.1.0...HEAD\n"
+        "[0.1.0]: https://github.com/LinVireo/agent-browser-mcp/releases/tag/v0.1.0\n",
         encoding="utf-8",
     )
 
@@ -110,11 +110,11 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
     assert "## [Unreleased]\n\n## [0.3.0] - " in changelog
     assert "### Changed\n\n- Pending change." in changelog
     assert (
-        "[Unreleased]: https://github.com/0xlinn/agent-browser-mcp/compare/v0.3.0...HEAD"
+        "[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.0...HEAD"
         in changelog
     )
     assert (
-        "[0.3.0]: https://github.com/0xlinn/agent-browser-mcp/compare/v0.1.0...v0.3.0" in changelog
+        "[0.3.0]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.1.0...v0.3.0" in changelog
     )
 
 

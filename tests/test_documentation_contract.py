@@ -50,7 +50,7 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
     contributing_zh = (ROOT / "CONTRIBUTING.zh-CN.md").read_text(encoding="utf-8")
 
     for text in (readme, readme_zh):
-        assert "git clone https://github.com/0xlinn/agent-browser-mcp.git" in text
+        assert "git clone https://github.com/LinVireo/agent-browser-mcp.git" in text
         assert ".venv\\Scripts\\agent-browser-mcp.exe" in text
         assert "AGENT_BROWSER_WS_ALLOWED_ORIGINS" in text
         assert "AGENT_BROWSER_WS_ALLOW_NO_ORIGIN" in text
@@ -193,6 +193,38 @@ def test_published_agent_guide_is_not_machine_specific():
         reference = path.relative_to(ROOT).as_posix()
         assert reference in text, f"AGENTS.md does not point at {reference}"
 
+
+
+def test_readme_links_survive_being_read_off_the_repository():
+    """README.md is the package's long description on the index page.
+
+    An index renders it standalone, so a relative link there resolves against
+    the index host and 404s -- the reader is one click from the usage guide, the
+    security policy and the licence, and gets none of them. Absolute links work
+    from both places, so the READMEs pay that cost and the rest of the docs,
+    which are only ever read inside the tree, keep relative links.
+    """
+    repository = "https://github.com/LinVireo/agent-browser-mcp/"
+    for name in ("README.md", "README.zh-CN.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        targets = re.findall(r"\]\(([^)\s]+)\)", text)
+        assert targets, f"{name}: the link scan stopped matching"
+        relative = [
+            target
+            for target in targets
+            if not target.startswith(("https://", "http://", "#", "mailto:"))
+        ]
+        assert not relative, f"{name} links to {relative} relatively, which breaks off-tree"
+        # An absolute link is only useful if it points at this repository; a link
+        # left pointing at the upstream fork would read as if this were its code.
+        in_repo = [target for target in targets if target.startswith(repository)]
+        assert in_repo, f"{name} no longer links into {repository}"
+        for target in in_repo:
+            tail = target[len(repository):]
+            if not tail.startswith("blob/main/"):
+                continue
+            referenced = ROOT / tail[len("blob/main/"):]
+            assert referenced.exists(), f"{name} links to a missing file: {tail}"
 
 
 def test_user_facing_docs_carry_no_pre_unification_version_numbers():

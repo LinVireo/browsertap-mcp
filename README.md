@@ -1,14 +1,14 @@
-<!-- mcp-name: io.github.0xlinn/agent-browser-mcp -->
+<!-- mcp-name: io.github.LinVireo/agent-browser-mcp -->
 
 # agent-browser-mcp
 
-English | [中文文档](README.zh-CN.md)
+English | [中文文档](https://github.com/LinVireo/agent-browser-mcp/blob/main/README.zh-CN.md)
 
-[![Offline CI](https://github.com/0xlinn/agent-browser-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/0xlinn/agent-browser-mcp/actions/workflows/test.yml)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Offline CI](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE)
 
-[Usage guide](docs/USAGE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+[Usage guide](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md) · [Contributing](https://github.com/LinVireo/agent-browser-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/agent-browser-mcp/blob/main/CHANGELOG.md)
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
@@ -50,7 +50,7 @@ desktop feature set:
 **Windows PowerShell**
 
 ```powershell
-git clone https://github.com/0xlinn/agent-browser-mcp.git
+git clone https://github.com/LinVireo/agent-browser-mcp.git
 Set-Location agent-browser-mcp
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
@@ -60,7 +60,7 @@ python -m venv .venv
 **Linux or macOS**
 
 ```bash
-git clone https://github.com/0xlinn/agent-browser-mcp.git
+git clone https://github.com/LinVireo/agent-browser-mcp.git
 cd agent-browser-mcp
 python -m venv .venv
 ./.venv/bin/python -m pip install -e ".[desktop]"
@@ -185,7 +185,7 @@ Once the extension is loaded and a normal page is open, try:
 
 If tabs come back empty, run `agent-browser-mcp doctor`.
 
-For the least disruptive workflow, start with [`docs/USAGE.md`](docs/USAGE.md): it explains which operations stay in a background tab, when a desktop screenshot really means the monitor, and when an image-capable model is useful.
+For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.md): it explains which operations stay in a background tab, when a desktop screenshot really means the monitor, and when an image-capable model is useful.
 
 ## Configuration
 
@@ -194,7 +194,7 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](docs/USAGE.md): 
 | Variable | Default | Purpose |
 |---|---|---|
 | `AGENT_BROWSER_TMWD_HOST` | `127.0.0.1` | Bridge bind address. |
-| `AGENT_BROWSER_TMWD_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge hosting. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). |
+| `AGENT_BROWSER_TMWD_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge hosting. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md). |
 | `AGENT_BROWSER_NO_SPAWN` | unset | Set to `1` to stop the MCP server from auto-starting the bridge. Use it when you run the bridge yourself. |
 | `AGENT_BROWSER_BRIDGE_AUTH` | enabled | Set to `off` only for an explicitly trusted local compatibility setup. By default ABM authenticates `/link` with a persistent per-user token. |
 | `AGENT_BROWSER_BRIDGE_TOKEN_FILE` | `~/.agent-browser-mcp/bridge-token` | Override the shared token file location. Editors do not need individual token configuration. |
@@ -254,6 +254,23 @@ files. A copy looks correct for as long as the contents happen to agree, then
 silently stops receiving updates when you upgrade the package. If you keep copies
 anyway, `python -m scripts.check_tool_docs --check-installed-skills --skill-mirror
 DIR` compares them against the shipped originals and names whichever one drifted.
+
+### Upgrade
+
+An upgrade is three steps, not one: the three parts do not become current at the
+same moment, and step 3 fails silently if you skip it.
+
+1. Update the package — `pip install -U agent-browser-mcp` once it is on PyPI, or
+   `git pull` in a source checkout. A new MCP session picks this up immediately.
+2. `agent-browser-mcp bridge --restart`. The daemon is long-lived and outlives
+   every MCP session, so until it restarts it keeps serving the old code.
+3. Open `chrome://extensions` and press **Reload** on the extension. Its files
+   were replaced on disk, but Chrome keeps running the build it already loaded,
+   and no command can make it re-read them.
+
+`agent-browser-mcp doctor` reports which part is stale and names the one action
+that fixes it: `reload_extension`, `restart_bridge`, or `restart_mcp_session`.
+The other two will not help, so read the field rather than doing all three.
 
 ### Uninstall
 
@@ -340,7 +357,7 @@ The extension requests broad permissions because the feature set requires them:
 `downloads`, and `<all_urls>`. `declarativeNetRequest` temporarily removes CSP
 response headers only from the tab executing an eval-based command. The rule is
 session-scoped, reference-counted, and removed in cleanup; it is not a
-browser-wide persistent CSP override. See [Security](SECURITY.md) for the full
+browser-wide persistent CSP override. See [Security](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md) for the full
 permission and loopback threat model.
 
 ## Tools
@@ -512,13 +529,13 @@ After approval the sequence is fixed: take the cross-process lock (contended →
 
 Run `agent-browser-mcp doctor` first. For connection, version, dialog,
 permission, and physical-input recovery procedures, see the dedicated
-[troubleshooting guide](docs/TROUBLESHOOTING.md).
+[troubleshooting guide](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md).
 
 ## Credits
 
-ABM is maintained by `0xlinn`. The original repository copyright attribution remains with `zhea` in [LICENSE](LICENSE); these are distinct maintenance and copyright roles. The canonical public repository for this distribution is `0xlinn/agent-browser-mcp`.
+ABM is maintained by `LinVireo`. The original repository copyright attribution remains with `zhea` in [LICENSE](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE); these are distinct maintenance and copyright roles. The canonical public repository for this distribution is `LinVireo/agent-browser-mcp`.
 
-This distribution is a fork of [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp), branched at commit `04cc1f1` (2026-04-15). It has diverged substantially since: 46 commits, 81 files changed, and +38,096/-1,105 lines against that fork point, growing the tracked tree from 19 files to 82. The upstream snapshot shipped no test suite, documentation set, or CI configuration. The MCP tool surface, the bridge and its token authentication, the Chrome extension, the release evidence pipeline, and both READMEs were rewritten or written from scratch here. Attribution is kept because the lineage is real, not because the current code is close to it.
+This distribution is a fork of [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp), branched at commit `04cc1f1` (2026-04-15). It has diverged substantially since: more than 50 commits and tens of thousands of changed lines against that fork point, growing the tracked tree from 19 files to over 80 — `git diff --shortstat 04cc1f1..HEAD` prints the current figure. The upstream snapshot shipped no test suite, documentation set, or CI configuration. The MCP tool surface, the bridge and its token authentication, the Chrome extension, the release evidence pipeline, and both READMEs were rewritten or written from scratch here. Attribution is kept because the lineage is real, not because the current code is close to it.
 
 The browser automation core here was extracted from [GenericAgent](https://github.com/lsdefine/GenericAgent)'s browser stack and repackaged as an MCP server. Thanks to that project and its author for the original implementation.
 

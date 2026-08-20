@@ -16,7 +16,7 @@ env:
 jobs:
   live:
     name: Live Chrome verification
-    if: github.repository == '0xlinn/agent-browser-mcp'
+    if: github.repository == 'LinVireo/agent-browser-mcp'
     environment: abm-live
     runs-on: [self-hosted, Windows, X64, abm]
     timeout-minutes: 10
