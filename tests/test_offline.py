@@ -546,6 +546,13 @@ def test_exec_js_undelivered_retry_stays_inside_total_timeout(monkeypatch):
     that only reports "undelivered" after spending everything it was handed
     leaves nothing to retry with, which is how this retry used to be dead code.
     """
+    # The driver spends exactly the budget it was handed, on a fake clock instead
+    # of a real sleep: a real sleep left only ~8ms of slack under the 40ms
+    # deadline, so scheduler noise (or coverage tracing) could exhaust the budget
+    # before the retry and drop driver.calls to 1 -- a flake in the test, not in
+    # the code. Same monotonic-patch idiom as the other deadline tests here.
+    clock = [100.0]
+
     class SlowUndeliveredDriver:
         default_session_id = "c:target"
 
@@ -554,7 +561,7 @@ def test_exec_js_undelivered_retry_stays_inside_total_timeout(monkeypatch):
 
         def execute_js(self, script, timeout=15.0, session_id=None):
             self.calls.append(timeout)
-            time.sleep(timeout)
+            clock[0] += timeout
             return {
                 "result": (
                     f"No response data in {timeout}s "
@@ -564,22 +571,21 @@ def test_exec_js_undelivered_retry_stays_inside_total_timeout(monkeypatch):
 
     driver = SlowUndeliveredDriver()
     monkeypatch.setattr(S, "require_driver", lambda: driver)
-    started = time.monotonic()
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
+    started = time.perf_counter()
 
     with pytest.raises(RuntimeError, match="undelivered"):
         S.exec_js("return 1", session_id="c:target", timeout=0.04)
 
-    elapsed = time.monotonic() - started
     assert len(driver.calls) == 2
     assert driver.calls[0] < 0.04
-    assert sum(driver.calls) <= 0.04
-    # The three assertions above are the contract; they read the budget the code
-    # actually handed the driver, so they hold under any machine load. This one
-    # is only a backstop for a retry that sleeps outside the recorded timeout,
-    # and its failure mode is a re-armed 15s default -- so the ceiling is loose
-    # on purpose. A tight one (0.10s, two sleeps totalling 0.04s) made this test
-    # fail for scheduler noise inside the full offline suite.
-    assert elapsed < 1.0
+    # Both budgets together stay inside the caller's deadline; the epsilon covers
+    # float noise in the reserve split, not a real extension of the deadline.
+    assert sum(driver.calls) <= 0.04 + 1e-9
+    # Backstop for a retry that sleeps outside the recorded timeout -- with the
+    # clock faked, nothing in the code under test sleeps, so a re-armed 15s
+    # default would show up here. perf_counter because monotonic is patched.
+    assert time.perf_counter() - started < 5.0
 
 
 def test_page_type_slow_session_resolution_sends_no_input_after_deadline(monkeypatch):
