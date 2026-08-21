@@ -16,15 +16,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .browser_bridge import BrowserBridge
+from .paths import state_dir
 
 logger = logging.getLogger(__name__)
-_STATE_DIR_ENV = "AGENT_BROWSER_STATE_DIR"
 
 
 def bridge_state_dir() -> Path:
-    path = Path(os.environ.get(_STATE_DIR_ENV, "")).expanduser() if os.environ.get(_STATE_DIR_ENV) else Path.home() / ".agent-browser-mcp"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return state_dir(create=True)
 
 
 def bridge_pid_path() -> Path:

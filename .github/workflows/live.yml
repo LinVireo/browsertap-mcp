@@ -14,9 +14,66 @@ env:
   ABM_PYTHON: ${{ vars.ABM_LIVE_PYTHON || 'python' }}
 
 jobs:
+  preflight:
+    # This job exists because the `live` job below cannot report its own missing
+    # prerequisite. A job whose `runs-on` labels match no online runner does not
+    # fail -- it queues, for up to 24 hours, and `timeout-minutes` governs
+    # execution time only, not queue time. So a "check the runner first" step
+    # placed inside `live` would never execute on the one path where it matters.
+    # Only a job that is guaranteed to start can say "there is no runner", which
+    # means a GitHub-hosted one.
+    #
+    # It gates on a repository variable rather than querying the runner API on
+    # purpose: listing self-hosted runners needs the Administration permission,
+    # which `permissions:` cannot grant to GITHUB_TOKEN, so an API check would
+    # need a long-lived PAT secret just to produce a better error message.
+    name: Check live prerequisites
+    if: github.repository == 'LinVireo/agent-browser-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require a registered self-hosted browser runner
+        if: vars.ABM_LIVE_RUNNER != 'ready'
+        run: |
+          echo "::error title=No live runner registered::The live browser suite has no machine to run on; failing now instead of queueing."
+          cat <<'EOF'
+          The live suite drives a real Chrome window through the bridge and the
+          unpacked extension, so it only runs on a self-hosted Windows runner
+          that a maintainer owns. None is declared, and without one the `live`
+          job would sit in Queued for up to 24 hours and then expire -- which
+          reads as an infrastructure hiccup rather than as "this was never
+          configured".
+
+          To enable it:
+
+            1. Register a self-hosted runner on a Windows machine with Chrome,
+               the bridge and the unpacked extension already working. Give it the
+               labels: self-hosted Windows X64 abm
+            2. Optionally set the repository variable ABM_LIVE_PYTHON to the
+               interpreter to use; it defaults to `python` on PATH.
+            3. Set the repository variable ABM_LIVE_RUNNER to: ready
+               (Settings -> Secrets and variables -> Actions -> Variables)
+
+          The `abm-live` environment referenced by the live job is created by
+          GitHub on first use; add required reviewers there if a run should need
+          approval before it touches that desktop.
+
+          Until then, run the live gates locally:
+
+            python -m pytest tests/ -q -m live
+
+          and leave the browser idle while they run -- CONTRIBUTING.md explains
+          why a browser in use makes the failover test flaky.
+          EOF
+          exit 1
+      - name: Report prerequisites satisfied
+        run: |
+          echo "ABM_LIVE_RUNNER=ready; handing off to the self-hosted browser runner."
+          echo "Interpreter: ${ABM_PYTHON}"
+
   live:
     name: Live Chrome verification
-    if: github.repository == 'LinVireo/agent-browser-mcp'
+    needs: preflight
     environment: abm-live
     runs-on: [self-hosted, Windows, X64, abm]
     timeout-minutes: 10

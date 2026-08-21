@@ -17,6 +17,7 @@ from bottle import request
 from simple_websocket_server import WebSocket, WebSocketServer
 
 from ._version import __version__
+from .paths import state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ REMOTE_TRANSPORT_MARGIN = 2.0
 def bridge_token_path() -> Path:
     """Return the one persistent token location shared by all ABM processes."""
     configured = (os.environ.get(TOKEN_FILE_ENV) or '').strip()
-    return Path(configured).expanduser() if configured else Path.home() / '.agent-browser-mcp' / 'bridge-token'
+    return Path(configured).expanduser() if configured else state_dir() / 'bridge-token'
 
 
 def _read_token_file(path: Path) -> str:

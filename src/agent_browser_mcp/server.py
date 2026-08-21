@@ -63,6 +63,7 @@ from .page_input import (  # noqa: E402
     type_commands,
     type_target_script,
 )
+from .paths import state_dir  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -379,9 +380,7 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def _bridge_log_path() -> Path:
-    log_dir = Path.home() / ".agent-browser-mcp"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    path = log_dir / "bridge.log"
+    path = state_dir(create=True) / "bridge.log"
     try:
         if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
             path.replace(path.with_suffix(".log.old"))
@@ -394,7 +393,7 @@ _SPAWN_LOCK_STALE = 30.0
 
 
 def _spawn_lock_path() -> Path:
-    return Path.home() / ".agent-browser-mcp" / "spawn.lock"
+    return state_dir() / "spawn.lock"
 
 
 def _pid_alive(pid: int) -> bool:

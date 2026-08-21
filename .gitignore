@@ -48,7 +48,13 @@ CLAUDE.md
 BUGREPORT.md
 SPEC.md
 DELIVER.md
-docs/superpowers/plans/
+# Whole directory, not just `plans/`. The three files under `specs/` were tracked
+# and shipped 686 lines of internal design notes -- named after the private
+# framework that produced them, linked from nothing in README, and useful only to
+# whoever was mid-implementation. They stay on disk for that person and out of the
+# published tree. Design decisions a reader needs are in README, CONTRIBUTING and
+# AGENTS.md; anything here that outlives its task belongs there instead.
+docs/superpowers/
 
 # local scratch files, repository root only
 #

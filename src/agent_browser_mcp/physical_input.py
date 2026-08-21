@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .paths import state_dir
+
 
 class PhysicalInputBusy(RuntimeError):
     """Raised when another process owns the physical-input lease."""
@@ -454,7 +456,7 @@ def wait_for_quiet(quiet_seconds: float = 0.75) -> None:
 
 
 def _default_lock_path() -> Path:
-    return Path.home() / ".agent-browser-mcp" / "physical-input.lock"
+    return state_dir() / "physical-input.lock"
 
 
 def run_physical_action(

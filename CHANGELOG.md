@@ -6,6 +6,47 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-08-21
+
+### Fixed
+
+- `AGENT_BROWSER_STATE_DIR` now relocates every file ABM writes outside the
+  package, not just one of them. The `.agent-browser-mcp` directory literal was
+  spelled out at five call sites and only `bridge_state_dir` consulted the
+  variable, so pointing it at a scratch directory moved `bridge.pid` there and
+  silently left `bridge-token`, `bridge.log`, `spawn.lock` and
+  `physical-input.lock` behind in the real home directory -- a state directory
+  that was one-fifth redirected, which is worse than one that ignores the
+  variable outright, because a test or a sandbox that sets it looks isolated and
+  is not. All five now resolve through `agent_browser_mcp.paths.state_dir`, and
+  `tests/test_paths.py` pins each one individually so a new writer that rebuilds
+  the path by hand fails instead of quietly re-splitting the set. The narrower
+  `AGENT_BROWSER_BRIDGE_TOKEN_FILE` override still wins for the token file; only
+  the default it falls back to moved.
+- The live workflow fails immediately, with the setup it needs, when no
+  self-hosted browser runner is declared. It asked for `runs-on: [self-hosted,
+  Windows, X64, abm]` while the repository had no runner registered, and a job
+  whose labels match no online runner does not fail -- it queues for up to 24
+  hours and then expires, because `timeout-minutes` governs execution time and
+  not queue time. A dispatch therefore looked like an infrastructure hiccup
+  rather than a workflow that was never configured. A GitHub-hosted `preflight`
+  job now gates the run: it can report the missing prerequisite precisely because
+  it is the one job guaranteed to start. It keys off the `ABM_LIVE_RUNNER`
+  repository variable rather than the runner API, since listing self-hosted
+  runners needs the Administration permission that `permissions:` cannot grant to
+  `GITHUB_TOKEN`.
+
+### Removed
+
+- The three internal design notes under `docs/superpowers/specs/` are no longer
+  part of the published tree. They shipped 686 lines of mid-implementation
+  reasoning, named after the private framework that produced them, linked from
+  nothing a reader would find. They stay on disk for whoever is working through
+  them; the directory joins `docs/superpowers/plans/` in `.gitignore`. Anything
+  in them that outlives its task belongs in `README.md`, `CONTRIBUTING.md` or
+  `AGENTS.md` instead. Earlier tags still contain them, since removing them from
+  history would rewrite published commits.
+
 ## [0.3.13] - 2026-08-20
 
 ### Added
@@ -345,6 +386,7 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.13...HEAD
+[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.14...HEAD
+[0.3.14]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/LinVireo/agent-browser-mcp/releases/tag/v0.3.12
