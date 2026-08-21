@@ -42,9 +42,9 @@ def _run_node_script(script: str) -> dict:
 def _create_operation_source() -> str:
     source = BACKGROUND.read_text(encoding="utf-8")
     prefix_start = source.index("const CREATE_OPERATIONS_KEY")
-    prefix_end = source.index("\n\nfunction newTabGeneration", prefix_start)
+    prefix_end = source.index("\nfunction newTabGeneration", prefix_start)
     create_start = source.index("async function createTabAck")
-    create_end = source.index("\n\nasync function handleExtMessage", create_start)
+    create_end = source.index("\nasync function handleExtMessage", create_start)
     return source[prefix_start:prefix_end] + "\n" + source[create_start:create_end]
 
 
@@ -2050,7 +2050,7 @@ debuggerAttachments.set('tab:55', stale);
 const fs = require('fs');
 const source = fs.readFileSync(__BACKGROUND__, 'utf8');
 const debuggerStart = source.indexOf('function debuggerTargetKey');
-const debuggerEnd = source.indexOf('\\n\\nasync function handleProtocolDialog', debuggerStart);
+const debuggerEnd = source.indexOf('\\nasync function handleProtocolDialog', debuggerStart);
 const batchStart = source.indexOf('function batchDeadlineRemainingMs');
 const batchEnd = source.indexOf('\\n\\nasync function handleCDP', batchStart);
 if (debuggerStart < 0 || debuggerEnd < 0 || batchStart < 0 || batchEnd < 0) {
@@ -2619,7 +2619,7 @@ eval(source + '\\n;globalThis.__fetchCookies = fetchCookies;');
 def test_cookie_handler_rejects_unsupported_urls_before_cookie_api_calls():
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("async function handleCookies")
-    end = source.index("\n\nfunction batchDeadlineRemainingMs", start)
+    end = source.index("\nfunction batchDeadlineRemainingMs", start)
     handler_source = source[start:end]
     script = f"""
 let cookieCalls = [];
@@ -3119,7 +3119,7 @@ def test_debugger_watchdog_detaches_clears_lease_and_allows_reattach():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3189,7 +3189,7 @@ def test_debugger_attach_watchdog_cleans_late_attach_and_allows_reattach():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3265,7 +3265,7 @@ def test_debugger_attach_timeout_rejects_all_shared_waiters():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3348,7 +3348,7 @@ def test_debugger_conflict_recovery_stages_obey_attach_deadline(pending_stage):
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3411,7 +3411,7 @@ def test_debugger_recovery_timeout_rejects_long_and_short_waiters_together():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3492,7 +3492,7 @@ def test_late_programmatic_detach_event_does_not_invalidate_replacement_lease():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3573,7 +3573,7 @@ def test_debugger_conflict_recovery_preserves_concurrent_lease_refs():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3686,7 +3686,7 @@ def test_debugger_target_aliases_share_one_lease_and_target_only_detach_invalida
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3768,7 +3768,7 @@ def test_cdp_command_external_debugger_conflict_preserves_error_and_cleans_state
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', start);
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
 if (start < 0 || end < 0) throw new Error('debugger helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
@@ -3936,7 +3936,7 @@ def test_worker_restart_sweep_releases_only_orphaned_debugger_attachments():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const debuggerStart = source.indexOf('function debuggerTargetKey');
-const debuggerEnd = source.indexOf('\\n\\nasync function handleProtocolDialog', debuggerStart);
+const debuggerEnd = source.indexOf('\\nasync function handleProtocolDialog', debuggerStart);
 const sweepStart = source.indexOf('// The same leak, one layer down');
 const sweepEnd = source.indexOf('\\nasync function withCspOff', sweepStart);
 if (debuggerStart < 0 || debuggerEnd < 0 || sweepStart < 0 || sweepEnd < 0) {{
@@ -4119,9 +4119,9 @@ def test_stopping_network_cancels_only_its_pending_body_watchdog():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const captureStart = source.indexOf('function boundedCaptureInteger');
-const captureEnd = source.indexOf('\\n\\nfunction handleDebuggerEvent', captureStart);
+const captureEnd = source.indexOf('\\nfunction handleDebuggerEvent', captureStart);
 const debuggerStart = source.indexOf('function debuggerTargetKey');
-const debuggerEnd = source.indexOf('\\n\\nasync function handleProtocolDialog', debuggerStart);
+const debuggerEnd = source.indexOf('\\nasync function handleProtocolDialog', debuggerStart);
 if (captureStart < 0 || captureEnd < 0 || debuggerStart < 0 || debuggerEnd < 0) {{
   throw new Error('capture/debugger helpers not found');
 }}

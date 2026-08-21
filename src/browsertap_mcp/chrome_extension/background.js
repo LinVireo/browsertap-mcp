@@ -16,6 +16,7 @@ chrome.runtime.onInstalled.addListener(() => {
   reinjectAllTabs();
 });
 
+// --- Content-script reinjection after install/update ----------------------
 async function reinjectAllTabs() {
   let tabs;
   try { tabs = await chrome.tabs.query({}); } catch (_) { return; }
@@ -78,6 +79,7 @@ const createOperationPromises = new Map();
 let createOperationsLoadPromise = null;
 let createOperationsWriteQueue = Promise.resolve();
 
+// --- Durable tab-create operations ----------------------------------------
 function pruneCreateOperations() {
   const cutoff = Date.now() - CREATE_OPERATION_TTL_MS;
   for (const [operationId, record] of createOperations.entries()) {
@@ -183,6 +185,7 @@ async function createTabStatus(msg) {
   return { ok: true, data: operationRecordData(record) };
 }
 
+// --- Tab generations: bookkeeping and generation-checked close ------------
 function newTabGeneration() {
   const random = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
   return `${Date.now().toString(36)}-${nextTabGeneration++}-${random}`;
@@ -524,6 +527,7 @@ function installPermissionLeaseRecoveryHooks() {
   return restoreExpiredPermissionLeases();
 }
 
+// --- Site-permission commands (set / reset) -------------------------------
 async function resetSitePermissionLeases({ origin = '', permission = '' } = {}) {
   const normalizedOrigin = origin ? normalizePermissionOrigin(origin) : '';
   if (origin && !normalizedOrigin) return { ok: false, error: 'origin must be an http or https origin' };
@@ -716,6 +720,7 @@ async function setSitePermission(msg) {
   });
 }
 
+// --- Dialog policy and runtime execution contexts -------------------------
 function validDialogPolicy(policy) {
   return policy === 'dismiss' || policy === 'accept' || policy === 'manual';
 }
@@ -1047,6 +1052,7 @@ function handleConsoleCaptureEvent(tabId, method, params = {}) {
   capture.messages.push(message);
 }
 
+// --- Capture commands: start, snapshot, stop ------------------------------
 async function handleNetworkCaptureCommand(msg, sender) {
   const tabId = Number(msg.tabId || sender.tab?.id);
   if (!Number.isInteger(tabId)) {
@@ -1222,6 +1228,7 @@ async function handleConsoleCaptureCommand(msg, sender) {
   return { ok: false, code: 'unknown_method', error: `Unknown console method: ${msg.method}` };
 }
 
+// --- Debugger events and tab teardown -------------------------------------
 function handleDebuggerEvent(source, method, params) {
   const tabId = source.tabId;
   if (!tabId || !dialogAttachedTabs.has(tabId)) return;
@@ -1346,6 +1353,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void cancelManualExecution(tabId, 'tab removed');
 });
 
+// --- Exec dialog-policy claims --------------------------------------------
 function currentExecDialogPolicy(tabId, token) {
   const scopes = execDialogPolicies.get(tabId);
   if (!scopes) return null;
@@ -1379,6 +1387,7 @@ function claimManualExecDialogPolicy(tabId, source) {
   return null;
 }
 
+// --- Debugger target identity and attachment registry ---------------------
 function debuggerTargetKey(target) {
   if (target?.tabId) return `tab:${target.tabId}`;
   if (target?.targetId) return `target:${target.targetId}`;
@@ -1543,6 +1552,7 @@ function handleDebuggerDetach(source) {
   clearDebuggerTabState(tabId, 'debugger detached');
 }
 
+// --- Debugger attach/detach and pending-command rejection -----------------
 function boundedCdpTimeout(value, fallback = 20000, minimum = 100) {
   const requested = Number(value);
   const lowerBound = Math.max(1, Math.floor(Number(minimum) || 100));
@@ -1903,6 +1913,7 @@ async function forceInvalidateDebuggerAttachment(
   await attachment.invalidatingPromise;
 }
 
+// --- CDP command dispatch with a deadline ---------------------------------
 async function sendDebuggerCommandWithTimeout(
   lease, method, params = {}, timeoutMs = 20000, minimumTimeoutMs = 100,
 ) {
@@ -1957,6 +1968,7 @@ async function sendDebuggerCommandWithTimeout(
   }
 }
 
+// --- Navigation: dialogs, pending state, Page.navigate --------------------
 async function handleProtocolDialog(msg) {
   const tabId = Number(msg.tabId);
   const action = msg.action;
@@ -2356,6 +2368,7 @@ async function navigateWithDialogPolicy(msg) {
   }
 }
 
+// --- Downloads ------------------------------------------------------------
 function boundedDownloadTimeout(value, fallback = 60000) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -2495,6 +2508,7 @@ async function handleDownloadCommand(msg) {
   }
 }
 
+// --- open_new_tab: create and acknowledge ---------------------------------
 async function createTabAck(msg) {
   const operationId = String(msg.operation_id || '').trim();
   if (!operationId) {
@@ -2616,6 +2630,7 @@ async function createTabAck(msg) {
   finally { createOperationPromises.delete(operationId); }
 }
 
+// --- Command router: every bridge command dispatches here -----------------
 async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'site_permission') {
     // Keep operation failures in a successful bridge envelope so the server
@@ -3014,6 +3029,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
+// --- Cookies --------------------------------------------------------------
 async function handleCookies(msg, sender) {
   try {
     // Runtime messages are origin-bound to their sender tab. Bridge calls have
@@ -3049,6 +3065,7 @@ async function handleCookies(msg, sender) {
   }
 }
 
+// --- CDP batch and single raw CDP commands --------------------------------
 function batchDeadlineRemainingMs(msg, stage) {
   const deadlineEpochMs = Number(msg.deadlineEpochMs);
   if (!Number.isFinite(deadlineEpochMs) || deadlineEpochMs <= 0) return null;
@@ -3342,6 +3359,7 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
 const DIALOG_SCOPE_GRACE_MS = 10000;
 const DIALOG_SCOPE_MAX_BUDGET_MS = 120000;  // same ceiling set_dialog_policy applies
 
+// --- Script builders: page, subframe and CDP variants ---------------------
 function dialogScopeWindowMs(scope) {
   const requested = Number(scope?.timeoutMs);
   const budget = Number.isFinite(requested) && requested > 0
@@ -3393,6 +3411,7 @@ function buildCdpScript(code, dialogScope = null, sourceUrl = null) {
   `, dialogScope, sourceUrl);
 }
 
+// --- Manual execution: results, errors, lease lifecycle -------------------
 function manualExecutionResult(status, dialog = null) {
   const blocked = status === 'blocked_by_dialog';
   return { ok: true, data: {
@@ -3917,6 +3936,7 @@ async function getClientId() {
   }
 }
 
+// --- Bridge connection: probe, keepalive, liveness ------------------------
 function scheduleProbe() {
   // MV3 clamps sub-minute alarms aggressively; also wake via tabs/events below.
   chrome.alarms.create('btap-ws-probe', { delayInMinutes: 0.5, periodInMinutes: 1 });
@@ -4048,6 +4068,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// --- Bridge socket: exec dispatch and the connect loop --------------------
 async function handleWsExec(data) {
   const tabId = data.tabId;
   const dialogScopeMatch = typeof data.code === 'string'
@@ -4323,6 +4344,8 @@ function connectWS() {
 // Initial connect + wake-up hooks
 void installPermissionLeaseRecoveryHooks();
 void bridgeConfigReady.finally(() => ensureConnected('boot'));
+
+// --- Lifecycle and tab-update listeners -----------------------------------
 chrome.runtime.onStartup.addListener(() => {
   ensureConnected('onStartup');
 });

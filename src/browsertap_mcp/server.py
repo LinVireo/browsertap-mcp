@@ -68,6 +68,7 @@ from .paths import state_dir  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+# --- Stdio logging -----------------------------------------------------------
 def configure_stdio_logging() -> None:
     """Route BTAP runtime diagnostics away from the MCP stdout transport."""
     package_logger = logging.getLogger("browsertap_mcp")
@@ -116,6 +117,7 @@ _LAB_SITE_PERMISSION_APPROVALS: set[str] = set()
 _XTERM_SUBMIT_DELAY_MS = 75
 
 
+# --- Tab ownership: which tabs this process opened ---------------------------
 class _TabOwnershipRegistry:
     """Process-local capabilities for tabs created by this MCP server.
 
@@ -207,6 +209,7 @@ class _TabOwnershipRegistry:
 _TAB_OWNERSHIP = _TabOwnershipRegistry()
 
 
+# --- Automation profile and approval policy ----------------------------------
 def _env_enabled(name: str, *, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -358,6 +361,7 @@ def _threaded_tool(*d_args: Any, **d_kwargs: Any):
 mcp.tool = _threaded_tool  # type: ignore[assignment]
 
 
+# --- Package paths: extension and bundled skills -----------------------------
 def chrome_extension_dir() -> Path:
     return ROOT / "chrome_extension"
 
@@ -373,6 +377,7 @@ def agent_skills_dir() -> Path:
     return ROOT / "skills"
 
 
+# --- Bridge daemon: liveness, spawn lock, autostart --------------------------
 def _port_open(host: str, port: int) -> bool:
     with socket.socket() as sock:
         sock.settimeout(1)
@@ -573,6 +578,7 @@ def _spawn_bridge_daemon_locked() -> bool:
     return False
 
 
+# --- Driver handle and session cache -----------------------------------------
 def get_driver() -> BrowserBridge:
     global _driver
     if _driver is not None:
@@ -646,6 +652,7 @@ def ensure_sessions(
     return sessions
 
 
+# --- Session targeting: normalize, prune, switch -----------------------------
 def normalize_session_id(session_id: Optional[str]) -> Optional[str]:
     if session_id is None:
         return None
@@ -737,6 +744,7 @@ def switch_session(
     return str(driver.default_session_id)
 
 
+# --- exec_js: the one bridge roundtrip every tool goes through ---------------
 def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0) -> dict[str, Any]:
     timeout = float(timeout)
     if timeout <= 0:
@@ -812,6 +820,7 @@ _EXTENSION_PROTOCOL_VERSION = 3
 _REQUIRED_EXTENSION_CAPABILITIES = {"content_command_channel_removed"}
 
 
+# --- Version comparison for the setup report ---------------------------------
 def _version_order(value: Any) -> tuple[int, ...] | None:
     """Parse a dotted version for ordering, or None when it cannot be ordered.
 
@@ -847,6 +856,7 @@ def _component_is_newer(component: Any) -> bool:
     return bool(running and reported and reported > running)
 
 
+# --- Tools: automation profile -----------------------------------------------
 @mcp.tool(
     description=(
         "Return the active safe/lab automation profile. Lab is the default and skips elicitation "
@@ -875,6 +885,7 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
     return _automation_profile()
 
 
+# --- Tool: get_setup_status (what browsertap doctor reads) -------------------
 @mcp.tool(description="Return component versions, stale-build actions, extension path, bridge ports, and connection status for setup/diagnostics.")
 def get_setup_status() -> dict[str, Any]:
     driver = get_driver()
@@ -1004,6 +1015,7 @@ def get_setup_status() -> dict[str, Any]:
     return status
 
 
+# --- Tools: tab inventory and closing ----------------------------------------
 @mcp.tool(description="List connected tabs across all connected browsers; each tab has a browser field (chrome/edge/opera) and a session id to pass verbatim.")
 def list_tabs() -> dict[str, Any]:
     try:
@@ -1123,6 +1135,7 @@ def close_tabs(
     }
 
 
+# --- Tools: switch and activate a tab ----------------------------------------
 @mcp.tool(
     description=(
         "Set the target tab for later calls by session id, URL substring, or browser name "
@@ -1207,6 +1220,7 @@ def activate_tab(session_id: Optional[str] = None) -> dict[str, Any]:
     return {"status": "ok", **out}
 
 
+# --- Navigation: open_url and its dialog policy ------------------------------
 def _session_url(session_id: str) -> str:
     for session in active_sessions():
         if str(session.get("id")) == str(session_id):
@@ -1420,6 +1434,7 @@ def open_url(
 _DIALOG_POLICIES = frozenset({"dismiss", "accept", "manual"})
 
 
+# --- Navigation helpers: targets, direct CDP, result classification ----------
 def _validate_dialog_policy(policy: Any) -> str:
     if not isinstance(policy, str) or policy not in _DIALOG_POLICIES:
         raise ValueError("dialog policy/action must be one of: dismiss, accept, manual")
@@ -1663,6 +1678,7 @@ def _classify_navigation_result(
     return out
 
 
+# --- Tools: dialogs (native prompts and leave confirmations) -----------------
 @mcp.tool(
     description=(
         "Inspect or handle a JavaScript dialog on the requested real-browser tab. "
@@ -1845,6 +1861,7 @@ async def resolve_leave_dialog(
     }
 
 
+# --- Tool: open_new_tab (owned tabs) -----------------------------------------
 @mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Pass active=true only when foreground work is genuinely required. If the create ACK is lost, the same operation_id is reconciled within one total deadline; a completed result is registered only with its exact client_id, tab_id, and generation. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true; after dispatch, an unresolved operation returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. Never use a URL-based guess or an unmarked create retry.")
 def open_new_tab(
     url: str,
@@ -2194,6 +2211,7 @@ def open_new_tab(
     return out
 
 
+# --- Tools: extension inventory and enable/disable ---------------------------
 @mcp.tool(description="Get absolute path to the unpacked Chrome extension directory for manual installation.")
 def extension_path() -> dict[str, Any]:
     return {"extension_path": str(chrome_extension_dir())}
@@ -2267,6 +2285,7 @@ def _extension_operation_result(
     }
 
 
+# --- Tools: downloads --------------------------------------------------------
 def _move_download(
     source: Path,
     destination: Path,
@@ -2463,6 +2482,7 @@ def download_file(
     return out
 
 
+# --- Tools: uninstall extension, bookmarks, raw extension calls --------------
 @mcp.tool(
     description=(
         "Uninstall another installed extension by id. show_confirm_dialog defaults to true; "
@@ -2642,6 +2662,7 @@ def _tab_extension_operation(
     return result
 
 
+# --- Tools: network and console capture --------------------------------------
 @mcp.tool(
     description=(
         "Start bounded CDP Network capture on a real-browser tab. Captures requests, responses, "
@@ -2801,6 +2822,7 @@ def console_capture_stop(
     )
 
 
+# --- Tool: scan_page ---------------------------------------------------------
 @mcp.tool(
     description=(
         "Read the current page as simplified HTML/text, preserving login state from the real "
@@ -2909,6 +2931,7 @@ def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
     }
 
 
+# --- Tools: wait_for, wait_for_url, scroll_page ------------------------------
 @mcp.tool(
     description=(
         "Wait until a condition holds on the page, then return. Use this instead of "
@@ -3216,6 +3239,7 @@ def scroll_page(
     }
 
 
+# --- Tools: execute_js (with CDP fallback) and cdp_command -------------------
 def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> str:
     token = f"cdp-{time.monotonic_ns()}"
     deadline_ms = max(1, min(120000, int(float(timeout) * 1000)))
@@ -3608,6 +3632,7 @@ def cdp_command(
             driver.default_session_id = previous_default
 
 
+# --- Tools: save_pdf, debugger_targets, cdp_batch ----------------------------
 @mcp.tool(
     description=(
         "Print a real-browser tab to a validated PDF file through bounded CDP. The file is "
@@ -3702,6 +3727,7 @@ _PAGE_CHALLENGE_ATTEMPTS: dict[str, tuple[str, float, int]] = {}
 _PAGE_CHALLENGE_LOCK = threading.Lock()
 
 
+# --- Page input: focus proof, challenge tracking, dispatch -------------------
 def _clear_page_challenge(session_id: str) -> None:
     with _PAGE_CHALLENGE_LOCK:
         _PAGE_CHALLENGES.clear(session_id)
@@ -3986,6 +4012,7 @@ def _page_type_target_info(
     return raw
 
 
+# --- Tools: page input (click, type, press, drag, upload) --------------------
 @mcp.tool(
     description=(
         "Click a CSS/structured locator or viewport coordinates in a specific real browser tab "
@@ -4351,6 +4378,7 @@ def upload_files(
     return {"status": "ok", "selector": selector, "files": files, "node_id": node}
 
 
+# --- Cookies: read through the extension, write through CDP ------------------
 @mcp.tool(description="Get cookies for the current page or specified tab via the Chrome extension bridge.")
 def get_cookies(session_id: Optional[str] = None, tab_id: Optional[int] = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"cmd": "cookies"}
@@ -4453,6 +4481,7 @@ _SITE_PERMISSION_CONTENT_SETTINGS = {
 _SITE_PERMISSION_SETTINGS = {"allow", "block", "ask"}
 
 
+# --- Tools: site permissions (operator approval required) --------------------
 def _normalize_site_permission_origin(raw_origin: Any) -> str:
     if not isinstance(raw_origin, str) or not raw_origin.strip():
         raise ValueError("origin must be an http or https origin")
@@ -4697,6 +4726,7 @@ def reset_site_permissions(
             driver.default_session_id = previous_default
 
 
+# --- Cookie writes: CDP path with a document.cookie fallback -----------------
 def _cdp(method: str, params: dict[str, Any], session_id: Optional[str],
          tab_id: Optional[int], timeout: float) -> Any:
     payload: dict[str, Any] = {"cmd": "cdp", "method": method, "params": params}
@@ -5090,6 +5120,7 @@ def storage_set(
     return out
 
 
+# --- Tool: capture_page_screenshot -------------------------------------------
 @mcp.tool(
     description=(
         "Capture a viewport, full-page, or clipped screenshot of a page/tab via CDP with optional "
@@ -5223,6 +5254,7 @@ def capture_page_screenshot(
     )
 
 
+# --- Desktop automation: pyautogui loader and screen capture -----------------
 def _pyautogui():
     # pyautogui reads no env vars; the failsafe (corner abort raising
     # FailSafeException mid-automation) must be disabled on the module itself.
@@ -5325,6 +5357,7 @@ def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False)
     )
 
 
+# --- Physical input: operator approval gate ----------------------------------
 class PhysicalInputApproval(BaseModel):
     approve: StrictBool = Field(description="Approve this one physical input action")
 
@@ -5437,6 +5470,7 @@ _PHYSICAL_INPUT_NOTICE = (
 )
 
 
+# --- Tools: physical mouse and keyboard --------------------------------------
 @mcp.tool(description="Move the real mouse cursor to screen coordinates." + _PHYSICAL_INPUT_NOTICE)
 async def mouse_move(
     ctx: Context,

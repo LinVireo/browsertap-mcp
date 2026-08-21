@@ -217,7 +217,7 @@ def test_capture_tools_flatten_real_remote_bridge_payloads(monkeypatch):
 def test_capture_extension_harness_collects_body_console_and_releases_leases():
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("function boundedCaptureInteger")
-    end = source.index("\n\nfunction handleDebuggerEvent", start)
+    end = source.index("\nfunction handleDebuggerEvent", start)
     helpers = source[start:end]
     script = f"""
 const networkCaptures = new Map();

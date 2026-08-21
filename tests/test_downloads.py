@@ -466,7 +466,7 @@ def test_open_url_does_not_infer_download_from_err_aborted_alone():
 def test_extension_download_harness_reports_completed_interrupted_and_timeout():
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("function boundedDownloadTimeout")
-    end = source.index("\n\nasync function handleExtMessage", start)
+    end = source.index("\nasync function handleExtMessage", start)
     helpers = source[start:end]
     script = f"""
 const listeners = new Set();
@@ -539,7 +539,7 @@ async function emit(state, error = null) {{
 def test_extension_download_terminal_event_wins_over_stale_search_and_start_failure_is_structured():
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("function boundedDownloadTimeout")
-    end = source.index("\n\nasync function handleExtMessage", start)
+    end = source.index("\nasync function handleExtMessage", start)
     helpers = source[start:end]
     script = f"""
 const listeners = new Set();
@@ -618,7 +618,7 @@ const chrome = {{
 def test_extension_download_complete_without_final_path_is_structured_failure():
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("function boundedDownloadTimeout")
-    end = source.index("\n\nasync function handleExtMessage", start)
+    end = source.index("\nasync function handleExtMessage", start)
     helpers = source[start:end]
     script = f"""
 const listeners = new Set();

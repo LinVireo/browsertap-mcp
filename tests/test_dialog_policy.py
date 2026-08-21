@@ -1043,12 +1043,12 @@ const chrome = {{
 }};
 
 eval(section('function handleDebuggerEvent', '\\n\\nchrome.debugger.onEvent.addListener'));
-eval(section('function debuggerTargetKey', '\\n\\nasync function handleProtocolDialog'));
+eval(section('function debuggerTargetKey', '\\nasync function handleProtocolDialog'));
 eval(section('async function handleProtocolDialog', '\\n\\nfunction classifyNavigationOutcome'));
 eval(section('function manualExecutionResult', '\\n// --- Scoped, temporary CSP removal'));
 eval(section(
   'chrome.debugger.onDetach.addListener',
-  '\\n\\nfunction currentExecDialogPolicy',
+  '\\nfunction currentExecDialogPolicy',
 ));
 
 (async () => {{
@@ -1498,7 +1498,7 @@ const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
 const fallbackStart = source.indexOf('async function attachBtapDebugger');
 const helperStart = start >= 0 ? start : fallbackStart;
-const end = source.indexOf('\\n\\nasync function handleProtocolDialog', helperStart);
+const end = source.indexOf('\\nasync function handleProtocolDialog', helperStart);
 if (helperStart < 0 || end < 0) throw new Error('debugger lease helpers not found');
 const dialogAttachedTabs = new Set();
 const debuggerAttachments = new Map();
