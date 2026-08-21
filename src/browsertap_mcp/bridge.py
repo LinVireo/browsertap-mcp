@@ -36,7 +36,7 @@ class ProcessIdentityUnavailable(RuntimeError):
     to decide whether it may *act* on a pid — delete bridge.pid, report a stop as
     completed, spawn a replacement — and an unqueryable process (owned by another
     user, or elevated) is the one case where guessing "already gone" does real
-    damage: ABM throws away the only record of a daemon that is still holding the
+    damage: BTAP throws away the only record of a daemon that is still holding the
     ports, then starts a second one that cannot bind. `physical_input._pid_alive`
     already refuses to read access-denied as death for the same reason.
     """
@@ -253,8 +253,8 @@ def _remove_record_if_owned(record: dict[str, Any]) -> None:
 
 
 def _configured_bridge_port_open() -> bool:
-    host = os.environ.get("AGENT_BROWSER_TMWD_HOST", "127.0.0.1")
-    port = int(os.environ.get("AGENT_BROWSER_TMWD_PORT", "18765")) + 1
+    host = os.environ.get("BROWSERTAP_BRIDGE_HOST", "127.0.0.1")
+    port = int(os.environ.get("BROWSERTAP_BRIDGE_PORT", "18765")) + 1
     try:
         with socket.create_connection((host, port), timeout=0.25):
             return True
@@ -359,7 +359,7 @@ def stop_bridge_daemon(*, timeout: float = 5.0) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m agent_browser_mcp.bridge")
+    parser = argparse.ArgumentParser(prog="python -m browsertap_mcp.bridge")
     parser.add_argument("--instance-id", default="foreground")
     return parser
 
@@ -371,8 +371,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
-    host = os.environ.get("AGENT_BROWSER_TMWD_HOST", "127.0.0.1")
-    port = int(os.environ.get("AGENT_BROWSER_TMWD_PORT", "18765"))
+    host = os.environ.get("BROWSERTAP_BRIDGE_HOST", "127.0.0.1")
+    port = int(os.environ.get("BROWSERTAP_BRIDGE_PORT", "18765"))
     driver = BrowserBridge(host=host, port=port)
     record: Optional[dict[str, Any]] = None
     try:

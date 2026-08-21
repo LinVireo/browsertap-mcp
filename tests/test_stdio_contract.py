@@ -5,10 +5,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_MODULES = (
-    ROOT / "src" / "agent_browser_mcp" / "server.py",
-    ROOT / "src" / "agent_browser_mcp" / "simphtml.py",
-    ROOT / "src" / "agent_browser_mcp" / "browser_bridge.py",
-    ROOT / "src" / "agent_browser_mcp" / "tmwebdriver.py",
+    ROOT / "src" / "browsertap_mcp" / "server.py",
+    ROOT / "src" / "browsertap_mcp" / "simphtml.py",
+    ROOT / "src" / "browsertap_mcp" / "browser_bridge.py",
 )
 
 

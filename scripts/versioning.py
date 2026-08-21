@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CHANGELOG_RELEASE_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$", re.MULTILINE)
 CHANGELOG_UNRELEASED_RE = re.compile(r"^## \[Unreleased\]\s*$", re.MULTILINE)
-CHANGELOG_REPOSITORY = "https://github.com/LinVireo/agent-browser-mcp"
+CHANGELOG_REPOSITORY = "https://github.com/LinVireo/browsertap-mcp"
 VersionPart = Literal["patch", "minor"]
 README_VERSION_PATTERNS = {
     "README.md": re.compile(
@@ -63,11 +63,11 @@ def bump_version(version: str, part: VersionPart) -> str:
 
 
 def _version_path(root: Path) -> Path:
-    return root / "src" / "agent_browser_mcp" / "_version.py"
+    return root / "src" / "browsertap_mcp" / "_version.py"
 
 
 def _manifest_path(root: Path) -> Path:
-    return root / "src" / "agent_browser_mcp" / "chrome_extension" / "manifest.json"
+    return root / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json"
 
 
 def read_source_version(root: Path = ROOT) -> str:
@@ -117,9 +117,9 @@ def _read_package_version(root: Path, source_version: str) -> str:
         raise VersionError("pyproject.toml must declare project.dynamic = ['version']")
     setuptools = data.get("tool", {}).get("setuptools", {})
     version_config = setuptools.get("dynamic", {}).get("version")
-    if version_config != {"attr": "agent_browser_mcp.__version__"}:
+    if version_config != {"attr": "browsertap_mcp.__version__"}:
         raise VersionError(
-            "tool.setuptools.dynamic.version must read agent_browser_mcp.__version__"
+            "tool.setuptools.dynamic.version must read browsertap_mcp.__version__"
         )
     return source_version
 
@@ -184,7 +184,7 @@ def validate_versions(root: Path = ROOT) -> dict[str, str]:
     }
     if len(set(versions.values())) != 1:
         rendered = ", ".join(f"{name}={value}" for name, value in versions.items())
-        raise VersionError(f"ABM versions are inconsistent: {rendered}")
+        raise VersionError(f"BTAP versions are inconsistent: {rendered}")
     return versions
 
 
@@ -325,18 +325,35 @@ def latest_release_tag(root: Path = ROOT) -> str | None:
     return completed.stdout.strip() or None
 
 
-def _version_at_ref(root: Path, ref: str) -> str:
-    try:
-        source = subprocess.run(
-            ("git", "show", f"{ref}:src/agent_browser_mcp/_version.py"),
+#: Package directories the version source has lived in, newest first. The 0.4.0
+#: rename moved it, and a baseline from before that commit still has to be
+#: readable -- otherwise the gate crashes on exactly the change set it exists to
+#: validate, and the release that renames the package is the one that skips the
+#: check.
+VERSION_SOURCE_REFS = (
+    "src/browsertap_mcp/_version.py",
+    "src/agent_browser_mcp/_version.py",
+)
+
+
+def _version_source_at_ref(root: Path, ref: str) -> str:
+    details: list[str] = []
+    for candidate in VERSION_SOURCE_REFS:
+        completed = subprocess.run(
+            ("git", "show", f"{ref}:{candidate}"),
             cwd=root,
             text=True,
             capture_output=True,
-            check=True,
-        ).stdout
-    except subprocess.CalledProcessError as exc:
-        detail = exc.stderr.strip() or exc.stdout.strip() or str(exc)
-        raise VersionError(f"cannot compare version against {ref!r}: {detail}") from exc
+            check=False,
+        )
+        if completed.returncode == 0:
+            return completed.stdout
+        details.append(completed.stderr.strip() or completed.stdout.strip())
+    raise VersionError(f"cannot compare version against {ref!r}: {'; '.join(details)}")
+
+
+def _version_at_ref(root: Path, ref: str) -> str:
+    source = _version_source_at_ref(root, ref)
     try:
         module = ast.parse(source, filename=f"{ref}:_version.py")
     except SyntaxError as exc:
@@ -401,7 +418,7 @@ def validate_version_bump(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate or update ABM component versions")
+    parser = argparse.ArgumentParser(description="Validate or update BTAP component versions")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check")
     bump = subparsers.add_parser("bump")

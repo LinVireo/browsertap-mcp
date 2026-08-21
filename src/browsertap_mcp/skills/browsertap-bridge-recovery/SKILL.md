@@ -1,16 +1,16 @@
 ---
-name: abm-bridge-recovery
-description: 恢复 agent-browser-mcp (ABM) 的 CDP 桥连。触发：桥断了 / MCP 浏览器工具挂住 / get_setup_status 转圈 / list_tabs 拿不到 tab / Unknown command: downloads。分层排错：netstat → /link curl → list_tabs，别把 MCP 层挂当成桥断。
+name: browsertap-bridge-recovery
+description: 恢复 browsertap-mcp (BTAP) 的 CDP 桥连。触发：桥断了 / MCP 浏览器工具挂住 / get_setup_status 转圈 / list_tabs 拿不到 tab / Unknown command: downloads。分层排错：netstat → /link curl → list_tabs，别把 MCP 层挂当成桥断。
 ---
 
-# agent-browser-mcp (ABM) 桥连恢复
+# browsertap-mcp (BTAP) 桥连恢复
 
-浏览器自动化走 **agent-browser-mcp**（调用方守则见 [[browser-mcp-default]]），通过 CDP 连真实
+浏览器自动化走 **browsertap-mcp**（调用方守则见 [[browsertap-default]]），通过 CDP 连真实
 Chrome/Edge。桥连或"浏览器探测"中断时按此恢复。**调用语义、tab 归属、工具选择顺序不在这份文档里**
 ——那些属于守则；这里只管"连不上/挂住了怎么恢复"。
 
 给人看的完整排错手册（本文件随包发布，读者手上可能没有仓库目录，所以给 URL）：
-<https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md>
+<https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md>
 （中文 `docs/TROUBLESHOOTING.zh-CN.md`）。本文件只保留 agent 需要**自己动手**的那部分。
 
 ## 关键原则
@@ -29,14 +29,14 @@ netstat → /link curl → list_tabs（MCP 层验通）
 
 ## 组件与要求
 
-- 扩展 **Agent Browser MCP Bridge**，源在仓库 `src/agent_browser_mcp/chrome_extension`
+- 扩展 **BrowserTap Bridge**，源在仓库 `src/browsertap_mcp/chrome_extension`
   （端口在 `config.js`）。扩展版本与包版本统一，`chrome://extensions` 上看到的号应与
   `get_setup_status.package_version` 一致；不一致就是没 Reload。
 - 桥接端口：ws **18765** / http **18766**。
-- 桥守护进程：`agent-browser-mcp bridge`（等价于 `python -m agent_browser_mcp.bridge`，**前台常驻**）。
+- 桥守护进程：`browsertap bridge`（等价于 `python -m browsertap_mcp.bridge`，**前台常驻**）。
   管理用 `--restart` / `--stop`，别用裸 `bridge` 去"顺手起一下"。
-  **MCP 实例探测不到桥会自动 detached 拉起守护并走 remote 模式**（`AGENT_BROWSER_NO_SPAWN=1`
-  可关），桥死了通常自愈；日志 `~/.agent-browser-mcp/bridge.log`（>5MB 轮转 `bridge.log.old`）。
+  **MCP 实例探测不到桥会自动 detached 拉起守护并走 remote 模式**（`BROWSERTAP_NO_SPAWN=1`
+  可关），桥死了通常自愈；日志 `~/.browsertap/bridge.log`（>5MB 轮转 `bridge.log.old`）。
 - `remote_mode=false` → MCP 自托管 driver，**仅当自动拉起失败才会发生**；见到先查 `bridge.log`
   找 spawn 失败原因。
 - **硬性要求**：① 扩展在 `chrome://extensions`（或 `edge://extensions`）已加载并启用（需开
@@ -54,29 +54,29 @@ netstat → /link curl → list_tabs（MCP 层验通）
 不用手动 netstat/curl/看 badge：
 
 ```bash
-agent-browser-mcp doctor
+browsertap doctor
 ```
 
 只有排查 `/link` 本身时才手工请求。token 从共享文件读取，**不要输出它**：
 
 ```powershell
 # Windows PowerShell
-$abmTokenFile = if ($env:AGENT_BROWSER_BRIDGE_TOKEN_FILE) { $env:AGENT_BROWSER_BRIDGE_TOKEN_FILE } else { Join-Path $env:USERPROFILE '.agent-browser-mcp\bridge-token' }
-$abmToken = (Get-Content -Raw -LiteralPath $abmTokenFile).Trim()
-curl.exe -s --noproxy "*" --max-time 6 -X POST http://127.0.0.1:18766/link -H "Content-Type: application/json" -H "Authorization: Bearer $abmToken" -d '{"cmd":"diagnose"}'
+$btapTokenFile = if ($env:BROWSERTAP_BRIDGE_TOKEN_FILE) { $env:BROWSERTAP_BRIDGE_TOKEN_FILE } else { Join-Path $env:USERPROFILE '.browsertap\bridge-token' }
+$btapToken = (Get-Content -Raw -LiteralPath $btapTokenFile).Trim()
+curl.exe -s --noproxy "*" --max-time 6 -X POST http://127.0.0.1:18766/link -H "Content-Type: application/json" -H "Authorization: Bearer $btapToken" -d '{"cmd":"diagnose"}'
 ```
 
 ```bash
 # macOS / Linux
-ABM_TOKEN_FILE="${AGENT_BROWSER_BRIDGE_TOKEN_FILE:-$HOME/.agent-browser-mcp/bridge-token}"
+BTAP_TOKEN_FILE="${BROWSERTAP_BRIDGE_TOKEN_FILE:-$HOME/.browsertap/bridge-token}"
 curl -s --noproxy '*' --max-time 6 -X POST http://127.0.0.1:18766/link \
   -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $(tr -d '[:space:]' < "$ABM_TOKEN_FILE")" \
+  -H "Authorization: Bearer $(tr -d '[:space:]' < "$BTAP_TOKEN_FILE")" \
   -d '{"cmd":"diagnose"}'
 ```
 
-> **`/link` 默认使用 Bearer token 鉴权**。所有 ABM 进程读取
-> `~/.agent-browser-mcp/bridge-token`，编辑器无需配置 token。**401 ≠ 桥挂了**，
+> **`/link` 默认使用 Bearer token 鉴权**。所有 BTAP 进程读取
+> `~/.browsertap/bridge-token`，编辑器无需配置 token。**401 ≠ 桥挂了**，
 > 通常是升级前的旧 bridge 还持有不同 token，或双方显式覆盖了不同的 token 文件路径。
 > 详见「成因 6」。被拒时正文是纯文本 `unauthorized: missing or bad bridge token`，
 > **不是** JSON，别照 `{"error":...}` 解析。
@@ -98,10 +98,10 @@ cause 行。看到它就别按成因表排了，照它说的做：
 | doctor 末行 | 含义 | 怎么办 |
 |---|---|---|
 | `[!!] stale_package` | 有组件比当前 MCP 进程新 | 重启 **MCP 会话/客户端**。重启桥或 Reload 扩展都修不了 |
-| `[!!] stale_extension` | 扩展是旧构建 | 去 `chrome://extensions` Reload **一次** Agent Browser MCP Bridge |
-| `[!!] stale_bridge` | 常驻桥在跑旧代码 | `agent-browser-mcp bridge --restart`；**不用**重启 Chrome |
+| `[!!] stale_extension` | 扩展是旧构建 | 去 `chrome://extensions` Reload **一次** BrowserTap Bridge |
+| `[!!] stale_bridge` | 常驻桥在跑旧代码 | `browsertap bridge --restart`；**不用**重启 Chrome |
 
-> 改桥侧代码（`tmwebdriver.py` 等）后要**重启桥守护**才生效。老 daemon 收到 `diagnose`
+> 改桥侧代码（`browser_bridge.py` 等）后要**重启桥守护**才生效。老 daemon 收到 `diagnose`
 > 返回裸 `ok`（没这分支），见到 `ok` 就是旧代码还在跑。
 
 **Fallback：手动分层**（`diagnose` 不可用/想眼见为实）：
@@ -130,15 +130,15 @@ netstat -an | Select-String '18765|18766'   # 应见 18765/18766 LISTENING
 **通常自愈**——任何新 MCP 实例的工具调用发现桥不在会自动 detached 拉起守护。仍需手动时：
 
 ```bash
-agent-browser-mcp bridge --restart
+browsertap bridge --restart
 ```
 
 它后台拉起并打印 `{"status": "restarted", ...}`；`--stop` 只停不起。
-**不要用不带参数的 `agent-browser-mcp bridge`**：那是**前台常驻**，会一直占住当前终端
+**不要用不带参数的 `browsertap bridge`**：那是**前台常驻**，会一直占住当前终端
 （agent 调它等于把自己挂住），只适合人在终端里盯日志。
 
 起来的标志是日志出现 `Bridge started: ws=18765 http=18766 pid=...`（stderr 与
-`~/.agent-browser-mcp/bridge.log` 都有）；若打的是 `Bridge already running at ...; exiting`
+`~/.browsertap/bridge.log` 都有）；若打的是 `Bridge already running at ...; exiting`
 说明桥本来就活着，问题不在这一节。netstat 见 LISTENING 后扩展**秒级自动重连**。
 
 ### 成因 2：`/link` 空数组 → 扩展没注册 tab
@@ -167,7 +167,7 @@ manifest 缺 `"storage"` 权限，`getClientId()` 访问 `chrome.storage.local` 
 浏览器重启/更新后 dev-mode 扩展常被自动禁用。修复：
 
 - 进 `chrome://extensions`（Edge 用 `edge://extensions`），开 Developer Mode，重新启用 / Reload
-  **Agent Browser MCP Bridge**；
+  **BrowserTap Bridge**；
 - 或前台化浏览器 / 打开一个新 http(s) 页面触发扩展重连。
 - 多浏览器时若只有一边空：只 Reload 缺 tab 的那个浏览器的扩展即可，另一边不受影响（session 按
   `client_id` 隔离），`list_tabs` 按 `browser` 字段确认哪边缺。
@@ -218,23 +218,23 @@ MV3 的 background service worker 会被浏览器在 idle 后回收。**独特�
 
 ### 成因 6：`/link` 返回 401（token 鉴权）
 
-ABM 默认从 `~/.agent-browser-mcp/bridge-token` 取持久 token。**401 是客户端和常驻 bridge 使用的
+BTAP 默认从 `~/.browsertap/bridge-token` 取持久 token。**401 是客户端和常驻 bridge 使用的
 token 不一致，不是扩展坏了**：
 
 - **症状**：curl `/link` 直接 401；MCP 工具报 unauthorized；扩展那边一切正常（WS 18765 不走
   token，按 origin 校验）。
 - **正常生命周期**：首次启动自动创建文件；关闭浏览器/编辑器不会轮换。卸载扩展或重装 Python 包也
   保留该文件，所以旧 token 是可复用状态，不会阻碍重装。
-- **旧 env 迁移**：只有文件不存在时，`AGENT_BROWSER_BRIDGE_TOKEN` 才导入一次；文件存在后它不能
+- **旧 env 迁移**：只有文件不存在时，`BROWSERTAP_BRIDGE_TOKEN` 才导入一次；文件存在后它不能
   覆盖文件。不要给不同编辑器分别配置 token。
 - **最常见根因**：① 升级前的旧 bridge 仍在内存中；② bridge 与 MCP 显式设置了不同的
-  `AGENT_BROWSER_BRIDGE_TOKEN_FILE`；③ bridge 运行时手工删除或改写了 token 文件。
+  `BROWSERTAP_BRIDGE_TOKEN_FILE`；③ bridge 运行时手工删除或改写了 token 文件。
 - **恢复顺序**：确认双方使用同一 token 文件路径；默认路径一致时只重启 bridge 一次，再重试 MCP
   工具。不要重装扩展，也不要轮流重启所有编辑器。
-- **完整清理**：先停止所有 ABM bridge，再删除整个 `~/.agent-browser-mcp`，然后启动任意一个 MCP
+- **完整清理**：先停止所有 BTAP bridge，再删除整个 `~/.browsertap`，然后启动任意一个 MCP
   会话生成新 token。若先删文件但旧 bridge 仍运行，新客户端会生成新 token 并暂时 401。
 - **同一个 token 也守 `/api/result` 和 `/api/longpoll`**，被拒时同样是纯文本 401。
-- **兼容开关**：仅在明确可信的隔离环境中用 `AGENT_BROWSER_BRIDGE_AUTH=off` 关闭鉴权；这不是普通
+- **兼容开关**：仅在明确可信的隔离环境中用 `BROWSERTAP_BRIDGE_AUTH=off` 关闭鉴权；这不是普通
   恢复步骤。
 
 ## 多浏览器（Chrome + Edge 同时连）
@@ -248,7 +248,7 @@ token 不一致，不是扩展坏了**：
 - 报 `No connected tab for browser 'edge'`：Edge 侧扩展没连上——去 `edge://extensions` Reload 并
   开一个 http(s) 页面（见成因 2）。报错会列出当前实际连上的浏览器名。
 - **改完扩展两边都要 Reload 一次**（MV3 缓存旧 SW）；桥侧代码改动还要重启桥守护。
-- **默认落点**：MCP 实例环境变量 `AGENT_BROWSER_PREFERRED_BROWSER=chrome|edge` 指定"没指名时默认
+- **默认落点**：MCP 实例环境变量 `BROWSERTAP_PREFERRED_BROWSER=chrome|edge` 指定"没指名时默认
   用哪个浏览器"（只影响盲选默认，不限制显式 `switch_tab`）。
 - **断流/空响应语义**：`execute_js` 不假成功返回空数据——`status="no_response"` 表示脚本未送达
   （已自动重试 1 次）或已送达但超时（勿盲目重试有副作用脚本，先 `scan_page` 核实）；
@@ -297,7 +297,7 @@ token 不一致，不是扩展坏了**：
 ## 已知坑
 
 - **别乱杀 MCP 实例**：它们是瘦 remote client，父进程（编辑器/宿主会话）活着就不是孤儿，杀了会
-  报错或立即 respawn。要停桥用 `agent-browser-mcp bridge --restart`。
+  报错或立即 respawn。要停桥用 `browsertap bridge --restart`。
 - 带 Turnstile 的登录盾页曾把 `execute_js` 挂死 >120s。现在监控往返有界、单次调用不再叠到
   120s+，超时以 `status="no_response"` 明确返回。验证码应改用**有界 `page_click`** 在同一个已连接
   tab 里处理（没进展返回 `challenge_stalled`，交还用户手动过盾），不要再对盾页跑长 `execute_js`。

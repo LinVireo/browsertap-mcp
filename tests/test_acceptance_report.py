@@ -59,8 +59,8 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     (artifacts / "live-junit.xml").write_text(passing_xml, encoding="utf-8")
     for name in ("tool-coverage-offline.json", "tool-coverage-live.json"):
         (artifacts / name).write_text(json.dumps(_passing_tool_evidence()), encoding="utf-8")
-    wheel = dist / "agent_browser_mcp-9.9.9-py3-none-any.whl"
-    sdist = dist / "agent_browser_mcp-9.9.9.tar.gz"
+    wheel = dist / "browsertap_mcp-9.9.9-py3-none-any.whl"
+    sdist = dist / "browsertap_mcp-9.9.9.tar.gz"
     wheel.write_bytes(b"wheel")
     sdist.write_bytes(b"sdist")
     manifest = {

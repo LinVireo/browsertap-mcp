@@ -2,7 +2,7 @@
 
 English | [简体中文](CONTRIBUTING.zh-CN.md)
 
-Contributions should preserve ABM's defining behavior: operate the user's real
+Contributions should preserve BTAP's defining behavior: operate the user's real
 browser session, prefer background page/CDP work, and use foreground physical
 input only as an explicit last resort.
 
@@ -12,7 +12,7 @@ input only as an explicit last resort.
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,desktop]"  # Windows PowerShell
 python -m pip install -e ".[dev,desktop]"                  # other activated venvs
-agent-browser-mcp extension-path
+browsertap extension-path
 ```
 
 Load the printed directory as an unpacked extension. Python server changes are
@@ -27,7 +27,7 @@ The normal suite is offline and does not touch a browser:
 ```text
 python -m ruff check src tests scripts
 python -m pytest tests -q
-python -m pytest tests -q --cov=agent_browser_mcp --cov-fail-under=85
+python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
 python -m scripts.tool_coverage_report --format markdown
 python -m scripts.check_tool_docs --format markdown
 python -m scripts.versioning check
@@ -59,10 +59,10 @@ product contract.
 
 The public `test.yml` workflow runs only offline gates on GitHub-hosted runners.
 `live.yml` is manual-only and targets a prepared self-hosted Windows runner. Set
-the repository variable `ABM_LIVE_PYTHON` when that runner does not expose the
+the repository variable `BTAP_LIVE_PYTHON` when that runner does not expose the
 intended interpreter as `python`. Do not schedule the live workflow on a desktop
 that is also used interactively. The live job is restricted to the canonical
-repository and the `abm-live` GitHub environment. Configure that environment
+repository and the `btap-live` GitHub environment. Configure that environment
 with required-reviewer protection before registering the runner; the workflow
 file cannot create or enforce repository environment protection rules itself.
 
@@ -107,9 +107,9 @@ in the same change:
 
 1. `README.md` and `README.zh-CN.md` (the authoritative 55-tool table);
 2. the tool's MCP `description=` text;
-3. `src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md` (the caller
+3. `src/browsertap_mcp/skills/browsertap-default/SKILL.md` (the caller
    contract: which tool to call first, when `session_id` is mandatory);
-4. `src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md` (what a caller
+4. `src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md` (what a caller
    follows when the bridge itself is unreachable).
 
 The two skills cross-reference each other, so each is hash-checked as its own
@@ -117,8 +117,8 @@ group of copies — a reader who receives an update for only one of them gets
 pointed at advice that no longer matches. Keep both free of machine-specific
 paths or claims; `tests/test_documentation_contract.py` fails on an absolute path.
 
-They ship as package data, so `pip install agent-browser-mcp` carries them and
-`agent-browser-mcp skill-path` prints the directory that holds them as
+They ship as package data, so `pip install browsertap-mcp` carries them and
+`browsertap skill-path` prints the directory that holds them as
 `<name>/SKILL.md`. Both the `MANIFEST.in` rule and the `package-data` glob in
 `pyproject.toml` are required: they are what put the files in the source archive
 and the wheel respectively, and having only one produces an sdist that carries
@@ -135,7 +135,7 @@ hold them:
 ```bash
 python -m scripts.check_tool_docs --check-installed-skills \
     --skill-mirror /path/to/installed/skills
-# or: AGENT_BROWSER_SKILL_MIRRORS="dir1:dir2" python -m scripts.check_tool_docs --check-installed-skills
+# or: BROWSERTAP_SKILL_MIRRORS="dir1:dir2" python -m scripts.check_tool_docs --check-installed-skills
 ```
 
 Each directory is expected to contain `<skill-name>/SKILL.md`. Where an agent
@@ -171,7 +171,7 @@ verify.
 - Do not commit caches, generated coverage, JUnit XML, logs, local screenshots,
   or build output. Keep generated and machine-local files covered by
   `.gitignore`.
-- The legacy `src/agent_browser_mcp/chrome_extension/config.js`/TID page-command
+- The legacy `src/browsertap_mcp/chrome_extension/config.js`/TID page-command
   channel has been removed. That file must not exist in Git or Python
   distributions; the distribution gate rejects it.
 - Never include bridge tokens, cookies, `.env` files, browser profiles, or
@@ -182,7 +182,7 @@ verify.
 
 ## Publishing to PyPI
 
-The package is not on PyPI yet. `pip install agent-browser-mcp` therefore does
+The package is not on PyPI yet. `pip install browsertap-mcp` therefore does
 not work, and both READMEs say so; that sentence changes only once the upload
 has actually happened.
 
@@ -195,11 +195,11 @@ release the next patch.
 Three things have to exist before the workflow can upload, and none of them can
 be created from inside this repository:
 
-1. A PyPI account with the project name `agent-browser-mcp` available or already
-   owned. Check <https://pypi.org/project/agent-browser-mcp/> first; a name in
+1. A PyPI account with the project name `browsertap-mcp` available or already
+   owned. Check <https://pypi.org/project/browsertap-mcp/> first; a name in
    use by someone else cannot be taken over.
 2. A **Trusted Publisher** on PyPI for this repository
-   (`LinVireo/agent-browser-mcp`), workflow `release.yml`, environment `pypi`.
+   (`LinVireo/browsertap-mcp`), workflow `release.yml`, environment `pypi`.
    Trusted Publishing means the workflow exchanges a short-lived GitHub OIDC
    token for the upload credential at request time, so no API token is stored in
    the repository — there is nothing to leak and nothing to rotate. Repeat the
@@ -215,11 +215,11 @@ Then, in order:
 python -m scripts.finalize_change --bump none
 python -m scripts.evidence_manifest --check
 
-# 2. Rehearse on TestPyPI (Actions -> ABM publish to PyPI -> index: testpypi),
+# 2. Rehearse on TestPyPI (Actions -> BTAP publish to PyPI -> index: testpypi),
 #    then install from there into a throwaway virtual environment. Dependencies
 #    come from the real index; only this package comes from the rehearsal one.
 python -m pip install --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ "agent-browser-mcp[desktop]"
+    --extra-index-url https://pypi.org/simple/ "browsertap-mcp[desktop]"
 
 # 3. Publish for real by publishing the GitHub Release for the tag.
 ```

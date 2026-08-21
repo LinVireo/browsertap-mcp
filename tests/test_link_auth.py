@@ -3,7 +3,7 @@
 The WS port keeps web pages out with an Origin prefix check, which works there
 because a page cannot forge chrome-extension://. /link has no such handle: any
 local process can POST an execute_js and run arbitrary JS in the user's
-logged-in tabs. Every ABM process therefore reads one persistent per-user token;
+logged-in tabs. Every BTAP process therefore reads one persistent per-user token;
 editors do not supply or rotate it.
 
 Every test here binds its OWN ports (see conftest's link_bridge fixture) and
@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import requests
 
-from agent_browser_mcp import browser_bridge as T
+from browsertap_mcp import browser_bridge as T
 
 TOKEN = "s3cret-token"
 
@@ -277,7 +277,7 @@ class TestRemoteClientCarriesTheToken:
         client = _remote_client(link_bridge_auth.port)
         with pytest.raises(
             PermissionError,
-            match=r"agent-browser-mcp bridge --restart",
+            match=r"browsertap bridge --restart",
         ):
             client._remote_cmd({"cmd": "get_all_sessions"})
 
@@ -327,7 +327,7 @@ class _NeverAnsweringSocket:
 
 
 def _register_session(host, session_id, info, client):
-    from agent_browser_mcp.browser_bridge import Session
+    from browsertap_mcp.browser_bridge import Session
 
     session = Session(session_id, info, client)
     host.sessions[session_id] = session

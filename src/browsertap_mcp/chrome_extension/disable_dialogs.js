@@ -7,14 +7,14 @@
 //
 // Now the natives stay in place until automation explicitly turns suppression
 // on for this tab. The injected script preamble pushes a scope onto
-// window.__abm_dialog_scopes (same MAIN world) carrying a policy and a
+// window.__btap_dialog_scopes (same MAIN world) carrying a policy and a
 // deadline, and activeScope() below is the single reader of that list.
 //
 // Deadlines rather than a boolean, because a boolean stays stuck on if the
 // script throws, the tab navigates mid-command, or the worker is evicted — and
 // a stuck flag silently eats the user's own confirm() dialogs, which is the very
 // bug this was meant to fix. Note the preamble also maintains a legacy
-// window.__abm_suppress_until mirror; nothing reads it, so do not rely on it.
+// window.__btap_suppress_until mirror; nothing reads it, so do not rely on it.
 (function() {
   const _log = console.log.bind(console);
   const native = {
@@ -24,7 +24,7 @@
   };
 
   function toast(type, msg) {
-    _log('[ABM] ' + type + ' suppressed:', msg);
+    _log('[BTAP] ' + type + ' suppressed:', msg);
     try {
       const d = document.createElement('div');
       d.textContent = '[' + type + '] ' + msg;
@@ -43,20 +43,20 @@
 
   function activeScope() {
     const now = Date.now();
-    const scopes = Array.isArray(window.__abm_dialog_scopes)
-      ? window.__abm_dialog_scopes.filter(scope => scope && now < scope.deadline &&
+    const scopes = Array.isArray(window.__btap_dialog_scopes)
+      ? window.__btap_dialog_scopes.filter(scope => scope && now < scope.deadline &&
           (scope.policy === 'dismiss' || scope.policy === 'accept'))
       : [];
-    if (Array.isArray(window.__abm_dialog_scopes)) {
-      window.__abm_dialog_scopes = scopes;
+    if (Array.isArray(window.__btap_dialog_scopes)) {
+      window.__btap_dialog_scopes = scopes;
     }
     if (scopes.length) return scopes[scopes.length - 1];
     return null;
   }
 
   function recordDialog(scope, type, msg, defaultPrompt) {
-    const records = Array.isArray(window.__abm_dialog_records)
-      ? window.__abm_dialog_records : [];
+    const records = Array.isArray(window.__btap_dialog_records)
+      ? window.__btap_dialog_records : [];
     records.push({
       token: scope.token,
       policy: scope.policy,
@@ -65,7 +65,7 @@
       defaultPrompt: defaultPrompt === undefined ? '' : String(defaultPrompt),
       openedAt: Date.now(),
     });
-    window.__abm_dialog_records = records.slice(-50);
+    window.__btap_dialog_records = records.slice(-50);
   }
 
   // Note the asymmetry in the fallbacks: when NOT automating we defer to the

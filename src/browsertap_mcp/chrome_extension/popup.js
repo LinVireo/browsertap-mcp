@@ -8,7 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // The bridge port is deliberately NOT editable here. The Python side owns it
-// (AGENT_BROWSER_TMWD_PORT), and a second source of truth in a popup any user
+// (BROWSERTAP_BRIDGE_PORT), and a second source of truth in a popup any user
 // can open silently breaks the bridge for the whole profile — the value would
 // persist in chrome.storage and survive reinstalling the Python package.
 // background.js still reads the stored port key, so the rare non-default-port
@@ -27,17 +27,17 @@ function localizeDocument() {
 }
 
 async function loadIndicatorVisibility() {
-  const stored = await chrome.storage.local.get('abm_indicator_visible');
-  let visible = stored.abm_indicator_visible;
+  const stored = await chrome.storage.local.get('btap_indicator_visible');
+  let visible = stored.btap_indicator_visible;
   if (visible === undefined) {
-    // Carry the pre-ABM preference over once. The popup is the only place with
+    // Carry the pre-BTAP preference over once. The popup is the only place with
     // a healthy extension context guaranteed, so the migration lives here;
     // content.js just reads both keys.
     const legacy = await chrome.storage.local.get('tmwd_indicator_visible');
     if (legacy.tmwd_indicator_visible !== undefined) {
       visible = legacy.tmwd_indicator_visible;
       try {
-        await chrome.storage.local.set({ abm_indicator_visible: visible });
+        await chrome.storage.local.set({ btap_indicator_visible: visible });
         await chrome.storage.local.remove?.('tmwd_indicator_visible');
       } catch (_) { /* retried the next time the popup opens */ }
     }
@@ -47,7 +47,7 @@ async function loadIndicatorVisibility() {
 
 async function saveIndicatorVisibility() {
   const visible = document.getElementById('indicator-visible').checked;
-  await chrome.storage.local.set({ abm_indicator_visible: visible });
+  await chrome.storage.local.set({ btap_indicator_visible: visible });
 }
 
 async function fetchCookies() {

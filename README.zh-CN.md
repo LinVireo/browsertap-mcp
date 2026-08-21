@@ -1,19 +1,19 @@
-# agent-browser-mcp
+# browsertap-mcp
 
-[English](https://github.com/LinVireo/agent-browser-mcp/blob/main/README.md) | 中文文档
+[English](https://github.com/LinVireo/browsertap-mcp/blob/main/README.md) | 中文文档
 
-[![离线 CI](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE)
+[![离线 CI](https://github.com/LinVireo/browsertap-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/LinVireo/browsertap-mcp/actions/workflows/test.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
 
-[使用指南](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md) · [贡献指南](https://github.com/LinVireo/agent-browser-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/agent-browser-mcp/blob/main/CHANGELOG.md)
+[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
-`agent-browser-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
+`browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.3.14**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.0**。
 
-当页面级输入无法完成操作时，ABM 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
+当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
 profile 对物理输入进行询问；默认 `lab` profile 免询问执行，也可通过配置恢复会话级询问。
 两种 profile 均保留输入锁、安静窗口、目标激活和屏幕确认。
@@ -51,37 +51,37 @@ profile 对物理输入进行询问；默认 `lab` profile 免询问执行，也
 **Windows PowerShell**
 
 ```powershell
-git clone https://github.com/LinVireo/agent-browser-mcp.git
-Set-Location agent-browser-mcp
+git clone https://github.com/LinVireo/browsertap-mcp.git
+Set-Location browsertap-mcp
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
-.\.venv\Scripts\agent-browser-mcp.exe extension-path
+.\.venv\Scripts\browsertap.exe extension-path
 ```
 
 **Linux 或 macOS**
 
 ```bash
-git clone https://github.com/LinVireo/agent-browser-mcp.git
-cd agent-browser-mcp
+git clone https://github.com/LinVireo/browsertap-mcp.git
+cd browsertap-mcp
 python -m venv .venv
 ./.venv/bin/python -m pip install -e ".[desktop]"
-./.venv/bin/agent-browser-mcp extension-path
+./.venv/bin/browsertap extension-path
 ```
 
 核心安装 `pip install -e .` 不包含操作系统级鼠标、键盘和桌面截图依赖，仅适用于明确不使用
 这些工具的环境。首次发布到 PyPI 后，可改用
-`pip install "agent-browser-mcp[desktop]"`；发布前以以上源码安装方式为准。
+`pip install "browsertap-mcp[desktop]"`；发布前以以上源码安装方式为准。
 
 ### 2. 加载 Chrome 扩展
 
 项目包含一个未打包扩展，首次使用时需手动加载。
 
 ```bash
-agent-browser-mcp extension-path
+browsertap extension-path
 ```
 
 打开 `chrome://extensions`，启用**开发者模式**，选择**加载已解压的扩展程序**，然后选择上述命令输出的目录。
-加载后，扩展名称显示为 **Agent Browser MCP Bridge**。
+加载后，扩展名称显示为 **BrowserTap Bridge**。
 
 Edge 或 Opera 可在 `edge://extensions` 或 `opera://extensions` 中加载同一目录；bridge 会自动区分不同浏览器。
 
@@ -89,8 +89,8 @@ Edge 或 Opera 可在 `edge://extensions` 或 `opera://extensions` 中加载同�
 
 #### 连接状态角标
 
-扩展可能会在页面上显示小型 `ABM：检测中`、`ABM：已连接` 或
-`ABM：桥未连接` 角标。角标仅用于展示连接状态，不会显示页面内容、Cookie、token 或 URL。
+扩展可能会在页面上显示小型 `BTAP：检测中`、`BTAP：已连接` 或
+`BTAP：桥未连接` 角标。角标仅用于展示连接状态，不会显示页面内容、Cookie、token 或 URL。
 打开扩展弹窗并取消勾选**在页面上显示连接状态**即可隐藏角标；隐藏角标不会停止
 bridge、keepalive 或自动重连。
 
@@ -101,9 +101,9 @@ bridge、keepalive 或自动重连。
 ```json
 {
   "mcpServers": {
-    "agent-browser-mcp": {
+    "browsertap": {
       "type": "stdio",
-      "command": "agent-browser-mcp"
+      "command": "browsertap"
     }
   }
 }
@@ -115,16 +115,16 @@ bridge、keepalive 或自动重连。
 <summary>Claude Code</summary>
 
 ```bash
-claude mcp add agent-browser-mcp -- agent-browser-mcp
+claude mcp add browsertap -- browsertap
 ```
 
 添加 `--scope user` 可在所有项目中启用该服务。虚拟环境安装示例：
 
 ```bash
-claude mcp add agent-browser-mcp -- /absolute/path/to/.venv/bin/agent-browser-mcp
+claude mcp add browsertap -- /absolute/path/to/.venv/bin/browsertap
 ```
 
-Windows PowerShell 应填写 `.venv\Scripts\agent-browser-mcp.exe` 的绝对路径。
+Windows PowerShell 应填写 `.venv\Scripts\browsertap.exe` 的绝对路径。
 
 使用 `/mcp` 确认连接状态。
 </details>
@@ -145,7 +145,7 @@ Windows PowerShell 应填写 `.venv\Scripts\agent-browser-mcp.exe` 的绝对路�
 <summary>VS Code</summary>
 
 ```bash
-code --add-mcp '{"name":"agent-browser-mcp","command":"agent-browser-mcp"}'
+code --add-mcp '{"name":"browsertap-mcp","command":"browsertap-mcp"}'
 ```
 
 也可将配置写入 `.vscode/mcp.json`。VS Code 使用的配置键为 `servers`，不是 `mcpServers`。
@@ -158,13 +158,13 @@ code --add-mcp '{"name":"agent-browser-mcp","command":"agent-browser-mcp"}'
 
 ```yaml
 mcp_servers:
-  agent-browser-mcp:
-    command: agent-browser-mcp
+  browsertap:
+    command: browsertap
     timeout: 120
     connect_timeout: 60
 ```
 
-`agent-browser-mcp print-hermes-config` 可输出该配置。示例文件：`examples/hermes-config.yaml`。使用 `hermes mcp list` 验证连接。
+`browsertap print-hermes-config` 可输出该配置。示例文件：`examples/hermes-config.yaml`。使用 `hermes mcp list` 验证连接。
 </details>
 
 <details>
@@ -179,9 +179,9 @@ mcp_servers:
 
 > 我现在开了哪些标签页?读一下当前页面并总结。
 
-若标签页列表为空，运行 `agent-browser-mcp doctor`。
+若标签页列表为空，运行 `browsertap doctor`。
 
-需要减少对用户操作的影响时，请先阅读 [`docs/USAGE.zh-CN.md`](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.zh-CN.md)。其中说明
+需要减少对用户操作的影响时，请先阅读 [`docs/USAGE.zh-CN.md`](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md)。其中说明
 后台标签页、前台页面和桌面截图的区别，以及多模态模型的适用场景。
 
 ## 配置
@@ -190,28 +190,28 @@ mcp_servers:
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `AGENT_BROWSER_TMWD_HOST` | `127.0.0.1` | 桥的绑定地址 |
-| `AGENT_BROWSER_TMWD_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为单 bridge 锁 socket。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
-| `AGENT_BROWSER_NO_SPAWN` | 未设置 | 设为 `1` 后 MCP 服务不自动启动 bridge，适用于由运维流程单独管理 bridge 的环境 |
-| `AGENT_BROWSER_BRIDGE_AUTH` | 启用 | 仅在明确可信的本机兼容环境中设为 `off`。默认 ABM 使用持久用户 token 保护 `/link`。 |
-| `AGENT_BROWSER_BRIDGE_TOKEN_FILE` | `~/.agent-browser-mcp/bridge-token` | 覆盖共享 token 文件位置。各编辑器不需要分别配置 token。 |
-| `AGENT_BROWSER_BRIDGE_TOKEN` | 未设置 | 旧安装的一次性迁移来源。token 文件不存在时导入一次,此后始终以文件为准。 |
-| `AGENT_BROWSER_PREFERRED_BROWSER` | 未设置 | `chrome` / `edge` / `opera`。多个浏览器都连上、又没指定标签页时,默认落在哪个浏览器 |
-| `AGENT_BROWSER_MODE` | `lab` | `lab` 默认免询问连续自动化;`safe` 对每次物理输入/站点 allow 单独询问。也可用 `set_automation_profile` 只改当前 MCP 进程 |
-| `AGENT_BROWSER_LAB_NO_ELICIT` | 启用 | `lab` 默认按 `1` 处理。只有明确设为 `0`/`false` 才恢复会话级询问;跨进程锁、安静窗口、前台确认和 ownership 始终生效 |
-| `AGENT_BROWSER_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | `lab` 下匹配当前 host 时,普通 `open_url` 自动接受 beforeunload;显式 `intent_leave=false` 可强制保留页面 |
-| `AGENT_BROWSER_WS_ALLOWED_ORIGINS` | 未设置 | 允许连接 bridge WebSocket 的额外 origin，以英文逗号分隔并精确匹配。扩展 origin 自动允许；不要加入宽泛或不可信 origin。 |
-| `AGENT_BROWSER_WS_ALLOW_NO_ORIGIN` | 未设置 | 仅在可信的非浏览器本机 WebSocket 客户端无法发送 `Origin` 时设为 `1`。默认拒绝无 origin 客户端。 |
+| `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | 桥的绑定地址 |
+| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为单 bridge 锁 socket。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
+| `BROWSERTAP_NO_SPAWN` | 未设置 | 设为 `1` 后 MCP 服务不自动启动 bridge，适用于由运维流程单独管理 bridge 的环境 |
+| `BROWSERTAP_BRIDGE_AUTH` | 启用 | 仅在明确可信的本机兼容环境中设为 `off`。默认 BTAP 使用持久用户 token 保护 `/link`。 |
+| `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | 覆盖共享 token 文件位置。各编辑器不需要分别配置 token。 |
+| `BROWSERTAP_BRIDGE_TOKEN` | 未设置 | 旧安装的一次性迁移来源。token 文件不存在时导入一次,此后始终以文件为准。 |
+| `BROWSERTAP_PREFERRED_BROWSER` | 未设置 | `chrome` / `edge` / `opera`。多个浏览器都连上、又没指定标签页时,默认落在哪个浏览器 |
+| `BROWSERTAP_MODE` | `lab` | `lab` 默认免询问连续自动化;`safe` 对每次物理输入/站点 allow 单独询问。也可用 `set_automation_profile` 只改当前 MCP 进程 |
+| `BROWSERTAP_LAB_NO_ELICIT` | 启用 | `lab` 默认按 `1` 处理。只有明确设为 `0`/`false` 才恢复会话级询问;跨进程锁、安静窗口、前台确认和 ownership 始终生效 |
+| `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | `lab` 下匹配当前 host 时,普通 `open_url` 自动接受 beforeunload;显式 `intent_leave=false` 可强制保留页面 |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | 允许连接 bridge WebSocket 的额外 origin，以英文逗号分隔并精确匹配。扩展 origin 自动允许；不要加入宽泛或不可信 origin。 |
+| `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | 未设置 | 仅在可信的非浏览器本机 WebSocket 客户端无法发送 `Origin` 时设为 `1`。默认拒绝无 origin 客户端。 |
 
 ### 命令行
 
 ```bash
-agent-browser-mcp                      # 运行 MCP 服务(stdio)
-agent-browser-mcp extension-path       # 打印未打包扩展的目录
-agent-browser-mcp skill-path           # 打印随包发布的 agent skill 所在目录
-agent-browser-mcp doctor               # 诊断本地环境,输出 JSON
-agent-browser-mcp bridge               # 在前台运行桥
-agent-browser-mcp print-hermes-config  # 打印 Hermes 配置片段
+browsertap                      # 运行 MCP 服务(stdio)
+browsertap extension-path       # 打印未打包扩展的目录
+browsertap skill-path           # 打印随包发布的 agent skill 所在目录
+browsertap doctor               # 诊断本地环境,输出 JSON
+browsertap bridge               # 在前台运行桥
+browsertap print-hermes-config  # 打印 Hermes 配置片段
 ```
 
 `doctor` 会报告扩展路径、端口状态和已连接标签页数量，并返回结构化判定。`cause` 的取值为
@@ -219,27 +219,27 @@ agent-browser-mcp print-hermes-config  # 打印 Hermes 配置片段
 `bridge_unreachable`；`advice` 提供对应恢复建议。`registering` 表示扩展已连接，但尚无正常的
 `http(s)` 内容标签页完成注册。
 
-ABM 首次使用时创建 `~/.agent-browser-mcp/bridge-token`，bridge 和所有 MCP 进程均读取该文件。
+BTAP 首次使用时创建 `~/.browsertap/bridge-token`，bridge 和所有 MCP 进程均读取该文件。
 关闭浏览器或编辑器不会轮换 token。卸载扩展或重装 Python 包时会保留该文件，因此重装后可以
-继续使用。若需彻底清除用户数据，应先停止所有 ABM bridge 进程，再删除整个
-`~/.agent-browser-mcp` 目录；下次启动时会生成新 token。
+继续使用。若需彻底清除用户数据，应先停止所有 BTAP bridge 进程，再删除整个
+`~/.browsertap` 目录；下次启动时会生成新 token。
 
 ### Agent skill（可选）
 
-ABM 随包发布两份 skill，用来告诉调用方的 agent 该怎么驱动它。它们就是普通 Markdown，
+BTAP 随包发布两份 skill，用来告诉调用方的 agent 该怎么驱动它。它们就是普通 Markdown，
 **完全可选** —— 不装也不影响任何工具。它们补的是工具描述装不下的那部分判断：先调哪个工具、
 什么时候必须带 `session_id`、哪些标签页属于用户因此不能碰。
 
 ```bash
-agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skills
+browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 ```
 
 该目录下有：
 
 | Skill | 作用 |
 |---|---|
-| `browser-mcp-default/SKILL.md` | 调用契约：动手前先选定目标；要改动页面就自己开标签页，收尾时关掉；遇到 `no_response` / `switched_session` / `bridge_error` 怎么处理。 |
-| `abm-bridge-recovery/SKILL.md` | 传输层本身出问题时的恢复流程：三个组件里到底哪个是旧的，以及对应的那一次重启或重新加载。 |
+| `browsertap-default/SKILL.md` | 调用契约：动手前先选定目标；要改动页面就自己开标签页，收尾时关掉；遇到 `no_response` / `switched_session` / `bridge_error` 怎么处理。 |
+| `browsertap-bridge-recovery/SKILL.md` | 传输层本身出问题时的恢复流程：三个组件里到底哪个是旧的，以及对应的那一次重启或重新加载。 |
 
 请把客户端的 skill 管理器**指向这个目录**，不要复制文件。复制出来的副本在内容恰好一致期间
 看不出问题，等你升级包之后就静默收不到更新了。如果确实保留了副本，可以用
@@ -250,26 +250,26 @@ agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skil
 
 升级要做三件事，不是一件：三个部分不会同时变成新版，而第 3 步漏掉不会有任何报错。
 
-1. 更新包 —— 发布到 PyPI 后用 `pip install -U agent-browser-mcp`，源码安装则 `git pull`。
+1. 更新包 —— 发布到 PyPI 后用 `pip install -U browsertap-mcp`，源码安装则 `git pull`。
    新建的 MCP 会话立即生效。
-2. `agent-browser-mcp bridge --restart`。守护进程常驻、活得比每个 MCP 会话都长，不重启就
+2. `browsertap bridge --restart`。守护进程常驻、活得比每个 MCP 会话都长，不重启就
    一直用旧代码。
 3. 打开 `chrome://extensions`，在扩展上点一次**重新加载**。磁盘上的文件已经换了，但 Chrome
    仍在跑先前加载的构建，且没有任何命令能让它重读。
 
-`agent-browser-mcp doctor` 会指出哪一部分是旧的，并给出唯一有效的动作：
+`browsertap doctor` 会指出哪一部分是旧的，并给出唯一有效的动作：
 `reload_extension`、`restart_bridge` 或 `restart_mcp_session`。另外两个不起作用，所以照这个
 字段做，别三件一起做。
 
 ### 卸载
 
-1. 运行 `agent-browser-mcp bridge --stop` 停止托管的 bridge 守护进程。
+1. 运行 `browsertap bridge --stop` 停止托管的 bridge 守护进程。
 2. 打开 `chrome://extensions`（Edge/Opera 使用对应扩展管理页），移除以未打包方式加载的
-   **Agent Browser MCP Bridge** 扩展。
-3. 从每个 MCP 客户端配置中移除 `agent-browser-mcp` 条目。
-4. 在安装时使用的环境中运行 `pip uninstall agent-browser-mcp`。若使用专用虚拟环境，退出该
+   **BrowserTap Bridge** 扩展。
+3. 从每个 MCP 客户端配置中移除 `browsertap` 条目。
+4. 在安装时使用的环境中运行 `pip uninstall browsertap-mcp`。若使用专用虚拟环境，退出该
    环境后再移除其明确目录。
-5. 可选彻底清理：确认所有 ABM bridge 均已停止后，移除 `~/.agent-browser-mcp`。这会删除持久
+5. 可选彻底清理：确认所有 BTAP bridge 均已停止后，移除 `~/.browsertap`。这会删除持久
    bridge token 和日志；默认保留这些数据，以便重装后无需重新配置即可继续使用。
 
 ## 工作原理
@@ -279,8 +279,7 @@ agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skil
 1. **Chrome 扩展**（MV3）：注入真实页面，并通过 Chrome API 访问 `tabs`、`cookies`、`debugger` 和 `management`。
 2. **BrowserBridge**：本地守护进程，监听 `127.0.0.1:18765`（WebSocket）和 `:18766`（HTTP），
    负责维护扩展连接、会话状态和结果转发。该进程独立于 MCP 实例运行，缺失时由 MCP 服务按需启动，
-   且不创建可见窗口。会话以 `clientId:tabId` 标识，支持多个浏览器和 profile 并存。0.3.6 之前的
-   `agent_browser_mcp.tmwebdriver.TMWebDriver` 导入路径继续作为兼容别名保留。
+   且不创建可见窗口。会话以 `clientId:tabId` 标识，支持多个浏览器和 profile 并存。
 3. **MCP 服务**：将上述能力公开为 MCP 工具。
 
 浏览器连接包含两条通道：按标签页的会话通道，以及直接连接扩展 service worker 的通道。第二条
@@ -296,8 +295,8 @@ agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skil
 通过 CDP 派发，不移动光标或聚焦窗口，响应包含 `foreground_changed: false`。
 `mouse_move`/`mouse_click`/`mouse_drag` 使用**桌面屏幕**坐标并驱动真实光标；两种坐标不可互换。
 
-**自动化 profile。** 未设置 `AGENT_BROWSER_MODE` 时默认使用 `lab`，并按
-`AGENT_BROWSER_LAB_NO_ELICIT=1` 处理，物理输入和站点 `allow` 不进行 elicitation。
+**自动化 profile。** 未设置 `BROWSERTAP_MODE` 时默认使用 `lab`，并按
+`BROWSERTAP_LAB_NO_ELICIT=1` 处理，物理输入和站点 `allow` 不进行 elicitation。
 `safe` profile 对每次操作进行询问。两种 profile 均保留跨进程锁、安静窗口、目标激活、所有权
 和 `on_screen` 检查。
 
@@ -313,7 +312,7 @@ agent-browser-mcp skill-path   # 例如 .../site-packages/agent_browser_mcp/skil
 
 **挑战页继续使用原浏览器会话。** Cloudflare Turnstile 等控件在同一个已连接标签页中由
 `page_click` 处理，并有尝试次数上限。无进展时返回 `challenge_stalled`，后续处理应在同一标签页
-中完成。ABM 不会启动 Playwright、无头浏览器或独立自动化 profile 作为后备路径。
+中完成。BTAP 不会启动 Playwright、无头浏览器或独立自动化 profile 作为后备路径。
 
 **工具契约变更需要重新加载。** MCP 客户端在启动会话时读取工具 schema 和描述；升级服务后应重启
 MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` 手动 **Reload**；
@@ -347,7 +346,7 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 | `navigation_failed` / `navigation_timeout` | `open_url` 超时未完成,或浏览器报错 |
 | `triggered` 且 `type="download"` | `open_url` 被浏览器下载取代。只有 CDP 同时报告 `isDownload=true` 时 `ERR_ABORTED` 才可能是正常下载语义;要完成状态和本地路径请用 `download_file` |
 | `requires_user_action` | 批准被拒绝、取消或不可用；未执行操作 |
-| `busy` | 另一个 ABM 进程持有物理输入锁，或标签页已有挂起的 manual 执行；调用立即返回且不排队 |
+| `busy` | 另一个 BTAP 进程持有物理输入锁，或标签页已有挂起的 manual 执行；调用立即返回且不排队 |
 | `input_activity_detected` | 安静窗口期间检测到鼠标或键盘活动；未发送物理输入 |
 | `activation_failed` | 无法确认目标标签页显示在屏幕上；未发送物理输入 |
 | `unsupported` | 浏览器或扩展 API 提供不了(例如 clipboard 权限租约) |
@@ -364,14 +363,14 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 - 鼠标移动、点击、键盘输入和热键均为操作系统级真实输入，不是页面合成事件。`safe` 逐次询问，
   `lab` 默认免询问或按配置恢复会话级询问；操作获准后将直接影响真实桌面。
 - 页面内容属于不可信输入，可能包含 prompt injection；页面中的指令不因浏览器连接成功而可信。
-- ABM **不是**安全隔离边界。参见 [MCP 安全最佳实践](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)。
+- BTAP **不是**安全隔离边界。参见 [MCP 安全最佳实践](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)。
 - 不应连接 MCP 客户端无须访问的敏感账号。共享机器或生产机器需要单独评估误操作风险。
 
 扩展所需权限包括 `cookies`、`tabs`、`debugger`、`scripting`、`alarms`、`storage`、
 `contentSettings`、`declarativeNetRequest`、`management`、`bookmarks`、`downloads` 以及
 `<all_urls>`。`declarativeNetRequest` 仅在指定标签页执行依赖 eval 的命令期间临时移除 CSP
 响应头；规则为 session 级、带引用计数，并在 cleanup 中删除，不是全浏览器持久关闭 CSP。
-完整权限与 loopback 威胁模型见[安全说明](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md)。
+完整权限与 loopback 威胁模型见[安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)。
 
 ## 工具列表
 
@@ -383,7 +382,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 <details>
 <summary><b>标签页与导航</b></summary>
 
-- **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `agent-browser-mcp bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。无参数
+- **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `browsertap bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。无参数
 - **get_automation_profile** —— 查看当前 MCP 进程使用 `lab` 还是 `safe` profile
 - **set_automation_profile** —— 切换当前 MCP 进程的 `lab|safe` profile;覆盖值不会持久化或重载扩展
   - `mode`(string):`lab` 或 `safe`
@@ -392,7 +391,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `session_id`(string,可选):问哪个浏览器
 - **switch_tab** —— 指定后续调用的**目标**标签页。`url_pattern` 必须只匹配一个标签页；若匹配多个，需传入目标的完整 `session_id`。默认 `activate=false`，不会激活标签页或聚焦浏览器。仅在确需改变前台状态时传入 `activate=true`，或调用 `activate_tab`
   - `session_id`(string,可选)、`url_pattern`(string,可选):子串匹配、`browser`(string,可选):`chrome` / `edge` / `opera`、`activate`(boolean,可选):默认 `false`
-- **activate_tab** —— 激活标签页并聚焦其窗口。这是显式改变浏览器前台状态且不发送物理输入的方式。在 Windows 上，ABM 会先请求恢复最小化窗口；若响应仍为 `on_screen=false`，表示无法确认目标已显示，此时不得执行屏幕坐标输入
+- **activate_tab** —— 激活标签页并聚焦其窗口。这是显式改变浏览器前台状态且不发送物理输入的方式。在 Windows 上，BTAP 会先请求恢复最小化窗口；若响应仍为 `on_screen=false`，表示无法确认目标已显示，此时不得执行屏幕坐标输入
   - `session_id`(string,可选)
 - **open_url** —— 当前标签页导航到 URL,并报告**实际落地**的地址。全局默认仍是 `dismiss`;lab 命中配置的 shell/IDE host 时自动 accept。协议 `navigate` 在重 SPA 失效时自动降级 `Page.navigate`。CDP 返回 `isDownload=true` 时改为返回 `{type:"download",status:"triggered"}`,不再只报 `navigation_failed`;此时附带的 `ERR_ABORTED` 是正常下载导航语义
   - `url`(string)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`、`beforeunload`(string,可选):默认 `dismiss`、`intent_leave`(boolean,可选):`false` 强制保留页面
@@ -462,7 +461,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 
 由 `chrome.contentSettings` 支撑的临时、origin 作用域权限租约。每条租约都记录原设置并在到期、显式 reset、service worker 重启或浏览器重启后恢复。
 
-- **set_site_permission** —— 给一个 origin 设置一种权限,60–600 秒。`safe` 下每次 `allow` 都要批准;默认 `lab` 按 `AGENT_BROWSER_LAB_NO_ELICIT=1` 直接执行。拒绝返回 `requires_user_action` 且不改变任何东西;不可恢复能力返回 `unsupported`
+- **set_site_permission** —— 给一个 origin 设置一种权限,60–600 秒。`safe` 下每次 `allow` 都要批准;默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 直接执行。拒绝返回 `requires_user_action` 且不改变任何东西;不可恢复能力返回 `unsupported`
   - `permission`(string)、`setting`(string):`allow`、`block` 或 `ask`、`origin`(string,可选):默认取标签页 origin、`duration_seconds`(integer,可选):60–600,默认 `300`、`session_id`(string,可选)
 - **reset_site_permissions** —— 不等到期,现在就把匹配的租约恢复。`origin` 和 `permission` 都不给就恢复那个浏览器上的全部租约
   - `origin`(string,可选)、`permission`(string,可选)、`session_id`(string,可选)
@@ -482,7 +481,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 
 > **操作其他扩展的限制**：Chrome 默认在 attach 阶段拒绝跨扩展调试，`tab_id`、`extension_id`
 > 和 `target_id` 三种寻址方式均受该限制，除非 Chrome 使用
-> `--silent-debugger-extension-api` 启动。这些参数主要用于操作 ABM 扩展自身目标和执行故障诊断。
+> `--silent-debugger-extension-api` 启动。这些参数主要用于操作 BTAP 扩展自身目标和执行故障诊断。
 </details>
 
 <details>
@@ -493,7 +492,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `session_id`(string,可选)
 - **set_extension_enabled** —— *(零标签页可用)* 启用或禁用已安装的扩展。Chrome 没有任何 API 可以*安装*扩展,所以这里只能开关已存在的
   - `extension_id`(string)、`enabled`(boolean)、`session_id`(string,可选)
-- **uninstall_extension** —— *(零标签页可用)* 卸载其他扩展；默认显示 Chrome 确认框。仅对明确选定的测试扩展设置 `show_confirm_dialog=false`；活动通道无法卸载 ABM 自身
+- **uninstall_extension** —— *(零标签页可用)* 卸载其他扩展；默认显示 Chrome 确认框。仅对明确选定的测试扩展设置 `show_confirm_dialog=false`；活动通道无法卸载 BTAP 自身
   - `extension_id`(string)、`show_confirm_dialog`(boolean,可选):默认 `true`、`session_id`(string,可选)
 - **get_bookmarks** —— *(零标签页可用)* 读取书签树
   - `session_id`(string,可选)
@@ -501,7 +500,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `title`(string)、`url`(string,可选):省略则创建文件夹、`parent_id`(string,可选)、`session_id`(string,可选)
 - **remove_bookmark** —— *(零标签页可用)* 删除书签或递归删除文件夹
   - `bookmark_id`(string)、`recursive`(boolean,可选):默认 `false`、`session_id`(string,可选)
-- **call_extension** —— *(零标签页可用)* 向另一个扩展发送 JSON;目标必须启用并通过 `externally_connectable` 允许 ABM
+- **call_extension** —— *(零标签页可用)* 向另一个扩展发送 JSON;目标必须启用并通过 `externally_connectable` 允许 BTAP
   - `extension_id`(string)、`message_json`(string):JSON 文本、`session_id`(string,可选)
 </details>
 
@@ -536,7 +535,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 应优先使用可在后台标签页中运行的 `page_*` 工具。仅在页面级输入无法完成操作时使用桌面工具，
 例如浏览器界面、原生文件选择器、扩展弹窗和操作系统对话框。
 
-`safe` 模式下这五个直接工具逐次 elicitation;默认 `lab` 按 `AGENT_BROWSER_LAB_NO_ELICIT=1` 免询问执行,显式设为 false 才恢复会话级批准。拒绝、取消或不支持 elicitation 时返回 `requires_user_action`;无论哪种模式,锁/安静窗口/ownership/目标提前台与屏幕确认都不会跳过。`resolve_leave_dialog` 是第六条物理输入路径，只能在两次协议处理失败后用 Enter 兜底，并经过相同闸门。
+`safe` 模式下这五个直接工具逐次 elicitation;默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 免询问执行,显式设为 false 才恢复会话级批准。拒绝、取消或不支持 elicitation 时返回 `requires_user_action`;无论哪种模式,锁/安静窗口/ownership/目标提前台与屏幕确认都不会跳过。`resolve_leave_dialog` 是第六条物理输入路径，只能在两次协议处理失败后用 Enter 兜底，并经过相同闸门。
 
 物理输入按固定顺序执行：获取跨进程锁（已占用时立即返回 `busy`，不排队）；等待短暂安静窗口
 （检测到鼠标或键盘活动时返回 `input_activity_detected`，不发送输入）；激活目标标签页；发送输入。
@@ -554,19 +553,21 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 
 ## 故障排查
 
-应先运行 `agent-browser-mcp doctor`。连接、版本、对话框、权限和物理输入相关的恢复流程见
-[故障排查指南](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
+应先运行 `browsertap doctor`。连接、版本、对话框、权限和物理输入相关的恢复流程见
+[故障排查指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
 
 ## 致谢
 
-ABM 由 `LinVireo` 维护。原仓库版权归属仍按 [LICENSE](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE) 中的 `zhea` 保留；维护者与原始版权归属是两个不同角色。本发行版的权威公开仓库为 `LinVireo/agent-browser-mcp`。
+BTAP 由 `LinVireo` 维护。[LICENSE](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
+中的 MIT 版权声明按原样保留（`zhea`）；维护者与版权归属是两个不同角色。本发行版的权威公开仓库为
+`LinVireo/browsertap-mcp`。
 
-本发行版基于 [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp) 二次开发，分叉点为 `04cc1f1`（2026-04-15）。此后差异已经很大：相对分叉点超过 50 个提交、数万行改动，跟踪文件数由 19 增至 80 以上——当前数字用 `git diff --shortstat 04cc1f1..HEAD` 现查。上游快照不包含测试套件、文档集与 CI 配置；MCP 工具面、bridge 及其 token 鉴权、Chrome 扩展、发布证据链与两份 README 均在此重写或从零编写。保留致谢是因为来源关系属实，而非当前代码与其接近。
+这里的浏览器层有一小部分来自 [GenericAgent](https://github.com/lsdefine/GenericAgent)，
+感谢该项目及其作者提供的原始实现。下列文件源出于此，且此后均已大幅重写；本发行版的其余部分——
+MCP 工具面、bridge 及其 token 鉴权、Chrome 扩展、发布证据链、测试套件与两份 README——均在此编写。
 
-这里的浏览器自动化核心是从 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器栈中提取出来、重新封装成 MCP 服务的。感谢该项目及其作者提供的原始实现。
-
-以下部分来自或改编自 GenericAgent:
-- `TMWebDriver.py`（现由 `browser_bridge.py` 维护，`tmwebdriver.py` 作为兼容 shim 保留）
+源出 GenericAgent 的部分：
+- `TMWebDriver.py`（现由 `browser_bridge.py` 维护）
 - `simphtml.py`
 - `tmwd_cdp_bridge` Chrome 扩展资源
 

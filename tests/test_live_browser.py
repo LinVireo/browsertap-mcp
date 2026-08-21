@@ -14,7 +14,7 @@ import re
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 pytestmark = pytest.mark.live
 
@@ -69,7 +69,7 @@ class TestDialogPolicy:
         goto(scratch_session, STATIC, "h1")
 
         alert = S.execute_js(
-            "alert('ABM alert'); return 'continued'",
+            "alert('BTAP alert'); return 'continued'",
             session_id=scratch_session,
             dialog_policy="dismiss",
             no_monitor=True,
@@ -77,10 +77,10 @@ class TestDialogPolicy:
         assert alert["status"] == "ok"
         assert alert["js_return"] == "continued"
         assert alert["dialog"]["type"] == "alert"
-        assert alert["dialog"]["message"] == "ABM alert"
+        assert alert["dialog"]["message"] == "BTAP alert"
 
         dismissed = S.execute_js(
-            "return confirm('ABM confirm')",
+            "return confirm('BTAP confirm')",
             session_id=scratch_session,
             dialog_policy="dismiss",
             no_monitor=True,
@@ -90,7 +90,7 @@ class TestDialogPolicy:
         assert dismissed["dialog"]["type"] == "confirm"
 
         accepted = S.execute_js(
-            "return confirm('ABM confirm')",
+            "return confirm('BTAP confirm')",
             session_id=scratch_session,
             dialog_policy="accept",
             no_monitor=True,
@@ -99,7 +99,7 @@ class TestDialogPolicy:
         assert accepted["js_return"] is True
 
         prompt = S.execute_js(
-            "return prompt('ABM prompt', 'typed text')",
+            "return prompt('BTAP prompt', 'typed text')",
             session_id=scratch_session,
             dialog_policy="accept",
             no_monitor=True,
@@ -121,20 +121,20 @@ class TestDialogPolicy:
             S.execute_js(
                 """
                 document.body.insertAdjacentHTML(
-                  'beforeend', '<button id="abm-arm-beforeunload">Arm</button>');
-                window.__abmBeforeUnload = event => {
+                  'beforeend', '<button id="btap-arm-beforeunload">Arm</button>');
+                window.__btapBeforeUnload = event => {
                   event.preventDefault();
                   event.returnValue = '';
                 };
-                document.querySelector('#abm-arm-beforeunload').onclick = () => {
-                  addEventListener('beforeunload', window.__abmBeforeUnload);
+                document.querySelector('#btap-arm-beforeunload').onclick = () => {
+                  addEventListener('beforeunload', window.__btapBeforeUnload);
                 };
                 return true;
                 """,
                 session_id=scratch_session,
                 no_monitor=True,
             )
-            S.page_click(selector="#abm-arm-beforeunload", session_id=scratch_session)
+            S.page_click(selector="#btap-arm-beforeunload", session_id=scratch_session)
 
             dismissed = S.open_url(
                 "https://example.org/",
@@ -157,7 +157,7 @@ class TestDialogPolicy:
         finally:
             try:
                 S.execute_js(
-                    "removeEventListener('beforeunload', window.__abmBeforeUnload); return true",
+                    "removeEventListener('beforeunload', window.__btapBeforeUnload); return true",
                     session_id=scratch_session,
                     no_monitor=True,
                 )
@@ -316,7 +316,7 @@ class TestScanPageOffscreen:
         goto(scratch_session, DOCS, "h1")
         scan = S.scan_page(session_id=scratch_session, maxchars=60000, timeout=30)
         # The base-url marker is an internal detail and must not reach the agent.
-        assert "abm-base:" not in scan["content"]
+        assert "btap-base:" not in scan["content"]
 
 
 class TestNavigationOutcome:
@@ -351,14 +351,14 @@ class TestExplicitSessionPipeline:
         """Every monitor/readback roundtrip must remain pinned to the named tab."""
         server_driver = S.require_driver()
         created = S.open_new_tab(
-            "https://example.com/?abm-explicit-other=211",
+            "https://example.com/?btap-explicit-other=211",
             timeout=20,
             active=False,
             session_id=scratch_session,
         )
         other_session = created.get("session_id")
         previous_default = server_driver.default_session_id
-        marker = "abm-explicit-session-211"
+        marker = "btap-explicit-session-211"
         try:
             assert created["status"] == "ok"
             assert created["owned"] is True
@@ -367,7 +367,7 @@ class TestExplicitSessionPipeline:
             goto(scratch_session, STATIC, "h1")
             server_driver.default_session_id = other_session
             result = S.execute_js(
-                f"document.body.dataset.abmExplicitTarget = '{marker}'; return document.title",
+                f"document.body.dataset.btapExplicitTarget = '{marker}'; return document.title",
                 session_id=scratch_session,
                 no_monitor=False,
                 timeout=15,
@@ -377,13 +377,13 @@ class TestExplicitSessionPipeline:
             assert server_driver.default_session_id == other_session
 
             scratch_marker = S.execute_js(
-                "return document.body.dataset.abmExplicitTarget || null",
+                "return document.body.dataset.btapExplicitTarget || null",
                 session_id=scratch_session,
                 no_monitor=True,
                 timeout=10,
             )
             other_marker = S.execute_js(
-                "return document.body.dataset.abmExplicitTarget || null",
+                "return document.body.dataset.btapExplicitTarget || null",
                 session_id=other_session,
                 no_monitor=True,
                 timeout=10,
@@ -400,7 +400,7 @@ class TestExplicitSessionPipeline:
 class TestNewTabGeneration:
     def test_open_new_tab_returns_matching_live_generation(self, scratch_session):
         created = S.open_new_tab(
-            "https://example.com/?abm-generation=211",
+            "https://example.com/?btap-generation=211",
             timeout=20,
             active=False,
             session_id=scratch_session,
@@ -423,7 +423,7 @@ class TestNewTabGeneration:
                 timeout=15,
             )
             assert immediate["status"] in ("ok", "success")
-            assert "abm-generation=211" in immediate["js_return"]
+            assert "btap-generation=211" in immediate["js_return"]
         finally:
             if created_sid:
                 S.close_tabs(created_sid, owner_id=created.get("owner_id"))
@@ -437,7 +437,7 @@ class TestBackgroundPageInput:
             None,
         )
         created = S.open_new_tab(
-            "https://example.com/?abm-never-activated-input=1",
+            "https://example.com/?btap-never-activated-input=1",
             timeout=20,
             active=False,
             session_id=scratch_session,
@@ -760,7 +760,7 @@ class TestBackgroundPageInput:
 
             reset_events()
             xterm_typed = S.page_type(
-                "printf 'abm-xterm'",
+                "printf 'btap-xterm'",
                 selector="#page-input-xterm",
                 submit_key="enter",
                 session_id=scratch_session,
@@ -774,7 +774,7 @@ class TestBackgroundPageInput:
                 timeout=15,
             )
             xterm_state = json.loads(xterm_state["js_return"])
-            assert xterm_state == {"value": "printf 'abm-xterm'", "active": True}
+            assert xterm_state == {"value": "printf 'btap-xterm'", "active": True}
             xterm_events = observed_events()
             assert any(event["type"] == "input" and event["id"] == "page-input-xterm-helper"
                        for event in xterm_events)
@@ -829,10 +829,10 @@ class TestBackgroundPageInput:
                 </div>
               </div>`;
             const helper = document.querySelector('.xterm-helper-textarea');
-            window.__abmXtermEvents = [];
+            window.__btapXtermEvents = [];
             for (const type of ['focus', 'beforeinput', 'input']) {
               helper.addEventListener(type, event => {
-                window.__abmXtermEvents.push({
+                window.__btapXtermEvents.push({
                   type,
                   data: event.data || null,
                   value: helper.value,
@@ -853,14 +853,14 @@ class TestBackgroundPageInput:
         )
         assert json.loads(setup["js_return"]) == {"active": "BODY", "helpers": 1}
 
-        result = S.page_type("ABM_FIRST_INPUT_OK", session_id=scratch_session)
+        result = S.page_type("BTAP_FIRST_INPUT_OK", session_id=scratch_session)
         observed = S.execute_js(
             """
             const helper = document.querySelector('.xterm-helper-textarea');
             return JSON.stringify({
               active: document.activeElement === helper,
               value: helper.value,
-              events: window.__abmXtermEvents,
+              events: window.__btapXtermEvents,
             });
             """,
             session_id=scratch_session,
@@ -874,33 +874,33 @@ class TestBackgroundPageInput:
         assert result["status"] == "success"
         assert result["foreground_changed"] is False
         assert result["target_kind"] == "xterm"
-        assert result["typed_chars"] == len("ABM_FIRST_INPUT_OK")
+        assert result["typed_chars"] == len("BTAP_FIRST_INPUT_OK")
         assert active_after == active_before
         assert state["active"] is True
-        assert state["value"] == "ABM_FIRST_INPUT_OK"
+        assert state["value"] == "BTAP_FIRST_INPUT_OK"
         assert any(event["type"] == "focus" for event in state["events"])
         assert any(
-            event["type"] == "input" and event["data"] == "ABM_FIRST_INPUT_OK"
+            event["type"] == "input" and event["data"] == "BTAP_FIRST_INPUT_OK"
             for event in state["events"]
         )
 
     def test_page_type_structured_locator_executes_in_background(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
         S.execute_js(
-            "document.body.innerHTML='<label for=abm-field>ABM field</label>' + "
-            "'<input id=abm-field>'; return true",
+            "document.body.innerHTML='<label for=btap-field>BTAP field</label>' + "
+            "'<input id=btap-field>'; return true",
             session_id=scratch_session,
             no_monitor=True,
         )
 
         result = S.page_type(
             "background-value",
-            selector={"label": "ABM field"},
+            selector={"label": "BTAP field"},
             clear=True,
             session_id=scratch_session,
         )
         value = S.execute_js(
-            "return document.querySelector('#abm-field').value",
+            "return document.querySelector('#btap-field').value",
             session_id=scratch_session,
             no_monitor=True,
         )
@@ -912,17 +912,17 @@ class TestBackgroundPageInput:
     def test_page_press_dispatches_chord_in_background(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
         S.execute_js(
-            "document.body.innerHTML='<input id=abm-key-target value=abcdef>'; "
-            "document.querySelector('#abm-key-target').focus(); "
-            "window.__abmKeys=[]; document.addEventListener('keydown', "
-            "e => window.__abmKeys.push([e.key,e.ctrlKey]), true); return true",
+            "document.body.innerHTML='<input id=btap-key-target value=abcdef>'; "
+            "document.querySelector('#btap-key-target').focus(); "
+            "window.__btapKeys=[]; document.addEventListener('keydown', "
+            "e => window.__btapKeys.push([e.key,e.ctrlKey]), true); return true",
             session_id=scratch_session,
             no_monitor=True,
         )
 
         result = S.page_press("ctrl,a", session_id=scratch_session)
         observed = S.execute_js(
-            "return JSON.stringify(window.__abmKeys)",
+            "return JSON.stringify(window.__btapKeys)",
             session_id=scratch_session,
             no_monitor=True,
         )
@@ -950,7 +950,7 @@ class TestFailoverRefusal:
         """Reading is side-effect free, but silently returning a DIFFERENT page
         than the caller asked for is its own wrong answer, so get_main_block
         defaults to no failover too."""
-        from agent_browser_mcp import simphtml
+        from browsertap_mcp import simphtml
 
         prev = driver.default_session_id
         try:
@@ -972,7 +972,7 @@ class TestFailoverRefusal:
     def test_failover_is_available_when_explicitly_asked_for(self, driver, scratch_session):
         """The escape hatch still works for a caller that genuinely wants any
         live tab rather than a specific one."""
-        from agent_browser_mcp import simphtml
+        from browsertap_mcp import simphtml
 
         prev = driver.default_session_id
         try:
@@ -1062,7 +1062,7 @@ class TestActivateTab:
 class TestCookiesAndStorage:
     def test_set_cookies_success(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        name = "abm_set_cookies_success"
+        name = "btap_set_cookies_success"
         try:
             result = S.set_cookies(
                 {"name": name, "value": "v1", "path": "/"},
@@ -1074,7 +1074,7 @@ class TestCookiesAndStorage:
 
     def test_set_cookies_cleanup_removes_fixture_cookie(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        name = "abm_set_cookies_cleanup"
+        name = "btap_set_cookies_cleanup"
         S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
         try:
             assert any(
@@ -1090,7 +1090,7 @@ class TestCookiesAndStorage:
 
     def test_get_cookies_success(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        name = "abm_get_cookies_success"
+        name = "btap_get_cookies_success"
         S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
         try:
             cookies = S.get_cookies(session_id=scratch_session).get("data", [])
@@ -1100,14 +1100,14 @@ class TestCookiesAndStorage:
 
     def test_delete_cookies_success(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        name = "abm_delete_cookies_success"
+        name = "btap_delete_cookies_success"
         S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
         result = S.delete_cookies(name, session_id=scratch_session)
         assert result["status"] == "ok", result
 
     def test_delete_cookies_cleanup_leaves_no_fixture_cookie(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        name = "abm_delete_cookies_cleanup"
+        name = "btap_delete_cookies_cleanup"
         S.set_cookies({"name": name, "value": "v1", "path": "/"}, session_id=scratch_session)
         try:
             S.delete_cookies(name, session_id=scratch_session)
@@ -1127,16 +1127,16 @@ class TestCookiesAndStorage:
 
     def test_storage_set_cleanup_removes_fixture_key(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
-        S.storage_set("abm_cleanup", "value", session_id=scratch_session)
+        S.storage_set("btap_cleanup", "value", session_id=scratch_session)
         try:
-            assert S.storage_get("abm_cleanup", session_id=scratch_session)["found"]
+            assert S.storage_get("btap_cleanup", session_id=scratch_session)["found"]
         finally:
             S.execute_js(
-                "localStorage.removeItem('abm_cleanup'); return true",
+                "localStorage.removeItem('btap_cleanup'); return true",
                 session_id=scratch_session,
                 no_monitor=True,
             )
-        assert not S.storage_get("abm_cleanup", session_id=scratch_session)["found"]
+        assert not S.storage_get("btap_cleanup", session_id=scratch_session)["found"]
 
     def test_storage_get_dump_all(self, scratch_session):
         goto(scratch_session, STATIC, "h1")

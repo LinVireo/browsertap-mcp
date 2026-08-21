@@ -181,8 +181,8 @@ def _init_repo(root: Path, *files: str) -> None:
 
     root.mkdir(parents=True, exist_ok=True)
     run("init", "-q")
-    run("config", "user.email", "abm-test@example.invalid")
-    run("config", "user.name", "ABM Test")
+    run("config", "user.email", "btap-test@example.invalid")
+    run("config", "user.name", "BTAP Test")
     run("config", "commit.gpgsign", "false")
     for name in files:
         (root / name).write_text(f"{name}\n", encoding="utf-8")

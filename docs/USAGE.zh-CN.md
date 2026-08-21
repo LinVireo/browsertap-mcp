@@ -1,15 +1,15 @@
-# ABM 使用指南
+# BTAP 使用指南
 
 [English](USAGE.md) | 中文
 
-本文档定义 `agent-browser-mcp` 在现有 Chrome、Edge 或 Opera 会话中的推荐操作方式，
+本文档定义 `browsertap-mcp` 在现有 Chrome、Edge 或 Opera 会话中的推荐操作方式，
 目标是在保持任务可控的同时，尽量避免改变用户正在使用的浏览器和桌面状态。55 个工具及其
 参数以根目录的 [README 中文版](../README.zh-CN.md)为权威参考；本文档仅说明操作流程和
 边界选择。
 
 ## 1. 操作层级
 
-ABM 的操作分为三个层级：
+BTAP 的操作分为三个层级：
 
 | 层级 | 操作对象 | 对可见界面的影响 |
 |---|---|---|
@@ -86,12 +86,12 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 物理输入的执行顺序如下：
 
 1. 仅在用户需要查看页面或桌面操作依赖可见状态时，显式激活目标标签页。
-2. ABM 验证目标窗口、标签页所有权和 `on_screen` 状态。
-3. ABM 获取跨进程输入锁并等待安静窗口；若检测到用户鼠标或键盘活动，本次操作取消。
+2. BTAP 验证目标窗口、标签页所有权和 `on_screen` 状态。
+3. BTAP 获取跨进程输入锁并等待安静窗口；若检测到用户鼠标或键盘活动，本次操作取消。
 4. 无法确认目标显示在屏幕上时，返回 `activation_failed`，且不发送输入。
 
 默认 `lab` profile 免 elicitation，以支持连续自动化。设置
-`AGENT_BROWSER_LAB_NO_ELICIT=0` 或 `false` 可恢复 lab 会话级询问；`safe` profile 对每次
+`BROWSERTAP_LAB_NO_ELICIT=0` 或 `false` 可恢复 lab 会话级询问；`safe` profile 对每次
 物理输入和站点 `allow` 操作进行询问。两种 profile 均保留输入锁、安静窗口、所有权检查、
 目标激活和屏幕确认。
 
@@ -103,7 +103,7 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
   `reset_site_permissions`。
 - Turnstile 等挑战无进展时返回 `challenge_stalled`。后续人工处理应继续使用同一个标签页，
   不应启动另一个浏览器会话。
-- ABM 不会自动降级到 Playwright、无头浏览器或其他浏览器 profile，以确保登录态和前台影响
+- BTAP 不会自动降级到 Playwright、无头浏览器或其他浏览器 profile，以确保登录态和前台影响
   边界保持一致。
 
 ## 7. 诊断与升级
@@ -111,21 +111,21 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 基础诊断命令：
 
 ```text
-agent-browser-mcp doctor
+browsertap doctor
 ```
 
 `get_setup_status` 用于核对 package、bridge、extension 和 protocol 版本。Bridge 是独立后台
 进程：允许自动拉起时，未监听的 bridge 会自动启动；仍占用端口的旧 bridge 必须执行
-`agent-browser-mcp bridge --restart`，该操作不会改变浏览器前台状态。未打包扩展的源文件发生
+`browsertap bridge --restart`，该操作不会改变浏览器前台状态。未打包扩展的源文件发生
 变化后，仍需在 `chrome://extensions` 或 Edge、Opera 对应页面中手动执行 **Reload**。工具
 schema 变化后，需重启 MCP 会话或客户端以重新读取工具描述。
 
-若将 `AGENT_BROWSER_TMWD_PORT` 从 `18765` 改为其他值，还需在扩展的 Service Worker 控制台
+若将 `BROWSERTAP_BRIDGE_PORT` 从 `18765` 改为其他值，还需在扩展的 Service Worker 控制台
 告知一次相同的 WebSocket 端口（见[故障排查](TROUBLESHOOTING.zh-CN.md)）。Python 环境变量
 无法直接修改已安装扩展的 storage；两端端口不一致时不会建立连接。
 
 完整恢复流程见[故障排查](TROUBLESHOOTING.zh-CN.md)。`/link` HTTP 通道使用
-`~/.agent-browser-mcp/bridge-token`。该 token、浏览器 profile、Cookies、含个人信息的截图和
+`~/.browsertap/bridge-token`。该 token、浏览器 profile、Cookies、含个人信息的截图和
 本地日志均不得提交到 Git。
 
 ## 8. 提示词示例
@@ -149,6 +149,6 @@ schema 变化后，需重启 MCP 会话或客户端以重新读取工具描述�
 
 ## 9. 安全边界
 
-ABM 控制用户授权给 MCP 客户端的真实浏览器 profile。页面内容属于不可信输入，可能包含
-prompt injection。ABM 本身不是安全隔离边界，应仅连接适合由该 MCP 客户端访问的账号和会话。
+BTAP 控制用户授权给 MCP 客户端的真实浏览器 profile。页面内容属于不可信输入，可能包含
+prompt injection。BTAP 本身不是安全隔离边界，应仅连接适合由该 MCP 客户端访问的账号和会话。
 威胁模型及漏洞报告方式见 [SECURITY.md](../SECURITY.md)。

@@ -15,7 +15,7 @@ js_optHTML = r'''function optHTML(text_only=false) {
 function createEnhancedDOMCopy() {  
   const nodeInfo = new WeakMap();  
   const ignoreTags = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK', 'COLGROUP', 'COL', 'TEMPLATE', 'PARAM', 'SOURCE'];  
-  const ignoreIds = ['abm-indicator'];
+  const ignoreIds = ['btap-indicator'];
   function cloneNode(sourceNode, keep=false) {  
     if (!sourceNode) return null;
     if (sourceNode.nodeType === 8 ||   
@@ -75,7 +75,7 @@ function createEnhancedDOMCopy() {
     // the page. Still excluded (keeps the payload small), but now counted so
     // the caller can say "scroll and re-scan".
     const inRange = Math.abs(rect.left) < 5000 && Math.abs(rect.top) < 5000;
-    if (renders && !inRange) window.__abm_offscreen = (window.__abm_offscreen || 0) + 1;
+    if (renders && !inRange) window.__btap_offscreen = (window.__btap_offscreen || 0) + 1;
     const isVisible = (renders && inRange) || isSmallDropdown;
     const zIndex = style.position !== 'static' ? (parseInt(style.zIndex) || 0) : 0;
   
@@ -139,13 +139,13 @@ function createEnhancedDOMCopy() {
     }  
   };  
 }  
-window.__abm_offscreen = 0;
+window.__btap_offscreen = 0;
 const { domCopy, getNodeInfo, isVisible } = createEnhancedDOMCopy();
 if (!domCopy) {
   if (text_only) return '';
   const emptyRoot = document.createElement('body');
-  emptyRoot.setAttribute('data-abm-state', 'empty-document');
-  emptyRoot.insertAdjacentHTML('afterbegin', '<!--abm-base:' + location.href + '-->');
+  emptyRoot.setAttribute('data-btap-state', 'empty-document');
+  emptyRoot.insertAdjacentHTML('afterbegin', '<!--btap-base:' + location.href + '-->');
   return emptyRoot.outerHTML;
 }
 if (text_only) {
@@ -347,14 +347,14 @@ root.querySelectorAll('iframe').forEach(f => {
 // Emit the page URL so relative hrefs can be resolved to absolute ones when
 // they get turned into refs. Comments survive outerHTML and are stripped again
 // before the HTML reaches the caller.
-root.insertAdjacentHTML('afterbegin', '<!--abm-base:' + location.href + '-->');
+root.insertAdjacentHTML('afterbegin', '<!--btap-base:' + location.href + '-->');
 // Tell the caller what the ±5000px viewport clamp dropped, plus where we are
 // in the document, so "nothing found" can be told apart from "not scrolled to
 // it yet". A comment survives outerHTML and costs nothing to parse.
-if (window.__abm_offscreen > 0) {
+if (window.__btap_offscreen > 0) {
   const de = document.documentElement;
   root.insertAdjacentHTML('afterbegin',
-    '<!--abm-offscreen:' + window.__abm_offscreen +
+    '<!--btap-offscreen:' + window.__btap_offscreen +
     ' scrollY:' + Math.round(window.scrollY) +
     ' viewH:' + window.innerHeight +
     ' docH:' + Math.max(de.scrollHeight, document.body.scrollHeight) + '-->');
@@ -830,7 +830,7 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
     if text_only: return page
     base_url = None
     if isinstance(page, str):
-        m = re.search(r'<!--abm-base:(.*?)-->', page)
+        m = re.search(r'<!--btap-base:(.*?)-->', page)
         if m:
             base_url = m.group(1)
             # Consumed here; the caller already knows the URL from list_tabs, so
@@ -1141,7 +1141,7 @@ def execute_js_rich(
         result = response['data'] if 'data' in response else None
         blocked_dialog = bool(
             isinstance(result, dict)
-            and result.get('__abm_dialog_result') is True
+            and result.get('__btap_dialog_result') is True
             and result.get('status') == 'blocked_by_dialog'
         )
         if response.get('closed', 0) == 1:
@@ -1209,12 +1209,12 @@ def execute_js_rich(
         # Report whether the in-deadline retry actually ran instead of asking the
         # caller to trust prose about it. False means the budget was too small to
         # reserve a retry window, so a caller-side retry is the only one there is.
-        rr['abm_retried'] = retried
+        rr['btap_retried'] = retried
         if kind == 'undelivered':
             rr['suggestion'] = (
-                ("ABM already retried once inside the original deadline and it was still "
+                ("BTAP already retried once inside the original deadline and it was still "
                  "not delivered. " if retried else
-                 "The deadline was too short for ABM to retry inside it. ")
+                 "The deadline was too short for BTAP to retry inside it. ")
                 + "Confirm the target with list_tabs, then retry with a longer timeout."
             )
         else:

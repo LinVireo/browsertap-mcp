@@ -4,7 +4,7 @@ Long hrefs used to become a bare '__link__', so on a search results page the
 agent could read 30 titles and reach none of them. They now become short '#rN'
 refs with the real (absolute) URL handed back out of band.
 """
-from agent_browser_mcp.simphtml import optimize_html_for_tokens
+from browsertap_mcp.simphtml import optimize_html_for_tokens
 
 LONG = "https://linux.do/t/some-long-topic-slug-here/2725484"
 SHORT = "/short"

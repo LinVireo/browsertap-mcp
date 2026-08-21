@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nsmall-test-image"
 PNG_BASE64 = base64.b64encode(PNG_BYTES).decode("ascii")
@@ -192,11 +192,11 @@ def test_desktop_screenshot_captures_virtual_desktop_and_explains_pixels(monkeyp
 
 def test_optional_desktop_dependency_errors_are_actionable(monkeypatch):
     monkeypatch.setitem(sys.modules, "mss", None)
-    with pytest.raises(RuntimeError, match=r"agent-browser-mcp\[desktop\]"):
+    with pytest.raises(RuntimeError, match=r"browsertap-mcp\[desktop\]"):
         S.capture_desktop_screenshot()
 
     monkeypatch.setitem(sys.modules, "pyautogui", None)
-    with pytest.raises(RuntimeError, match=r"agent-browser-mcp\[desktop\]"):
+    with pytest.raises(RuntimeError, match=r"browsertap-mcp\[desktop\]"):
         S._pyautogui()
 
 

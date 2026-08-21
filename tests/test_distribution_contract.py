@@ -38,11 +38,11 @@ def _core_metadata(version: str, *, drop: str = "", replace: tuple[str, str] | N
     """
     lines = [
         "Metadata-Version: 2.4",
-        "Name: agent-browser-mcp",
+        "Name: browsertap-mcp",
         f"Version: {version}",
         "Summary: Real-browser MCP server",
         "License-Expression: MIT",
-        "Project-URL: Homepage, https://github.com/LinVireo/agent-browser-mcp",
+        "Project-URL: Homepage, https://github.com/LinVireo/browsertap-mcp",
         "Classifier: Development Status :: 4 - Beta",
         "Classifier: Intended Audience :: Developers",
         "Classifier: Programming Language :: Python :: 3.10",
@@ -60,7 +60,7 @@ def _core_metadata(version: str, *, drop: str = "", replace: tuple[str, str] | N
 
 
 def _write_sdist(path: Path, *names: str, version: str = "0.3.4", metadata: str | None = None) -> None:
-    prefix = f"agent_browser_mcp-{version}"
+    prefix = f"browsertap_mcp-{version}"
     members = list(names)
     pkg_info = f"{prefix}/PKG-INFO"
     text = metadata if metadata is not None else _core_metadata(version)
@@ -74,7 +74,7 @@ def _write_sdist(path: Path, *names: str, version: str = "0.3.4", metadata: str 
 
 
 def _write_wheel(path: Path, names, *, version: str = "0.3.4", metadata: str | None = None) -> None:
-    metadata_name = f"agent_browser_mcp-{version}.dist-info/METADATA"
+    metadata_name = f"browsertap_mcp-{version}.dist-info/METADATA"
     with zipfile.ZipFile(path, "w") as archive:
         for name in names:
             archive.writestr(name, "")
@@ -88,17 +88,17 @@ def _wheel_names() -> list[str]:
 
 
 def _sdist_names() -> list[str]:
-    prefix = "agent_browser_mcp-0.3.4"
+    prefix = "browsertap_mcp-0.3.4"
     return [f"{prefix}{suffix}" for suffix in REQUIRED_SDIST_SUFFIXES]
 
 
 def test_distribution_contract_accepts_clean_wheel_and_sdist(tmp_path):
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
-    _write_wheel(wheel, ["agent_browser_mcp/server.py", *_wheel_names()])
-    sdist = tmp_path / "agent_browser_mcp-0.3.4.tar.gz"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, ["browsertap_mcp/server.py", *_wheel_names()])
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
     _write_sdist(
         sdist,
-        "agent_browser_mcp-0.3.4/src/agent_browser_mcp/server.py",
+        "browsertap_mcp-0.3.4/src/browsertap_mcp/server.py",
         *_sdist_names(),
     )
 
@@ -109,24 +109,24 @@ def test_distribution_contract_accepts_clean_wheel_and_sdist(tmp_path):
 
 
 def test_distribution_contract_rejects_generated_extension_config(tmp_path):
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
     _write_wheel(
         wheel,
-        ["agent_browser_mcp/chrome_extension/config.js", *_wheel_names()],
+        ["browsertap_mcp/chrome_extension/config.js", *_wheel_names()],
     )
 
     issues = validate_archive(wheel)
 
-    assert issues == ["agent_browser_mcp/chrome_extension/config.js: generated extension config"]
+    assert issues == ["browsertap_mcp/chrome_extension/config.js: generated extension config"]
 
 
 def test_distribution_contract_requires_test_and_release_sources_in_sdist(tmp_path):
-    sdist = tmp_path / "agent_browser_mcp-0.3.4.tar.gz"
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
     names = _sdist_names()
-    names.remove("agent_browser_mcp-0.3.4/tests/conftest.py")
+    names.remove("browsertap_mcp-0.3.4/tests/conftest.py")
     _write_sdist(
         sdist,
-        "agent_browser_mcp-0.3.4/src/agent_browser_mcp/server.py",
+        "browsertap_mcp-0.3.4/src/browsertap_mcp/server.py",
         *names,
     )
 
@@ -134,27 +134,26 @@ def test_distribution_contract_requires_test_and_release_sources_in_sdist(tmp_pa
 
 
 def test_distribution_contract_requires_extension_runtime_in_wheel(tmp_path):
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
     names = _wheel_names()
-    names.remove("agent_browser_mcp/chrome_extension/content.js")
+    names.remove("browsertap_mcp/chrome_extension/content.js")
     _write_wheel(wheel, names)
 
     assert validate_archive(wheel) == [
-        "missing required wheel file: agent_browser_mcp/chrome_extension/content.js"
+        "missing required wheel file: browsertap_mcp/chrome_extension/content.js"
     ]
 
 
 @pytest.mark.parametrize(
     "missing_suffix",
     (
-        "/agent_browser_mcp/browser_bridge.py",
-        "/agent_browser_mcp/tmwebdriver.py",
+        "/browsertap_mcp/browser_bridge.py",
     ),
 )
 def test_distribution_contract_requires_bridge_modules_in_wheel(
     tmp_path, missing_suffix
 ):
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
     names = _wheel_names()
     names.remove(missing_suffix.lstrip("/"))
     _write_wheel(wheel, names)
@@ -167,14 +166,13 @@ def test_distribution_contract_requires_bridge_modules_in_wheel(
 @pytest.mark.parametrize(
     "missing_suffix",
     (
-        "/src/agent_browser_mcp/browser_bridge.py",
-        "/src/agent_browser_mcp/tmwebdriver.py",
+        "/src/browsertap_mcp/browser_bridge.py",
     ),
 )
 def test_distribution_contract_requires_bridge_modules_in_sdist(
     tmp_path, missing_suffix
 ):
-    prefix = "agent_browser_mcp-0.3.4"
+    prefix = "browsertap_mcp-0.3.4"
     sdist = tmp_path / f"{prefix}.tar.gz"
     names = _sdist_names()
     names.remove(f"{prefix}{missing_suffix}")
@@ -192,17 +190,17 @@ def test_distribution_contract_rejects_wheel_whose_metadata_version_is_stale(tmp
     check the filename would advertise the new version while every installer
     reported the old one.
     """
-    wheel = tmp_path / "agent_browser_mcp-0.3.12-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.12-py3-none-any.whl"
     _write_wheel(wheel, _wheel_names(), version="0.3.4")
 
     assert validate_archive(wheel) == [
-        "agent_browser_mcp-0.3.4.dist-info/METADATA: metadata version '0.3.4' "
+        "browsertap_mcp-0.3.4.dist-info/METADATA: metadata version '0.3.4' "
         "does not match filename version '0.3.12'"
     ]
 
 
 def test_distribution_contract_rejects_sdist_whose_metadata_version_is_stale(tmp_path):
-    sdist = tmp_path / "agent_browser_mcp-0.3.12.tar.gz"
+    sdist = tmp_path / "browsertap_mcp-0.3.12.tar.gz"
     _write_sdist(sdist, *_sdist_names(), version="0.3.4")
 
     issues = validate_archive(sdist)
@@ -211,7 +209,7 @@ def test_distribution_contract_rejects_sdist_whose_metadata_version_is_stale(tmp
 
 
 def test_distribution_contract_rejects_archive_without_core_metadata(tmp_path):
-    wheel = tmp_path / "agent_browser_mcp-0.3.12-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.12-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for name in _wheel_names():
             archive.writestr(name, "")
@@ -228,11 +226,11 @@ def test_distribution_contract_rejects_a_long_description_the_index_cannot_rende
     one wall of literal Markdown. A PyPI filename can never be reused, so
     noticing after the upload costs the version number.
     """
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
     _write_wheel(wheel, _wheel_names(), metadata=_core_metadata("0.3.4", drop="Description-"))
 
     assert validate_archive(wheel) == [
-        "agent_browser_mcp-0.3.4.dist-info/METADATA: description-content-type is '', "
+        "browsertap_mcp-0.3.4.dist-info/METADATA: description-content-type is '', "
         "so the index would render README.md as plain text"
     ]
 
@@ -259,7 +257,7 @@ def test_distribution_contract_requires_publishable_metadata(tmp_path, drop, exp
     offered to interpreters that cannot run it, and neither shows up in any test
     that merely installs the wheel.
     """
-    sdist = tmp_path / "agent_browser_mcp-0.3.4.tar.gz"
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
     _write_sdist(sdist, *_sdist_names(), metadata=_core_metadata("0.3.4", drop=drop))
 
     issues = validate_archive(sdist)
@@ -276,12 +274,12 @@ def test_distribution_contract_reads_headers_and_not_the_markdown_body(tmp_path)
     """
     metadata = (
         "Metadata-Version: 2.4\n"
-        "Name: agent-browser-mcp\n"
+        "Name: browsertap-mcp\n"
         "Version: 0.3.4\n"
         "Summary: one line\n"
         "  continued by folding\n"
         "License-Expression: MIT\n"
-        "Project-URL: Homepage, https://example.invalid/abm\n"
+        "Project-URL: Homepage, https://example.invalid/btap\n"
         "Classifier: Development Status :: 4 - Beta\n"
         "Classifier: Intended Audience :: Developers\n"
         "Classifier: Programming Language :: Python :: 3.10\n"
@@ -294,7 +292,7 @@ def test_distribution_contract_reads_headers_and_not_the_markdown_body(tmp_path)
         "Classifier: Development Status :: 1 - Planning\n"
         "Requires-Python: >=9.9\n"
     )
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
     _write_wheel(wheel, _wheel_names(), metadata=metadata)
 
     assert validate_archive(wheel) == []
@@ -304,7 +302,7 @@ def test_distribution_contract_reads_headers_and_not_the_markdown_body(tmp_path)
     _write_wheel(stripped, _wheel_names(), metadata=body_only)
 
     assert validate_archive(stripped) == [
-        "agent_browser_mcp-0.3.4.dist-info/METADATA: core metadata has no summary field"
+        "browsertap_mcp-0.3.4.dist-info/METADATA: core metadata has no summary field"
     ]
 
 
@@ -360,7 +358,7 @@ def test_build_and_runtime_dependencies_have_compatible_bounds():
         "pillow>=12.2.0",
     ]
     assert "chrome_extension/_locales/*/*.json" in project["tool"]["setuptools"]["package-data"][
-        "agent_browser_mcp"
+        "browsertap_mcp"
     ]
 
 
@@ -379,7 +377,7 @@ _OPTIONAL_IMPORTS = {"PIL": "pillow", "mss": "mss", "pyautogui": "pyautogui"}
 
 
 def _third_party_imports() -> set[str]:
-    root = Path(__file__).resolve().parents[1] / "src" / "agent_browser_mcp"
+    root = Path(__file__).resolve().parents[1] / "src" / "browsertap_mcp"
     modules: set[str] = set()
     for source in sorted(root.rglob("*.py")):
         tree = ast.parse(source.read_text(encoding="utf-8"), str(source))
@@ -391,7 +389,7 @@ def _third_party_imports() -> set[str]:
     return {
         module
         for module in modules
-        if module not in sys.stdlib_module_names and module != "agent_browser_mcp"
+        if module not in sys.stdlib_module_names and module != "browsertap_mcp"
     }
 
 
@@ -400,7 +398,7 @@ def test_every_module_the_package_imports_is_a_declared_dependency():
 
     `anyio` and `pydantic` reached the package only through `mcp`, which is free
     to drop or repin either one in any release; the install would then succeed
-    and `import agent_browser_mcp.server` would fail. This test fails on the next
+    and `import browsertap_mcp.server` would fail. This test fails on the next
     undeclared import instead of waiting for that.
     """
     root = Path(__file__).resolve().parents[1]
@@ -445,35 +443,35 @@ def test_every_module_the_package_imports_is_a_declared_dependency():
 def test_distribution_contract_ships_packaged_skills_but_rejects_stray_copies(tmp_path):
     """The skills ship *from one place only*.
 
-    `agent-browser-mcp skill-path` points a caller's skill manager at
-    `agent_browser_mcp/skills/`, so that copy is required. A second copy
+    `browsertap skill-path` points a caller's skill manager at
+    `browsertap_mcp/skills/`, so that copy is required. A second copy
     somewhere else in the archive is a caller's own installed mirror or a
     leftover, and it drifts from the shipped one without anything failing.
     """
-    sdist = tmp_path / "agent_browser_mcp-0.3.4.tar.gz"
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
     _write_sdist(
         sdist,
         *_sdist_names(),
-        "agent_browser_mcp-0.3.4/docs/browser-mcp-default.SKILL.md",
-        "agent_browser_mcp-0.3.4/SKILL.md",
+        "browsertap_mcp-0.3.4/docs/browsertap-default.SKILL.md",
+        "browsertap_mcp-0.3.4/SKILL.md",
     )
 
     assert validate_archive(sdist) == [
-        "agent_browser_mcp-0.3.4/docs/browser-mcp-default.SKILL.md: "
+        "browsertap_mcp-0.3.4/docs/browsertap-default.SKILL.md: "
         "agent skill outside the packaged skills directory",
-        "agent_browser_mcp-0.3.4/SKILL.md: "
+        "browsertap_mcp-0.3.4/SKILL.md: "
         "agent skill outside the packaged skills directory",
     ]
 
 
 def test_distribution_contract_requires_every_packaged_skill_in_the_wheel(tmp_path):
-    wheel = tmp_path / "agent_browser_mcp-0.3.4-py3-none-any.whl"
-    dropped = "agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md"
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    dropped = "browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md"
     assert dropped in _wheel_names(), "the recovery skill is no longer a required wheel member"
     _write_wheel(
         wheel,
         [
-            "agent_browser_mcp/server.py",
+            "browsertap_mcp/server.py",
             *(name for name in _wheel_names() if name != dropped),
         ],
     )
@@ -491,7 +489,7 @@ def test_manifest_ships_the_packaged_agent_skills():
     # A bare root-level `SKILL.md` is still refused: that one is a caller's own
     # copy dropped in the checkout, not part of the release.
     assert "exclude SKILL.md" in manifest
-    assert "recursive-include src/agent_browser_mcp/skills SKILL.md" in manifest
+    assert "recursive-include src/browsertap_mcp/skills SKILL.md" in manifest
     # sdist and wheel take different routes into the archive, so shipping needs
     # both the MANIFEST rule above and the package-data glob below. Getting only
     # one produces a source archive that carries the skills and a wheel that
@@ -501,18 +499,18 @@ def test_manifest_ships_the_packaged_agent_skills():
     # through those two rules without editing this test.
     shipped_skills = sorted(
         path.parent.name
-        for path in (root / "src" / "agent_browser_mcp" / "skills").glob("*/SKILL.md")
+        for path in (root / "src" / "browsertap_mcp" / "skills").glob("*/SKILL.md")
     )
-    assert shipped_skills, "expected at least one agent skill under src/agent_browser_mcp/skills/"
+    assert shipped_skills, "expected at least one agent skill under src/browsertap_mcp/skills/"
     assert "include CONTRIBUTING.zh-CN.md" in manifest
 
 
 def test_repository_hygiene_rules_do_not_hide_python_sources_or_mutate_import_paths():
     root = Path(__file__).resolve().parents[1]
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
-    server = (root / "src" / "agent_browser_mcp" / "server.py").read_text(encoding="utf-8")
+    server = (root / "src" / "browsertap_mcp" / "server.py").read_text(encoding="utf-8")
     content = (
-        root / "src" / "agent_browser_mcp" / "chrome_extension" / "content.js"
+        root / "src" / "browsertap_mcp" / "chrome_extension" / "content.js"
     ).read_text(encoding="utf-8")
 
     # Rules only, never the prose. `_*.py` used to be an actual rule here and it
@@ -586,7 +584,7 @@ def test_extension_locales_define_every_key_the_extension_asks_for():
     instead of failing. The manifest is worse: Chrome refuses to load the
     extension when a `__MSG_*` name cannot be resolved in `default_locale`.
     """
-    extension = Path(__file__).resolve().parents[1] / "src" / "agent_browser_mcp"
+    extension = Path(__file__).resolve().parents[1] / "src" / "browsertap_mcp"
     extension = extension / "chrome_extension"
     locales = {
         path.parent.name: json.loads(path.read_text(encoding="utf-8"))
@@ -623,8 +621,8 @@ def test_extension_locales_define_every_key_the_extension_asks_for():
 def test_live_runner_is_scoped_to_canonical_repository_and_environment():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "live.yml").read_text(encoding="utf-8")
-    assert "if: github.repository == 'LinVireo/agent-browser-mcp'" in workflow
-    assert "environment: abm-live" in workflow
+    assert "if: github.repository == 'LinVireo/browsertap-mcp'" in workflow
+    assert "environment: btap-live" in workflow
     assert "sys.path.insert" not in workflow
 
 
@@ -643,7 +641,7 @@ def test_publish_workflow_cannot_fire_by_accident_and_stores_no_upload_token():
     assert "\n  push:" not in triggers
     assert "pull_request:" not in triggers
 
-    assert "if: github.repository == 'LinVireo/agent-browser-mcp'" in workflow
+    assert "if: github.repository == 'LinVireo/browsertap-mcp'" in workflow
     assert "needs: build" in workflow
     assert "environment: ${{" in workflow
     assert "id-token: write" in workflow

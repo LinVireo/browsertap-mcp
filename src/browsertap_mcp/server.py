@@ -69,19 +69,19 @@ logger = logging.getLogger(__name__)
 
 
 def configure_stdio_logging() -> None:
-    """Route ABM runtime diagnostics away from the MCP stdout transport."""
-    package_logger = logging.getLogger("agent_browser_mcp")
-    if any(getattr(handler, "_abm_stdio_handler", False) for handler in package_logger.handlers):
+    """Route BTAP runtime diagnostics away from the MCP stdout transport."""
+    package_logger = logging.getLogger("browsertap_mcp")
+    if any(getattr(handler, "_btap_stdio_handler", False) for handler in package_logger.handlers):
         return
     handler = logging.StreamHandler(sys.stderr)
-    handler._abm_stdio_handler = True  # type: ignore[attr-defined]
+    handler._btap_stdio_handler = True  # type: ignore[attr-defined]
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     package_logger.addHandler(handler)
     package_logger.setLevel(logging.WARNING)
     package_logger.propagate = False
 
 mcp = FastMCP(
-    name="agent-browser",
+    name="browsertap",
     instructions=(
         "Browser automation tools for the user's real Chrome/Edge session via BrowserBridge/CDP. "
         "Supports page scanning, JS execution, CDP commands, screenshots, cookies, and desktop physical input. "
@@ -99,8 +99,8 @@ mcp = FastMCP(
 )
 
 _driver: Optional[BrowserBridge] = None
-_DRIVER_PORT = int(os.environ.get("AGENT_BROWSER_TMWD_PORT", "18765"))
-_DRIVER_HOST = os.environ.get("AGENT_BROWSER_TMWD_HOST", "127.0.0.1")
+_DRIVER_PORT = int(os.environ.get("BROWSERTAP_BRIDGE_PORT", "18765"))
+_DRIVER_HOST = os.environ.get("BROWSERTAP_BRIDGE_HOST", "127.0.0.1")
 
 # The local operator profile intentionally defaults to lab. Safe remains an
 # explicit, process-wide override for sessions where every foreground action
@@ -131,7 +131,7 @@ class _TabOwnershipRegistry:
 
     @staticmethod
     def _new_owner_id() -> str:
-        return f"abm_owner_{secrets.token_urlsafe(18)}"
+        return f"btap_owner_{secrets.token_urlsafe(18)}"
 
     def register(
         self,
@@ -215,13 +215,13 @@ def _env_enabled(name: str, *, default: bool = False) -> bool:
 
 
 def _automation_mode() -> str:
-    mode = (_AUTOMATION_MODE_OVERRIDE or os.environ.get("AGENT_BROWSER_MODE", "lab"))
+    mode = (_AUTOMATION_MODE_OVERRIDE or os.environ.get("BROWSERTAP_MODE", "lab"))
     mode = str(mode).strip().lower()
     return mode if mode in _AUTOMATION_MODES else "lab"
 
 
 def _auto_beforeunload_hosts() -> list[str]:
-    raw = os.environ.get("AGENT_BROWSER_AUTO_BEFOREUNLOAD_HOSTS")
+    raw = os.environ.get("BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS")
     values = raw.split(",") if raw is not None else _DEFAULT_AUTO_BEFOREUNLOAD_HOSTS
     return [str(value).strip().lower() for value in values if str(value).strip()]
 
@@ -229,7 +229,7 @@ def _auto_beforeunload_hosts() -> list[str]:
 def _automation_profile() -> dict[str, Any]:
     mode = _automation_mode()
     no_elicit = mode == "lab" and _env_enabled(
-        "AGENT_BROWSER_LAB_NO_ELICIT", default=True
+        "BROWSERTAP_LAB_NO_ELICIT", default=True
     )
     return {
         "mode": mode,
@@ -543,7 +543,7 @@ def _spawn_bridge_daemon_locked() -> bool:
         exe,
         "-u",
         "-m",
-        "agent_browser_mcp.bridge",
+        "browsertap_mcp.bridge",
         f"--instance-id={instance_id}",
     ]
     kwargs: dict[str, Any] = {
@@ -581,7 +581,7 @@ def get_driver() -> BrowserBridge:
         if _driver is not None:
             return _driver
         if (
-            os.environ.get("AGENT_BROWSER_NO_SPAWN") != "1"
+            os.environ.get("BROWSERTAP_NO_SPAWN") != "1"
             and not _port_open(_DRIVER_HOST, _DRIVER_PORT + 1)
         ):
             spawn_bridge_daemon()
@@ -599,7 +599,7 @@ def require_driver() -> BrowserBridge:
     # resurrect it.
     if (
         driver.is_remote
-        and os.environ.get("AGENT_BROWSER_NO_SPAWN") != "1"
+        and os.environ.get("BROWSERTAP_NO_SPAWN") != "1"
         and not _port_open(_DRIVER_HOST, _DRIVER_PORT + 1)
     ):
         spawn_bridge_daemon()
@@ -727,8 +727,8 @@ def switch_session(
         return str(driver.default_session_id)
     sessions = ensure_sessions()
     # With several browsers connected, a blind default should land on the
-    # user-preferred one (AGENT_BROWSER_PREFERRED_BROWSER=chrome|edge|opera).
-    pref = os.environ.get("AGENT_BROWSER_PREFERRED_BROWSER", "").strip().lower()
+    # user-preferred one (BROWSERTAP_PREFERRED_BROWSER=chrome|edge|opera).
+    pref = os.environ.get("BROWSERTAP_PREFERRED_BROWSER", "").strip().lower()
     if pref:
         preferred = [s for s in sessions if str(s.get("browser", "")).lower() == pref]
         if preferred:
@@ -850,7 +850,7 @@ def _component_is_newer(component: Any) -> bool:
 @mcp.tool(
     description=(
         "Return the active safe/lab automation profile. Lab is the default and skips elicitation "
-        "unless AGENT_BROWSER_LAB_NO_ELICIT is explicitly disabled; safe requires approval for "
+        "unless BROWSERTAP_LAB_NO_ELICIT is explicitly disabled; safe requires approval for "
         "every physical action and permission allow."
     )
 )
@@ -861,7 +861,7 @@ def get_automation_profile() -> dict[str, Any]:
 @mcp.tool(
     description=(
         "Set the safe or lab automation profile for this MCP process. This does not persist or "
-        "reload the extension; AGENT_BROWSER_MODE controls the next process."
+        "reload the extension; BROWSERTAP_MODE controls the next process."
     )
 )
 def set_automation_profile(mode: str) -> dict[str, Any]:
@@ -972,11 +972,11 @@ def get_setup_status() -> dict[str, Any]:
         "restart_bridge_required": restart_bridge_required,
         "reload_extension_required": reload_extension_required,
         "restart_mcp_session_required": package_is_stale,
-        "extension_name": "Agent Browser MCP Bridge",
+        "extension_name": "BrowserTap Bridge",
         "extension_path": str(chrome_extension_dir()),
-        "tmwebdriver_host": _DRIVER_HOST,
-        "tmwebdriver_ws_port": _DRIVER_PORT,
-        "tmwebdriver_http_port": _DRIVER_PORT + 1,
+        "bridge_host": _DRIVER_HOST,
+        "bridge_ws_port": _DRIVER_PORT,
+        "bridge_http_port": _DRIVER_PORT + 1,
         "remote_mode": driver.is_remote,
         "connected_tabs": len(sessions),
         "default_session_id": driver.default_session_id,
@@ -1279,7 +1279,7 @@ def open_url(
         if target_session is None:
             candidates = sessions
             preferred_browser = os.environ.get(
-                "AGENT_BROWSER_PREFERRED_BROWSER", ""
+                "BROWSERTAP_PREFERRED_BROWSER", ""
             ).strip().lower()
             if preferred_browser:
                 preferred = [
@@ -1567,7 +1567,7 @@ def _direct_cdp(
     if result.get("ok") is False:
         code = result.get("code") or "cdp_error"
         hint = result.get("hint") or (
-            "A cdp_timeout forces ABM to detach; retry once after list_tabs. "
+            "A cdp_timeout forces BTAP to detach; retry once after list_tabs. "
             "A debugger_conflict requires closing DevTools or the competing debugger."
         )
         raise RuntimeError(f"{code}: {result.get('error') or 'CDP command failed'}. {hint}")
@@ -2466,7 +2466,7 @@ def download_file(
 @mcp.tool(
     description=(
         "Uninstall another installed extension by id. show_confirm_dialog defaults to true; "
-        "set it false only for an explicitly selected disposable/test extension. The ABM bridge "
+        "set it false only for an explicitly selected disposable/test extension. The BTAP bridge "
         "cannot uninstall itself through its active connection."
     )
 )
@@ -2573,8 +2573,8 @@ def remove_bookmark(
 
 @mcp.tool(
     description=(
-        "Send a JSON message from the ABM extension service worker to another installed "
-        "extension. The target must be enabled and list this ABM extension in "
+        "Send a JSON message from the BTAP extension service worker to another installed "
+        "extension. The target must be enabled and list this BTAP extension in "
         "externally_connectable. Works with no tabs open."
     )
 )
@@ -2891,7 +2891,7 @@ def scan_page(
 
 
 _OFFSCREEN_RE = re.compile(
-    r"<!--abm-offscreen:(\d+) scrollY:(-?\d+) viewH:(\d+) docH:(\d+)-->")
+    r"<!--btap-offscreen:(\d+) scrollY:(-?\d+) viewH:(\d+) docH:(\d+)-->")
 
 
 def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
@@ -3227,11 +3227,11 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
       const deadline = Date.now() + {deadline_ms};
       const scoped = policy === 'accept' || policy === 'dismiss';
       if (scoped) {{
-        const scopes = Array.isArray(window.__abm_dialog_scopes)
-          ? window.__abm_dialog_scopes : [];
+        const scopes = Array.isArray(window.__btap_dialog_scopes)
+          ? window.__btap_dialog_scopes : [];
         scopes.push({{token, policy, deadline}});
-        window.__abm_dialog_scopes = scopes;
-        window.__abm_suppress_until = Math.max(
+        window.__btap_dialog_scopes = scopes;
+        window.__btap_suppress_until = Math.max(
           deadline, ...scopes.map(scope => Number(scope.deadline) || 0));
       }}
       try {{
@@ -3259,10 +3259,10 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
         return {{ok: false, error: {{name: error.name || 'Error',
           message: error.message || String(error), stack: error.stack || ''}}}};
       }} finally {{
-        if (scoped && Array.isArray(window.__abm_dialog_scopes)) {{
-          window.__abm_dialog_scopes = window.__abm_dialog_scopes
+        if (scoped && Array.isArray(window.__btap_dialog_scopes)) {{
+          window.__btap_dialog_scopes = window.__btap_dialog_scopes
             .filter(scope => scope.token !== token && Date.now() < scope.deadline);
-          window.__abm_suppress_until = window.__abm_dialog_scopes.reduce(
+          window.__btap_suppress_until = window.__btap_dialog_scopes.reduce(
             (latest, scope) => Math.max(latest, Number(scope.deadline) || 0), 0);
         }}
       }}
@@ -3329,7 +3329,7 @@ def _execute_js_cdp_fallback(
     }
 
 
-@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. ABM pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting. Use wait_for/wait_for_url instead of setTimeout or sleep Promises; ABM retries only proven-undelivered work, never an acknowledged script whose side effects may already have run.")
+@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. BTAP pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting. Use wait_for/wait_for_url instead of setTimeout or sleep Promises; BTAP retries only proven-undelivered work, never an acknowledged script whose side effects may already have run.")
 def execute_js(
     script: str,
     session_id: Optional[str] = None,
@@ -3377,7 +3377,7 @@ def execute_js(
         else:
             candidates = sessions
             preferred_browser = os.environ.get(
-                "AGENT_BROWSER_PREFERRED_BROWSER", ""
+                "BROWSERTAP_PREFERRED_BROWSER", ""
             ).strip().lower()
             if preferred_browser:
                 preferred = [
@@ -3458,7 +3458,7 @@ def execute_js(
         scoped_script = (
             script
             if policy == "manual" else
-            f"/*__abm_dialog_scope:{scope_token}*/\n{script}"
+            f"/*__btap_dialog_scope:{scope_token}*/\n{script}"
             if scope_token is not None else script
         )
         result = simphtml.execute_js_rich(
@@ -3471,7 +3471,7 @@ def execute_js(
             deadline=deadline,
         )
         wrapped = result.get("js_return")
-        if isinstance(wrapped, dict) and wrapped.get("__abm_dialog_result") is True:
+        if isinstance(wrapped, dict) and wrapped.get("__btap_dialog_result") is True:
             result = dict(result)
             result["js_return"] = wrapped.get("value")
             wrapped_status = wrapped.get("status")
@@ -4186,7 +4186,7 @@ def page_type(
             else:
                 candidates = sessions
                 preferred_browser = os.environ.get(
-                    "AGENT_BROWSER_PREFERRED_BROWSER", ""
+                    "BROWSERTAP_PREFERRED_BROWSER", ""
                 ).strip().lower()
                 if preferred_browser:
                     preferred = [
@@ -4503,11 +4503,11 @@ class SitePermissionApproval(BaseModel):
 
 # An elicitation is answered by a human, and the global tool lock is held for the
 # whole await (see _threaded_tool), so a prompt nobody answers does not just
-# stall its own tool — it wedges every other ABM tool in this process until the
+# stall its own tool — it wedges every other BTAP tool in this process until the
 # client cancels the request. Bound the wait: an unanswered approval is exactly
 # the "declined, cancelled, or unavailable" case both callers already report as
 # requires_user_action.
-_APPROVAL_TIMEOUT_ENV = "AGENT_BROWSER_APPROVAL_TIMEOUT"
+_APPROVAL_TIMEOUT_ENV = "BROWSERTAP_APPROVAL_TIMEOUT"
 _DEFAULT_APPROVAL_TIMEOUT = 120.0
 
 
@@ -4536,7 +4536,7 @@ async def _request_site_permission_approval(
     try:
         with anyio.fail_after(_approval_timeout()):
             result = await ctx.elicit(
-                message=("ABM requests temporary site permission: "
+                message=("BTAP requests temporary site permission: "
                          f"allow {permission} for {origin} for {duration_seconds} seconds"),
                 schema=SitePermissionApproval,
             )
@@ -4584,7 +4584,7 @@ def _site_permission_extension_result(response: Any) -> dict[str, Any]:
         "Temporarily set an origin-scoped browser site permission for 60-600 seconds. "
         "Only http/https origins and notifications, geolocation/location, camera, microphone, or clipboard are supported. "
         "safe asks on every allow; lab skips prompts by default and restores session approval only "
-        "when AGENT_BROWSER_LAB_NO_ELICIT is explicitly disabled. All leases restore their prior setting."
+        "when BROWSERTAP_LAB_NO_ELICIT is explicitly disabled. All leases restore their prior setting."
     )
 )
 async def set_site_permission(
@@ -5231,7 +5231,7 @@ def _pyautogui():
     except ImportError as exc:
         raise RuntimeError(
             "Physical input requires the optional desktop dependencies. "
-            "Install `agent-browser-mcp[desktop]`."
+            "Install `browsertap-mcp[desktop]`."
         ) from exc
     except Exception as exc:
         # pyautogui binds to a display while importing, so a headless or
@@ -5258,7 +5258,7 @@ def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False)
     except ImportError as exc:
         raise RuntimeError(
             "Desktop capture requires the optional desktop dependencies. "
-            "Install `agent-browser-mcp[desktop]`."
+            "Install `browsertap-mcp[desktop]`."
         ) from exc
     except Exception as exc:
         raise RuntimeError(
@@ -5340,7 +5340,7 @@ async def _request_physical_approval(ctx: Context, summary: str) -> bool:
     try:
         with anyio.fail_after(_approval_timeout()):
             result = await ctx.elicit(
-                message=f"ABM requests one physical input action: {summary}",
+                message=f"BTAP requests one physical input action: {summary}",
                 schema=PhysicalInputApproval,
             )
         approved = (
@@ -5430,7 +5430,7 @@ async def _run_approved_physical_action(
 
 _PHYSICAL_INPUT_NOTICE = (
     " Safe mode requires one-action approval; lab skips prompting by default and uses session "
-    "approval only when AGENT_BROWSER_LAB_NO_ELICIT is explicitly disabled. By default ABM "
+    "approval only when BROWSERTAP_LAB_NO_ELICIT is explicitly disabled. By default BTAP "
     "foregrounds and verifies the selected browser tab after the quiet-input check; prefer an "
     "explicit session_id for browser input. activate_session='none' is only for intentional "
     "input to the already-visible desktop or native UI."

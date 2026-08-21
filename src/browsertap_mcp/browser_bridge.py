@@ -105,10 +105,10 @@ def _error_payload(exc: Exception, *, prefix: str = "") -> dict[str, str]:
 # --- /link 鉴权 --------------------------------------------------------------
 # WS 口靠 origin 前缀挡住网页（扩展读不到磁盘上的密钥，只能这么做）；但 /link 是
 # 命令通道，本机任意进程都能 POST 一条 execute_js 在用户登录态的 Chrome 里跑任意
-# JS。ABM 默认用用户目录中的持久 token 鉴权；旧环境变量只用于一次迁移。
-TOKEN_ENV = 'AGENT_BROWSER_BRIDGE_TOKEN'
-TOKEN_FILE_ENV = 'AGENT_BROWSER_BRIDGE_TOKEN_FILE'
-TOKEN_AUTH_ENV = 'AGENT_BROWSER_BRIDGE_AUTH'
+# JS。BTAP 默认用用户目录中的持久 token 鉴权；旧环境变量只用于一次迁移。
+TOKEN_ENV = 'BROWSERTAP_BRIDGE_TOKEN'
+TOKEN_FILE_ENV = 'BROWSERTAP_BRIDGE_TOKEN_FILE'
+TOKEN_AUTH_ENV = 'BROWSERTAP_BRIDGE_AUTH'
 
 # Extra socket budget a remote (is_remote=True) client grants itself on top of
 # the command timeout it hands the daemon. Without it the HTTP read deadline and
@@ -124,7 +124,7 @@ REMOTE_TRANSPORT_MARGIN = 2.0
 
 
 def bridge_token_path() -> Path:
-    """Return the one persistent token location shared by all ABM processes."""
+    """Return the one persistent token location shared by all BTAP processes."""
     configured = (os.environ.get(TOKEN_FILE_ENV) or '').strip()
     return Path(configured).expanduser() if configured else state_dir() / 'bridge-token'
 
@@ -160,17 +160,17 @@ def _persist_token(path: Path, token: str) -> str:
             if stored:
                 return stored
             time.sleep(0.01)
-        raise RuntimeError(f'ABM bridge token file is empty: {path}')
+        raise RuntimeError(f'BTAP bridge token file is empty: {path}')
     except OSError as exc:
-        raise RuntimeError(f'ABM cannot persist its bridge token at {path}: {exc}') from exc
+        raise RuntimeError(f'BTAP cannot persist its bridge token at {path}: {exc}') from exc
 
 
 def bridge_token() -> str:
-    """Read or create the stable per-user token shared by every ABM process.
+    """Read or create the stable per-user token shared by every BTAP process.
 
     The old env var is a one-time bootstrap for existing installs. Once the file
     exists, later editor environments cannot rotate or replace it. Authentication
-    can only be disabled deliberately via ``AGENT_BROWSER_BRIDGE_AUTH=off``.
+    can only be disabled deliberately via ``BROWSERTAP_BRIDGE_AUTH=off``.
     """
     auth_mode = (os.environ.get(TOKEN_AUTH_ENV) or '').strip().lower()
     if auth_mode in {'0', 'false', 'off', 'disabled'}:
@@ -350,7 +350,7 @@ class BrowserBridge:
             if origin and not origin.startswith(
                     ('chrome-extension://', 'moz-extension://',
                      'safari-web-extension://', 'extension://')):
-                extra = os.environ.get('AGENT_BROWSER_WS_ALLOWED_ORIGINS', '')
+                extra = os.environ.get('BROWSERTAP_WS_ALLOWED_ORIGINS', '')
                 if not any(origin == o.strip() for o in extra.split(',') if o.strip()):
                     raise bottle.HTTPResponse(status=403, body='forbidden origin')
 
@@ -518,17 +518,17 @@ class BrowserBridge:
         extension cannot read a token file off disk.
 
         A non-browser local client (curl, a test script) sends no Origin at
-        all. That is allowed only when AGENT_BROWSER_WS_ALLOW_NO_ORIGIN=1,
+        all. That is allowed only when BROWSERTAP_WS_ALLOW_NO_ORIGIN=1,
         so the default posture stays closed.
         """
         origin = self._ws_origin(sock)
         if not origin:
-            return os.environ.get('AGENT_BROWSER_WS_ALLOW_NO_ORIGIN', '') == '1'
+            return os.environ.get('BROWSERTAP_WS_ALLOW_NO_ORIGIN', '') == '1'
         allowed = ('chrome-extension://', 'moz-extension://',
                    'safari-web-extension://', 'extension://')
         if origin.startswith(allowed):
             return True
-        extra = os.environ.get('AGENT_BROWSER_WS_ALLOWED_ORIGINS', '')
+        extra = os.environ.get('BROWSERTAP_WS_ALLOWED_ORIGINS', '')
         return any(origin == o.strip() for o in extra.split(',') if o.strip())
 
     def clean_sessions(self):
@@ -888,7 +888,7 @@ class BrowserBridge:
                     if alive_sessions:
                         cands = ', '.join(str(s.id) for s in alive_sessions[:8])
                         raise SessionNotConnectedError(
-                            f"Session {session_id} is not connected. ABM refused to execute on a "
+                            f"Session {session_id} is not connected. BTAP refused to execute on a "
                             f"different tab. Active sessions: {cands}. Select the intended target "
                             "with switch_tab and retry."
                         )
@@ -1155,8 +1155,8 @@ class BrowserBridge:
         if resp.status_code == 401:
             # 别把 401 的 HTML/文本喂给 .json()（会变成一句看不懂的 JSONDecodeError）。
             raise PermissionError(
-                "Bridge request rejected (401): the MCP process and daemon use different ABM tokens. "
-                f"Confirm both use {bridge_token_path()}, then run `agent-browser-mcp bridge --restart`. "
+                "Bridge request rejected (401): the MCP process and daemon use different BTAP tokens. "
+                f"Confirm both use {bridge_token_path()}, then run `browsertap bridge --restart`. "
                 f"{TOKEN_ENV} is only a one-time migration source for older installs."
             )
         if resp.status_code >= 400:
@@ -1193,8 +1193,8 @@ class BrowserBridge:
                     "cause": "bridge_unreachable",
                     "ok": False,
                     "advice": (
-                        "The bridge daemon is unreachable. ABM normally starts it automatically; "
-                        "run `agent-browser-mcp bridge --restart` if recovery does not occur."
+                        "The bridge daemon is unreachable. BTAP normally starts it automatically; "
+                        "run `browsertap bridge --restart` if recovery does not occur."
                     ),
                     "error": str(e),
                 }
@@ -1221,7 +1221,7 @@ class BrowserBridge:
         elif stale:
             cause, ok, advice = "sw_slept_or_dropped", False, (
                 f"The extension last checked in {round(now - self.last_ext_seen)}s ago. A normal open page "
-                "should reconnect within 5 seconds; otherwise reload Agent Browser MCP Bridge once in "
+                "should reconnect within 5 seconds; otherwise reload BrowserTap Bridge once in "
                 "chrome://extensions."
             )
         else:
@@ -1323,9 +1323,6 @@ class BrowserBridge:
             # operation id, a different route can select another browser; the
             # caller must reconcile through the pinned extension client.
             raise
-
-# Compatibility alias for callers that imported the original class name.
-TMWebDriver = BrowserBridge
 
 
 if __name__ == "__main__":

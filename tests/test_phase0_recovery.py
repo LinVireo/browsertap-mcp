@@ -11,13 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_browser_mcp import server as S
-from agent_browser_mcp.browser_bridge import BrowserBridge, Session
+from browsertap_mcp import server as S
+from browsertap_mcp.browser_bridge import BrowserBridge, Session
 
 BACKGROUND = (
     Path(__file__).resolve().parents[1]
     / "src"
-    / "agent_browser_mcp"
+    / "browsertap_mcp"
     / "chrome_extension"
     / "background.js"
 )
@@ -121,8 +121,8 @@ def _fresh_tab_ownership(monkeypatch):
 
 
 def test_get_automation_profile_defaults_to_lab_and_env_can_force_safe(monkeypatch):
-    monkeypatch.delenv("AGENT_BROWSER_MODE", raising=False)
-    monkeypatch.delenv("AGENT_BROWSER_LAB_NO_ELICIT", raising=False)
+    monkeypatch.delenv("BROWSERTAP_MODE", raising=False)
+    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", None)
     profile = S.get_automation_profile()
     assert profile["mode"] == "lab"
@@ -130,7 +130,7 @@ def test_get_automation_profile_defaults_to_lab_and_env_can_force_safe(monkeypat
     assert profile["physical_approval"] == "not_required"
     assert profile["site_permission_approval"] == "not_required"
 
-    monkeypatch.setenv("AGENT_BROWSER_MODE", "safe")
+    monkeypatch.setenv("BROWSERTAP_MODE", "safe")
     profile = S.get_automation_profile()
     assert profile["mode"] == "safe"
     assert profile["no_elicit"] is False
@@ -139,8 +139,8 @@ def test_get_automation_profile_defaults_to_lab_and_env_can_force_safe(monkeypat
 
 
 def test_lab_can_explicitly_restore_session_level_approval(monkeypatch):
-    monkeypatch.setenv("AGENT_BROWSER_MODE", "lab")
-    monkeypatch.setenv("AGENT_BROWSER_LAB_NO_ELICIT", "0")
+    monkeypatch.setenv("BROWSERTAP_MODE", "lab")
+    monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "0")
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", None)
     profile = S.get_automation_profile()
     assert profile["no_elicit"] is False
@@ -158,8 +158,8 @@ def test_set_automation_profile_is_process_local_and_validated(monkeypatch):
 
 @pytest.mark.anyio
 async def test_lab_no_elicit_skips_physical_prompt_but_keeps_physical_gate(monkeypatch):
-    monkeypatch.setenv("AGENT_BROWSER_MODE", "lab")
-    monkeypatch.setenv("AGENT_BROWSER_LAB_NO_ELICIT", "1")
+    monkeypatch.setenv("BROWSERTAP_MODE", "lab")
+    monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
     gate_calls = []
 
     class Context:
@@ -284,8 +284,8 @@ def test_storage_get_dump_has_item_and_byte_bounds(monkeypatch):
 def test_lab_host_navigation_auto_accepts_but_intent_false_preserves_dismiss(
     monkeypatch,
 ):
-    monkeypatch.setenv("AGENT_BROWSER_MODE", "lab")
-    monkeypatch.setenv("AGENT_BROWSER_AUTO_BEFOREUNLOAD_HOSTS", "shell.,ttyd")
+    monkeypatch.setenv("BROWSERTAP_MODE", "lab")
+    monkeypatch.setenv("BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS", "shell.,ttyd")
     driver = _Driver(
         [
             {"data": {"status": "ok", "url": "https://new.test/"}},
@@ -506,8 +506,8 @@ def test_open_url_session_resolution_uses_one_bounded_snapshot(monkeypatch):
         return _sessions(url="https://shell.example/terminal")
 
     monkeypatch.setattr(S, "active_sessions", sessions)
-    monkeypatch.setenv("AGENT_BROWSER_MODE", "lab")
-    monkeypatch.setenv("AGENT_BROWSER_AUTO_BEFOREUNLOAD_HOSTS", "shell.")
+    monkeypatch.setenv("BROWSERTAP_MODE", "lab")
+    monkeypatch.setenv("BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS", "shell.")
 
     result = S.open_url(
         "https://new.test/", session_id="chrome:profile:7", timeout=0.08
@@ -785,7 +785,7 @@ def test_open_new_tab_ready_session_executes_immediately_without_listing(monkeyp
     assert created["owned"] is True
     assert created["owner_id"]
     assert immediate["js_return"] == 2
-    assert executed == [("/*__abm_dialog_scope:scope-ready*/\n1+1", created["session_id"])]
+    assert executed == [("/*__btap_dialog_scope:scope-ready*/\n1+1", created["session_id"])]
 
 
 def test_open_new_tab_reconciles_lost_create_ack_to_exact_session(monkeypatch):
@@ -1723,7 +1723,7 @@ async function sendTabsUpdate() {{}}
     result = _run_node_script(script)
     assert result["createCalls"] == 1
     assert result["first"]["data"] == result["second"]["data"] == result["third"]["data"]
-    assert result["stored"]["abmCreateOperationsV1"]["op-dedup"]["status"] == "completed"
+    assert result["stored"]["btapCreateOperationsV1"]["op-dedup"]["status"] == "completed"
 
 
 def test_extension_pending_persistence_failure_is_fail_closed():
@@ -1889,7 +1889,7 @@ async function scheduleNewTabGeneration() {{ throw new Error('generation should 
     assert operation["generation"] == "generation-53"
     assert operation["may_have_created"] is True
     assert operation["retry_safe"] is False
-    assert result["stored"]["abmCreateOperationsV1"][
+    assert result["stored"]["btapCreateOperationsV1"][
         "op-completion-write-fail"
     ]["generation"] == "generation-53"
 
@@ -1901,11 +1901,11 @@ let now = 1000;
 Date.now = () => now;
 const calls = [];
 const attachTimeouts = [];
-async function attachAbmDebugger(target, timeoutMs) {{
+async function attachBtapDebugger(target, timeoutMs) {{
   attachTimeouts.push(timeoutMs);
   return {{ attachment: {{ target }}, released: false }};
 }}
-async function detachAbmDebugger(lease) {{ lease.released = true; }}
+async function detachBtapDebugger(lease) {{ lease.released = true; }}
 function boundedCdpTimeout(value, fallback = 20000) {{
   const requested = Number(value);
   return Number.isFinite(requested) && requested > 0 ? requested : fallback;
@@ -1953,7 +1953,7 @@ let now = 1000;
 Date.now = () => now;
 const attachTimeouts = [];
 const commands = [];
-async function attachAbmDebugger(target, timeoutMs) {{
+async function attachBtapDebugger(target, timeoutMs) {{
   attachTimeouts.push(timeoutMs);
   if (attachTimeouts.length === 1) {{
     now += timeoutMs;
@@ -1963,7 +1963,7 @@ async function attachAbmDebugger(target, timeoutMs) {{
   }}
   return {{ attachment: {{ target }}, released: false }};
 }}
-async function detachAbmDebugger(lease) {{ lease.released = true; }}
+async function detachBtapDebugger(lease) {{ lease.released = true; }}
 function boundedCdpTimeout(value, fallback = 20000) {{
   const requested = Number(value);
   return Number.isFinite(requested) && requested > 0 ? requested : fallback;
@@ -2156,7 +2156,7 @@ def test_browser_bridge_newtab_forwards_operation_and_client_id(monkeypatch):
 def test_extension_pending_create_status_survives_service_worker_restart_without_create():
     function_source = _create_operation_source()
     script = f"""
-const stored = {{ abmCreateOperationsV1: {{ 'op-pending': {{
+const stored = {{ btapCreateOperationsV1: {{ 'op-pending': {{
   operation_id: 'op-pending', status: 'pending', url: 'https://pending.test/',
   client_id: 'chrome:profile', created_at: Date.now(), tab_status: 'pending',
 }} }} }};
@@ -2289,7 +2289,7 @@ def test_bridge_replaces_same_session_id_when_tab_generation_changes():
 
 def test_extension_manifest_matches_package_version_and_branding():
     manifest = json.loads((BACKGROUND.parent / "manifest.json").read_text(encoding="utf-8"))
-    from agent_browser_mcp import __version__
+    from browsertap_mcp import __version__
 
     assert manifest["version"] == __version__
     assert manifest["name"] == "__MSG_extensionName__"
@@ -2397,11 +2397,11 @@ process.stdout.write(JSON.stringify({
     ]
     assert result["alarms"] == [
         {
-            "name": "abm-ws-probe",
+            "name": "btap-ws-probe",
             "details": {"delayInMinutes": 0.5, "periodInMinutes": 1},
         },
     ] * 3
-    assert "chrome.alarms.create('abm-ws-keepalive'" not in BACKGROUND.read_text(
+    assert "chrome.alarms.create('btap-ws-keepalive'" not in BACKGROUND.read_text(
         encoding="utf-8"
     )
 
@@ -2527,16 +2527,16 @@ def test_extension_popup_keeps_cookie_viewer_and_clipboard_copy():
     assert 'data-i18n="cookieViewerTitle"' in popup
     assert 'id="indicator-visible"' in popup
     assert "cmd: 'cookies'" in script
-    assert "abm_indicator_visible" in script
+    assert "btap_indicator_visible" in script
     assert "chrome.i18n.getMessage" in script
     assert "navigator.clipboard.writeText" in script
-    # The bridge port stays owned by the Python side (AGENT_BROWSER_TMWD_PORT).
+    # The bridge port stays owned by the Python side (BROWSERTAP_BRIDGE_PORT).
     # Exposing it in a popup any user can open is a second source of truth that
     # silently breaks the bridge profile-wide and outlives a package reinstall,
     # so the popup must not read or write it. background.js keeps reading
-    # abm_port from storage for the documented non-default-port setup.
+    # btap_port from storage for the documented non-default-port setup.
     assert 'id="bridge-port"' not in popup
-    assert "abm_port" not in script
+    assert "btap_port" not in script
 
 
 def test_extension_popup_rejects_non_http_pages_and_handles_malformed_cookie_data():
@@ -2693,10 +2693,10 @@ def test_extension_ui_is_localized_and_indicator_can_hide_without_stopping_keepa
     assert manifest["default_locale"] == "en"
     assert set(english) == set(chinese)
     assert "extensionName" in english
-    assert "abm_indicator_visible" in content
+    assert "btap_indicator_visible" in content
     assert "d.hidden = value === false" in content
-    assert "chrome.runtime.connect({ name: 'abm_keepalive' })" in content
-    assert "abm_status_request" in content
+    assert "chrome.runtime.connect({ name: 'btap_keepalive' })" in content
+    assert "btap_status_request" in content
     assert "chrome.runtime.onMessage.addListener" in content
     assert "setInterval" not in content
     assert "setTimeout" not in content
@@ -2752,20 +2752,20 @@ const chrome = {
     },
   },
   storage: {
-    local: { get(_key, callback) { callback({ abm_indicator_visible: true }); } },
+    local: { get(_key, callback) { callback({ btap_indicator_visible: true }); } },
     onChanged: { addListener(listener) { storageListeners.push(listener); } },
   },
 };
 
 eval(source);
-const firstBadge = elements.get('abm-indicator');
+const firstBadge = elements.get('btap-indicator');
 eval(source);
-const secondBadge = elements.get('abm-indicator');
-ports[1].listeners[0]({ type: 'abm_status', ws: true });
+const secondBadge = elements.get('btap-indicator');
+ports[1].listeners[0]({ type: 'btap_status', ws: true });
 const badgeBeforeLateCallback = secondBadge.innerText;
-runtimeListeners[0]({ type: 'abm_status', ws: false });
+runtimeListeners[0]({ type: 'btap_status', ws: false });
 const badgeAfterLateCallback = secondBadge.innerText;
-runtimeListeners[1]({ type: 'abm_status', ws: false });
+runtimeListeners[1]({ type: 'btap_status', ws: false });
 process.stdout.write(JSON.stringify({
   timerCalls,
   ports: ports.length,
@@ -2786,8 +2786,8 @@ process.stdout.write(JSON.stringify({
         "timerCalls": 0,
         "ports": 2,
         "portRequests": [
-            [{"type": "abm_status_request"}],
-            [{"type": "abm_status_request"}],
+            [{"type": "btap_status_request"}],
+            [{"type": "btap_status_request"}],
         ],
         "runtimeListenerCount": 2,
         "storageListenerCount": 2,
@@ -2864,25 +2864,25 @@ eval(source);
 contextInvalidated = true;
 const lateErrors = [];
 for (const invoke of [
-  () => runtimeListeners[0]({ type: 'abm_status', ws: true }),
-  () => ports[0].listeners[0]({ type: 'abm_status', ws: false }),
+  () => runtimeListeners[0]({ type: 'btap_status', ws: true }),
+  () => ports[0].listeners[0]({ type: 'btap_status', ws: false }),
   () => {
     if (typeof storageCallbacks[0] === 'function') {
-      storageCallbacks[0]({ abm_indicator_visible: false });
+      storageCallbacks[0]({ btap_indicator_visible: false });
     }
   },
   () => storageListeners[0](
-    { abm_indicator_visible: { newValue: false } }, 'local',
+    { btap_indicator_visible: { newValue: false } }, 'local',
   ),
 ]) {
   try { invoke(); } catch (error) { lateErrors.push(error.message); }
 }
-resolveStorage({ abm_indicator_visible: false });
+resolveStorage({ btap_indicator_visible: false });
 Promise.resolve().then(() => Promise.resolve()).then(() => {
   process.stdout.write(JSON.stringify({
     invalidChromeAccesses,
     lateErrors,
-    hidden: elements.get('abm-indicator').hidden,
+    hidden: elements.get('btap-indicator').hidden,
   }));
 });
 """.replace("__CONTENT__", json.dumps(str(content_path)))
@@ -2948,7 +2948,7 @@ function makePort(tabId, frameId = 0) {{
   const disconnectListeners = [];
   const messageListeners = [];
   return {{
-    name: 'abm_keepalive',
+    name: 'btap_keepalive',
     sender: {{ tab: {{ id: tabId }}, frameId }},
     disconnectCalls: 0,
     posted: [],
@@ -2973,7 +2973,7 @@ const otherFrame = makePort(42, 7);
 (async () => {{
 connectListener(first);
 ws = {{ readyState: WebSocket.OPEN }};
-first.fireMessage({{ type: 'abm_status_request' }});
+first.fireMessage({{ type: 'btap_status_request' }});
 connectListener(second);
 connectListener(otherFrame);
 first.fireDisconnect();
@@ -3017,26 +3017,26 @@ process.stdout.write(JSON.stringify({{
         "ensureConnectedCalls": 3,
         "tabsUpdateCalls": 2,
         "firstStatuses": [
-            {"type": "abm_status", "ws": False},
-            {"type": "abm_status", "ws": True},
+            {"type": "btap_status", "ws": False},
+            {"type": "btap_status", "ws": True},
         ],
         "secondStatuses": [
-            {"type": "abm_status", "ws": True},
-            {"type": "abm_status", "ws": False},
+            {"type": "btap_status", "ws": True},
+            {"type": "btap_status", "ws": False},
         ],
         "otherFrameStatuses": [
-            {"type": "abm_status", "ws": True},
-            {"type": "abm_status", "ws": False},
+            {"type": "btap_status", "ws": True},
+            {"type": "btap_status", "ws": False},
         ],
         "tabMessages": [
             {
                 "tabId": 42,
-                "message": {"type": "abm_status", "ws": True},
+                "message": {"type": "btap_status", "ws": True},
                 "options": {"frameId": 0},
             },
             {
                 "tabId": 42,
-                "message": {"type": "abm_status", "ws": True},
+                "message": {"type": "btap_status", "ws": True},
                 "options": {"frameId": 0},
             },
         ],
@@ -3060,8 +3060,8 @@ process.stdout.write(JSON.stringify({{
 def test_extension_bridge_port_is_persistent_and_not_fixed_to_one_url():
     source = BACKGROUND.read_text(encoding="utf-8")
 
-    assert "chrome.storage.local.get('abm_port')" in source
-    # The pre-ABM key is still read once so an install already pointed at a
+    assert "chrome.storage.local.get('btap_port')" in source
+    # The pre-BTAP key is still read once so an install already pointed at a
     # non-default bridge does not silently fall back to 18765 after the rename.
     assert "chrome.storage.local.get('tmwd_port')" in source
     assert "chrome.storage.onChanged.addListener" in source
@@ -3075,7 +3075,7 @@ def test_extension_pass2_final_build_is_observable():
 
 
 def test_save_pdf_accepts_real_extension_ws_payload(tmp_path, monkeypatch):
-    pdf_bytes = b"%PDF-1.7\nABM regression fixture\n%%EOF\n"
+    pdf_bytes = b"%PDF-1.7\nBTAP regression fixture\n%%EOF\n"
     encoded = base64.b64encode(pdf_bytes).decode("ascii")
     driver = _Driver([{"data": {"data": encoded}}])
     _install(monkeypatch, driver)
@@ -3140,7 +3140,7 @@ const chrome = {{ debugger: {{
 }} }};
 eval(source.slice(start, end));
 (async () => {{
-  const first = await attachAbmDebugger({{ tabId: 42 }});
+  const first = await attachBtapDebugger({{ tabId: 42 }});
   let failure = null;
   try {{
     await sendDebuggerCommandWithTimeout(first, 'Runtime.evaluate', {{}}, 10);
@@ -3153,11 +3153,11 @@ eval(source.slice(start, end));
     pending: first.attachment.pendingCommands.size,
   }};
   resolveCommands = true;
-  const second = await attachAbmDebugger({{ tabId: 42 }});
+  const second = await attachBtapDebugger({{ tabId: 42 }});
   const result = await sendDebuggerCommandWithTimeout(
     second, 'Runtime.evaluate', {{}}, 100,
   );
-  await detachAbmDebugger(second);
+  await detachBtapDebugger(second);
   process.stdout.write(JSON.stringify({{
     failure, afterTimeout, attachCalls, detachCalls, result,
   }}));
@@ -3216,7 +3216,7 @@ eval(source.slice(start, end));
 (async () => {{
   let failure = null;
   try {{
-    await attachAbmDebugger({{ tabId: 43 }}, 10);
+    await attachBtapDebugger({{ tabId: 43 }}, 10);
   }} catch (error) {{
     failure = {{
       code: error.code,
@@ -3234,8 +3234,8 @@ eval(source.slice(start, end));
     tracked: debuggerAttachments.size,
     detachCalls,
   }};
-  const second = await attachAbmDebugger({{ tabId: 43 }}, 100);
-  await detachAbmDebugger(second);
+  const second = await attachBtapDebugger({{ tabId: 43 }}, 100);
+  await detachBtapDebugger(second);
   process.stdout.write(JSON.stringify({{
     failure, afterTimeout, afterLateAttach, attachCalls, detachCalls,
   }}));
@@ -3291,8 +3291,8 @@ const chrome = {{ debugger: {{
 eval(source.slice(start, end));
 (async () => {{
   const startedAt = Date.now();
-  const firstPromise = attachAbmDebugger({{ tabId: 46 }}, 20);
-  const secondPromise = attachAbmDebugger({{ tabId: 46 }}, 1000);
+  const firstPromise = attachBtapDebugger({{ tabId: 46 }}, 20);
+  const secondPromise = attachBtapDebugger({{ tabId: 46 }}, 1000);
   const settled = await Promise.allSettled([firstPromise, secondPromise]);
   const elapsedMs = Date.now() - startedAt;
   const failures = settled.map(result => ({{
@@ -3307,8 +3307,8 @@ eval(source.slice(start, end));
   }};
   resolveFirstAttach();
   await new Promise(resolve => setTimeout(resolve, 25));
-  const third = await attachAbmDebugger({{ tabId: 46 }}, 100);
-  await detachAbmDebugger(third);
+  const third = await attachBtapDebugger({{ tabId: 46 }}, 100);
+  await detachBtapDebugger(third);
   process.stdout.write(JSON.stringify({{
     failures, elapsedMs, afterTimeout, attachCalls, detachCalls,
   }}));
@@ -3375,7 +3375,7 @@ eval(source.slice(start, end));
   const startedAt = Date.now();
   let failure = null;
   try {{
-    await attachAbmDebugger({{ tabId: 48 }}, 20);
+    await attachBtapDebugger({{ tabId: 48 }}, 20);
   }} catch (error) {{
     failure = {{ code: error.code, timeoutMs: error.timeoutMs }};
   }}
@@ -3439,10 +3439,10 @@ const chrome = {{ debugger: {{
 }} }};
 eval(source.slice(start, end));
 (async () => {{
-  const longWaiter = attachAbmDebugger({{ tabId: 49 }}, 1000);
+  const longWaiter = attachBtapDebugger({{ tabId: 49 }}, 1000);
   await recoveryDetachStarted;
   const startedAt = Date.now();
-  const shortWaiter = attachAbmDebugger({{ tabId: 49 }}, 20);
+  const shortWaiter = attachBtapDebugger({{ tabId: 49 }}, 20);
   const settled = await Promise.allSettled([longWaiter, shortWaiter]);
   const stateAtTimeout = {{
     elapsedMs: Date.now() - startedAt,
@@ -3518,12 +3518,12 @@ const chrome = {{ debugger: {{
 }} }};
 eval(source.slice(start, end));
 (async () => {{
-  const first = await attachAbmDebugger({{ tabId: 47 }});
+  const first = await attachBtapDebugger({{ tabId: 47 }});
   const invalidation = forceInvalidateDebuggerAttachment(
     first.attachment, 'test forced invalidation',
   );
   while (detachCalls < 1) await Promise.resolve();
-  const secondPromise = attachAbmDebugger({{ tabId: 47 }}, 1000);
+  const secondPromise = attachBtapDebugger({{ tabId: 47 }}, 1000);
   await Promise.resolve();
   const beforeDetachResolution = {{
     attachCalls,
@@ -3541,7 +3541,7 @@ eval(source.slice(start, end));
     invalidated: second.attachment.invalidated,
     refs: second.attachment.refs,
   }};
-  await detachAbmDebugger(second);
+  await detachBtapDebugger(second);
   process.stdout.write(JSON.stringify({{
     beforeDetachResolution,
     afterLateEvent,
@@ -3605,10 +3605,10 @@ const chrome = {{ debugger: {{
 }} }};
 eval(source.slice(start, end));
 (async () => {{
-  const firstPromise = attachAbmDebugger({{ tabId: 42 }});
-  const secondPromise = attachAbmDebugger({{ tabId: 42 }});
+  const firstPromise = attachBtapDebugger({{ tabId: 42 }});
+  const secondPromise = attachBtapDebugger({{ tabId: 42 }});
   await recoveryDetachStarted;
-  const thirdPromise = attachAbmDebugger({{ tabId: 42 }});
+  const thirdPromise = attachBtapDebugger({{ tabId: 42 }});
   resolveRecoveryDetach();
   const [first, second, third] = await Promise.all([
     firstPromise, secondPromise, thirdPromise,
@@ -3621,21 +3621,21 @@ eval(source.slice(start, end));
     tracked: debuggerAttachments.size,
     sameAttachment: first.attachment === second.attachment && second.attachment === third.attachment,
   }};
-  await detachAbmDebugger(first);
+  await detachBtapDebugger(first);
   const afterFirstRelease = {{
     refs: third.attachment.refs,
     attached: third.attachment.attached,
     tracked: debuggerAttachments.size,
     detachCalls,
   }};
-  await detachAbmDebugger(second);
+  await detachBtapDebugger(second);
   const afterSecondRelease = {{
     refs: third.attachment.refs,
     attached: third.attachment.attached,
     tracked: debuggerAttachments.size,
     detachCalls,
   }};
-  await detachAbmDebugger(third);
+  await detachBtapDebugger(third);
   process.stdout.write(JSON.stringify({{
     attachCalls,
     detachCalls,
@@ -3713,9 +3713,9 @@ const chrome = {{ debugger: {{
 }} }};
 eval(source.slice(start, end));
 (async () => {{
-  const byTarget = await attachAbmDebugger({{ targetId: 'target-42' }});
-  const byTab = await attachAbmDebugger({{ tabId: 42 }});
-  const byExtension = await attachAbmDebugger({{ extensionId: 'extension-42' }});
+  const byTarget = await attachBtapDebugger({{ targetId: 'target-42' }});
+  const byTab = await attachBtapDebugger({{ tabId: 42 }});
+  const byExtension = await attachBtapDebugger({{ extensionId: 'extension-42' }});
   const beforeDetach = {{
     attachCalls,
     tracked: debuggerAttachments.size,
@@ -3794,7 +3794,7 @@ eval(source.slice(start, end));
 (async () => {{
   let failure = null;
   try {{
-    await attachAbmDebugger({{ tabId: 42 }});
+    await attachBtapDebugger({{ tabId: 42 }});
   }} catch (error) {{
     failure = {{ message: error.message, code: debuggerFailureCode(error) }};
   }}
@@ -3845,7 +3845,7 @@ const DEFAULT_CDP_TIMEOUT_MS = 5000;
 let attachCalls = 0;
 let evaluateCalls = 0;
 let detachCalls = 0;
-async function attachAbmDebugger({{ tabId }}) {{
+async function attachBtapDebugger({{ tabId }}) {{
   attachCalls += 1;
   {attach_js}
 }}
@@ -3853,7 +3853,7 @@ async function sendDebuggerCommandWithTimeout() {{
   evaluateCalls += 1;
   {evaluate_js}
 }}
-async function detachAbmDebugger() {{ detachCalls += 1; }}
+async function detachBtapDebugger() {{ detachCalls += 1; }}
 {_cdp_exec_fallback_source()}
 (async () => {{
   const res = await runCdpExecFallback(11, 'return 1');
@@ -3866,7 +3866,7 @@ async function detachAbmDebugger() {{ detachCalls += 1; }}
 def test_cdp_exec_fallback_retries_an_attach_that_never_dispatched():
     """A CSP page's fallback used to die on the first attach failure.
 
-    Attaching races anything else that touches the debugger (another ABM command
+    Attaching races anything else that touches the debugger (another BTAP command
     finishing, DevTools closing), and a lost race there means the caller's script
     never ran at all -- so retrying is safe and fixes a whole class of one-off
     'CDP fallback failed' returns.
@@ -4007,7 +4007,7 @@ eval(source.slice(sweepStart, sweepEnd));
     # Order matters: the rejected detach sits between two that must happen, so a
     # sweep that aborted on the first failure would never reach T-9.
     assert outcome["detached"] == [{"tabId": 11}, {"tabId": 14}, {"targetId": "T-9"}]
-    assert outcome["logs"] == ["[ABM] released 2 stale debugger attachment(s)"]
+    assert outcome["logs"] == ["[BTAP] released 2 stale debugger attachment(s)"]
     assert outcome["liveLeaseRefs"] == 1
     assert outcome["tracked"] == 1
     # Two markers for the two detaches that landed; the rejected one takes its own
@@ -4061,7 +4061,7 @@ eval(source.slice(start, end));
 (async () => {{
   const cold = await Promise.all(Array.from({{ length: 5 }}, () => getClientId()));
   const afterCold = {{
-    ids: [...new Set(cold)], getCalls, setCalls, persisted: stored.abm_client_id,
+    ids: [...new Set(cold)], getCalls, setCalls, persisted: stored.btap_client_id,
   }};
   const warm = await Promise.all(Array.from({{ length: 3 }}, () => getClientId()));
   const afterWarm = {{ ids: [...new Set(warm)], getCalls, setCalls }};
@@ -4095,7 +4095,7 @@ eval(source.slice(start, end));
     cold = outcome["afterCold"]
     assert len(cold["ids"]) == 1, cold["ids"]
     assert cold["ids"][0].startswith("chrome_")
-    # abm_client_id then tmwd_client_id, once each: one storage pass total.
+    # btap_client_id then tmwd_client_id, once each: one storage pass total.
     assert cold["getCalls"] == 2
     assert cold["setCalls"] == 1
     assert cold["persisted"] == cold["ids"][0]
@@ -4110,7 +4110,7 @@ eval(source.slice(start, end));
     assert outcome["degradedGetCalls"] == 1
     assert outcome["degradedSetCalls"] == 0
     assert outcome["errors"] == [
-        "[ABM-WS] storage unavailable, using ephemeral clientId"
+        "[BTAP-WS] storage unavailable, using ephemeral clientId"
     ]
 
 

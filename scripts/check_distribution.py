@@ -8,29 +8,27 @@ import zipfile
 from pathlib import Path
 
 REQUIRED_WHEEL_SUFFIXES = (
-    "/agent_browser_mcp/browser_bridge.py",
-    "/agent_browser_mcp/tmwebdriver.py",
-    "/agent_browser_mcp/chrome_extension/background.js",
-    "/agent_browser_mcp/chrome_extension/content.js",
-    "/agent_browser_mcp/chrome_extension/disable_dialogs.js",
-    "/agent_browser_mcp/chrome_extension/manifest.json",
-    "/agent_browser_mcp/chrome_extension/popup.html",
-    "/agent_browser_mcp/chrome_extension/popup.js",
-    "/agent_browser_mcp/chrome_extension/_locales/en/messages.json",
-    "/agent_browser_mcp/chrome_extension/_locales/zh_CN/messages.json",
-    # Required, not merely permitted: `agent-browser-mcp skill-path` points a
+    "/browsertap_mcp/browser_bridge.py",
+    "/browsertap_mcp/chrome_extension/background.js",
+    "/browsertap_mcp/chrome_extension/content.js",
+    "/browsertap_mcp/chrome_extension/disable_dialogs.js",
+    "/browsertap_mcp/chrome_extension/manifest.json",
+    "/browsertap_mcp/chrome_extension/popup.html",
+    "/browsertap_mcp/chrome_extension/popup.js",
+    "/browsertap_mcp/chrome_extension/_locales/en/messages.json",
+    "/browsertap_mcp/chrome_extension/_locales/zh_CN/messages.json",
+    # Required, not merely permitted: `browsertap skill-path` points a
     # caller's skill manager at these files, so a wheel that drops them ships a
     # command that resolves to an empty directory.
-    "/agent_browser_mcp/skills/browser-mcp-default/SKILL.md",
-    "/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md",
+    "/browsertap_mcp/skills/browsertap-default/SKILL.md",
+    "/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
 )
 REQUIRED_SDIST_SUFFIXES = (
     "/.gitignore",
     "/CONTRIBUTING.zh-CN.md",
-    "/src/agent_browser_mcp/browser_bridge.py",
-    "/src/agent_browser_mcp/tmwebdriver.py",
-    "/src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md",
-    "/src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md",
+    "/src/browsertap_mcp/browser_bridge.py",
+    "/src/browsertap_mcp/skills/browsertap-default/SKILL.md",
+    "/src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
     "/.github/workflows/live.yml",
     "/.github/workflows/release.yml",
     "/.github/workflows/test.yml",
@@ -53,13 +51,13 @@ def _normalise(name: str) -> str:
 
 
 def _is_packaged_skill(path: str) -> bool:
-    """True for a shipped agent skill at ``agent_browser_mcp/skills/<name>/SKILL.md``.
+    """True for a shipped agent skill at ``browsertap_mcp/skills/<name>/SKILL.md``.
 
     Matched by shape rather than by name so a skill added later ships without
     editing this gate, while a copy dropped anywhere else -- a caller's own
     installed mirror, a stray root file -- is still refused.
     """
-    marker = "/agent_browser_mcp/skills/"
+    marker = "/browsertap_mcp/skills/"
     index = path.find(marker)
     if index < 0:
         return False
@@ -70,7 +68,7 @@ def _is_packaged_skill(path: str) -> bool:
 def _forbidden_reason(name: str) -> str | None:
     path = _normalise(name)
     basename = path.rsplit("/", 1)[-1].lower()
-    if path.endswith("/agent_browser_mcp/chrome_extension/config.js"):
+    if path.endswith("/browsertap_mcp/chrome_extension/config.js"):
         return "generated extension config"
     if basename == "bridge-token":
         return "bridge authentication token"
@@ -82,7 +80,7 @@ def _forbidden_reason(name: str) -> str | None:
         return "agent skill outside the packaged skills directory"
     if basename.startswith("cookie") and basename.endswith(".json"):
         return "cookie export"
-    for segment in ("/.agent-browser-mcp/", "/artifacts/", "/out/", "/screenshots/"):
+    for segment in ("/.browsertap/", "/artifacts/", "/out/", "/screenshots/"):
         if segment in path.lower():
             return f"local runtime directory {segment.strip('/')}"
     return None

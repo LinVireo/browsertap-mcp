@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 
 def test_switch_session_rejects_ambiguous_url_matches(monkeypatch):
@@ -159,9 +159,9 @@ def test_get_driver_bootstrap_and_cache_branches(
     )
     monkeypatch.setattr(S, "BrowserBridge", FakeDriver)
     if no_spawn is None:
-        monkeypatch.delenv("AGENT_BROWSER_NO_SPAWN", raising=False)
+        monkeypatch.delenv("BROWSERTAP_NO_SPAWN", raising=False)
     else:
-        monkeypatch.setenv("AGENT_BROWSER_NO_SPAWN", no_spawn)
+        monkeypatch.setenv("BROWSERTAP_NO_SPAWN", no_spawn)
 
     first = S.get_driver()
     second = S.get_driver()
@@ -193,9 +193,9 @@ def test_require_driver_recovery_branches(
         lambda: calls.append("spawn") or False,
     )
     if no_spawn is None:
-        monkeypatch.delenv("AGENT_BROWSER_NO_SPAWN", raising=False)
+        monkeypatch.delenv("BROWSERTAP_NO_SPAWN", raising=False)
     else:
-        monkeypatch.setenv("AGENT_BROWSER_NO_SPAWN", no_spawn)
+        monkeypatch.setenv("BROWSERTAP_NO_SPAWN", no_spawn)
 
     assert S.require_driver() is driver
     assert calls == ["spawn"] * expected_spawns
@@ -206,7 +206,7 @@ def test_scan_page_returns_links_and_background_visibility_hint(monkeypatch):
 
     def get_html(_driver, **kwargs):
         kwargs["link_refs"]["https://example.test/long/path"] = "r1"
-        return "<main>ok</main><!--abm-offscreen:4 scrollY:0 viewH:0 docH:9000-->"
+        return "<main>ok</main><!--btap-offscreen:4 scrollY:0 viewH:0 docH:9000-->"
 
     monkeypatch.setattr(S.simphtml, "get_html", get_html)
 
@@ -225,7 +225,7 @@ def test_scan_page_text_only_pins_implicit_session_and_reports_scrolling_hint(mo
 
     def get_html(_driver, **kwargs):
         seen.update(kwargs)
-        return "text<!--abm-offscreen:3 scrollY:500 viewH:700 docH:9000-->"
+        return "text<!--btap-offscreen:3 scrollY:500 viewH:700 docH:9000-->"
 
     monkeypatch.setattr(S.simphtml, "get_html", get_html)
 

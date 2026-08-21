@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from agent_browser_mcp import __version__
-from agent_browser_mcp import server as S
+from browsertap_mcp import __version__
+from browsertap_mcp import server as S
 
 
 class _Driver:
@@ -53,7 +53,7 @@ def test_setup_status_reports_all_equal_components_as_healthy(monkeypatch):
 
     assert result["status"] == "healthy"
     assert result["action"] == "none"
-    assert result["extension_name"] == "Agent Browser MCP Bridge"
+    assert result["extension_name"] == "BrowserTap Bridge"
     assert result["restart_bridge_required"] is False
     assert result["reload_extension_required"] is False
 

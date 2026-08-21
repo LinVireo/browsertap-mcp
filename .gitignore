@@ -16,13 +16,13 @@ venv/
 .env.*
 !.env.example
 .DS_Store
-src/agent_browser_mcp/chrome_extension/config.js
+src/browsertap_mcp/chrome_extension/config.js
 *.log
 log
 temp_desktop.png
 
 # browser state and user-derived data
-.agent-browser-mcp/
+.browsertap/
 browser-profile*/
 profiles/
 sessions/
@@ -63,7 +63,7 @@ docs/superpowers/
 # vanish from `git status` and never make it into a commit -- the build would
 # still pass locally and a clone would be missing the file. There is
 # deliberately no `_*.py` rule in any form: it would hide
-# `src/agent_browser_mcp/_version.py`, the single source of the release version.
+# `src/browsertap_mcp/_version.py`, the single source of the release version.
 /_*.json
 /_*.txt
 /_*.md

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_browser_mcp import cli
+from browsertap_mcp import cli
 
 
 class FakeDriver:
@@ -48,8 +48,8 @@ def test_extension_path_prints_path_without_writing_package_files(monkeypatch, t
 def test_print_hermes_config(capsys):
     assert cli.cmd_print_hermes_config() == 0
     output = capsys.readouterr().out
-    assert "agent-browser-mcp:" in output
-    assert "command: agent-browser-mcp" in output
+    assert "browsertap:" in output
+    assert "command: browsertap" in output
     assert "connect_timeout: 60" in output
 
 
@@ -58,7 +58,7 @@ def test_version_flag_reports_package_version(capsys):
         cli.main(["--version"])
 
     assert exc.value.code == 0
-    assert capsys.readouterr().out.strip() == f"agent-browser-mcp {cli.__version__}"
+    assert capsys.readouterr().out.strip() == f"browsertap {cli.__version__}"
 
 
 @pytest.mark.parametrize("connect_result, expected", [(0, True), (10061, False)])
@@ -107,7 +107,7 @@ def test_doctor_healthy_returns_zero_and_prints_details(monkeypatch, capsys):
     payload = json.loads(captured.out)
     assert payload["connected_tabs"] == 1
     assert payload["remote_mode"] is True
-    assert payload["tmwebdriver_http_port"] == 19001
+    assert payload["bridge_http_port"] == 19001
     assert payload["ws_port_open"] is True
     assert payload["http_port_open"] is False
     assert "[OK] healthy: ready" in captured.err
@@ -129,7 +129,7 @@ def test_doctor_reload_extension_returns_nonzero(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out)["status"] == "stale_extension"
     assert "stale_extension" in captured.err
-    assert "Reload Agent Browser MCP Bridge" in captured.err
+    assert "Reload BrowserTap Bridge" in captured.err
 
 
 def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path, capsys):
@@ -154,7 +154,7 @@ def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path
     assert payload["error"] == "tabs unavailable"
     assert payload["setup_error"] == "setup unavailable"
     assert payload["diagnosis"]["cause"] == "diagnose_failed"
-    assert "agent-browser-mcp" in payload["next_steps"][-1]
+    assert "browsertap-mcp" in payload["next_steps"][-1]
     assert "hermes" not in payload["next_steps"][-1].lower()
     assert "stale_bridge" in captured.err
 
@@ -205,7 +205,7 @@ def test_main_dispatches_bridge_management(monkeypatch, args, expected):
 
 
 def test_cmd_bridge_stop_and_restart(monkeypatch, capsys):
-    from agent_browser_mcp import bridge
+    from browsertap_mcp import bridge
 
     monkeypatch.setattr(
         bridge, "stop_bridge_daemon", lambda: {"status": "stopped", "stopped": True}
@@ -221,7 +221,7 @@ def test_cmd_bridge_stop_and_restart(monkeypatch, capsys):
 
 @pytest.mark.parametrize("stop_status", ["identity_mismatch", "unmanaged_running"])
 def test_cmd_bridge_refuses_restart_after_unverified_stop(monkeypatch, capsys, stop_status):
-    from agent_browser_mcp import bridge
+    from browsertap_mcp import bridge
 
     monkeypatch.setattr(
         bridge,

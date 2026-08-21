@@ -7,17 +7,17 @@ failures. For normal operating workflows, see the [usage guide](USAGE.md).
 
 ## Diagnostic order
 
-1. Run `agent-browser-mcp doctor`.
+1. Run `browsertap doctor`.
 2. Inspect `get_setup_status` and compare `package_version`, `bridge_version`,
    `extension_version`, and `protocol_version`.
 3. Apply only the recovery action reported by the status result. A missing
    bridge listener is started automatically when spawning is enabled. If
-   `restart_bridge_required=true`, run `agent-browser-mcp bridge --restart`;
+   `restart_bridge_required=true`, run `browsertap bridge --restart`;
    this does not change the visible browser. `reload_extension_required=true`
    requires a manual reload of the unpacked extension.
 4. Re-run `doctor` and confirm that at least one normal page is connected.
 
-Bridge logs are stored at `~/.agent-browser-mcp/bridge.log`. Diagnostic output
+Bridge logs are stored at `~/.browsertap/bridge.log`. Diagnostic output
 may contain URLs or other browser context and should be reviewed before it is
 shared.
 
@@ -32,11 +32,11 @@ or open a new URL, then run `doctor` again.
 
 ### The MCP client cannot start the server
 
-Confirm that the package is installed and that `agent-browser-mcp` is available
+Confirm that the package is installed and that `browsertap-mcp` is available
 on `PATH`. When the package is installed in a virtual environment, configure
 the MCP client with the absolute executable path. On Windows this is typically
-`<repo>\.venv\Scripts\agent-browser-mcp.exe`; on Linux/macOS it is
-`<repo>/.venv/bin/agent-browser-mcp`.
+`<repo>\.venv\Scripts\browsertap-mcp.exe`; on Linux/macOS it is
+`<repo>/.venv/bin/browsertap`.
 
 If OS-level input or desktop capture reports a missing dependency, reinstall
 with the desktop extra, for example:
@@ -48,7 +48,7 @@ with the desktop extra, for example:
 ### `/link` returns HTTP 401
 
 The bridge and the MCP process must resolve the same token file. The default is
-`~/.agent-browser-mcp/bridge-token`; separate editor-specific token values are
+`~/.browsertap/bridge-token`; separate editor-specific token values are
 not required. If both processes use the default path, a bridge from an older
 installation may still be running. Restart the bridge and retry without
 printing or copying the token into diagnostics. The result and long-poll
@@ -61,12 +61,12 @@ cause.
 ### A call is refused with `Session ... is not connected`
 
 This refusal is deliberate. You named an explicit `session_id`, that tab is
-gone, and ABM did not run the call anywhere else: a click or a form submit
+gone, and BTAP did not run the call anywhere else: a click or a form submit
 landing on a substitute tab is worse than an error. The message names the tabs
 that are still connected:
 
 ```text
-Session chrome:123 is not connected. ABM refused to execute on a different tab.
+Session chrome:123 is not connected. BTAP refused to execute on a different tab.
 Active sessions: chrome:456, chrome:789. Select the intended target with
 switch_tab and retry.
 ```
@@ -77,7 +77,7 @@ all; see "No connected tabs" above.
 
 ### A result carries `switched_session`
 
-You passed no `session_id`, the shared default target had died, and ABM re-picked
+You passed no `session_id`, the shared default target had died, and BTAP re-picked
 a live tab in the same browser rather than failing a call that never named one.
 The call did execute, on the tab reported in `switched_session`; `switched_from`
 is the tab that went away. Confirm with `list_tabs` or `scan_page` that it landed
@@ -98,12 +98,12 @@ Separate client startup timeouts from tool deadlines. If the MCP process does
 not start, set the client's connect timeout to at least 60 seconds and use the
 absolute executable path. If one browser tool times out, keep its explicit
 `session_id`, increase that tool's `timeout` only when the operation is known to
-be slow, and inspect `~/.agent-browser-mcp/bridge.log`. Do not repeatedly retry
+be slow, and inspect `~/.browsertap/bridge.log`. Do not repeatedly retry
 a state-changing operation without first verifying whether it landed.
 
 ### Bridge port conflict or custom port
 
-ABM uses three consecutive ports: `AGENT_BROWSER_TMWD_PORT` for WebSocket,
+BTAP uses three consecutive ports: `BROWSERTAP_BRIDGE_PORT` for WebSocket,
 `PORT+1` for HTTP, and `PORT+2` for the singleton lock. A listener owned by
 another application can make the client appear to be connected to the wrong
 service. On Windows, inspect the owners without stopping anything:
@@ -117,17 +117,17 @@ Get-CimInstance Win32_Process |
 ```
 
 If another application owns the range, choose a free three-port range and set
-the base WebSocket port in `AGENT_BROWSER_TMWD_PORT` for the MCP/bridge process.
+the base WebSocket port in `BROWSERTAP_BRIDGE_PORT` for the MCP/bridge process.
 The extension cannot read environment variables, so tell it the same base port
-once: open `chrome://extensions`, click **service worker** under **Agent Browser
+once: open `chrome://extensions`, click **service worker** under **BrowserTap
 MCP Bridge**, and run this in the console that opens:
 
 ```js
-chrome.storage.local.set({ abm_port: 19765 })   // use your base port
+chrome.storage.local.set({ btap_port: 19765 })   // use your base port
 ```
 
 The extension reconnects to the new port immediately. Then run
-`agent-browser-mcp bridge --restart`. The Python environment cannot update
+`browsertap bridge --restart`. The Python environment cannot update
 extension storage automatically. Never terminate an unknown port owner solely
 by process name.
 
@@ -155,11 +155,11 @@ For a bridge started by version 0.3.4 or later, lifecycle management is fully
 backgrounded and does not focus or restart the browser:
 
 ```powershell
-agent-browser-mcp bridge --restart
-agent-browser-mcp bridge --stop
+browsertap bridge --restart
+browsertap bridge --stop
 ```
 
-ABM records the managed process in `~/.agent-browser-mcp/bridge.pid` and checks
+BTAP records the managed process in `~/.browsertap/bridge.pid` and checks
 its PID, creation identity, and executable before termination. It never kills a
 process merely because it is named `pythonw.exe`.
 
@@ -172,11 +172,11 @@ then verify its command line before stopping that exact PID:
 Get-NetTCPConnection -State Listen -LocalPort 18765,18766,18767 |
   Select-Object LocalPort,OwningProcess
 Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -like '*agent_browser_mcp.bridge*' } |
+  Where-Object { $_.CommandLine -like '*browsertap_mcp.bridge*' } |
   Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate,CommandLine
-# Only after the port owner and command line match the ABM bridge:
+# Only after the port owner and command line match the BTAP bridge:
 Stop-Process -Id <verified-port-owner-pid> -Force
-agent-browser-mcp bridge --restart
+browsertap bridge --restart
 ```
 
 This migration does not require restarting Chrome. The extension reconnects to
@@ -214,20 +214,20 @@ do not require desktop input. In `safe` mode, a site permission with
 
 ### Physical input returns `busy`
 
-Another ABM process owns the non-queued physical-input lock. Retry after the
+Another BTAP process owns the non-queued physical-input lock. Retry after the
 active operation finishes. Do not loop, delete lock files, terminate unrelated
 processes, or restart the bridge solely to clear this status; stale lock
 metadata is reclaimed automatically after its owner exits.
 
 ### Physical input returns `input_activity_detected`
 
-Mouse or keyboard activity occurred during the quiet-input window, so ABM sent
+Mouse or keyboard activity occurred during the quiet-input window, so BTAP sent
 no physical input. Retry only when the desktop is idle, or use a page-level tool
 that does not interact with the desktop.
 
 ### Physical input returns `activation_failed`
 
-ABM could not verify that the requested target was visible on screen and sent
+BTAP could not verify that the requested target was visible on screen and sent
 no input. Restore the browser window and explicitly activate the intended tab
 only when desktop input is required.
 
@@ -245,7 +245,7 @@ console. `pyautogui` binds a display while importing and `mss` binds inside
 Xlib error, or an `mss` `ScreenShotError` — after the sentence identifying it as
 a desktop problem. Reinstalling the extra does not help. Use `page_click`,
 `page_type`, `page_press`, `page_drag`, and `capture_page_screenshot`, which
-drive the tab through CDP and need no desktop, or run ABM where a real desktop
+drive the tab through CDP and need no desktop, or run BTAP where a real desktop
 session is available.
 
 ## Permission cleanup

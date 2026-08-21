@@ -1,4 +1,4 @@
-"""Generate an evidence-derived ABM release acceptance report."""
+"""Generate an evidence-derived BTAP release acceptance report."""
 
 from __future__ import annotations
 
@@ -251,7 +251,7 @@ def render_report(data: dict[str, object]) -> str:
     registered = int(tool_coverage.get("registered", 0))
     contract_valid = int(tool_coverage.get("contract_valid_tools", 0))
     lines = [
-        "# ABM Release Acceptance Report",
+        "# BTAP Release Acceptance Report",
         "",
         f"Generated: {data['generated']}",
         f"Version: `{data['version']}`",

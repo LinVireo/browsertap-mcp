@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKGROUND = ROOT / "src/agent_browser_mcp/chrome_extension/background.js"
-DISABLE_DIALOGS = ROOT / "src/agent_browser_mcp/chrome_extension/disable_dialogs.js"
+BACKGROUND = ROOT / "src/browsertap_mcp/chrome_extension/background.js"
+DISABLE_DIALOGS = ROOT / "src/browsertap_mcp/chrome_extension/disable_dialogs.js"
 
 
 def _run_node_harness(source: str) -> dict:
@@ -78,10 +78,10 @@ vm.runInContext(disableDialogs, context);
     if (error?.code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw error;
     harnessTimedOut = true;
     const token = {json.dumps(scope.get("token") if scope else None)};
-    const dialogs = (Array.isArray(window.__abm_dialog_records)
-      ? window.__abm_dialog_records : []).filter(record => record.token === token);
+    const dialogs = (Array.isArray(window.__btap_dialog_records)
+      ? window.__btap_dialog_records : []).filter(record => record.token === token);
     result = {{ ok: true, data: {{
-      __abm_dialog_result: true,
+      __btap_dialog_result: true,
       value: null,
       dialogs,
       manual_blocked: true,
@@ -92,8 +92,8 @@ vm.runInContext(disableDialogs, context);
     harnessTimedOut,
     after: window.after,
     nativeConfirmCalls,
-    scopesInstalled: Array.isArray(window.__abm_dialog_scopes),
-    suppressUntil: window.__abm_suppress_until ?? null,
+    scopesInstalled: Array.isArray(window.__btap_dialog_scopes),
+    suppressUntil: window.__btap_suppress_until ?? null,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
@@ -240,7 +240,7 @@ def test_handle_dialog_routes_action_and_prompt_to_requested_browser(monkeypatch
     )
     sid = _install_target(monkeypatch, driver)
 
-    result = S.handle_dialog("accept", prompt_text="ABM", session_id=sid)
+    result = S.handle_dialog("accept", prompt_text="BTAP", session_id=sid)
 
     assert result["status"] == "ok"
     assert driver.default_session_id == "other:7"
@@ -250,7 +250,7 @@ def test_handle_dialog_routes_action_and_prompt_to_requested_browser(monkeypatch
                 "cmd": "handle_dialog",
                 "tabId": 42,
                 "action": "accept",
-                "promptText": "ABM",
+                "promptText": "BTAP",
             },
             "chrome:profile",
             3.0,
@@ -327,7 +327,7 @@ def test_execute_js_surfaces_native_manual_pause_without_a_guessed_value(monkeyp
         return {
             "status": "success",
             "js_return": {
-                "__abm_dialog_result": True,
+                "__btap_dialog_result": True,
                 "value": None,
                 "dialogs": [observed],
                 "status": "blocked_by_dialog",
@@ -361,7 +361,7 @@ def test_execute_js_rich_skips_only_post_monitor_for_native_dialog_pause(monkeyp
         def execute_js(self, script, timeout=15):
             return {
                 "data": {
-                    "__abm_dialog_result": True,
+                    "__btap_dialog_result": True,
                     "value": None,
                     "status": "blocked_by_dialog",
                     "manual_blocked": True,
@@ -483,7 +483,7 @@ def test_execute_js_marks_only_the_user_script_with_its_policy_token(monkeypatch
     result = S.execute_js("return 1 + 1", session_id=sid)
 
     assert result["js_return"] == 2
-    assert seen == ["/*__abm_dialog_scope:scope-123*/\nreturn 1 + 1"]
+    assert seen == ["/*__btap_dialog_scope:scope-123*/\nreturn 1 + 1"]
 
 
 def test_execute_js_passes_explicit_session_without_parking_shared_default(monkeypatch):
@@ -568,7 +568,7 @@ def test_extension_contains_bounded_protocol_dialog_state():
 
 def test_extension_applies_policy_only_to_the_token_marked_script():
     source = BACKGROUND.read_text(encoding="utf-8")
-    assert "__abm_dialog_scope:" in source
+    assert "__btap_dialog_scope:" in source
     assert "dialogScopeToken" in source
 
 
@@ -838,7 +838,7 @@ process.stdout.write(JSON.stringify({{
   unscopedNativeCalls: unscoped.counters.nativeConfirmCalls,
   scopedAnswer: vm.runInContext("window.confirm('really?')", scoped.context),
   scopedNativeCalls: scoped.counters.nativeConfirmCalls,
-  scopedRecords: (scoped.window.__abm_dialog_records || []).map(r => r.token),
+  scopedRecords: (scoped.window.__btap_dialog_records || []).map(r => r.token),
 }}));
 """
     )
@@ -1086,7 +1086,7 @@ eval(section(
     );
     const attachAfterBusy = attachCalls;
     const handled = await handleProtocolDialog({{
-      tabId: 42, action: 'accept', promptText: 'ABM',
+      tabId: 42, action: 'accept', promptText: 'BTAP',
     }});
     for (let i = 0; i < 20 && pendingManualExecutions.has(42); i += 1) {{
       await new Promise(resolve => setTimeout(resolve, 0));
@@ -1209,7 +1209,7 @@ def test_native_manual_dialog_first_returns_pending_and_explicit_accept_releases
     assert actions == [{
         "tabId": 42,
         "method": "Page.handleJavaScriptDialog",
-        "params": {"accept": True, "promptText": "ABM"},
+        "params": {"accept": True, "promptText": "BTAP"},
     }]
     assert not any(
         command["method"] == "Runtime.terminateExecution"
@@ -1496,7 +1496,7 @@ def test_same_tab_debugger_leases_share_attach_and_preserve_tracking():
 const fs = require('fs');
 const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function debuggerTargetKey');
-const fallbackStart = source.indexOf('async function attachAbmDebugger');
+const fallbackStart = source.indexOf('async function attachBtapDebugger');
 const helperStart = start >= 0 ? start : fallbackStart;
 const end = source.indexOf('\\n\\nasync function handleProtocolDialog', helperStart);
 if (helperStart < 0 || end < 0) throw new Error('debugger lease helpers not found');
@@ -1516,12 +1516,12 @@ const chrome = {{ debugger: {{
 }} }};
 eval(source.slice(helperStart, end));
 (async () => {{
-  const first = await attachAbmDebugger({{ tabId: 42 }});
-  const second = await attachAbmDebugger({{ tabId: 42 }});
+  const first = await attachBtapDebugger({{ tabId: 42 }});
+  const second = await attachBtapDebugger({{ tabId: 42 }});
   const trackedAfterSecond = dialogAttachedTabs.has(42);
-  await detachAbmDebugger(second);
+  await detachBtapDebugger(second);
   const trackedAfterOneRelease = dialogAttachedTabs.has(42);
-  await detachAbmDebugger(first);
+  await detachBtapDebugger(first);
   process.stdout.write(JSON.stringify({{
     attachCalls, detachCalls, trackedAfterSecond, trackedAfterOneRelease,
     trackedAfterFinalRelease: dialogAttachedTabs.has(42),
@@ -1603,19 +1603,19 @@ def test_handle_dialog_extension_debugger_paths_detach_in_finally():
         assert match, function_name
         body = match.group(0)
         assert "finally" in body
-        assert "detachAbmDebugger" in body
+        assert "detachBtapDebugger" in body
     manual = source[
         source.index("function manualExecutionResult"):
         source.index("// --- Scoped, temporary CSP removal")
     ]
     assert "releaseManualExecution" in manual
-    assert "detachAbmDebugger" in manual
+    assert "detachBtapDebugger" in manual
 
 
 def test_all_extension_debugger_paths_use_state_tracking_wrappers():
     source = BACKGROUND.read_text(encoding="utf-8")
-    assert "async function attachAbmDebugger" in source
-    assert "async function detachAbmDebugger" in source
+    assert "async function attachBtapDebugger" in source
+    assert "async function detachBtapDebugger" in source
     assert source.count("chrome.debugger.attach(") == 1
     assert source.count("chrome.debugger.detach(") == 1
     assert "dialogAttachedTabs.add" in source
@@ -1641,7 +1641,7 @@ def test_injected_confirm_has_no_unconditional_accept():
 
 def test_injected_dialog_observations_are_bounded_and_policy_driven():
     source = DISABLE_DIALOGS.read_text(encoding="utf-8")
-    assert "__abm_dialog_records" in source
+    assert "__btap_dialog_records" in source
     assert "slice(" in source or "shift()" in source
     assert "defaultPrompt" in source
     assert "openedAt" in source

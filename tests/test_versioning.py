@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_browser_mcp import __version__
+from browsertap_mcp import __version__
 from scripts.versioning import (
     VersionError,
     bump_version,
@@ -56,7 +56,7 @@ def test_invalid_versions_are_rejected(version):
 
 
 def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
-    package = tmp_path / "src" / "agent_browser_mcp"
+    package = tmp_path / "src" / "browsertap_mcp"
     extension = package / "chrome_extension"
     extension.mkdir(parents=True)
     (package / "_version.py").write_text('__version__ = "0.1.0"\n', encoding="utf-8")
@@ -65,9 +65,9 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "pyproject.toml").write_text(
-        "[project]\nname='agent-browser-mcp'\ndynamic=['version']\n"
+        "[project]\nname='browsertap-mcp'\ndynamic=['version']\n"
         "[tool.setuptools.dynamic]\n"
-        "version={attr='agent_browser_mcp.__version__'}\n",
+        "version={attr='browsertap_mcp.__version__'}\n",
         encoding="utf-8",
     )
     (tmp_path / "README.md").write_text(
@@ -83,8 +83,8 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "## [Unreleased]\n\n"
         "### Changed\n\n- Pending change.\n\n"
         "## [0.1.0] - 2026-01-01\n\n- Initial release.\n\n"
-        "[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.1.0...HEAD\n"
-        "[0.1.0]: https://github.com/LinVireo/agent-browser-mcp/releases/tag/v0.1.0\n",
+        "[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.1.0...HEAD\n"
+        "[0.1.0]: https://github.com/LinVireo/browsertap-mcp/releases/tag/v0.1.0\n",
         encoding="utf-8",
     )
 
@@ -113,16 +113,16 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
     assert "## [Unreleased]\n\n## [0.3.0] - " in changelog
     assert "### Changed\n\n- Pending change." in changelog
     assert (
-        "[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.0...HEAD"
+        "[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.0...HEAD"
         in changelog
     )
     assert (
-        "[0.3.0]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.1.0...v0.3.0" in changelog
+        "[0.3.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.1.0...v0.3.0" in changelog
     )
 
 
 def test_static_project_version_is_rejected(tmp_path):
-    package = tmp_path / "src" / "agent_browser_mcp"
+    package = tmp_path / "src" / "browsertap_mcp"
     extension = package / "chrome_extension"
     extension.mkdir(parents=True)
     (package / "_version.py").write_text('__version__ = "0.3.0"\n', encoding="utf-8")
@@ -131,7 +131,7 @@ def test_static_project_version_is_rejected(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "pyproject.toml").write_text(
-        "[project]\nname='agent-browser-mcp'\nversion='0.3.0'\n",
+        "[project]\nname='browsertap-mcp'\nversion='0.3.0'\n",
         encoding="utf-8",
     )
 
@@ -140,7 +140,7 @@ def test_static_project_version_is_rejected(tmp_path):
 
 
 def test_production_changes_require_a_strict_version_increment():
-    assert validate_version_increment("0.3.0", "0.3.1", ["src/agent_browser_mcp/server.py"]) is True
+    assert validate_version_increment("0.3.0", "0.3.1", ["src/browsertap_mcp/server.py"]) is True
     assert (
         validate_version_increment("0.3.0", "0.3.0", ["README.md", "tests/test_versioning.py"])
         is False
@@ -155,13 +155,13 @@ def _tagged_repo(root: Path, version: str, tag: str) -> None:
     def run(*args: str) -> None:
         subprocess.run(("git", *args), cwd=root, check=True, capture_output=True, text=True)
 
-    package = root / "src" / "agent_browser_mcp"
+    package = root / "src" / "browsertap_mcp"
     package.mkdir(parents=True, exist_ok=True)
     (package / "_version.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
     (package / "server.py").write_text("VALUE = 1\n", encoding="utf-8")
     run("init", "-q")
-    run("config", "user.email", "abm-test@example.invalid")
-    run("config", "user.name", "ABM Test")
+    run("config", "user.email", "btap-test@example.invalid")
+    run("config", "user.name", "BTAP Test")
     run("config", "commit.gpgsign", "false")
     run("add", "-A")
     run("commit", "-q", "-m", "release")
@@ -177,7 +177,7 @@ def test_uncommitted_production_changes_still_require_a_version_increment(tmp_pa
     CI push event, and nothing had been pushed.
     """
     _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
-    (tmp_path / "src" / "agent_browser_mcp" / "server.py").write_text(
+    (tmp_path / "src" / "browsertap_mcp" / "server.py").write_text(
         "VALUE = 2\n", encoding="utf-8"
     )
 
@@ -191,21 +191,61 @@ def test_uncommitted_production_changes_still_require_a_version_increment(tmp_pa
         validate_version_bump(tmp_path, "v0.3.0", include_worktree=True)
 
 
+def test_base_version_is_readable_from_the_pre_rename_package_path(tmp_path):
+    """The 0.4.0 rename moved the version source, and the baseline predates it.
+
+    Resolving only the current path made the gate raise `path exists on disk, but
+    not in <ref>` for every baseline older than the rename commit -- so the one
+    release whose change set is largest would have been the release that skipped
+    the check.
+    """
+    def run(*args: str) -> None:
+        subprocess.run(("git", *args), cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    legacy = tmp_path / "src" / "agent_browser_mcp"
+    legacy.mkdir(parents=True)
+    (legacy / "_version.py").write_text('__version__ = "0.3.13"\n', encoding="utf-8")
+    run("init", "-q")
+    run("config", "user.email", "btap-test@example.invalid")
+    run("config", "user.name", "BTAP Test")
+    run("config", "commit.gpgsign", "false")
+    run("add", "-A")
+    run("commit", "-q", "-m", "pre-rename")
+    run("tag", "v0.3.13")
+
+    renamed = tmp_path / "src" / "browsertap_mcp"
+    legacy.rename(renamed)
+    (renamed / "_version.py").write_text('__version__ = "0.4.0"\n', encoding="utf-8")
+
+    result = validate_version_bump(tmp_path, "v0.3.13", include_worktree=True)
+
+    assert result["base"] == "0.3.13"
+    assert result["current"] == "0.4.0"
+    assert result["production_changed"] is True
+
+
+def test_unknown_base_ref_still_reports_a_usable_error(tmp_path):
+    _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
+
+    with pytest.raises(VersionError, match="cannot compare version against"):
+        validate_version_bump(tmp_path, "v9.9.9")
+
+
 def test_worktree_comparison_counts_untracked_production_files(tmp_path):
     _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
-    (tmp_path / "src" / "agent_browser_mcp" / "added.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "src" / "browsertap_mcp" / "added.py").write_text("X = 1\n", encoding="utf-8")
 
     with pytest.raises(VersionError, match="did not increase"):
         validate_version_bump(tmp_path, "v0.3.0", include_worktree=True)
 
-    (tmp_path / "src" / "agent_browser_mcp" / "_version.py").write_text(
+    (tmp_path / "src" / "browsertap_mcp" / "_version.py").write_text(
         '__version__ = "0.3.1"\n', encoding="utf-8"
     )
     bumped = validate_version_bump(tmp_path, "v0.3.0", include_worktree=True)
 
     assert bumped["base"] == "0.3.0"
     assert bumped["current"] == "0.3.1"
-    assert "src/agent_browser_mcp/added.py" in bumped["changed_paths"]
+    assert "src/browsertap_mcp/added.py" in bumped["changed_paths"]
 
 
 def test_untagged_repository_has_no_baseline_to_compare_against(tmp_path):

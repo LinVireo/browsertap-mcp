@@ -24,7 +24,7 @@ def _shipped_skills() -> list[Path]:
 
 def test_tool_docs_and_caller_skill_are_synchronized():
     # No skip: the skills ship inside the package, so an absent one is a
-    # packaging regression that would leave `agent-browser-mcp skill-path`
+    # packaging regression that would leave `browsertap skill-path`
     # pointing at an empty directory.
     assert _shipped_skills(), f"no <name>/SKILL.md under {SKILL_ROOT}"
     report = build_report()
@@ -50,22 +50,22 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
     contributing_zh = (ROOT / "CONTRIBUTING.zh-CN.md").read_text(encoding="utf-8")
 
     for text in (readme, readme_zh):
-        assert "git clone https://github.com/LinVireo/agent-browser-mcp.git" in text
-        assert ".venv\\Scripts\\agent-browser-mcp.exe" in text
-        assert "AGENT_BROWSER_WS_ALLOWED_ORIGINS" in text
-        assert "AGENT_BROWSER_WS_ALLOW_NO_ORIGIN" in text
+        assert "git clone https://github.com/LinVireo/browsertap-mcp.git" in text
+        assert ".venv\\Scripts\\browsertap.exe" in text
+        assert "BROWSERTAP_WS_ALLOWED_ORIGINS" in text
+        assert "BROWSERTAP_WS_ALLOW_NO_ORIGIN" in text
         assert "registering" in text
         assert "bridge_error" in text
         assert "switched_session" in text
-        assert "agent-browser-mcp bridge --stop" in text
-        assert "pip uninstall agent-browser-mcp" in text
+        assert "browsertap bridge --stop" in text
+        assert "pip uninstall browsertap-mcp" in text
         assert "chrome://extensions" in text
     assert "no_response" in troubleshooting
-    assert "AGENT_BROWSER_TMWD_PORT" in troubleshooting
+    assert "BROWSERTAP_BRIDGE_PORT" in troubleshooting
     # The bridge port is configured on the Python side and mirrored into the
     # extension from its service-worker console. It is deliberately NOT an
     # editable field in the popup, so the guide must carry the console step.
-    assert "chrome.storage.local.set({ abm_port" in troubleshooting
+    assert "chrome.storage.local.set({ btap_port" in troubleshooting
 
     assert "declarativeNetRequest" in security
     assert "three business days" in security
@@ -111,7 +111,7 @@ def test_troubleshooting_quotes_the_literals_the_code_actually_emits():
     says an unnamed target was re-picked. All three previously existed only in
     the source, so the operator hitting one had nothing to look up.
     """
-    bridge = (ROOT / "src" / "agent_browser_mcp" / "browser_bridge.py").read_text(
+    bridge = (ROOT / "src" / "browsertap_mcp" / "browser_bridge.py").read_text(
         encoding="utf-8"
     )
     # Adjacent string fragments are one value at runtime, so collapse the source
@@ -124,7 +124,7 @@ def test_troubleshooting_quotes_the_literals_the_code_actually_emits():
 
     literals = (
         "unauthorized: missing or bad bridge token",
-        "is not connected. ABM refused to execute on a different tab",
+        "is not connected. BTAP refused to execute on a different tab",
         "switched_session",
     )
     for literal in literals:
@@ -139,10 +139,14 @@ def test_troubleshooting_quotes_the_literals_the_code_actually_emits():
 
 
 def test_public_maintenance_commands_use_module_invocation():
+    # Only documents that ship. `docs/superpowers/` was untracked and
+    # gitignored in 0.3.14, so naming a file there made this contract
+    # unverifiable on a fresh clone: it passed on the maintainer machine,
+    # where the untracked file still exists, and raised FileNotFoundError
+    # anywhere else.
     paths = (
         ROOT / "CONTRIBUTING.md",
         ROOT / "CONTRIBUTING.zh-CN.md",
-        ROOT / "docs" / "superpowers" / "specs" / "2026-08-14-abm-095-stability-design.md",
     )
     for path in paths:
         text = path.read_text(encoding="utf-8")
@@ -204,7 +208,7 @@ def test_readme_links_survive_being_read_off_the_repository():
     from both places, so the READMEs pay that cost and the rest of the docs,
     which are only ever read inside the tree, keep relative links.
     """
-    repository = "https://github.com/LinVireo/agent-browser-mcp/"
+    repository = "https://github.com/LinVireo/browsertap-mcp/"
     for name in ("README.md", "README.zh-CN.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
         targets = re.findall(r"\]\(([^)\s]+)\)", text)
@@ -233,7 +237,7 @@ def test_user_facing_docs_carry_no_pre_unification_version_numbers():
     Everything is unified on the package version now, so a surviving `2.x.y` in
     a user-facing doc tells the reader the advice applies to a build that no
     longer exists. Dependency versions belong in CHANGELOG or CONTRIBUTING, not
-    in these files, so any `2.x.y` here is a leftover ABM version.
+    in these files, so any `2.x.y` here is a leftover BTAP version.
     """
     stale = re.compile(r"(?<![\w.])2\.\d+\.\d+(?![\w.])")
     paths = [
@@ -260,13 +264,13 @@ def test_example_client_names_match_the_standard_config():
         payload = json.loads((ROOT / "examples" / name).read_text(encoding="utf-8"))
         assert payload == {
             "mcpServers": {
-                "agent-browser-mcp": {
+                "browsertap": {
                     "type": "stdio",
-                    "command": "agent-browser-mcp",
+                    "command": "browsertap",
                     "args": [],
                 }
             }
         }
     hermes = (ROOT / "examples" / "hermes-config.yaml").read_text(encoding="utf-8")
-    assert "  agent-browser-mcp:\n" in hermes
-    assert "agent_browser" not in hermes
+    assert "  browsertap:\n" in hermes
+    assert "browsertap_mcp" not in hermes

@@ -1,15 +1,15 @@
-# ABM Usage Guide
+# BTAP Usage Guide
 
 English | [中文](USAGE.zh-CN.md)
 
-This guide describes the least disruptive way to use `agent-browser-mcp` with
+This guide describes the least disruptive way to use `browsertap-mcp` with
 an existing Chrome, Edge, or Opera session. The full 55-tool contract and every
 parameter remain in the root [README](../README.md); this document defines the
 recommended workflows and operation boundaries.
 
 ## 1. Operation levels
 
-ABM operations are divided into three levels:
+BTAP operations are divided into three levels:
 
 | Mode | What it touches | Does it change the visible browser? |
 |---|---|---|
@@ -63,7 +63,7 @@ it as already gone; never recreate an old tab id just to close it.
 
 ## 4. Screenshot sources and model capabilities
 
-ABM has two intentionally different screenshot tools:
+BTAP has two intentionally different screenshot tools:
 
 - `capture_page_screenshot` captures a tab through CDP. It can capture a
   background tab, a full page, or an explicit clip without bringing that tab
@@ -94,14 +94,14 @@ protocol/DOM/API surface. The order is:
 
 1. Explicitly activate the requested tab only when the user must see it or a
    desktop action truly needs it.
-2. ABM checks the target window, ownership, and `on_screen` state.
+2. BTAP checks the target window, ownership, and `on_screen` state.
 3. The physical-input lock and quiet-input gate run before any cursor or key
    event. User activity cancels the action instead of competing with it.
-4. If activation cannot be confirmed, ABM returns `activation_failed` and sends
+4. If activation cannot be confirmed, BTAP returns `activation_failed` and sends
    no input.
 
 The default `lab` profile skips elicitation for continuous automation. Set
-`AGENT_BROWSER_LAB_NO_ELICIT=0` or `false` to restore session-level lab prompts;
+`BROWSERTAP_LAB_NO_ELICIT=0` or `false` to restore session-level lab prompts;
 `safe` asks for each physical-input or site-allow action. Neither profile
 disables the lock, quiet-input gate, ownership checks, or screen confirmation.
 
@@ -114,7 +114,7 @@ disables the lock, quiet-input gate, ownership checks, or screen confirmation.
   cleanup.
 - A stalled Turnstile or similar challenge is returned as `challenge_stalled`.
   Continue in the same user-visible tab rather than opening a second browser.
-- ABM does not fall back to Playwright, a headless browser, or a separate
+- BTAP does not fall back to Playwright, a headless browser, or a separate
   profile. This preserves the user's login state and makes the foreground
   boundary explicit.
 
@@ -123,18 +123,18 @@ disables the lock, quiet-input gate, ownership checks, or screen confirmation.
 Run:
 
 ```text
-agent-browser-mcp doctor
+browsertap doctor
 ```
 
 Check `get_setup_status` for package, bridge, extension, and protocol versions.
 The bridge is a detached process. A missing listener starts automatically when
 spawning is enabled; an older bridge that still owns the port requires
-`agent-browser-mcp bridge --restart`, which does not change the visible browser.
+`browsertap bridge --restart`, which does not change the visible browser.
 An unpacked extension file change still requires a manual **Reload** from
 `chrome://extensions` (or the corresponding Edge/Opera page). Restart the MCP
 client after tool schema changes so it reads the new descriptions.
 
-If `AGENT_BROWSER_TMWD_PORT` is changed from `18765`, tell the extension the
+If `BROWSERTAP_BRIDGE_PORT` is changed from `18765`, tell the extension the
 same WebSocket port once from its service-worker console (see
 [Troubleshooting](TROUBLESHOOTING.md)). The Python environment cannot alter an
 already installed extension's storage; mismatched values leave the bridge and
@@ -143,7 +143,7 @@ extension listening on different ports.
 See [Troubleshooting](TROUBLESHOOTING.md) for complete recovery procedures.
 
 The `/link` HTTP channel uses the persistent token at
-`~/.agent-browser-mcp/bridge-token`. Do not put that token, browser profiles,
+`~/.browsertap/bridge-token`. Do not put that token, browser profiles,
 cookies, screenshots containing personal data, or local logs in Git.
 
 ## 8. Prompt examples
@@ -169,7 +169,7 @@ unless you need to inspect the actual monitor or a native dialog.
 
 ## 9. Safety boundary
 
-ABM controls the real browser profile supplied by the user. Page content is
+BTAP controls the real browser profile supplied by the user. Page content is
 untrusted input and can contain prompt injection. The service is not a security
 boundary; limit it to sessions and accounts appropriate for the MCP client.
 See [SECURITY.md](../SECURITY.md) for the threat model and reporting process.

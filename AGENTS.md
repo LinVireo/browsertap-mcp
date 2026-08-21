@@ -17,17 +17,17 @@ This is the first thing to check when an edit appears to do nothing.
 | Process | What it is | When your edit takes effect |
 |---|---|---|
 | MCP server | one per client session, short-lived | **immediately** on an editable install |
-| bridge daemon | `pythonw -m agent_browser_mcp.bridge`, long-lived, outlives every server | **only after a restart** |
-| Chrome extension | unpacked MV3 extension loaded from `src/agent_browser_mcp/chrome_extension` | **only after a manual reload** |
+| bridge daemon | `pythonw -m browsertap_mcp.bridge`, long-lived, outlives every server | **only after a restart** |
+| Chrome extension | unpacked MV3 extension loaded from `src/browsertap_mcp/chrome_extension` | **only after a manual reload** |
 
-The bridge runs **its own** `TMWebDriver` and keeps **its own**
+The bridge runs **its own** `BrowserBridge` and keeps **its own**
 `default_session_id`. A request with `sessionId: None` is therefore routed by the
 **bridge**, not by the server. After changing any session-resolution logic in
-`tmwebdriver.py`, restart the bridge before testing, or you will conclude the
+`browser_bridge.py`, restart the bridge before testing, or you will conclude the
 change had no effect:
 
 ```bash
-agent-browser-mcp bridge --restart   # Chrome does not need restarting
+browsertap bridge --restart   # Chrome does not need restarting
 ```
 
 The extension reconnects by itself within a few seconds; leave the browser
@@ -42,7 +42,7 @@ alone.
   bridge goes down permanently and needs manual recovery. **Never call it.**
 
 Ask the human to press Reload once on `chrome://extensions`. To find out which
-component is stale, run `agent-browser-mcp doctor` and read `action`:
+component is stale, run `browsertap doctor` and read `action`:
 `reload_extension`, `restart_bridge` and `restart_mcp_session` each name the one
 thing that will actually fix it -- the other two will not.
 
@@ -53,10 +53,10 @@ Miss one and some agent keeps calling the tool from outdated instructions:
 1. the `## Tools` table in **both** `README.md` and `README.zh-CN.md`
 2. the tool's own `description=` in `server.py` -- this is the text a calling
    agent actually receives
-3. `src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md` -- the **caller's**
+3. `src/browsertap_mcp/skills/browsertap-default/SKILL.md` -- the **caller's**
    rules of engagement (which tool to call first, when `session_id` is
    mandatory). This one decides whether other agents misuse the server.
-4. `src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md` -- what to do when
+4. `src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md` -- what to do when
    the transport itself is down.
 
 The two skills **cross-reference each other** (`[[...]]`); updating only one
@@ -73,7 +73,7 @@ python -m scripts.check_tool_docs
 ```
 
 The skills ship inside the wheel as package data.
-`agent-browser-mcp skill-path` prints the directory that holds them as
+`browsertap skill-path` prints the directory that holds them as
 `<name>/SKILL.md`. Point your skill manager **at that directory** instead of
 copying the files: a copy reads as correct for as long as the contents happen to
 agree and then silently stops receiving updates. If you keep a copy anyway,
@@ -93,7 +93,7 @@ connected, pick a target with switch_tab" -- so an agent had to run `list_tabs` 
 The current rule, which must survive any change here:
 
 - Caller did **not** name a tab (`session_id=None`) → if the default is dead,
-  **silently re-pick a live one** (`TMWebDriver._live_default_session_id`). The
+  **silently re-pick a live one** (`BrowserBridge._live_default_session_id`). The
   caller expressed no preference, so re-picking violates nothing.
 - Caller **did** name a tab and it is dead → **still refuse**. Never substitute
   another tab. A "click checkout" landing on the wrong page is far worse than an

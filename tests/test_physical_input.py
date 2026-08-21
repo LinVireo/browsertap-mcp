@@ -17,16 +17,16 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from agent_browser_mcp import physical_input as P
-from agent_browser_mcp import server as S
-from agent_browser_mcp.physical_input import (
+from browsertap_mcp import physical_input as P
+from browsertap_mcp import server as S
+from browsertap_mcp.physical_input import (
     InputActivityDetected,
     PhysicalInputBusy,
     PhysicalInputLease,
 )
 
 # Every child here is a spawn-context process, so before it can signal anything
-# it re-imports this module -- and with it agent_browser_mcp.server, mcp,
+# it re-imports this module -- and with it browsertap_mcp.server, mcp,
 # pydantic and anyio. Measured on an idle developer machine that cold import
 # alone costs 6.3-8.2s, which left the previous 10s budget about two seconds of
 # headroom: the full offline suite could and did fail these tests for load
@@ -37,7 +37,7 @@ CHILD_SIGNAL_TIMEOUT = 60
 
 def _hold_metadata_guard(path, ready, release):
     """Spawn-safe target that holds the real platform advisory guard."""
-    from agent_browser_mcp.physical_input import _ArbitrationGuard
+    from browsertap_mcp.physical_input import _ArbitrationGuard
 
     with _ArbitrationGuard(Path(path)):
         ready.set()
@@ -47,7 +47,7 @@ def _hold_metadata_guard(path, ready, release):
 
 def _exit_while_holding_metadata_guard(path, ready, exit_now):
     """Abruptly end a holder so the OS must release its advisory lock."""
-    from agent_browser_mcp.physical_input import _ArbitrationGuard
+    from browsertap_mcp.physical_input import _ArbitrationGuard
 
     with _ArbitrationGuard(Path(path)):
         ready.set()
@@ -58,7 +58,7 @@ def _exit_while_holding_metadata_guard(path, ready, exit_now):
 
 def _try_metadata_guard(path, started, done, outcome):
     """Spawn-safe contender that reports immediate guard arbitration."""
-    from agent_browser_mcp.physical_input import PhysicalInputBusy, _ArbitrationGuard
+    from browsertap_mcp.physical_input import PhysicalInputBusy, _ArbitrationGuard
 
     started.set()
     try:
@@ -72,7 +72,7 @@ def _try_metadata_guard(path, started, done, outcome):
 
 def _try_lease(path, started, done, outcome):
     """Spawn-safe lease reacquisition probe with a bounded parent wait."""
-    from agent_browser_mcp.physical_input import PhysicalInputBusy, PhysicalInputLease
+    from browsertap_mcp.physical_input import PhysicalInputBusy, PhysicalInputLease
 
     started.set()
     try:
@@ -86,7 +86,7 @@ def _try_lease(path, started, done, outcome):
 
 def _hold_lease(path, ttl_seconds, ready, release):
     """Hold the real lifetime lease until the parent releases this process."""
-    from agent_browser_mcp.physical_input import PhysicalInputLease
+    from browsertap_mcp.physical_input import PhysicalInputLease
 
     with PhysicalInputLease(path=Path(path), ttl_seconds=ttl_seconds, action_summary="holder"):
         ready.set()
@@ -96,7 +96,7 @@ def _hold_lease(path, ttl_seconds, ready, release):
 
 def _exit_while_holding_lease(path, ready, exit_now):
     """Exit abruptly so the OS lock releases while the JSON record remains."""
-    from agent_browser_mcp.physical_input import PhysicalInputLease
+    from browsertap_mcp.physical_input import PhysicalInputLease
 
     lease = PhysicalInputLease(path=Path(path), ttl_seconds=10, action_summary="abrupt")
     lease.__enter__()
@@ -1044,10 +1044,10 @@ def test_wait_for_quiet_rejects_invalid_duration(monkeypatch, value):
         P.wait_for_quiet(value)
 
 
-def test_default_lock_path_uses_agent_browser_directory(monkeypatch, tmp_path):
+def test_default_lock_path_uses_browsertap_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(P.Path, "home", classmethod(lambda _cls: tmp_path))
 
-    assert P._default_lock_path() == tmp_path / ".agent-browser-mcp" / "physical-input.lock"
+    assert P._default_lock_path() == tmp_path / ".browsertap" / "physical-input.lock"
 
 
 def test_last_input_marker_posix_uses_pointer_only(monkeypatch):
@@ -1277,7 +1277,7 @@ async def test_physical_tool_requires_approval_before_any_work(
 
     # Force safe mode so elicitation is required (lab defaults to no_elicit=true now)
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("AGENT_BROWSER_LAB_NO_ELICIT", raising=False)
+    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
 
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(S, "_maybe_activate", lambda *args: pytest.fail("must not activate"))
@@ -1299,7 +1299,7 @@ async def test_physical_tool_requires_approval_before_any_work(
 async def test_elicitation_decline_cancel_and_failure_are_structured(monkeypatch, action, error):
     ctx = _ApprovalContext(action=action, approve=True, error=error)
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("AGENT_BROWSER_LAB_NO_ELICIT", raising=False)
+    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(S.physical_input, "run_physical_action", lambda *args: pytest.fail("must not acquire lease"))
 
@@ -1315,7 +1315,7 @@ async def test_approval_requires_a_boolean_true(monkeypatch):
             return SimpleNamespace(action="accept", data=SimpleNamespace(approve=1))
 
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("AGENT_BROWSER_LAB_NO_ELICIT", raising=False)
+    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(S.physical_input, "run_physical_action", lambda *args: pytest.fail("must not acquire lease"))
 
@@ -1345,8 +1345,8 @@ async def test_unanswered_approval_times_out_instead_of_holding_the_tool_lock(mo
             pytest.fail("the approval wait was not bounded")
 
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("AGENT_BROWSER_LAB_NO_ELICIT", raising=False)
-    monkeypatch.setenv("AGENT_BROWSER_APPROVAL_TIMEOUT", "0.05")
+    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
+    monkeypatch.setenv("BROWSERTAP_APPROVAL_TIMEOUT", "0.05")
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(
         S.physical_input, "run_physical_action",
@@ -1360,15 +1360,15 @@ async def test_unanswered_approval_times_out_instead_of_holding_the_tool_lock(mo
 
 
 def test_approval_timeout_falls_back_on_bad_configuration(monkeypatch):
-    monkeypatch.delenv("AGENT_BROWSER_APPROVAL_TIMEOUT", raising=False)
+    monkeypatch.delenv("BROWSERTAP_APPROVAL_TIMEOUT", raising=False)
     assert S._approval_timeout() == S._DEFAULT_APPROVAL_TIMEOUT
-    monkeypatch.setenv("AGENT_BROWSER_APPROVAL_TIMEOUT", "not-a-number")
+    monkeypatch.setenv("BROWSERTAP_APPROVAL_TIMEOUT", "not-a-number")
     assert S._approval_timeout() == S._DEFAULT_APPROVAL_TIMEOUT
-    monkeypatch.setenv("AGENT_BROWSER_APPROVAL_TIMEOUT", "0")
+    monkeypatch.setenv("BROWSERTAP_APPROVAL_TIMEOUT", "0")
     assert S._approval_timeout() == S._DEFAULT_APPROVAL_TIMEOUT
-    monkeypatch.setenv("AGENT_BROWSER_APPROVAL_TIMEOUT", "-5")
+    monkeypatch.setenv("BROWSERTAP_APPROVAL_TIMEOUT", "-5")
     assert S._approval_timeout() == S._DEFAULT_APPROVAL_TIMEOUT
-    monkeypatch.setenv("AGENT_BROWSER_APPROVAL_TIMEOUT", " 7.5 ")
+    monkeypatch.setenv("BROWSERTAP_APPROVAL_TIMEOUT", " 7.5 ")
     assert S._approval_timeout() == 7.5
 
 
@@ -1514,5 +1514,5 @@ def test_missing_desktop_extra_keeps_its_own_install_instruction(monkeypatch):
         S._pyautogui()
 
     message = str(excinfo.value)
-    assert "agent-browser-mcp[desktop]" in message
+    assert "browsertap-mcp[desktop]" in message
     assert "desktop session could not be initialised" not in message

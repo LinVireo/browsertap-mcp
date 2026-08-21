@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_browser_mcp import bridge
+from browsertap_mcp import bridge
 
 
 class FakeDriver:
@@ -18,13 +18,13 @@ class FakeDriver:
 
 
 def test_remote_bridge_exits_without_sleeping(monkeypatch, caplog):
-    caplog.set_level("INFO", logger="agent_browser_mcp.bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.bridge")
     driver = FakeDriver(remote=True)
     calls = []
     monkeypatch.setattr(bridge, "BrowserBridge", lambda **kwargs: driver)
     monkeypatch.setattr(bridge.time, "sleep", lambda seconds: calls.append(seconds))
-    monkeypatch.setenv("AGENT_BROWSER_TMWD_HOST", "127.0.0.8")
-    monkeypatch.setenv("AGENT_BROWSER_TMWD_PORT", "19876")
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_HOST", "127.0.0.8")
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "19876")
 
     assert bridge.main([]) == 0
     assert calls == []
@@ -33,7 +33,7 @@ def test_remote_bridge_exits_without_sleeping(monkeypatch, caplog):
 
 
 def test_local_bridge_handles_interrupt_and_closes_driver(monkeypatch, caplog):
-    caplog.set_level("INFO", logger="agent_browser_mcp.bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.bridge")
     driver = FakeDriver()
     monkeypatch.setattr(bridge, "BrowserBridge", lambda **kwargs: driver)
     monkeypatch.setattr(
@@ -88,7 +88,7 @@ def test_bridge_constructor_failure_propagates(monkeypatch):
 
 
 def test_bridge_rejects_non_numeric_port_before_constructing(monkeypatch):
-    monkeypatch.setenv("AGENT_BROWSER_TMWD_PORT", "not-a-port")
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "not-a-port")
     monkeypatch.setattr(
         bridge,
         "BrowserBridge",
@@ -110,7 +110,7 @@ def test_remote_driver_without_close_is_supported(monkeypatch):
 
 
 def test_bridge_record_is_atomic_and_private(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(
         bridge,
         "process_identity",
@@ -127,7 +127,7 @@ def test_bridge_record_is_atomic_and_private(monkeypatch, tmp_path):
 
 
 def test_stop_bridge_refuses_unmanaged_listener(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(bridge, "_configured_bridge_port_open", lambda: True)
     monkeypatch.setattr(
         bridge,
@@ -143,14 +143,14 @@ def test_stop_bridge_refuses_unmanaged_listener(monkeypatch, tmp_path):
 
 
 def test_stop_bridge_reports_no_managed_or_listening_process(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(bridge, "_configured_bridge_port_open", lambda: False)
 
     assert bridge.stop_bridge_daemon() == {"status": "not_running", "stopped": False}
 
 
 def test_stop_bridge_refuses_reused_pid(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     record = {
         "pid": 45,
         "creation_ticks": 100,
@@ -176,7 +176,7 @@ def test_stop_bridge_refuses_reused_pid(monkeypatch, tmp_path):
 
 
 def test_stop_bridge_terminates_only_matching_record(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     record = {
         "pid": 46,
         "creation_ticks": 200,
@@ -204,7 +204,7 @@ def test_stop_bridge_keeps_record_when_identity_is_unknowable(monkeypatch, tmp_p
     while the daemon is still holding the ports, so the next --restart spawns a
     rival that cannot bind and the record ends up pointing at the broken one.
     """
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     record = {
         "pid": 47,
         "creation_ticks": 300,
@@ -245,7 +245,7 @@ def test_process_is_gone_requires_proof(monkeypatch):
 
 
 def test_write_bridge_record_refuses_when_own_identity_is_unknowable(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENT_BROWSER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
 
     def denied(pid):
         raise bridge.ProcessIdentityUnavailable("GetProcessTimes failed")

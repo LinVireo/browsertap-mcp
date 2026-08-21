@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-browser-mcp"
+name = "browsertap-mcp"
 dynamic = ["version"]
 description = "Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, cookies, and physical input"
 readme = "README.md"
@@ -72,7 +72,7 @@ dev = [
   "twine>=5.0",
   # Only the release tooling reads pyproject.toml (scripts/versioning.py and the
   # packaging tests). The installed package never imports it, so it is not a
-  # runtime dependency of `pip install agent-browser-mcp`.
+  # runtime dependency of `pip install browsertap-mcp`.
   "tomli>=2.0; python_version < '3.11'",
 ]
 
@@ -81,11 +81,11 @@ branch = true
 # `scripts` holds the release tooling that produces the acceptance score, so it
 # is measured too. Note that a `--cov=<pkg>` flag on the pytest command line
 # REPLACES this list rather than adding to it: the release and CI commands pass
-# `--cov=agent_browser_mcp` explicitly, so they measure only the package. Adding
+# `--cov=browsertap_mcp` explicitly, so they measure only the package. Adding
 # `--cov=scripts` there would fold the release tooling into `--cov-fail-under`,
 # which currently lands at 82.53% combined (package 89.1%, scripts 67.5%) and
 # would fail the 85 gate; ~185 more covered units are needed first.
-source = ["agent_browser_mcp", "scripts"]
+source = ["browsertap_mcp", "scripts"]
 omit = ["*/chrome_extension/*"]
 
 [tool.coverage.report]
@@ -107,39 +107,39 @@ select = ["E4", "E7", "E9", "F", "I"]
 ignore = ["E402", "E701", "E702", "E741"]
 
 [project.urls]
-Homepage = "https://github.com/LinVireo/agent-browser-mcp"
-Repository = "https://github.com/LinVireo/agent-browser-mcp"
-Issues = "https://github.com/LinVireo/agent-browser-mcp/issues"
-Changelog = "https://github.com/LinVireo/agent-browser-mcp/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.md"
+Homepage = "https://github.com/LinVireo/browsertap-mcp"
+Repository = "https://github.com/LinVireo/browsertap-mcp"
+Issues = "https://github.com/LinVireo/browsertap-mcp/issues"
+Changelog = "https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md"
 # The index page is the first place a reader looks for where to send a report,
 # and it is the one link that must not go through a public issue.
-Security = "https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md"
+Security = "https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md"
 
 [project.scripts]
-agent-browser-mcp = "agent_browser_mcp.cli:main"
+browsertap = "browsertap_mcp.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = {attr = "agent_browser_mcp.__version__"}
+version = {attr = "browsertap_mcp.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_browser_mcp = [
+browsertap_mcp = [
   "chrome_extension/*",
   "chrome_extension/_locales/*/*.json",
-  # The agent skills ship with the package so `agent-browser-mcp skill-path`
+  # The agent skills ship with the package so `browsertap skill-path`
   # resolves from a plain `pip install`, not only from a repository checkout.
   "skills/*/SKILL.md",
 ]
 
 [tool.setuptools.exclude-package-data]
-agent_browser_mcp = ["chrome_extension/config.js"]
+browsertap_mcp = ["chrome_extension/config.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

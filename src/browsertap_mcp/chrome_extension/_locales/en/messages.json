@@ -1,6 +1,6 @@
 {
-  "extensionName": { "message": "Agent Browser MCP Bridge" },
-  "extensionDescription": { "message": "Agent Browser MCP bridge with browser session and cookie access." },
+  "extensionName": { "message": "BrowserTap Bridge" },
+  "extensionDescription": { "message": "BrowserTap bridge with browser session and cookie access." },
   "indicatorToggleLabel": { "message": "Show connection status on pages" },
   "cookieViewerTitle": { "message": "Cookie viewer" },
   "refreshButton": { "message": "Refresh" },
@@ -10,8 +10,8 @@
   "unknownError": { "message": "unknown" },
   "noCookies": { "message": "(no cookies)" },
   "cookiesUnavailable": { "message": "Cookies are only available for HTTP(S) pages." },
-  "indicatorChecking": { "message": "ABM: checking" },
-  "indicatorConnected": { "message": "ABM: connected" },
-  "indicatorDisconnected": { "message": "ABM: disconnected" },
-  "indicatorRefreshPage": { "message": "ABM: refresh page" }
+  "indicatorChecking": { "message": "BTAP: checking" },
+  "indicatorConnected": { "message": "BTAP: connected" },
+  "indicatorDisconnected": { "message": "BTAP: disconnected" },
+  "indicatorRefreshPage": { "message": "BTAP: refresh page" }
 }

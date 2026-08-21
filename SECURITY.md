@@ -1,6 +1,6 @@
 # Security Policy
 
-`agent-browser-mcp` controls a real browser profile and may expose logged-in
+`browsertap-mcp` controls a real browser profile and may expose logged-in
 page content, cookies, downloads, screenshots, and OS-level input to an MCP
 client. Treat the client, its model, and every enabled tool as part of the same
 trust boundary.
@@ -22,7 +22,7 @@ triage/status update within seven business days. Remediation timing depends on
 severity and reproducibility; these targets are response goals, not a promise
 that every report is fixed within seven days.
 
-Include the affected ABM version, browser/version, operating system, expected
+Include the affected BTAP version, browser/version, operating system, expected
 security boundary, reproduction steps with synthetic data, and whether the
 issue requires a connected extension, an authenticated `/link` request, or
 physical input.
@@ -41,23 +41,23 @@ physical input.
   therefore equivalent to taking over every session that browser profile is
   signed into. Treat the token file like a password, not like a config value.
 - The `/link`, `/api/result`, and `/api/longpoll` HTTP routes require the
-  persistent per-user token stored at `~/.agent-browser-mcp/bridge-token`. Keep
+  persistent per-user token stored at `~/.browsertap/bridge-token`. Keep
   the file out of repositories, diagnostics, screenshots, and support bundles.
-- `AGENT_BROWSER_BRIDGE_AUTH=off` (also `0`, `false`, `disabled`) disables that
+- `BROWSERTAP_BRIDGE_AUTH=off` (also `0`, `false`, `disabled`) disables that
   authentication entirely: every token-guarded route then accepts any local
   request, with the consequence described above. It exists only for an
   explicitly trusted local compatibility setup, it is not reported by
-  `get_setup_status` or `agent-browser-mcp doctor`, and a value left in an
+  `get_setup_status` or `browsertap doctor`, and a value left in an
   editor's environment is therefore silent. Leave it unset.
 - WebSocket handshakes accept extension origins by default and reject missing
-  origins. `AGENT_BROWSER_WS_ALLOWED_ORIGINS` adds exact trusted origins;
-  `AGENT_BROWSER_WS_ALLOW_NO_ORIGIN=1` permits origin-less local clients. Both
+  origins. `BROWSERTAP_WS_ALLOWED_ORIGINS` adds exact trusted origins;
+  `BROWSERTAP_WS_ALLOW_NO_ORIGIN=1` permits origin-less local clients. Both
   expand the attack surface and should remain unset in normal installations.
   Scope this guarantee correctly: the default check is a prefix match on
   extension URL schemes and the WebSocket port carries no token, so it keeps
   ordinary web pages out but does not distinguish the real extension from a
   local process that sends an extension-shaped `Origin` header.
-- The extension has broad browser permissions because ABM can inspect and
+- The extension has broad browser permissions because BTAP can inspect and
   modify the real session, including cookies, downloads, tabs, bookmarks,
   extension management, CDP debugger access, and site content on `<all_urls>`.
   The popup's cookie viewer intentionally exposes cookie values and copies a
@@ -67,7 +67,7 @@ physical input.
   that page JavaScript cannot read, into the MCP client's context. Anything the
   client logs, caches, or forwards therefore carries live session credentials.
 - On ordinary pages the content script may display a small connection-status
-  badge (`ABM: checking`, `ABM: connected`, or `ABM: disconnected`). It is
+  badge (`BTAP: checking`, `BTAP: connected`, or `BTAP: disconnected`). It is
   presentation-only and contains no page content, cookie, token, or URL data.
   The popup toggle only hides the badge; it does not disable the bridge,
   keepalive, or automatic reconnect.
@@ -80,9 +80,9 @@ physical input.
   browser connection does not make instructions found in a page trustworthy.
 - The shipped default mode is `lab`, which skips elicitation so continuous
   automation is not interrupted: on a default install no physical-input or
-  site-allow action asks for approval. Set `AGENT_BROWSER_MODE=safe` to be
+  site-allow action asks for approval. Set `BROWSERTAP_MODE=safe` to be
   prompted per physical-input or site-allow action, or
-  `AGENT_BROWSER_LAB_NO_ELICIT=0` to keep `lab` but restore prompts. Both modes
+  `BROWSERTAP_LAB_NO_ELICIT=0` to keep `lab` but restore prompts. Both modes
   retain ownership checks, the physical-input lock, the quiet-input gate,
   activation checks, and temporary permission cleanup.
 - Physical input disables pyautogui's corner failsafe
@@ -97,6 +97,6 @@ physical input.
 - A page screenshot is scoped to a browser tab; a desktop screenshot may
   include any visible application. Review screenshots before sharing them.
 
-ABM is an automation tool, not a sandbox or security boundary. Use a browser
+BTAP is an automation tool, not a sandbox or security boundary. Use a browser
 profile and accounts appropriate for the MCP client, and avoid shared or
 production machines when the impact of a mistaken action would be unacceptable.

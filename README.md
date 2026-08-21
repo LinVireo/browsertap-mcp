@@ -1,18 +1,18 @@
-<!-- mcp-name: io.github.LinVireo/agent-browser-mcp -->
+<!-- mcp-name: io.github.LinVireo/browsertap-mcp -->
 
-# agent-browser-mcp
+# browsertap-mcp
 
-English | [中文文档](https://github.com/LinVireo/agent-browser-mcp/blob/main/README.zh-CN.md)
+English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/README.zh-CN.md)
 
-[![Offline CI](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/LinVireo/agent-browser-mcp/actions/workflows/test.yml)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE)
+[![Offline CI](https://github.com/LinVireo/browsertap-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/LinVireo/browsertap-mcp/actions/workflows/test.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
 
-[Usage guide](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md) · [Contributing](https://github.com/LinVireo/agent-browser-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/agent-browser-mcp/blob/main/CHANGELOG.md)
+[Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.3.14**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.0**.
 
 It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 
@@ -50,26 +50,26 @@ desktop feature set:
 **Windows PowerShell**
 
 ```powershell
-git clone https://github.com/LinVireo/agent-browser-mcp.git
-Set-Location agent-browser-mcp
+git clone https://github.com/LinVireo/browsertap-mcp.git
+Set-Location browsertap-mcp
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
-.\.venv\Scripts\agent-browser-mcp.exe extension-path
+.\.venv\Scripts\browsertap.exe extension-path
 ```
 
 **Linux or macOS**
 
 ```bash
-git clone https://github.com/LinVireo/agent-browser-mcp.git
-cd agent-browser-mcp
+git clone https://github.com/LinVireo/browsertap-mcp.git
+cd browsertap-mcp
 python -m venv .venv
 ./.venv/bin/python -m pip install -e ".[desktop]"
-./.venv/bin/agent-browser-mcp extension-path
+./.venv/bin/browsertap extension-path
 ```
 
 The core install (`pip install -e .`) omits OS-level mouse/keyboard and desktop
 capture dependencies. Use it only when those tools are intentionally disabled.
-After the first PyPI release, `pip install "agent-browser-mcp[desktop]"` will be
+After the first PyPI release, `pip install "browsertap-mcp[desktop]"` will be
 the non-editable install path; until then, the source install above is the
 supported path.
 
@@ -78,11 +78,11 @@ supported path.
 This project ships an unpacked extension that has to be loaded once by hand.
 
 ```bash
-agent-browser-mcp extension-path
+browsertap extension-path
 ```
 
 Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick the directory that command printed.
-The loaded extension is listed as **Agent Browser MCP Bridge**.
+The loaded extension is listed as **BrowserTap Bridge**.
 
 If you also use Edge or Opera, repeat the same steps at `edge://extensions` or `opera://extensions` with the same directory. The bridge tells the browsers apart automatically.
 
@@ -90,8 +90,8 @@ Then open a normal `http://` or `https://` page. A blank tab is not enough — c
 
 #### Connection status badge
 
-The extension may show a small `ABM: checking`, `ABM: connected`, or
-`ABM: disconnected` badge on pages. The badge is presentation-only: it reports
+The extension may show a small `BTAP: checking`, `BTAP: connected`, or
+`BTAP: disconnected` badge on pages. The badge is presentation-only: it reports
 the bridge connection state and does not display page content, cookies, tokens,
 or URLs. Open the extension popup and clear **Show connection status on pages**
 to hide it. Hiding the badge does not stop the bridge, keepalive, or automatic
@@ -104,9 +104,9 @@ reconnect behavior.
 ```json
 {
   "mcpServers": {
-    "agent-browser-mcp": {
+    "browsertap": {
       "type": "stdio",
-      "command": "agent-browser-mcp"
+      "command": "browsertap"
     }
   }
 }
@@ -118,17 +118,17 @@ If you installed into a virtualenv, point `command` at the executable's absolute
 <summary>Claude Code</summary>
 
 ```bash
-claude mcp add agent-browser-mcp -- agent-browser-mcp
+claude mcp add browsertap -- browsertap
 ```
 
 Add `--scope user` to make it available across all projects. For a virtualenv install:
 
 ```bash
-claude mcp add agent-browser-mcp -- /absolute/path/to/.venv/bin/agent-browser-mcp
+claude mcp add browsertap -- /absolute/path/to/.venv/bin/browsertap
 ```
 
 On Windows PowerShell, use the absolute path to
-`.venv\Scripts\agent-browser-mcp.exe` instead.
+`.venv\Scripts\browsertap.exe` instead.
 
 Verify with `/mcp`.
 </details>
@@ -149,7 +149,7 @@ Put the standard config in `.cursor/mcp.json` for one project, or `~/.cursor/mcp
 <summary>VS Code</summary>
 
 ```bash
-code --add-mcp '{"name":"agent-browser-mcp","command":"agent-browser-mcp"}'
+code --add-mcp '{"name":"browsertap-mcp","command":"browsertap-mcp"}'
 ```
 
 Or write it into `.vscode/mcp.json` by hand — note that VS Code's key is `servers`, not `mcpServers`.
@@ -162,13 +162,13 @@ Add to `~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
-  agent-browser-mcp:
-    command: agent-browser-mcp
+  browsertap:
+    command: browsertap
     timeout: 120
     connect_timeout: 60
 ```
 
-`agent-browser-mcp print-hermes-config` prints this snippet. An example file is included at `examples/hermes-config.yaml`. Verify with `hermes mcp list`.
+`browsertap print-hermes-config` prints this snippet. An example file is included at `examples/hermes-config.yaml`. Verify with `hermes mcp list`.
 </details>
 
 <details>
@@ -183,9 +183,9 @@ Once the extension is loaded and a normal page is open, try:
 
 > What tabs do I have open? Read the current page and summarise it.
 
-If tabs come back empty, run `agent-browser-mcp doctor`.
+If tabs come back empty, run `browsertap doctor`.
 
-For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/USAGE.md): it explains which operations stay in a background tab, when a desktop screenshot really means the monitor, and when an image-capable model is useful.
+For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md): it explains which operations stay in a background tab, when a desktop screenshot really means the monitor, and when an image-capable model is useful.
 
 ## Configuration
 
@@ -193,28 +193,28 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AGENT_BROWSER_TMWD_HOST` | `127.0.0.1` | Bridge bind address. |
-| `AGENT_BROWSER_TMWD_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge hosting. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md). |
-| `AGENT_BROWSER_NO_SPAWN` | unset | Set to `1` to stop the MCP server from auto-starting the bridge. Use it when you run the bridge yourself. |
-| `AGENT_BROWSER_BRIDGE_AUTH` | enabled | Set to `off` only for an explicitly trusted local compatibility setup. By default ABM authenticates `/link` with a persistent per-user token. |
-| `AGENT_BROWSER_BRIDGE_TOKEN_FILE` | `~/.agent-browser-mcp/bridge-token` | Override the shared token file location. Editors do not need individual token configuration. |
-| `AGENT_BROWSER_BRIDGE_TOKEN` | unset | Legacy one-time migration source. If the token file does not exist, ABM imports this value once; the file wins thereafter. |
-| `AGENT_BROWSER_PREFERRED_BROWSER` | unset | `chrome`, `edge`, or `opera`. Which browser wins when several are connected and no tab is specified. |
-| `AGENT_BROWSER_MODE` | `lab` | `lab` prioritizes uninterrupted automation and skips physical-input/site-allow elicitation; `safe` prompts for every such action. `set_automation_profile` changes only the current MCP process. |
-| `AGENT_BROWSER_LAB_NO_ELICIT` | enabled | Lab skips elicitation by default. Set this to `0`/`false` only when you want session-level lab approval prompts; the cross-process lock, quiet-input gate, foreground confirmation, and ownership checks always apply. |
-| `AGENT_BROWSER_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | In lab, ordinary `open_url` accepts beforeunload on matching current hosts. `intent_leave=false` always preserves the page. |
-| `AGENT_BROWSER_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins allowed to open the bridge WebSocket. Extension origins are allowed automatically; do not add broad or untrusted origins. |
-| `AGENT_BROWSER_WS_ALLOW_NO_ORIGIN` | unset | Set to `1` only for a trusted non-browser local WebSocket client that cannot send `Origin`. The default rejects origin-less clients. |
+| `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | Bridge bind address. |
+| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge hosting. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md). |
+| `BROWSERTAP_NO_SPAWN` | unset | Set to `1` to stop the MCP server from auto-starting the bridge. Use it when you run the bridge yourself. |
+| `BROWSERTAP_BRIDGE_AUTH` | enabled | Set to `off` only for an explicitly trusted local compatibility setup. By default BTAP authenticates `/link` with a persistent per-user token. |
+| `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | Override the shared token file location. Editors do not need individual token configuration. |
+| `BROWSERTAP_BRIDGE_TOKEN` | unset | Legacy one-time migration source. If the token file does not exist, BTAP imports this value once; the file wins thereafter. |
+| `BROWSERTAP_PREFERRED_BROWSER` | unset | `chrome`, `edge`, or `opera`. Which browser wins when several are connected and no tab is specified. |
+| `BROWSERTAP_MODE` | `lab` | `lab` prioritizes uninterrupted automation and skips physical-input/site-allow elicitation; `safe` prompts for every such action. `set_automation_profile` changes only the current MCP process. |
+| `BROWSERTAP_LAB_NO_ELICIT` | enabled | Lab skips elicitation by default. Set this to `0`/`false` only when you want session-level lab approval prompts; the cross-process lock, quiet-input gate, foreground confirmation, and ownership checks always apply. |
+| `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | In lab, ordinary `open_url` accepts beforeunload on matching current hosts. `intent_leave=false` always preserves the page. |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins allowed to open the bridge WebSocket. Extension origins are allowed automatically; do not add broad or untrusted origins. |
+| `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | unset | Set to `1` only for a trusted non-browser local WebSocket client that cannot send `Origin`. The default rejects origin-less clients. |
 
 ### CLI
 
 ```bash
-agent-browser-mcp                      # run the MCP server (stdio)
-agent-browser-mcp extension-path       # print the unpacked extension directory
-agent-browser-mcp skill-path           # print the directory holding the shipped agent skills
-agent-browser-mcp doctor               # diagnose the local setup, as JSON
-agent-browser-mcp bridge               # run the bridge in the foreground
-agent-browser-mcp print-hermes-config  # print a Hermes config snippet
+browsertap                      # run the MCP server (stdio)
+browsertap extension-path       # print the unpacked extension directory
+browsertap skill-path           # print the directory holding the shipped agent skills
+browsertap doctor               # diagnose the local setup, as JSON
+browsertap bridge               # run the bridge in the foreground
+browsertap print-hermes-config  # print a Hermes config snippet
 ```
 
 `doctor` reports the extension path, port state, and connected tab count. It also
@@ -223,31 +223,31 @@ returns a structured verdict: `cause` is one of `healthy`,
 `bridge_unreachable`, and `advice` is the matching one-line fix. `registering`
 means the extension is connected but no normal `http(s)` content tab is ready.
 
-ABM creates `~/.agent-browser-mcp/bridge-token` on first use and every bridge/MCP
+BTAP creates `~/.browsertap/bridge-token` on first use and every bridge/MCP
 process reads that same file. Closing browsers or editors does not rotate it. Removing
 the browser extension or reinstalling the Python package deliberately leaves the token
 file in place, so a reinstall continues to work. A full user-data purge may delete the
-whole `~/.agent-browser-mcp` directory only after all ABM bridge processes have stopped;
+whole `~/.browsertap` directory only after all BTAP bridge processes have stopped;
 the next start then creates a new token.
 
 ### Agent skills (optional)
 
-ABM ships two skills that tell a calling agent how to drive it. They are ordinary
+BTAP ships two skills that tell a calling agent how to drive it. They are ordinary
 Markdown and completely optional — every tool works without them. What they add is
 the judgement the tool descriptions cannot carry: which tool to reach for first,
 when `session_id` is mandatory, and which tabs belong to you and must be left
 alone.
 
 ```bash
-agent-browser-mcp skill-path   # e.g. .../site-packages/agent_browser_mcp/skills
+browsertap skill-path           # e.g. .../site-packages/browsertap_mcp/skills
 ```
 
 That directory contains:
 
 | Skill | What it is for |
 |---|---|
-| `browser-mcp-default/SKILL.md` | The calling contract: pick a target before acting, open your own tab for anything that mutates a page, close it in cleanup, and how to react to `no_response` / `switched_session` / `bridge_error`. |
-| `abm-bridge-recovery/SKILL.md` | Recovery when the transport itself is down: which of the three components is stale, and the one restart or reload that fixes it. |
+| `browsertap-default/SKILL.md` | The calling contract: pick a target before acting, open your own tab for anything that mutates a page, close it in cleanup, and how to react to `no_response` / `switched_session` / `bridge_error`. |
+| `browsertap-bridge-recovery/SKILL.md` | Recovery when the transport itself is down: which of the three components is stale, and the one restart or reload that fixes it. |
 
 Point your client's skill manager **at that directory** rather than copying the
 files. A copy looks correct for as long as the contents happen to agree, then
@@ -260,29 +260,29 @@ DIR` compares them against the shipped originals and names whichever one drifted
 An upgrade is three steps, not one: the three parts do not become current at the
 same moment, and step 3 fails silently if you skip it.
 
-1. Update the package — `pip install -U agent-browser-mcp` once it is on PyPI, or
+1. Update the package — `pip install -U browsertap-mcp` once it is on PyPI, or
    `git pull` in a source checkout. A new MCP session picks this up immediately.
-2. `agent-browser-mcp bridge --restart`. The daemon is long-lived and outlives
+2. `browsertap bridge --restart`. The daemon is long-lived and outlives
    every MCP session, so until it restarts it keeps serving the old code.
 3. Open `chrome://extensions` and press **Reload** on the extension. Its files
    were replaced on disk, but Chrome keeps running the build it already loaded,
    and no command can make it re-read them.
 
-`agent-browser-mcp doctor` reports which part is stale and names the one action
+`browsertap doctor` reports which part is stale and names the one action
 that fixes it: `reload_extension`, `restart_bridge`, or `restart_mcp_session`.
 The other two will not help, so read the field rather than doing all three.
 
 ### Uninstall
 
-1. Stop the managed daemon with `agent-browser-mcp bridge --stop`.
+1. Stop the managed daemon with `browsertap bridge --stop`.
 2. Open `chrome://extensions` (or the equivalent page in Edge/Opera) and remove the
-   unpacked **Agent Browser MCP Bridge** extension.
-3. Remove the `agent-browser-mcp` entry from each MCP client's configuration.
-4. Run `pip uninstall agent-browser-mcp` in the environment where it was installed. If
+   unpacked **BrowserTap Bridge** extension.
+3. Remove the `browsertap` entry from each MCP client's configuration.
+4. Run `pip uninstall browsertap-mcp` in the environment where it was installed. If
    you created a dedicated virtual environment, remove that specific environment after
    deactivating it.
-5. Optional full cleanup: after confirming every ABM bridge is stopped, remove
-   `~/.agent-browser-mcp`. This deletes the persistent bridge token and logs; the data is
+5. Optional full cleanup: after confirming every BTAP bridge is stopped, remove
+   `~/.browsertap`. This deletes the persistent bridge token and logs; the data is
    retained by default so reinstalling continues to work without reconfiguration.
 
 ## How it works
@@ -290,7 +290,7 @@ The other two will not help, so read the field rather than doing all three.
 Three layers:
 
 1. **Chrome extension** (MV3) — injected into real pages, reaches `tabs`, `cookies`, `debugger`, and `management` through Chrome APIs.
-2. **BrowserBridge** — a local daemon on `127.0.0.1:18765` (WebSocket) and `:18766` (HTTP). It owns the extension connections, tracks sessions, and relays results. It runs detached from any MCP instance, and the MCP server starts it on demand with no console window. Sessions are keyed `clientId:tabId`, so several browsers and profiles coexist. The pre-0.3.6 `agent_browser_mcp.tmwebdriver.TMWebDriver` import remains available as a compatibility alias.
+2. **BrowserBridge** — a local daemon on `127.0.0.1:18765` (WebSocket) and `:18766` (HTTP). It owns the extension connections, tracks sessions, and relays results. It runs detached from any MCP instance, and the MCP server starts it on demand with no console window. Sessions are keyed `clientId:tabId`, so several browsers and profiles coexist.
 3. **MCP server** — exposes the whole thing as MCP tools.
 
 Two channels reach the browser: a per-tab session channel, and a direct channel to the extension's service worker. The second one is why some tools keep working when every tab is closed.
@@ -301,13 +301,13 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Two kinds of coordinates, two kinds of authority.** `page_click`/`page_drag` take **viewport** coordinates inside one tab and are dispatched through CDP — no cursor movement, no window focus, `foreground_changed: false` in the reply. `mouse_move`/`mouse_click`/`mouse_drag` take **desktop screen** coordinates and drive your real cursor. The two are not interchangeable, and a viewport coordinate pasted into `mouse_click` will land somewhere else entirely.
 
-**Automation profiles.** With `AGENT_BROWSER_MODE` unset, ABM defaults to `lab` with `AGENT_BROWSER_LAB_NO_ELICIT=1` semantics: physical input and site `allow` proceed without elicitation. `safe` prompts for every action. Both profiles keep the cross-process lock, quiet-input gate, target activation, ownership protection, and `on_screen` check, so higher authority never means stale or misdirected input.
+**Automation profiles.** With `BROWSERTAP_MODE` unset, BTAP defaults to `lab` with `BROWSERTAP_LAB_NO_ELICIT=1` semantics: physical input and site `allow` proceed without elicitation. `safe` prompts for every action. Both profiles keep the cross-process lock, quiet-input gate, target activation, ownership protection, and `on_screen` check, so higher authority never means stale or misdirected input.
 
 **Dialogs are explicit.** `execute_js(dialog_policy=...)`, `open_url(beforeunload=...)`, and `handle_dialog(action=...)` take `dismiss` (default), `accept`, or `manual`. The global default still preserves the page; only an explicit accept or lab's configured shell/IDE host heuristic leaves automatically. `handle_dialog` answers within three seconds or reports `no_dialog`/an explicit error. `resolve_leave_dialog` tries protocol accept twice and uses physical Enter only as a final, lab-approved fallback.
 
 **Permissions are leases, not grants.** `set_site_permission` covers one origin for 60–600 seconds, records the prior setting, and restores it on expiry/reset/service-worker restart. `safe` prompts for every `allow`; default `lab` applies it without elicitation. Browser capabilities that cannot be restored return `unsupported` or `requires_user_action`.
 
-**Challenges stay in your browser.** A Cloudflare Turnstile or similar widget is handled in the same connected tab, by `page_click`, with a bounded number of attempts. When the challenge has not moved, the result is `challenge_stalled` and ABM stops so you can finish it yourself in that same tab. ABM never launches Playwright, a headless browser, or a separate automation profile as a fallback — the whole point is your real, logged-in session.
+**Challenges stay in your browser.** A Cloudflare Turnstile or similar widget is handled in the same connected tab, by `page_click`, with a bounded number of attempts. When the challenge has not moved, the result is `challenge_stalled` and BTAP stops so you can finish it yourself in that same tab. BTAP never launches Playwright, a headless browser, or a separate automation profile as a fallback — the whole point is your real, logged-in session.
 
 **Changed tools need a reload.** Tool schemas and descriptions are read once when your client starts the MCP server; after upgrading, restart the MCP session or your client, or you will keep calling the old signatures. Extension changes need a manual reload at `chrome://extensions` — `chrome.runtime.reload()` restarts the service worker without re-reading the files from disk.
 
@@ -332,7 +332,7 @@ Expected interruptions come back as a `status` field, not an exception:
 | `navigation_failed` / `navigation_timeout` | `open_url` did not complete within its timeout, or the browser reported an error. |
 | `triggered` with `type="download"` | `open_url` was replaced by a browser download. `ERR_ABORTED` can be normal only when CDP also reports `isDownload=true`; use `download_file` for completion and the local path. |
 | `requires_user_action` | Approval was declined, cancelled, or unavailable — nothing was done. |
-| `busy` | Another ABM process holds the physical-input lock, or the tab already has a pending manual execution. Returned immediately, never queued. |
+| `busy` | Another BTAP process holds the physical-input lock, or the tab already has a pending manual execution. Returned immediately, never queued. |
 | `input_activity_detected` | You used the mouse or keyboard during the post-approval quiet window, so no physical input was sent. |
 | `activation_failed` | The target tab could not be confirmed on screen, so no physical input was sent. |
 | `unsupported` | The browser or extension API cannot provide this (e.g. clipboard permission leases). |
@@ -357,7 +357,7 @@ The extension requests broad permissions because the feature set requires them:
 `downloads`, and `<all_urls>`. `declarativeNetRequest` temporarily removes CSP
 response headers only from the tab executing an eval-based command. The rule is
 session-scoped, reference-counted, and removed in cleanup; it is not a
-browser-wide persistent CSP override. See [Security](https://github.com/LinVireo/agent-browser-mcp/blob/main/SECURITY.md) for the full
+browser-wide persistent CSP override. See [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) for the full
 permission and loopback threat model.
 
 ## Tools
@@ -367,7 +367,7 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
 <details>
 <summary><b>Tabs and navigation</b></summary>
 
-- **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `agent-browser-mcp bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. No parameters.
+- **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `browsertap bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. No parameters.
 - **get_automation_profile** — inspect whether the current MCP process uses `lab` or `safe`.
 - **set_automation_profile** — switch the current MCP process between `lab|safe`; the override is not persisted and does not reload the extension.
   - `mode` (string): `lab` or `safe`
@@ -376,9 +376,9 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
   - `session_id` (string, optional): which browser to ask.
 - **switch_tab** — set the *target* tab for later calls. A `url_pattern` must match exactly one tab; if several match, select one with its full `session_id`. It does **not** raise the tab or focus the browser: `activate` defaults to `false`, so retargeting never disturbs what you are looking at. Pass `activate=true`, or call `activate_tab`, when you actually need the tab in front.
   - `session_id` (string, optional), `url_pattern` (string, optional): substring match, `browser` (string, optional): `chrome`, `edge`, or `opera`, `activate` (boolean, optional): default `false`.
-- **activate_tab** — bring a tab to the foreground and focus its window. This is the explicit way to raise a tab, and the only one that does not involve approving physical input. Check `on_screen` in the reply: ABM first asks Windows to restore a minimised browser, but `on_screen=false` means visibility still could not be confirmed and screen-coordinate input must not be sent.
+- **activate_tab** — bring a tab to the foreground and focus its window. This is the explicit way to raise a tab, and the only one that does not involve approving physical input. Check `on_screen` in the reply: BTAP first asks Windows to restore a minimised browser, but `on_screen=false` means visibility still could not be confirmed and screen-coordinate input must not be sent.
   - `session_id` (string, optional)
-- **open_url** — navigate the current tab. Global behavior remains `dismiss`; lab automatically accepts beforeunload on configured shell/IDE hosts. If the extension's `navigate` route is unavailable on a heavy SPA, ABM falls back to `Page.navigate`. A CDP result with `isDownload=true` returns `{type:"download",status:"triggered"}` instead of only `navigation_failed`; the accompanying `ERR_ABORTED` is normal for that download navigation.
+- **open_url** — navigate the current tab. Global behavior remains `dismiss`; lab automatically accepts beforeunload on configured shell/IDE hosts. If the extension's `navigate` route is unavailable on a heavy SPA, BTAP falls back to `Page.navigate`. A CDP result with `isDownload=true` returns `{type:"download",status:"triggered"}` instead of only `navigation_failed`; the accompanying `ERR_ABORTED` is normal for that download navigation.
   - `url` (string), `session_id` (string, optional), `timeout` (number, optional): default `15`, `beforeunload` (string, optional): default `dismiss`, `intent_leave` (boolean, optional): `false` forces page preservation
 - **download_file** — download an HTTP(S) URL through Chrome's native download manager, using that browser profile's cookies and authenticated session. It waits by default and returns `status="completed"` plus a verified absolute `path`; interrupted downloads return `failed`, while a timeout or `wait=false` returns `in_progress` with `download_id`. An explicit `session_id` must still be live and is never replaced with another profile. Use this for attachments instead of page `fetch`.
   - `url` (string), `filename` (string, optional): relative download name, `directory` (string, optional): arbitrary absolute destination directory; creates parents, `wait` (boolean, optional): default `true`; `directory` requires `true`, `timeout` (number, optional): default 60 seconds, maximum 1800, `session_id` (string, optional): selects the browser profile, `overwrite` (boolean, optional): default `false`; an existing final destination raises an error unless explicitly `true`. If a directory download times out, `directory_applied=false`: the move is no longer tracked and Chrome may finish into its default download directory.
@@ -399,7 +399,7 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
   - `url_pattern` (string): regex or substring to match against the URL, `timeout` (number, optional): default 15, `wait_ready` (boolean, optional): require `readyState === 'complete'`, default `true`, `session_id` (string, optional)
 - **scroll_page** — scroll and report the new position, so a long page can be read in passes.
   - `to` (string, optional): default `bottom`; also accepts `top`, a pixel offset, or a CSS selector to bring into view, `session_id` (string, optional), `timeout` (number, optional): default `15`
-- **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the shared default. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses the script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises; `no_response` reports `delivery_state` and `retry_safe`, and ABM never replays an acknowledged script whose side effects may already have run.
+- **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the shared default. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses the script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises; `no_response` reports `delivery_state` and `retry_safe`, and BTAP never replays an acknowledged script whose side effects may already have run.
   - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`
 - **handle_dialog** — inspect or answer a dialog left open on a tab. `action="manual"` reports it without choosing (`blocked_by_dialog`, or `no_dialog` if nothing is open); `accept`/`dismiss` answer it and release any paused `execute_js` or `open_url`. `prompt_text` supplies the text for an accepted `prompt`.
   - `action` (string), `prompt_text` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `3`, capped at three seconds
@@ -443,7 +443,7 @@ Pass `session_id` explicitly: the call binds the driver to that tab for its dura
 
 Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. Every lease records the prior setting and restores it — on expiry, on explicit reset, and after a service-worker restart or browser restart.
 
-- **set_site_permission** — set one permission for one origin, for 60–600 seconds. Supported: `notifications`, `geolocation` (or `location`), `camera`, `microphone`. `setting` is `allow`, `block`, or `ask`. In `safe`, every `allow` requires approval; default `lab` applies it without elicitation (`AGENT_BROWSER_LAB_NO_ELICIT=1` semantics). Declining returns `requires_user_action` and changes nothing. `clipboard` returns `unsupported`, because its exact prior state cannot be restored. Omit `origin` to use the target tab's current origin; only `http`/`https` origins are accepted.
+- **set_site_permission** — set one permission for one origin, for 60–600 seconds. Supported: `notifications`, `geolocation` (or `location`), `camera`, `microphone`. `setting` is `allow`, `block`, or `ask`. In `safe`, every `allow` requires approval; default `lab` applies it without elicitation (`BROWSERTAP_LAB_NO_ELICIT=1` semantics). Declining returns `requires_user_action` and changes nothing. `clipboard` returns `unsupported`, because its exact prior state cannot be restored. Omit `origin` to use the target tab's current origin; only `http`/`https` origins are accepted.
   - `permission` (string), `setting` (string): `allow`, `block`, or `ask`, `origin` (string, optional): defaults to the tab's origin, `duration_seconds` (integer, optional): 60–600, default `300`, `session_id` (string, optional)
 - **reset_site_permissions** — restore matching leases now instead of waiting for expiry. Omit both `origin` and `permission` to restore every lease on that browser.
   - `origin` (string, optional), `permission` (string, optional), `session_id` (string, optional)
@@ -472,7 +472,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
   - `session_id` (string, optional)
 - **set_extension_enabled** — *(no tab needed)* enable or disable an installed extension. Chrome exposes no API to *install* one, so this only toggles what is already there.
   - `extension_id` (string), `enabled` (boolean), `session_id` (string, optional)
-- **uninstall_extension** — *(no tab needed)* uninstall another extension. Confirmation defaults on; set it off only for an explicitly selected disposable/test extension. ABM cannot uninstall itself through its active response channel.
+- **uninstall_extension** — *(no tab needed)* uninstall another extension. Confirmation defaults on; set it off only for an explicitly selected disposable/test extension. BTAP cannot uninstall itself through its active response channel.
   - `extension_id` (string), `show_confirm_dialog` (boolean, optional): default `true`, `session_id` (string, optional)
 - **get_bookmarks** — *(no tab needed)* read the bookmark tree.
   - `session_id` (string, optional)
@@ -480,7 +480,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
   - `title` (string), `url` (string, optional): omit to create a folder, `parent_id` (string, optional), `session_id` (string, optional)
 - **remove_bookmark** — *(no tab needed)* remove a bookmark or folder subtree.
   - `bookmark_id` (string), `recursive` (boolean, optional): default `false`, `session_id` (string, optional)
-- **call_extension** — *(no tab needed)* send JSON to another enabled extension; the target must allow ABM via `externally_connectable`.
+- **call_extension** — *(no tab needed)* send JSON to another enabled extension; the target must allow BTAP via `externally_connectable`.
   - `extension_id` (string), `message_json` (string): JSON payload as text, `session_id` (string, optional)
 </details>
 
@@ -513,7 +513,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 
 Real OS-level input at **desktop screen** coordinates. It moves your actual cursor and types into whatever has focus. Prefer the `page_*` tools: they are precise, do not interrupt you, and work on a background tab. Reach for these only when page input genuinely cannot work — browser chrome, native file pickers, extension popups, OS dialogs.
 
-In `safe`, each of these five direct tools asks through MCP elicitation. Default `lab` uses `AGENT_BROWSER_LAB_NO_ELICIT=1` semantics and does not prompt; setting it false restores session-level lab approval. Decline, cancel, or unavailable elicitation returns `requires_user_action`; every profile still enforces the lock, quiet window, ownership, activation, and foreground check. `resolve_leave_dialog` is a sixth physical-input path, limited to a final Enter fallback after two protocol-level attempts and subject to the same gate.
+In `safe`, each of these five direct tools asks through MCP elicitation. Default `lab` uses `BROWSERTAP_LAB_NO_ELICIT=1` semantics and does not prompt; setting it false restores session-level lab approval. Decline, cancel, or unavailable elicitation returns `requires_user_action`; every profile still enforces the lock, quiet window, ownership, activation, and foreground check. `resolve_leave_dialog` is a sixth physical-input path, limited to a final Enter fallback after two protocol-level attempts and subject to the same gate.
 
 After approval the sequence is fixed: take the cross-process lock (contended → `busy`, returned immediately, never queued), wait out a short quiet window (you touched the mouse or keyboard → `input_activity_detected`, nothing sent), then raise the target tab, then act. All five direct tools take `session_id` — the same one you pass every other tool — and raise that tab; without one they fall back to the shared global target, which another task may have changed. Use `activate_session="none"` only for intentional input to the already-visible desktop or native UI. If the tab cannot be confirmed on screen the result is `activation_failed` and no input is sent, so a minimised window produces an error rather than a click into the wrong place.
 
@@ -527,20 +527,26 @@ After approval the sequence is fixed: take the cross-process lock (contended →
 
 ## Troubleshooting
 
-Run `agent-browser-mcp doctor` first. For connection, version, dialog,
+Run `browsertap doctor` first. For connection, version, dialog,
 permission, and physical-input recovery procedures, see the dedicated
-[troubleshooting guide](https://github.com/LinVireo/agent-browser-mcp/blob/main/docs/TROUBLESHOOTING.md).
+[troubleshooting guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md).
 
 ## Credits
 
-ABM is maintained by `LinVireo`. The original repository copyright attribution remains with `zhea` in [LICENSE](https://github.com/LinVireo/agent-browser-mcp/blob/main/LICENSE); these are distinct maintenance and copyright roles. The canonical public repository for this distribution is `LinVireo/agent-browser-mcp`.
+BTAP is maintained by `LinVireo`. The MIT copyright notice in
+[LICENSE](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE) is retained
+unchanged (`zhea`); maintenance and copyright attribution are distinct roles. The
+canonical public repository for this distribution is `LinVireo/browsertap-mcp`.
 
-This distribution is a fork of [`335234131/agent-browser-mcp`](https://github.com/335234131/agent-browser-mcp), branched at commit `04cc1f1` (2026-04-15). It has diverged substantially since: more than 50 commits and tens of thousands of changed lines against that fork point, growing the tracked tree from 19 files to over 80 — `git diff --shortstat 04cc1f1..HEAD` prints the current figure. The upstream snapshot shipped no test suite, documentation set, or CI configuration. The MCP tool surface, the bridge and its token authentication, the Chrome extension, the release evidence pipeline, and both READMEs were rewritten or written from scratch here. Attribution is kept because the lineage is real, not because the current code is close to it.
+A small part of the browser layer here originates in
+[GenericAgent](https://github.com/lsdefine/GenericAgent). Thanks to that project and
+its author for the original implementation. The files listed below started there and
+have each been substantially rewritten since; everything else in this distribution --
+the MCP tool surface, the bridge and its token authentication, the Chrome extension,
+the release evidence pipeline, the test suite, and both READMEs -- was written here.
 
-The browser automation core here was extracted from [GenericAgent](https://github.com/lsdefine/GenericAgent)'s browser stack and repackaged as an MCP server. Thanks to that project and its author for the original implementation.
-
-Derived from or adapted from GenericAgent:
-- `TMWebDriver.py` (now maintained as `browser_bridge.py`, with `tmwebdriver.py` retained as a compatibility shim)
+Originally from GenericAgent:
+- `TMWebDriver.py` (now maintained as `browser_bridge.py`)
 - `simphtml.py`
 - the `tmwd_cdp_bridge` Chrome extension resources
 

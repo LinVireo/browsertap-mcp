@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 HARNESS_TOOLS = [
     "capture_desktop_screenshot",

@@ -90,7 +90,7 @@ def _run_gates(skip_live: bool) -> None:
         "pytest",
         "tests",
         "-q",
-        "--cov=agent_browser_mcp",
+        "--cov=browsertap_mcp",
         "--cov-fail-under=85",
         "--cov-report=term-missing",
         "--cov-report=json:artifacts/coverage.json",
@@ -157,7 +157,7 @@ def _check_version_bump() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Synchronize the target ABM version, then run all change-set gates against it"
+        description="Synchronize the target BTAP version, then run all change-set gates against it"
     )
     parser.add_argument("--bump", choices=("none", "patch", "minor"), default="patch")
     parser.add_argument("--skip-live", action="store_true")
@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         _run(sys.executable, "-m", "scripts.acceptance_report")
     if archived is not None:
         print(f"Archived previous evidence under {archived.relative_to(ROOT)}.")
-    print(f"ABM change set finalized at {target}; synchronized {len(changed)} file(s).")
+    print(f"BTAP change set finalized at {target}; synchronized {len(changed)} file(s).")
     return 0
 
 

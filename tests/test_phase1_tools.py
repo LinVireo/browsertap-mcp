@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 BACKGROUND = (
     Path(__file__).resolve().parents[1]
     / "src"
-    / "agent_browser_mcp"
+    / "browsertap_mcp"
     / "chrome_extension"
     / "background.js"
 )
@@ -65,13 +65,13 @@ def test_bookmark_tools_match_existing_extension_protocol(monkeypatch):
         monkeypatch,
         [
             {"data": {"ok": True, "data": [{"id": "0"}]}},
-            {"data": {"ok": True, "data": {"id": "9", "title": "ABM"}}},
+            {"data": {"ok": True, "data": {"id": "9", "title": "BTAP"}}},
             {"data": {"ok": True}},
         ],
     )
     tree = S.get_bookmarks(session_id="chrome:profile:42")
     created = S.create_bookmark(
-        "ABM", "https://example.test/", "1", session_id="chrome:profile:42"
+        "BTAP", "https://example.test/", "1", session_id="chrome:profile:42"
     )
     removed = S.remove_bookmark("9", recursive=True, session_id="chrome:profile:42")
     assert tree["data"] == [{"id": "0"}]
@@ -83,7 +83,7 @@ def test_bookmark_tools_match_existing_extension_protocol(monkeypatch):
             "cmd": "bookmarks",
             "method": "create",
             "node": {
-                "title": "ABM",
+                "title": "BTAP",
                 "url": "https://example.test/",
                 "parentId": "1",
             },
@@ -186,8 +186,8 @@ def test_capture_tools_flatten_real_remote_bridge_payloads(monkeypatch):
             {"data": {"status": "capturing", "max_entries": 25}},
             {"data": {"status": "stopped", "requests": [{"url": "https://example.test/api"}]}},
             {"data": {"status": "capturing", "max_entries": 30}},
-            {"data": {"status": "capturing", "messages": [{"text": "ABM marker"}]}},
-            {"data": {"status": "stopped", "messages": [{"text": "ABM marker"}]}},
+            {"data": {"status": "capturing", "messages": [{"text": "BTAP marker"}]}},
+            {"data": {"status": "stopped", "messages": [{"text": "BTAP marker"}]}},
         ],
     )
     driver.default_session_id = "chrome:profile:42"
@@ -210,7 +210,7 @@ def test_capture_tools_flatten_real_remote_bridge_payloads(monkeypatch):
     assert stopped["status"] == "stopped"
     assert stopped["requests"][0]["url"] == "https://example.test/api"
     assert console["status"] == "capturing"
-    assert messages["messages"][0]["text"] == "ABM marker"
+    assert messages["messages"][0]["text"] == "BTAP marker"
     assert console_stopped["status"] == "stopped"
 
 
@@ -231,12 +231,12 @@ let detachCalls = 0;
 const dialogAttachedTabs = new Set();
 function boundedCdpTimeout(value, fallback = 20000) {{ return Number(value) || fallback; }}
 function debuggerFailureCode() {{ return 'cdp_error'; }}
-async function attachAbmDebugger(target) {{
+async function attachBtapDebugger(target) {{
   attachCalls += 1;
   dialogAttachedTabs.add(target.tabId);
   return {{ attachment: {{ target }}, released: false }};
 }}
-async function detachAbmDebugger(lease) {{ lease.released = true; detachCalls += 1; }}
+async function detachBtapDebugger(lease) {{ lease.released = true; detachCalls += 1; }}
 async function sendDebuggerCommandWithTimeout(_lease, method) {{
   if (method === 'Network.getResponseBody') return {{ body: 'response-body', base64Encoded: false }};
   return {{}};
@@ -269,7 +269,7 @@ async function sendDebuggerCommandWithTimeout(_lease, method) {{
   }}, {{}});
   handleConsoleCaptureEvent(42, 'Runtime.consoleAPICalled', {{
     type: 'log', timestamp: 2, executionContextId: 10,
-    args: [{{ value: 'ABM' }}, {{ value: 7 }}],
+    args: [{{ value: 'BTAP' }}, {{ value: 7 }}],
   }});
   handleConsoleCaptureEvent(42, 'Runtime.consoleAPICalled', {{
     type: 'log', timestamp: 3, executionContextId: 20,
@@ -312,7 +312,7 @@ async function sendDebuggerCommandWithTimeout(_lease, method) {{
     assert request["status"] == 200
     assert request["body"] == "response-body"
     messages = outcome["consoleGet"]["data"]["messages"]
-    assert [message["text"] for message in messages] == ["ABM 7", "Error: page failure"]
+    assert [message["text"] for message in messages] == ["BTAP 7", "Error: page failure"]
     assert {message["execution_context_id"] for message in messages} == {10}
     assert outcome["attachCalls"] == 2
     assert outcome["detachCalls"] == 2

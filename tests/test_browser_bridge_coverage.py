@@ -10,17 +10,8 @@ from types import SimpleNamespace
 import bottle
 import pytest
 
-from agent_browser_mcp import browser_bridge as T
-from agent_browser_mcp import simphtml
-
-
-def test_legacy_module_reexports_canonical_bridge() -> None:
-    from agent_browser_mcp import tmwebdriver as legacy
-
-    assert legacy.BrowserBridge is T.BrowserBridge
-    assert legacy.TMWebDriver is T.BrowserBridge
-    assert legacy.Session is T.Session
-    assert legacy.bridge_token is T.bridge_token
+from browsertap_mcp import browser_bridge as T
+from browsertap_mcp import simphtml
 
 
 class FakeSocket:
@@ -111,10 +102,14 @@ class DormantThread:
 
 
 def test_token_path_uses_configured_and_default_locations(monkeypatch, tmp_path):
+    # Pin home: the real one may hold a pre-0.4.0 `.agent-browser-mcp`, which
+    # `paths.state_dir` deliberately keeps using, so reading the developer's
+    # home would make this assertion depend on the machine.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setenv(T.TOKEN_FILE_ENV, str(tmp_path / "custom-token"))
     assert T.bridge_token_path() == tmp_path / "custom-token"
     monkeypatch.setenv(T.TOKEN_FILE_ENV, "   ")
-    assert T.bridge_token_path() == Path.home() / ".agent-browser-mcp" / "bridge-token"
+    assert T.bridge_token_path() == tmp_path / "home" / ".browsertap" / "bridge-token"
 
 
 @pytest.mark.parametrize("error", [OSError("unreadable"), UnicodeError("bad encoding")])
@@ -178,7 +173,7 @@ def test_check_link_token_accepts_empty_expected_and_rejects_wrong_token():
 
 
 def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, caplog):
-    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.browser_bridge")
     ws = FakeSocket()
     session = T.Session("ws:1", {"url": "https://one", "type": "ws"}, ws)
     assert session.url == "https://one"
@@ -207,7 +202,7 @@ def test_http_session_reconnect_and_unknown_type():
 
 
 def test_driver_registration_reconnect_and_unregister(caplog):
-    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.browser_bridge")
     driver = driver_stub()
     first = FakeSocket()
     info = {"url": "https://a", "type": "ws"}
@@ -225,7 +220,7 @@ def test_driver_registration_reconnect_and_unregister(caplog):
 
 
 def test_live_default_reselects_latest_and_handles_no_sessions(caplog):
-    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.browser_bridge")
     driver = driver_stub()
     dead = T.Session("c:dead", {"url": "dead", "type": "ws"}, FakeSocket())
     dead.mark_disconnected()
@@ -254,11 +249,11 @@ def test_live_default_reselects_latest_and_handles_no_sessions(caplog):
 def test_origin_allowlist(monkeypatch, origin, env, expected):
     driver = driver_stub()
     sock = SimpleNamespace(request=SimpleNamespace(headers={"Origin": origin}))
-    monkeypatch.setenv("AGENT_BROWSER_WS_ALLOW_NO_ORIGIN", env)
-    monkeypatch.delenv("AGENT_BROWSER_WS_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.setenv("BROWSERTAP_WS_ALLOW_NO_ORIGIN", env)
+    monkeypatch.delenv("BROWSERTAP_WS_ALLOWED_ORIGINS", raising=False)
     if "," in env:
-        monkeypatch.delenv("AGENT_BROWSER_WS_ALLOW_NO_ORIGIN", raising=False)
-        monkeypatch.setenv("AGENT_BROWSER_WS_ALLOWED_ORIGINS", env)
+        monkeypatch.delenv("BROWSERTAP_WS_ALLOW_NO_ORIGIN", raising=False)
+        monkeypatch.setenv("BROWSERTAP_WS_ALLOWED_ORIGINS", env)
     assert driver._origin_allowed(sock) is expected
 
 
@@ -317,7 +312,7 @@ def test_a_closed_tab_is_reported_once_and_can_still_be_reaped(caplog):
     outlives every MCP session accumulated one session per tab ever closed and
     re-logged all of them forever.
     """
-    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.browser_bridge")
     driver = driver_stub()
     client = FakeSocket()
     driver._apply_extension_tabs("one", "chrome", [{"id": 1, "url": "https://gone"}], client)
@@ -339,7 +334,7 @@ def test_a_closed_tab_is_reported_once_and_can_still_be_reaped(caplog):
 
 
 def test_find_and_set_session_local_paths(caplog):
-    caplog.set_level("INFO", logger="agent_browser_mcp.browser_bridge")
+    caplog.set_level("INFO", logger="browsertap_mcp.browser_bridge")
     driver = driver_stub()
     driver._register_client("c:1", FakeSocket(), {"url": "https://a.test", "type": "ws"})
     driver._register_client("c:2", FakeSocket(), {"url": "https://a.test/2", "type": "ws"})
@@ -663,7 +658,7 @@ def test_http_hook_rejects_web_origin_and_allows_extension_or_configured_origin(
         origin="chrome-extension://abc",
     )
     assert allowed["status"] == 200
-    monkeypatch.setenv("AGENT_BROWSER_WS_ALLOWED_ORIGINS", "https://trusted")
+    monkeypatch.setenv("BROWSERTAP_WS_ALLOWED_ORIGINS", "https://trusted")
     trusted = wsgi_post(
         http_app.app,
         "/link",

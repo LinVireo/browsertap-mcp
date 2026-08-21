@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 from tests.tool_coverage_manifest import TOOL_COVERAGE
 
 
@@ -96,7 +96,7 @@ def _run_evidence(node_ids: Iterable[str], *, timeout: int) -> dict[str, Any]:
             "exit_code": 0,
             "output": "",
         }
-    with tempfile.TemporaryDirectory(prefix="abm-tool-evidence-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="btap-tool-evidence-") as temporary:
         junit_path = Path(temporary) / "evidence.xml"
         command = [
             sys.executable,

@@ -1,4 +1,4 @@
-name: ABM publish to PyPI
+name: BTAP publish to PyPI
 
 # Nothing here runs on a push. Publishing is a deliberate act with an
 # irreversible result -- a PyPI filename can never be reused, so a wrong upload
@@ -21,14 +21,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: abm-publish
+  group: btap-publish
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build and check distributions
     runs-on: ubuntu-latest
-    if: github.repository == 'LinVireo/agent-browser-mcp'
+    if: github.repository == 'LinVireo/browsertap-mcp'
     timeout-minutes: 15
     steps:
       - name: Check out source
@@ -48,7 +48,7 @@ jobs:
       - name: Run offline tests with coverage
         run: >-
           python -m pytest tests -q
-          --cov=agent_browser_mcp
+          --cov=browsertap_mcp
           --cov-fail-under=85
       - name: Check documentation and versions
         run: python -m scripts.check_tool_docs --format markdown
@@ -70,7 +70,7 @@ jobs:
       - name: Upload built distributions
         uses: actions/upload-artifact@v4
         with:
-          name: abm-dist
+          name: btap-dist
           path: dist/
           if-no-files-found: error
 
@@ -93,7 +93,7 @@ jobs:
       - name: Download built distributions
         uses: actions/download-artifact@v4
         with:
-          name: abm-dist
+          name: btap-dist
           path: dist/
       - name: Publish to TestPyPI
         if: github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi'

@@ -5,7 +5,7 @@ import json
 import pytest
 from bs4 import BeautifulSoup
 
-from agent_browser_mcp import simphtml as S
+from browsertap_mcp import simphtml as S
 
 LONG_PATH = "/a/path/that/is/comfortably/longer/than/thirty/characters"
 
@@ -75,7 +75,7 @@ def test_optimize_html_preserves_ref_when_url_join_fails(monkeypatch):
 
 
 def test_execute_in_session_and_temp_monitor_helpers(caplog):
-    caplog.set_level("DEBUG", logger="agent_browser_mcp.simphtml")
+    caplog.set_level("DEBUG", logger="browsertap_mcp.simphtml")
     driver = QueueDriver([
         {"data": "plain"},
         {"data": "pinned"},
@@ -147,13 +147,13 @@ def test_find_changed_elements_handles_new_duplicates_reorder_and_truncation():
 
 def test_get_html_resolves_base_refs_and_restores_iframe(monkeypatch):
     page = (
-        "<!--abm-base:https://example.test/root/page-->"
+        "<!--btap-base:https://example.test/root/page-->"
         f'<div data-tag="iframe"><a href="{LONG_PATH}">open</a></div>'
     )
     monkeypatch.setattr(S, "get_main_block", lambda *_args, **_kwargs: page)
     refs = {}
     html = S.get_html(object(), link_refs=refs, session_id="c:2")
-    assert "abm-base" not in html
+    assert "btap-base" not in html
     assert "<iframe>" in html
     assert 'href="#r1"' in html
     assert refs == {f"https://example.test{LONG_PATH}": "r1"}
@@ -184,7 +184,7 @@ def test_get_html_cutlist_keeps_instruction_hit_and_emits_hint(monkeypatch):
 
 
 def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch, caplog):
-    caplog.set_level("DEBUG", logger="agent_browser_mcp.simphtml")
+    caplog.set_level("DEBUG", logger="browsertap_mcp.simphtml")
     page = _list_page(6) + "<div>" + "".join('<i class="few">x</i>' for _ in range(4)) + "</div>"
     candidates = [None, {}, {"selector": "["}, {"selector": ".few"}, {"selector": ".item"}]
     driver = QueueDriver([{"data": candidates}])
@@ -341,7 +341,7 @@ def test_execute_js_rich_classifies_navigation_and_reads_landing(monkeypatch):
 
 
 def test_execute_js_rich_navigation_location_failure_is_best_effort(caplog):
-    caplog.set_level("DEBUG", logger="agent_browser_mcp.simphtml")
+    caplog.set_level("DEBUG", logger="browsertap_mcp.simphtml")
     driver = QueueDriver(
         [
             {"result": "Session c:5 reloaded.", "closed": 1},
@@ -358,7 +358,7 @@ def test_execute_js_rich_navigation_location_failure_is_best_effort(caplog):
 
 def test_execute_js_rich_returns_blocked_dialog_with_new_tabs():
     response = {
-        "data": {"__abm_dialog_result": True, "status": "blocked_by_dialog"},
+        "data": {"__btap_dialog_result": True, "status": "blocked_by_dialog"},
         "newTabs": [{"id": "c:2"}],
         "executed_tab_id": 1,
     }

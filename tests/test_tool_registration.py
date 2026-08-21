@@ -12,7 +12,7 @@ import inspect
 
 import pytest
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 from scripts.tool_coverage_report import build_report as build_tool_coverage_report
 from tests.tool_coverage_manifest import TOOL_COVERAGE
 

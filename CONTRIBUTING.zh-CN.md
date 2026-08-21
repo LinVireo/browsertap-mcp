@@ -2,7 +2,7 @@
 
 [English](CONTRIBUTING.md) | 简体中文
 
-提交的改动应保持 ABM 的核心行为：操作用户正在使用的真实浏览器会话，优先使用后台
+提交的改动应保持 BTAP 的核心行为：操作用户正在使用的真实浏览器会话，优先使用后台
 页面/CDP 能力，只有在明确且确实必要时才使用前台物理输入。
 
 ## 开发环境
@@ -11,7 +11,7 @@
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,desktop]"  # Windows PowerShell
 python -m pip install -e ".[dev,desktop]"                       # 其他已激活的虚拟环境
-agent-browser-mcp extension-path
+browsertap extension-path
 ```
 
 将命令输出的目录作为未打包扩展加载。editable 安装会立即读取 Python server 改动；
@@ -24,7 +24,7 @@ bridge 改动需要重启 bridge；扩展源码改动需要在浏览器扩展管
 ```text
 python -m ruff check src tests scripts
 python -m pytest tests -q
-python -m pytest tests -q --cov=agent_browser_mcp --cov-fail-under=85
+python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
 python -m scripts.tool_coverage_report --format markdown
 python -m scripts.check_tool_docs --format markdown
 python -m scripts.versioning check
@@ -51,8 +51,8 @@ live 测试会操作已连接的真实浏览器，并可能暂时影响前台。
 
 公开的 `test.yml` 只在 GitHub 托管 runner 上运行离线门禁。`live.yml` 只能手动触发，
 目标是预先配置的 Windows 自托管 runner。若 runner 的 `python` 不是指定解释器，应设置
-仓库变量 `ABM_LIVE_PYTHON`。不要把日常交互使用的桌面配置为定时运行 live 的 runner。
-live job 仅允许规范仓库和 `abm-live` GitHub environment；注册 runner 前，应为该
+仓库变量 `BTAP_LIVE_PYTHON`。不要把日常交互使用的桌面配置为定时运行 live 的 runner。
+live job 仅允许规范仓库和 `btap-live` GitHub environment；注册 runner 前，应为该
 environment 配置 required reviewer。workflow 文件本身无法创建或强制执行仓库的
 environment 保护规则。
 
@@ -88,17 +88,17 @@ offline JUnit、覆盖率、工具证据，以及各一份 wheel/source archive�
 
 1. `README.md` 与 `README.zh-CN.md` 中作为权威列表的 55 个工具说明；
 2. 工具自身的 MCP `description=` 文本；
-3. 调用方契约 `src/agent_browser_mcp/skills/browser-mcp-default/SKILL.md`
+3. 调用方契约 `src/browsertap_mcp/skills/browsertap-default/SKILL.md`
    （先调哪个工具、什么时候必须带 `session_id`）；
-4. `src/agent_browser_mcp/skills/abm-bridge-recovery/SKILL.md`
+4. `src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md`
    （桥本身连不上时调用方该怎么恢复）。
 
 两份 skill 互相引用，因此各自按「一组副本」独立做哈希校验 —— 只更新其中一份，读者会被
 指向已经不成立的说明。两份都不得写入本机专属路径或只对某台机器成立的断言；写了绝对路径
 会被 `tests/test_documentation_contract.py` 拦下。
 
-它们以 package data 形式随包发布，因此 `pip install agent-browser-mcp` 就带着它们，
-`agent-browser-mcp skill-path` 会打印存放目录（形如 `<name>/SKILL.md`）。`MANIFEST.in`
+它们以 package data 形式随包发布，因此 `pip install browsertap-mcp` 就带着它们，
+`browsertap skill-path` 会打印存放目录（形如 `<name>/SKILL.md`）。`MANIFEST.in`
 的规则与 `pyproject.toml` 的 `package-data` 通配**两者都必需**：前者管 source archive，
 后者管 wheel；只写一处会得到「sdist 里有、wheel 里没有」，而 `pip install` 用的正是 wheel。
 `scripts/check_distribution.py` 要求两个归档里都有这两份文件，并拒绝归档中其他位置出现的
@@ -111,7 +111,7 @@ skill 管理器应**指向随包发布的那个目录**，不要复制文件。�
 ```bash
 python -m scripts.check_tool_docs --check-installed-skills \
     --skill-mirror /path/to/installed/skills
-# 或：AGENT_BROWSER_SKILL_MIRRORS="dir1:dir2" python -m scripts.check_tool_docs --check-installed-skills
+# 或：BROWSERTAP_SKILL_MIRRORS="dir1:dir2" python -m scripts.check_tool_docs --check-installed-skills
 ```
 
 每个目录下应有 `<skill-name>/SKILL.md`。agent 客户端把 skill 装在哪属于本机配置，
@@ -138,7 +138,7 @@ python -m scripts.check_tool_docs --check-installed-skills \
   覆盖率、文档、构建和发行检查。
 - 不提交缓存、coverage/JUnit 生成物、日志、本地截图或构建输出。这些可再生或本机文件应
   由 `.gitignore` 排除。
-- 旧版 `src/agent_browser_mcp/chrome_extension/config.js`/TID 页面命令通道已删除。
+- 旧版 `src/browsertap_mcp/chrome_extension/config.js`/TID 页面命令通道已删除。
   该文件不得进入 Git 或 Python 发行包，发行门禁会拒绝它。
 - 不得包含 bridge token、Cookie、`.env` 文件、浏览器 profile 或复制的用户内容。
   公开仓库发布前，对工作树和完整 Git 历史运行 secret scan。
@@ -147,7 +147,7 @@ python -m scripts.check_tool_docs --check-installed-skills \
 
 ## 发布到 PyPI
 
-本包尚未发布到 PyPI，因此 `pip install agent-browser-mcp` 现在不可用，两份 README 也
+本包尚未发布到 PyPI，因此 `pip install browsertap-mcp` 现在不可用，两份 README 也
 如此写明；那句话只有在真正上传成功之后才改。
 
 `.github/workflows/release.yml` 负责构建、门禁与上传。它**不会**被 push 触发，只能手动
@@ -156,9 +156,9 @@ python -m scripts.check_tool_docs --check-installed-skills \
 
 上传之前必须先具备三样东西，且都无法从本仓库内部创建：
 
-1. 一个 PyPI 账号，且项目名 `agent-browser-mcp` 可用或已归属自己。先查
-   <https://pypi.org/project/agent-browser-mcp/>；已被他人占用的名字无法接管。
-2. PyPI 上为本仓库配置的 **Trusted Publisher**：仓库 `LinVireo/agent-browser-mcp`、
+1. 一个 PyPI 账号，且项目名 `browsertap-mcp` 可用或已归属自己。先查
+   <https://pypi.org/project/browsertap-mcp/>；已被他人占用的名字无法接管。
+2. PyPI 上为本仓库配置的 **Trusted Publisher**：仓库 `LinVireo/browsertap-mcp`、
    workflow `release.yml`、environment `pypi`。Trusted Publishing 的含义是 workflow 在
    请求时用短期 GitHub OIDC token 换取上传凭据，仓库里不存任何 API token —— 没有可泄露
    的东西，也不需要轮换。TestPyPI 上按同样方式再配一份，environment 用 `testpypi`。
@@ -172,10 +172,10 @@ python -m scripts.check_tool_docs --check-installed-skills \
 python -m scripts.finalize_change --bump none
 python -m scripts.evidence_manifest --check
 
-# 2. 先在 TestPyPI 演练（Actions -> ABM publish to PyPI -> index: testpypi），再装进一个
+# 2. 先在 TestPyPI 演练（Actions -> BTAP publish to PyPI -> index: testpypi），再装进一个
 #    一次性虚拟环境验证。依赖仍从正式索引取，只有本包来自演练索引。
 python -m pip install --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ "agent-browser-mcp[desktop]"
+    --extra-index-url https://pypi.org/simple/ "browsertap-mcp[desktop]"
 
 # 3. 发布该 tag 对应的 GitHub Release，完成正式上传。
 ```

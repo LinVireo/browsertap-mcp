@@ -5,7 +5,7 @@ whether the agent is looking at a real return value. It used to fall through to
 None for the unload case, which made execute_js_rich report status:"success"
 with the bridge's diagnostic string masquerading as the script's return value.
 """
-from agent_browser_mcp.simphtml import no_response_kind
+from browsertap_mcp.simphtml import no_response_kind
 
 
 class TestRealReturns:

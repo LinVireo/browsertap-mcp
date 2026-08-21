@@ -1,5 +1,5 @@
 mcp_servers:
-  agent-browser-mcp:
-    command: agent-browser-mcp
+  browsertap:
+    command: browsertap
     timeout: 120
     connect_timeout: 60

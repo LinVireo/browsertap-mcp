@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKGROUND = ROOT / "src" / "agent_browser_mcp" / "chrome_extension" / "background.js"
-MANIFEST = ROOT / "src" / "agent_browser_mcp" / "chrome_extension" / "manifest.json"
+BACKGROUND = ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "background.js"
+MANIFEST = ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json"
 
 
 class _Driver:

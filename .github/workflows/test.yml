@@ -1,4 +1,4 @@
-name: ABM offline gates
+name: BTAP offline gates
 
 on:
   push:
@@ -44,7 +44,7 @@ jobs:
       - name: Run offline tests with coverage
         run: >-
           python -m pytest tests -q
-          --cov=agent_browser_mcp
+          --cov=browsertap_mcp
           --cov-fail-under=85
           --cov-report=term-missing
           --cov-report=xml
@@ -86,6 +86,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: abm-offline-${{ matrix.python-version }}
+          name: btap-offline-${{ matrix.python-version }}
           path: artifacts/
           if-no-files-found: ignore

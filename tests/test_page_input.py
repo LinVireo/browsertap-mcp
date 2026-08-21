@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from agent_browser_mcp.page_input import (
+from browsertap_mcp.page_input import (
     ChallengeAttemptTracker,
     InputValidationError,
     click_commands,
@@ -127,7 +127,7 @@ def test_type_focuses_selects_and_optionally_submits():
 def test_type_can_await_xterm_delivery_before_submitting():
     commands = type_commands(
         ".xterm",
-        "printf 'abm'",
+        "printf 'btap'",
         submit_key="enter",
         submit_delay_ms=75,
     )
@@ -146,13 +146,13 @@ def test_type_can_await_xterm_delivery_before_submitting():
 
 
 def test_type_retargets_xterm_container_to_helper_textarea():
-    commands = type_commands(".xterm", "printf 'abm'", submit_key="enter")
+    commands = type_commands(".xterm", "printf 'btap'", submit_key="enter")
     expression = commands[0]["params"]["expression"]
 
     assert ".xterm-helper-textarea" in expression
     assert "closest('.xterm')" in expression
     assert "targetKind" in expression
-    assert commands[1]["params"]["text"] == "printf 'abm'"
+    assert commands[1]["params"]["text"] == "printf 'btap'"
 
 
 def test_type_without_selector_autofocuses_the_single_xterm_helper():

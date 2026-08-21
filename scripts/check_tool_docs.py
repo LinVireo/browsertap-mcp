@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # at.
 #
 # The canonical copy lives inside the package rather than under `docs/` so that
-# `agent-browser-mcp skill-path` resolves it from a plain `pip install`. A
+# `browsertap skill-path` resolves it from a plain `pip install`. A
 # reader who only ever installs the wheel gets the same document a contributor
 # reviews.
 #
@@ -31,20 +31,20 @@ ROOT = Path(__file__).resolve().parents[1]
 # skills is the machine operator's business, not this project's, so naming those
 # directories here would publish someone's local layout and go stale the moment
 # they reorganize it. Pass `--skill-mirror DIR` (repeatable) or set
-# `AGENT_BROWSER_SKILL_MIRRORS` to a path-separator-separated list of directories
+# `BROWSERTAP_SKILL_MIRRORS` to a path-separator-separated list of directories
 # that each contain `<skill-name>/SKILL.md`.
 #
 # A mirror is worth checking because it is usually a link back to one shared
 # file: if a client directory ever holds a detached *real* copy instead, it reads
 # as fine for as long as the contents happen to agree and then silently stops
 # receiving updates. That silent drift is the whole reason for the hash compare.
-SKILL_MIRRORS_ENV = "AGENT_BROWSER_SKILL_MIRRORS"
-SKILL_ROOT = ROOT / "src" / "agent_browser_mcp" / "skills"
-# `browser-mcp-default` tells a calling agent how to drive the tools;
-# `abm-bridge-recovery` tells it how to get the bridge back when the transport
+SKILL_MIRRORS_ENV = "BROWSERTAP_SKILL_MIRRORS"
+SKILL_ROOT = ROOT / "src" / "browsertap_mcp" / "skills"
+# `browsertap-default` tells a calling agent how to drive the tools;
+# `browsertap-bridge-recovery` tells it how to get the bridge back when the transport
 # itself is down. They cross-reference each other, so a reader who receives an
 # update for only one of them gets pointed at advice that no longer matches.
-SKILL_NAMES = ("browser-mcp-default", "abm-bridge-recovery")
+SKILL_NAMES = ("browsertap-default", "browsertap-bridge-recovery")
 
 
 def _canonical_skill(name: str) -> Path:
@@ -63,7 +63,7 @@ def _skill_mirrors(explicit: list[str] | None = None) -> list[Path]:
 def _skill_group(name: str, mirrors: list[Path]) -> tuple[Path, ...]:
     return (_canonical_skill(name), *(mirror / name / "SKILL.md" for mirror in mirrors))
 
-from agent_browser_mcp import server as S
+from browsertap_mcp import server as S
 from scripts.versioning import validate_versions
 from tests.tool_coverage_manifest import TOOL_COVERAGE
 
@@ -72,25 +72,25 @@ TOOL_LINE_RE = re.compile(r"^- \*\*([a-z][a-z0-9_]*)\*\*", re.MULTILINE)
 # so losing one silently changes another agent's behaviour rather than failing
 # a test somewhere visible.
 REQUIRED_SKILL_TEXT = {
-    "browser-mcp-default": (
+    "browsertap-default": (
         "filter='user'",
         "network_capture_stop",
         "full_page",
         "clip",
         "quality",
         "reload_extension_required",
-        "AGENT_BROWSER_LAB_NO_ELICIT=1",
+        "BROWSERTAP_LAB_NO_ELICIT=1",
         # The recovery skill owns transport failures; without this pointer a
         # caller retries the MCP layer against a dead bridge instead.
-        "[[abm-bridge-recovery]]",
+        "[[browsertap-bridge-recovery]]",
     ),
-    "abm-bridge-recovery": (
-        "agent-browser-mcp doctor",
+    "browsertap-bridge-recovery": (
+        "browsertap doctor",
         # Version advice must be derived at runtime, never a literal, because
         # the extension and the package share one version now.
         "get_setup_status.package_version",
         # ...and the way back to the calling contract.
-        "[[browser-mcp-default]]",
+        "[[browsertap-default]]",
     ),
 }
 REQUIRED_DEFAULT_PARAMETERS = {
@@ -340,7 +340,7 @@ def report_ok(report: dict[str, Any]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate ABM tool docs and caller skill sync")
+    parser = argparse.ArgumentParser(description="Validate BTAP tool docs and caller skill sync")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument(
         "--check-installed-skills",
@@ -365,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         skill_mirrors=args.skill_mirror,
     )
     if args.format == "markdown":
-        print("# ABM Tool Documentation Contract")
+        print("# BTAP Tool Documentation Contract")
         print()
         print(f"- registered={report['registered']}")
         print(f"- coverage_manifest={report['coverage_manifest']}")

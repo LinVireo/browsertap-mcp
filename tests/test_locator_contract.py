@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from agent_browser_mcp import server as S
-from agent_browser_mcp.page_input import (
+from browsertap_mcp import server as S
+from browsertap_mcp.page_input import (
     InputValidationError,
     locator_query_script,
     normalize_locator,

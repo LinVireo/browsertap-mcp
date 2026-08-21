@@ -1,10 +1,83 @@
 # Changelog
 
-Notable user-facing changes to `agent-browser-mcp` are recorded here. This file
+Notable user-facing changes to `browsertap-mcp` are recorded here. This file
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-08-21
+
+### Changed
+
+- Renamed the project from `agent-browser-mcp` to `browsertap-mcp`. The
+  distribution is `browsertap-mcp`, the Python module is `browsertap_mcp`, and the
+  console script is `browsertap`: the distribution name carries the `-mcp` suffix
+  that an index search filters on, while the command drops it, because the command
+  is the part typed daily and this package is already more than an MCP server --
+  `browsertap bridge --restart`, `browsertap doctor` and `browsertap skill-path`
+  are not MCP calls. Nothing had been published to PyPI under the old name, so no
+  release is being superseded and no name is being burned; the module was renamed
+  with the distribution so that an installed `browsertap-mcp` is never imported as
+  something else.
+- MCP clients register the server as `browsertap` running `command: browsertap`.
+  The shipped examples, the README snippets and `browsertap print-hermes-config`
+  all agree on that spelling now. An existing client entry keeps pointing at the
+  old executable name and has to be re-added; the tool names a client derives from
+  its own entry key change with it.
+- `AGENT_BROWSER_TMWD_HOST` and `AGENT_BROWSER_TMWD_PORT` are now
+  `BROWSERTAP_BRIDGE_HOST` and `BROWSERTAP_BRIDGE_PORT`. They were named after the
+  driver class this release deletes, so carrying `TMWD` into the new namespace
+  would have preserved a word that no longer names anything. Every other variable
+  is a straight prefix swap, `AGENT_BROWSER_` to `BROWSERTAP_`.
+- All pre-0.4.0 `AGENT_BROWSER_*` variables still work. `browsertap_mcp.paths`
+  copies each one onto its new name when the new name is unset, and the package
+  `__init__` runs that before any submodule is imported -- which is the only point
+  early enough, because `server` reads the bridge host and port at *import* time
+  and an entry-point-level call would run after the value it is meant to supply
+  had already been read.
+- Per-user state moved from `~/.agent-browser-mcp` to `~/.browsertap`. An install
+  that predates the rename keeps using the old directory as long as it exists and
+  the new one does not, so the persistent bridge token stays valid and a running
+  daemon and a fresh server do not end up authenticating against different files.
+  The old directory is used in place, never renamed: a live bridge holds
+  `bridge.log` open and Windows refuses to rename a directory containing an open
+  handle, so a migration-by-move would fail in exactly the case that matters.
+- `doctor` reports `bridge_host`, `bridge_ws_port` and `bridge_http_port` instead
+  of `tmwebdriver_host`, `tmwebdriver_ws_port` and `tmwebdriver_http_port`. Same
+  values, named after the component that still exists.
+- The unpacked extension is now **BrowserTap Bridge**, and the internal `abm` /
+  `ABM` marker became `btap` / `BTAP` -- extension storage keys, the WebSocket
+  subprotocol, injected page globals, and the connection badge text. Reload the
+  extension after upgrading: an unpacked extension's ID is derived from its
+  directory path, and the package directory changed, so Chrome treats it as a new
+  extension. That also resets what the old extension had stored -- the badge
+  preference, the remembered bridge port, and any granted permission leases. The
+  bridge does not pin extension IDs, so nothing else has to be reconfigured.
+- The two packaged agent skills are now `browsertap-default` and
+  `browsertap-bridge-recovery`. `browsertap skill-path` still prints the directory
+  that holds them.
+
+### Fixed
+
+- `versioning check-bump` can read a baseline from before the rename. It resolved
+  the version source at one hardcoded package path, so any base ref older than the
+  rename commit failed with `path exists on disk, but not in <ref>` -- the gate
+  would have crashed on precisely the change set it exists to validate. It now
+  tries the pre-0.4.0 path as a fallback.
+- `test_public_maintenance_commands_use_module_invocation` no longer reads a file
+  under `docs/superpowers/`, which 0.3.14 untracked and gitignored. The contract
+  passed only on a machine where the untracked file still sat on disk and raised
+  `FileNotFoundError` on a fresh clone.
+
+### Removed
+
+- `tmwebdriver.py` and the `TMWebDriver` alias in `browser_bridge`. The shim
+  existed so that code written before 0.3.6 could keep importing the original
+  class name, and the rename retired the debt for free: no caller has ever been
+  able to write `browsertap_mcp.tmwebdriver`, so the compatibility surface it
+  preserved is one that never existed under this name. The packaging contracts and
+  the stdout-discipline check no longer require the file.
 
 ## [0.3.14] - 2026-08-21
 
@@ -386,7 +459,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.14...HEAD
-[0.3.14]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.13...v0.3.14
-[0.3.13]: https://github.com/LinVireo/agent-browser-mcp/compare/v0.3.12...v0.3.13
-[0.3.12]: https://github.com/LinVireo/agent-browser-mcp/releases/tag/v0.3.12
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.14...v0.4.0
+[0.3.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.13...v0.3.14
+[0.3.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.12...v0.3.13
+[0.3.12]: https://github.com/LinVireo/browsertap-mcp/releases/tag/v0.3.12

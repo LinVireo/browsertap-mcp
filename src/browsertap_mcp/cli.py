@@ -39,8 +39,8 @@ def cmd_skill_path() -> int:
 def cmd_print_hermes_config() -> int:
     print(
         "mcp_servers:\n"
-        "  agent-browser-mcp:\n"
-        "    command: agent-browser-mcp\n"
+        "  browsertap:\n"
+        "    command: browsertap\n"
         "    timeout: 120\n"
         "    connect_timeout: 60"
     )
@@ -82,9 +82,9 @@ def cmd_doctor() -> int:
         }
     payload.update({
         "remote_mode": getattr(driver, "is_remote", False),
-        "tmwebdriver_host": getattr(driver, "host", "127.0.0.1"),
-        "tmwebdriver_ws_port": ws_port,
-        "tmwebdriver_http_port": http_port,
+        "bridge_host": getattr(driver, "host", "127.0.0.1"),
+        "bridge_ws_port": ws_port,
+        "bridge_http_port": http_port,
         "ws_port_open": _port_open(getattr(driver, "host", "127.0.0.1"), ws_port),
         "http_port_open": _port_open(getattr(driver, "host", "127.0.0.1"), http_port),
         "connected_tabs": len(sessions),
@@ -94,7 +94,7 @@ def cmd_doctor() -> int:
         "next_steps": [
             "Load the unpacked extension in chrome://extensions from extension_path.",
             "Open a normal http/https page in Chrome.",
-            "Run your MCP client's connection check for `agent-browser-mcp` after adding the config.",
+            "Run your MCP client's connection check for `browsertap-mcp` after adding the config.",
         ],
     })
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -107,10 +107,10 @@ def cmd_doctor() -> int:
             file=sys.stderr,
         )
     elif payload.get("action") == "reload_extension":
-        print("\n[!!] stale_extension: Reload Agent Browser MCP Bridge once in chrome://extensions.", file=sys.stderr)
+        print("\n[!!] stale_extension: Reload BrowserTap Bridge once in chrome://extensions.", file=sys.stderr)
     elif payload.get("action") == "restart_bridge":
         print(
-            "\n[!!] stale_bridge: Run `agent-browser-mcp bridge --restart`; "
+            "\n[!!] stale_bridge: Run `browsertap bridge --restart`; "
             "Chrome does not need restarting.",
             file=sys.stderr,
         )
@@ -148,7 +148,7 @@ def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agent-browser-mcp",
+        prog="browsertap",
         description="Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, and physical input.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

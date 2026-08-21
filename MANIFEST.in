@@ -1,5 +1,5 @@
-recursive-include src/agent_browser_mcp/chrome_extension *
-exclude src/agent_browser_mcp/chrome_extension/config.js
+recursive-include src/browsertap_mcp/chrome_extension *
+exclude src/browsertap_mcp/chrome_extension/config.js
 include .gitignore
 include README.md
 include README.zh-CN.md
@@ -16,7 +16,7 @@ exclude SKILL.md
 # Kept after the bare `exclude` above so the ordering reads unambiguously: a
 # stray `SKILL.md` dropped in the repository root is a caller's own copy and
 # stays out, while the two packaged agent skills ship as package data.
-recursive-include src/agent_browser_mcp/skills SKILL.md
+recursive-include src/browsertap_mcp/skills SKILL.md
 include pyproject.toml
 include MANIFEST.in
 recursive-include scripts *.py

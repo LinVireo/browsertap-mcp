@@ -1,6 +1,6 @@
 """Shared fixtures.
 
-The offline layer imports agent_browser_mcp directly and never touches a
+The offline layer imports browsertap_mcp directly and never touches a
 browser. The live layer needs a running bridge daemon plus the extension
 connected, so it is marked `live` and skipped by default (see pyproject).
 """
@@ -70,7 +70,7 @@ def _spawn_test_bridge(token, monkeypatch):
     """
     import time
 
-    from agent_browser_mcp.browser_bridge import TOKEN_AUTH_ENV, TOKEN_ENV, BrowserBridge
+    from browsertap_mcp.browser_bridge import TOKEN_AUTH_ENV, TOKEN_ENV, BrowserBridge
 
     if token:
         monkeypatch.delenv(TOKEN_AUTH_ENV, raising=False)
@@ -125,7 +125,7 @@ def link_bridge_open(monkeypatch):
 @pytest.fixture(scope="session")
 def driver():
     """A BrowserBridge talking to an already-running bridge, or skip."""
-    from agent_browser_mcp.browser_bridge import BrowserBridge
+    from browsertap_mcp.browser_bridge import BrowserBridge
 
     d = BrowserBridge()
     try:
@@ -146,7 +146,7 @@ def scratch_session(driver):
     """
     import time
 
-    from agent_browser_mcp import server as S
+    from browsertap_mcp import server as S
 
     result = S.open_new_tab("https://example.com/")
     if result.get("status") == "unknown" or not result.get("owned"):

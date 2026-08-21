@@ -1,4 +1,4 @@
-name: ABM live Chrome gates
+name: BTAP live Chrome gates
 
 on:
   workflow_dispatch:
@@ -7,11 +7,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: abm-live-browser
+  group: btap-live-browser
   cancel-in-progress: false
 
 env:
-  ABM_PYTHON: ${{ vars.ABM_LIVE_PYTHON || 'python' }}
+  BTAP_PYTHON: ${{ vars.BTAP_LIVE_PYTHON || 'python' }}
 
 jobs:
   preflight:
@@ -28,12 +28,12 @@ jobs:
     # which `permissions:` cannot grant to GITHUB_TOKEN, so an API check would
     # need a long-lived PAT secret just to produce a better error message.
     name: Check live prerequisites
-    if: github.repository == 'LinVireo/agent-browser-mcp'
+    if: github.repository == 'LinVireo/browsertap-mcp'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require a registered self-hosted browser runner
-        if: vars.ABM_LIVE_RUNNER != 'ready'
+        if: vars.BTAP_LIVE_RUNNER != 'ready'
         run: |
           echo "::error title=No live runner registered::The live browser suite has no machine to run on; failing now instead of queueing."
           cat <<'EOF'
@@ -48,13 +48,13 @@ jobs:
 
             1. Register a self-hosted runner on a Windows machine with Chrome,
                the bridge and the unpacked extension already working. Give it the
-               labels: self-hosted Windows X64 abm
-            2. Optionally set the repository variable ABM_LIVE_PYTHON to the
+               labels: self-hosted Windows X64 btap
+            2. Optionally set the repository variable BTAP_LIVE_PYTHON to the
                interpreter to use; it defaults to `python` on PATH.
-            3. Set the repository variable ABM_LIVE_RUNNER to: ready
+            3. Set the repository variable BTAP_LIVE_RUNNER to: ready
                (Settings -> Secrets and variables -> Actions -> Variables)
 
-          The `abm-live` environment referenced by the live job is created by
+          The `btap-live` environment referenced by the live job is created by
           GitHub on first use; add required reviewers there if a run should need
           approval before it touches that desktop.
 
@@ -68,14 +68,14 @@ jobs:
           exit 1
       - name: Report prerequisites satisfied
         run: |
-          echo "ABM_LIVE_RUNNER=ready; handing off to the self-hosted browser runner."
-          echo "Interpreter: ${ABM_PYTHON}"
+          echo "BTAP_LIVE_RUNNER=ready; handing off to the self-hosted browser runner."
+          echo "Interpreter: ${BTAP_PYTHON}"
 
   live:
     name: Live Chrome verification
     needs: preflight
-    environment: abm-live
-    runs-on: [self-hosted, Windows, X64, abm]
+    environment: btap-live
+    runs-on: [self-hosted, Windows, X64, btap]
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -83,31 +83,31 @@ jobs:
       - name: Resolve configured Python
         shell: powershell
         run: |
-          $python = Get-Command $env:ABM_PYTHON -ErrorAction Stop
-          "ABM_PYTHON=$($python.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $python = Get-Command $env:BTAP_PYTHON -ErrorAction Stop
+          "BTAP_PYTHON=$($python.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install editable package
         shell: powershell
         run: |
-          & $env:ABM_PYTHON -m pip install -e ".[desktop,dev]"
+          & $env:BTAP_PYTHON -m pip install -e ".[desktop,dev]"
       - name: Verify bridge and extension diagnostics
         shell: powershell
         run: |
-          & $env:ABM_PYTHON -c 'import json; from agent_browser_mcp import server as S; s = S.get_setup_status(); print(json.dumps(s, ensure_ascii=False, indent=2, default=str)); raise SystemExit(2 if s.get("reload_extension_required") or s.get("restart_bridge_required") else 0)'
+          & $env:BTAP_PYTHON -c 'import json; from browsertap_mcp import server as S; s = S.get_setup_status(); print(json.dumps(s, ensure_ascii=False, indent=2, default=str)); raise SystemExit(2 if s.get("reload_extension_required") or s.get("restart_bridge_required") else 0)'
       - name: Run live browser suite
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          & $env:ABM_PYTHON -m pytest tests -q -m live --junitxml=artifacts/live-junit.xml
+          & $env:BTAP_PYTHON -m pytest tests -q -m live --junitxml=artifacts/live-junit.xml
       - name: Recheck diagnostics after cleanup
         if: always()
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          & $env:ABM_PYTHON -c "import json; from agent_browser_mcp import server as S; print(json.dumps(S.get_setup_status(), ensure_ascii=False, indent=2, default=str))" | Out-File -Encoding utf8 artifacts/setup-status.json
+          & $env:BTAP_PYTHON -c "import json; from browsertap_mcp import server as S; print(json.dumps(S.get_setup_status(), ensure_ascii=False, indent=2, default=str))" | Out-File -Encoding utf8 artifacts/setup-status.json
       - name: Upload live evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: abm-live-evidence
+          name: btap-live-evidence
           path: artifacts/
           if-no-files-found: ignore

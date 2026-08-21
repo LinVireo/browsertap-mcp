@@ -13,9 +13,9 @@ import time
 import anyio
 import pytest
 
-from agent_browser_mcp import server as S
-from agent_browser_mcp import simphtml
-from agent_browser_mcp.browser_bridge import BrowserBridge, Session
+from browsertap_mcp import server as S
+from browsertap_mcp import simphtml
+from browsertap_mcp.browser_bridge import BrowserBridge, Session
 
 # --- how a bridge reply is classified -----------------------------------
 
@@ -108,7 +108,7 @@ def test_ref_numbering_is_stable_across_calls_on_one_dict():
 # --- the offscreen marker ----------------------------------------------
 
 def test_offscreen_note_parses_the_marker():
-    html = '<body><!--abm-offscreen:15 scrollY:0 viewH:780 docH:2574--><p>x</p></body>'
+    html = '<body><!--btap-offscreen:15 scrollY:0 viewH:780 docH:2574--><p>x</p></body>'
     assert S._offscreen_note(html) == {
         "elements": 15, "scroll_y": 0, "viewport_height": 780, "doc_height": 2574,
     }
@@ -120,7 +120,7 @@ def test_offscreen_note_absent_when_nothing_was_dropped():
 
 def test_offscreen_note_handles_negative_scroll():
     """Overscroll (rubber-banding) reports a negative scrollY on some platforms."""
-    html = '<!--abm-offscreen:3 scrollY:-40 viewH:600 docH:2000-->'
+    html = '<!--btap-offscreen:3 scrollY:-40 viewH:600 docH:2000-->'
     note = S._offscreen_note(html)
     assert note is not None and note["scroll_y"] == -40
 
@@ -353,7 +353,7 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
     assert result["retry_safe"] is True
     # The reserve makes the retry reachable; the total still fits one deadline.
     assert len(driver.timeouts) == 2
-    assert result["abm_retried"] is True
+    assert result["btap_retried"] is True
     assert sum(driver.timeouts) <= 0.16
     # The budgets above are the contract -- they read what the code handed the
     # driver, so they hold under any machine load. This wall clock is only a
@@ -406,9 +406,9 @@ def test_driver_ack_does_not_restart_execute_js_deadline(monkeypatch):
     # that exactly, with no dependence on machine load. The wall-clock version
     # of this test (elapsed < 0.23 for a 0.14 budget) had only 0.09s of slack
     # and tripped under coverage instrumentation.
-    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.monotonic", lambda: clock[0])
     monkeypatch.setattr(
-        "agent_browser_mcp.browser_bridge.time.sleep",
+        "browsertap_mcp.browser_bridge.time.sleep",
         lambda seconds: clock.__setitem__(0, clock[0] + seconds),
     )
 
@@ -444,7 +444,7 @@ def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
     )
     driver.sessions = {"c:1": session}
 
-    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.monotonic", lambda: clock[0])
 
     def final_sleep(seconds):
         clock[0] += seconds
@@ -454,7 +454,7 @@ def test_driver_consumes_result_arriving_in_final_poll_slice(monkeypatch):
             "tabId": 1,
         }
 
-    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.sleep", final_sleep)
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.sleep", final_sleep)
 
     result = driver.execute_js("return 9", timeout=0.05, session_id="c:1")
 
@@ -476,13 +476,13 @@ def test_ext_cmd_consumes_result_arriving_in_final_poll_slice(monkeypatch):
             sent["id"] = json.loads(payload)["id"]
 
     driver.ext_clients = {"c": {"ws": Socket(), "ts": 1.0}}
-    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.monotonic", lambda: clock[0])
 
     def final_sleep(seconds):
         clock[0] += seconds
         driver.results[sent["id"]] = {"success": True, "data": {"ok": True}}
 
-    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.sleep", final_sleep)
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.sleep", final_sleep)
 
     result = driver.ext_cmd({"cmd": "tabs"}, timeout=0.05)
 
@@ -929,14 +929,14 @@ def test_driver_does_not_dispatch_when_session_recovers_at_deadline(monkeypatch)
     session.mark_disconnected()
     driver.sessions = {"c:1": session}
 
-    monkeypatch.setattr("agent_browser_mcp.browser_bridge.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.monotonic", lambda: clock[0])
 
     def recover_on_final_sleep(seconds):
         clock[0] += seconds
         session.reconnect(Socket(), info)
 
     monkeypatch.setattr(
-        "agent_browser_mcp.browser_bridge.time.sleep", recover_on_final_sleep
+        "browsertap_mcp.browser_bridge.time.sleep", recover_on_final_sleep
     )
 
     result = driver.execute_js("window.sideEffect = true", timeout=0.05, session_id="c:1")
@@ -1294,7 +1294,7 @@ class _FakeSession:
 
 def _driver_with(sessions, default, latest=None):
     """A BrowserBridge with a hand-built session table and no sockets."""
-    from agent_browser_mcp.browser_bridge import BrowserBridge
+    from browsertap_mcp.browser_bridge import BrowserBridge
 
     d = BrowserBridge.__new__(BrowserBridge)  # skip __init__: it binds ports
     d.sessions = {s.id: s for s in sessions}
@@ -1716,7 +1716,7 @@ def test_session_table_readers_survive_concurrent_registration_churn(monkeypatch
     """
     import queue as _queue
 
-    from agent_browser_mcp import browser_bridge as _bb
+    from browsertap_mcp import browser_bridge as _bb
 
     # mark_disconnected() logs per tab, and this loops thousands of times.
     monkeypatch.setattr(_bb.logger, "disabled", True)
@@ -1887,7 +1887,7 @@ async def test_registered_async_tool_shares_lock_and_offloads_blocking_io(monkey
             return {"data": {"ok": True}}
 
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "lab")
-    monkeypatch.setenv("AGENT_BROWSER_LAB_NO_ELICIT", "1")
+    monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
     monkeypatch.setattr(S, "require_driver", lambda: Driver())
     monkeypatch.setattr(S, "switch_session", lambda session_id=None: session_id or "chrome:7")
     monkeypatch.setattr(
