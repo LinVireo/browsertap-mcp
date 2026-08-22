@@ -6,6 +6,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-23
+
+### Fixed
+
+- A working install no longer collects red `tabs_update failed` entries on
+  `chrome://extensions`. Chromium refuses to dispatch a `chrome.*` call whose
+  service worker has already stopped, answering with the bare message `No SW`,
+  and it rejects that call *before* the WebSocket close is processed -- so the
+  socket still read `OPEN` and the extension filed an ordinary MV3 eviction as a
+  real failure. Nothing behaved differently; the report did, which matters more
+  than it sounds for a project whose first troubleshooting instruction is to
+  look at that page. The log sites in the WebSocket client now ask
+  `isWorkerGoneError` first and each names which side went away: the bridge, the
+  worker, or neither. The error reply that saves the bridge a full request
+  timeout stays keyed on the socket rather than on this check, because an
+  evicted worker still has an open socket to answer through.
+
 ## [0.4.2] - 2026-08-23
 
 ### Security
@@ -610,7 +627,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.14...v0.4.0

@@ -315,6 +315,18 @@ the assertion turns flaky.
 - If a manual `execute_js` debugging session left a CDP debugger attached, the
   whole live suite fails afterwards with "debugger already attached". Suspect
   your own leftovers before blaming a code change; re-verify in a clean browser.
+- **`Error: No SW` from a `chrome.*` call is the worker being collected**, not a
+  failure. Chromium's `ExtensionFunctionDispatcher::DispatchForServiceWorker`
+  answers a call whose service worker has already stopped with that bare string
+  (`No RPH` when the render process host went first). The trap is that it arrives
+  *before* the WebSocket close is processed, so `ws.readyState` still reads
+  `OPEN`, and a benign/real split keyed on the socket alone files a routine
+  eviction as `console.error` -- a red entry on `chrome://extensions` for an
+  install that is working, which is the first thing a new user is told to check.
+  `isWorkerGoneError` is that check and the log sites go through it. Do **not**
+  fold it into the `dead` flag in `ws.onmessage`: that flag also decides whether
+  to send the error reply, and the socket here is still open, so the bridge can
+  be answered instead of waiting out its full timeout.
 
 ## 9. Machine-specific notes
 

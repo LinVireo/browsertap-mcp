@@ -2307,6 +2307,142 @@ def test_extension_manifest_matches_package_version_and_branding():
     assert "config.js" not in injected_files
 
 
+def test_extension_logs_an_evicted_worker_as_routine_not_as_an_extension_error():
+    """An MV3 eviction mid-call must not read as a broken extension.
+
+    Chromium answers a chrome.* call whose service worker already stopped with
+    the bare message "No SW" (``DispatchForServiceWorker`` in
+    extension_function_dispatcher.cc; "No RPH" is the same bail-out when the
+    render process host went first). The catch here used to classify by the
+    socket alone, and Chrome rejects the pending call before the WebSocket close
+    is processed -- so readyState still read OPEN, the eviction took the
+    `console.error` branch, and an install doing nothing wrong grew a red
+    `tabs_update failed` entry on chrome://extensions. That is the whole defect:
+    nothing behaved differently, the report did.
+
+    The three outcomes have to stay distinguishable, which is why this drives the
+    real function instead of grepping for the helper: an eviction and a departed
+    bridge are both routine but say different things, and a genuine failure still
+    has to be loud.
+    """
+    script = """
+const fs = require('fs');
+const source = fs.readFileSync(__BACKGROUND__, 'utf8');
+const helperStart = source.indexOf('function isWorkerGoneError');
+const helperEnd = source.indexOf('\\nfunction bridgeStatusMessage', helperStart);
+const updateStart = source.indexOf('async function sendTabsUpdate');
+const updateEnd = source.indexOf('\\nchrome.tabs.onUpdated.addListener', updateStart);
+if (helperStart < 0 || helperEnd < 0 || updateStart < 0 || updateEnd < 0) {
+  throw new Error('isWorkerGoneError or sendTabsUpdate not found');
+}
+const WebSocket = { OPEN: 1, CLOSED: 3 };
+let ws = null;
+let queryError = new Error('unset');
+const chrome = { tabs: { query: () => Promise.reject(queryError) } };
+function ensureConnected() {}
+function isScriptable() { return true; }
+function getBrowserType() { return 'chrome'; }
+function getClientId() { return Promise.resolve('chrome_test'); }
+function tabGenerationFor() { return Promise.resolve('gen'); }
+eval(source.slice(helperStart, helperEnd));
+eval(source.slice(updateStart, updateEnd));
+
+const reportHarnessFailure = console.error.bind(console);
+const calls = [];
+console.log = (...args) => calls.push({ level: 'log', text: String(args[0]) });
+console.error = (...args) => calls.push({ level: 'error', text: String(args[0]) });
+
+async function run(label, message, readyState) {
+  // A send() that throws is the point: every scenario must be decided in the
+  // catch around chrome.tabs.query, never by reaching the wire.
+  ws = { readyState, send() { throw new Error('sendTabsUpdate should not have sent'); } };
+  queryError = new Error(message);
+  calls.length = 0;
+  await sendTabsUpdate();
+  return { label, calls: calls.slice() };
+}
+
+(async () => {
+  const scenarios = [];
+  scenarios.push(await run('worker-gone', 'No SW', WebSocket.OPEN));
+  scenarios.push(await run('render-process-gone', 'No RPH', WebSocket.OPEN));
+  scenarios.push(await run('real-failure', 'boom', WebSocket.OPEN));
+  scenarios.push(await run('bridge-gone', 'boom', WebSocket.CLOSED));
+  const verdicts = [];
+  for (const message of ['No SW', 'No RPH', 'No SWx', 'no sw', '', 'Error: No SW']) {
+    verdicts.push({ message, verdict: isWorkerGoneError(new Error(message)) });
+  }
+  verdicts.push({ message: 'thrown-null', verdict: isWorkerGoneError(null) });
+  verdicts.push({ message: 'thrown-undefined', verdict: isWorkerGoneError(undefined) });
+  verdicts.push({ message: 'thrown-string', verdict: isWorkerGoneError('No SW') });
+  process.stdout.write(JSON.stringify({ scenarios, verdicts }));
+})().catch(error => { reportHarnessFailure(error); process.exit(1); });
+""".replace(
+        "__BACKGROUND__", json.dumps(str(BACKGROUND))
+    )
+    outcome = _run_node_script(script)
+
+    calls = {entry["label"]: entry["calls"] for entry in outcome["scenarios"]}
+    assert sorted(calls) == [
+        "bridge-gone",
+        "real-failure",
+        "render-process-gone",
+        "worker-gone",
+    ]
+    for label in ("worker-gone", "render-process-gone"):
+        assert len(calls[label]) == 1, calls[label]
+        assert calls[label][0]["level"] == "log", calls[label]
+        assert "worker evicted mid-update" in calls[label][0]["text"]
+
+    # A departed bridge stays a separate sentence: the operator reading the log
+    # has to be able to tell which side went away.
+    assert calls["bridge-gone"][0]["level"] == "log"
+    assert "bridge went away mid-update" in calls["bridge-gone"][0]["text"]
+
+    # And anything else is still loud, or this test would be a way to silence
+    # real breakage.
+    assert calls["real-failure"][0]["level"] == "error"
+    assert "tabs_update failed" in calls["real-failure"][0]["text"]
+
+    verdicts = {entry["message"]: entry["verdict"] for entry in outcome["verdicts"]}
+    assert verdicts == {
+        "No SW": True,
+        "No RPH": True,
+        # Chrome's message is matched whole. `Error: No SW` is what the console
+        # prints for the same error, and treating that rendering as the message
+        # would let any error whose text merely ends that way pass as routine.
+        "No SWx": False,
+        "no sw": False,
+        "": False,
+        "Error: No SW": False,
+        "thrown-null": False,
+        "thrown-undefined": False,
+        "thrown-string": False,
+    }
+
+
+def test_no_extension_api_failure_in_the_ws_client_is_reported_as_an_error():
+    """Keep the two remaining loud sites the two that cannot be an eviction.
+
+    Every await on a chrome.* API in this section can come back "No SW", so a
+    new `console.error` next to one of them is a new false red entry. The two
+    listed here are neither: `new WebSocket()` is a platform constructor and
+    `onerror` is the socket's own report, and no service worker lifecycle event
+    produces either.
+    """
+    import re
+
+    source = BACKGROUND.read_text(encoding="utf-8")
+    client = source[source.index("// --- WebSocket client for BrowserBridge ---") :]
+    loud = re.findall(r"console\.error\('\[BTAP-WS\][^']*'", client)
+    assert loud == [
+        "console.error('[BTAP-WS] Constructor error:'",
+        "console.error('[BTAP-WS] Error:'",
+    ], loud
+    # The classification helper is what the rest of them go through now.
+    assert source.count("isWorkerGoneError(e)") == 6, "5 call sites plus the definition"
+
+
 def test_extension_keepalive_uses_interval_and_reconnects_failed_sockets():
     script = """
 const intervals = [];
@@ -4029,6 +4165,14 @@ const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
 const start = source.indexOf('function getBrowserType');
 const end = source.indexOf('\\nfunction scheduleProbe', start);
 if (start < 0 || end < 0) throw new Error('client id helpers not found');
+// The degraded path now asks whether the worker went away before it decides
+// how loudly to report, and that predicate lives outside this slice. Eval the
+// real one rather than stubbing it: a stub would keep passing while the thing
+// the extension actually calls was broken.
+const goneStart = source.indexOf('function isWorkerGoneError');
+const goneEnd = source.indexOf('\\nfunction bridgeStatusMessage', goneStart);
+if (goneStart < 0 || goneEnd < 0) throw new Error('isWorkerGoneError not found');
+eval(source.slice(goneStart, goneEnd));
 let CLIENT_ID = null;
 let clientIdPromise = null;
 const navigator = {{ userAgent: 'Mozilla/5.0 Chrome/126.0.0.0 Safari/537.36' }};

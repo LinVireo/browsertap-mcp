@@ -3783,6 +3783,22 @@ let WS_URL = `ws://127.0.0.1:${bridgePort}`;
 let HTTP_PROBE = `http://127.0.0.1:${bridgePort + 1}/link`;
 let bridgeConfigLoaded = false;
 
+// Chromium refuses to dispatch a chrome.* call whose service worker has already
+// stopped: extension_function_dispatcher.cc answers with the bare string
+// "No SW" ("No RPH" when the render process host went first). Both mean the
+// worker was collected mid-call, which is ordinary MV3 lifecycle and not a
+// failure -- the next worker start re-pushes everything through ext_ready.
+// The readyState checks below cannot see it: Chrome rejects the pending call at
+// once while the WebSocket close is processed afterwards, so the socket still
+// reads OPEN at that instant and an eviction was being logged as an error, which
+// is what puts a red entry on chrome://extensions for a healthy install.
+// Matching on the message is the only signal Chrome gives here; if that wording
+// changes upstream the cost is one noisy log line, never behaviour.
+function isWorkerGoneError(e) {
+  const message = e && e.message ? String(e.message) : '';
+  return message === 'No SW' || message === 'No RPH';
+}
+
 function bridgeStatusMessage() {
   return {
     type: 'btap_status',
@@ -3850,7 +3866,13 @@ async function loadBridgePort() {
       } catch (_) { /* retried on the next worker start */ }
     }
   } catch (e) {
-    console.error('[BTAP-WS] bridge port storage unavailable, using default', e);
+    // "storage unavailable" is a real thing to report; a worker that went away
+    // mid-read is not, and the fallback below is never reached by anything in
+    // that case because the worker is on its way out.
+    const gone = isWorkerGoneError(e);
+    console[gone ? 'log' : 'error'](
+      gone ? '[BTAP-WS] bridge port read abandoned, worker evicted mid-read'
+           : '[BTAP-WS] bridge port storage unavailable, using default', e);
     applyBridgePort(DEFAULT_BRIDGE_PORT);
   } finally {
     bridgeConfigLoaded = true;
@@ -3921,7 +3943,14 @@ async function getClientId() {
       CLIENT_ID = getBrowserType() + '_' + Math.random().toString(36).slice(2, 8);
       await chrome.storage.local.set({ btap_client_id: CLIENT_ID });
     } catch (e) {
-      console.error('[BTAP-WS] storage unavailable, using ephemeral clientId', e);
+      // Same distinction: a missing permission or a broken storage area costs
+      // id stability and deserves an error, while an eviction mid-read does not
+      // -- the ephemeral id minted below dies with the worker and the next start
+      // reads the persisted one back.
+      const gone = isWorkerGoneError(e);
+      console[gone ? 'log' : 'error'](
+        gone ? '[BTAP-WS] clientId read abandoned, worker evicted mid-read'
+             : '[BTAP-WS] storage unavailable, using ephemeral clientId', e);
       if (!CLIENT_ID) CLIENT_ID = getBrowserType() + '_' + Math.random().toString(36).slice(2, 8);
     }
     return CLIENT_ID;
@@ -4262,7 +4291,14 @@ function connectWS() {
       }));
       console.log('[BTAP-WS] Sent ext_ready with', tabs.length, 'tabs as', clientId);
     } catch (e) {
-      console.error('[BTAP-WS] ext_ready failed', e);
+      // Three ways this ends and only the third is a defect: the bridge went
+      // away, the worker was evicted mid-handshake, or something really broke.
+      // Either of the first two is answered by the next connect, which re-sends
+      // this very message.
+      const benign = self !== ws || self.readyState !== WebSocket.OPEN || isWorkerGoneError(e);
+      console[benign ? 'log' : 'error'](
+        benign ? '[BTAP-WS] ext_ready dropped, connection or worker went away mid-handshake'
+               : '[BTAP-WS] ext_ready failed', e);
     }
   };
   ws.onmessage = async (event) => {
@@ -4303,9 +4339,14 @@ function connectWS() {
       // Name the two cases apart: a dead socket is benign (bridge restarted),
       // a real parse failure is not. The old wording blamed parsing for both.
       const dead = !sock || sock.readyState !== WebSocket.OPEN;
-      console[dead ? 'log' : 'error'](
-        dead ? '[BTAP-WS] bridge went away mid-request, reply dropped'
-             : '[BTAP-WS] message handling error', e);
+      // An evicted worker is benign too, but it is deliberately NOT folded into
+      // `dead`: the socket is still open, so the error reply below can still
+      // reach the bridge and save it a full timeout. Only the log level moves.
+      const benign = dead || isWorkerGoneError(e);
+      let what = '[BTAP-WS] message handling error';
+      if (dead) what = '[BTAP-WS] bridge went away mid-request, reply dropped';
+      else if (benign) what = '[BTAP-WS] worker evicted mid-request, replying with the error';
+      console[benign ? 'log' : 'error'](what, e);
       // Logging alone left the bridge with no reply at all, so the Python side
       // waited out its full timeout for a request that had already failed.
       // Answer with an error whenever we still know which request this was.
@@ -4433,10 +4474,14 @@ async function sendTabsUpdate() {
   } catch (e) {
     // Same benign/real split as onmessage: the bridge restarting under us is
     // routine (the next keepalive tick re-pushes tabs), a real failure is not.
+    // An eviction mid-update is routine as well and does not present as a dead
+    // socket -- see isWorkerGoneError for why readyState still reads OPEN.
     const dead = !sock || sock.readyState !== WebSocket.OPEN;
-    console[dead ? 'log' : 'error'](
-      dead ? '[BTAP-WS] tabs_update dropped, bridge went away mid-update'
-           : '[BTAP-WS] tabs_update failed', e);
+    const benign = dead || isWorkerGoneError(e);
+    let what = '[BTAP-WS] tabs_update failed';
+    if (dead) what = '[BTAP-WS] tabs_update dropped, bridge went away mid-update';
+    else if (benign) what = '[BTAP-WS] tabs_update dropped, worker evicted mid-update';
+    console[benign ? 'log' : 'error'](what, e);
   }
 }
 chrome.tabs.onUpdated.addListener((_, changeInfo) => {
