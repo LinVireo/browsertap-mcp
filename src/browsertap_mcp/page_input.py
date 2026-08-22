@@ -462,7 +462,7 @@ def structured_locator_script(
   const verifyHit = {json.dumps(verify_hit)};
   const centerX = {json.dumps(center_x)};
   const centerY = {json.dumps(center_y)};
-  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS.replace("{", "{{").replace("}", "}}")}
+  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS}
   const clean = value => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
   const same = (actual, expected, exact) => exact ? clean(actual) === clean(expected) : clean(actual).includes(clean(expected));
   const implicitRole = el => {{

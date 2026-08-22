@@ -11,7 +11,9 @@ The proof runs in the browser, so these tests run the generated script in Node
 against a hand-built DOM, the way ``test_dialog_policy`` runs extension code.
 Both resolvers embed the same ``_HIT_TEST_JS`` helper, so exercising it through
 the CSS resolver covers the structured one's copy as well; the structured
-resolver's own wiring is asserted textually at the end.
+resolver's own wiring is asserted textually at the end, and every generated
+script is parsed by Node so a textual assertion can never again pass over a
+script the browser refuses to compile.
 """
 from __future__ import annotations
 
@@ -273,7 +275,13 @@ def test_the_structured_resolver_carries_the_same_proof():
     script = structured_locator_script(
         {"role": "button", "name": "Pay"}, purpose="click", verify_hit=True
     )
-    assert _HIT_TEST_JS.strip().splitlines()[0] in script
+    # Verbatim, not just the helper's first line: the structured resolver is
+    # built by an f-string, and an f-string escapes braces only in its own
+    # literal text -- braces inside an interpolated value are emitted as they
+    # are. Pre-doubling them therefore shipped `=> {{` to the browser, and a
+    # first-line check still passed because the corrupted line starts with the
+    # same characters. The whole helper has to survive the interpolation.
+    assert _HIT_TEST_JS in script
     assert "if (purpose === 'click' && verifyHit)" in script
     # Inside a frame the accumulated frame offsets go stale after a scroll, so
     # that path refuses instead of scrolling.
@@ -282,3 +290,44 @@ def test_the_structured_resolver_carries_the_same_proof():
         {"frame": ["iframe"], "css": "#pay"}, purpose="click", verify_hit=True
     )
     assert "const framed = true" in framed
+
+
+# Every script this module hands to the browser, across the switches that change
+# how it is assembled. A resolver that does not compile fails identically to one
+# whose logic is wrong -- `Runtime.evaluate` answers with a SyntaxError and the
+# input is never dispatched -- but only the live suite ever noticed, which is one
+# browser and four minutes away from the change that caused it.
+_GENERATED_SCRIPTS = {
+    "structured_click_verified": lambda: structured_locator_script(
+        {"css": "#target"}, purpose="click", verify_hit=True, center_x=True, center_y=True
+    ),
+    "structured_click_framed": lambda: structured_locator_script(
+        {"frame": ["iframe"], "css": "#target"}, purpose="click", verify_hit=True
+    ),
+    "structured_type": lambda: structured_locator_script(
+        {"role": "textbox", "name": "Email"}, purpose="type", select_all=True
+    ),
+    "structured_query": lambda: structured_locator_script({"role": "button", "name": "Pay"}),
+    "structured_unicode_name": lambda: structured_locator_script(
+        {"role": "button", "name": "结账"}, purpose="click", verify_hit=True
+    ),
+    "selector_click_verified": lambda: resolve_selector_script(
+        "#target", 0, 0, require_interactable=True, verify_hit=True, center_x=True, center_y=True
+    ),
+    "selector_plain": lambda: resolve_selector_script("#target"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_GENERATED_SCRIPTS))
+def test_every_generated_resolver_compiles_as_javascript(name, tmp_path):
+    script = _GENERATED_SCRIPTS[name]()
+    path = tmp_path / f"{name}.js"
+    path.write_text(script, encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(path)], capture_output=True, text=True, timeout=20
+    )
+    assert completed.returncode == 0, completed.stderr
+    # The corruption that made this test necessary was a doubled brace, which
+    # parses in a few places and fails in most; the pair is worth naming so a
+    # failure reads as "the template escaped itself" rather than "bad JS".
+    assert "{{" not in script and "}}" not in script
