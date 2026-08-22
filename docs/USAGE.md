@@ -97,6 +97,9 @@ protocol/DOM/API surface. The order is:
 2. BTAP checks the target window, ownership, and `on_screen` state.
 3. The physical-input lock and quiet-input gate run before any cursor or key
    event. User activity cancels the action instead of competing with it.
+   Detecting that activity needs a signal from the OS, and not every machine
+   has one: with none available the window still elapses but sees nothing,
+   and the result says so in `input_quiet.enforced`.
 4. If activation cannot be confirmed, BTAP returns `activation_failed` and sends
    no input.
 

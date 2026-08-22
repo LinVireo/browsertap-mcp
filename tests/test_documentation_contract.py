@@ -197,6 +197,53 @@ def test_troubleshooting_quotes_the_literals_the_code_actually_emits():
         assert "switched_from" in guide
 
 
+def test_public_docs_do_not_promise_a_quiet_gate_the_os_may_not_afford():
+    """The gate's own limits have to reach the reader who trusts it.
+
+    Every published description of the physical-input sequence used to say the
+    quiet window cancels the action on user activity, full stop. It can only do
+    that where the OS answers: the last-input timestamp is Windows-only and the
+    pointer probe is blind under Wayland, in a headless container, and on macOS
+    without the accessibility permission. So the field the code now emits has to
+    be findable in the guides -- a reader who sees `enforced: false` and cannot
+    look it up is back to assuming the desktop was idle, which is the belief the
+    fix exists to remove.
+    """
+    physical = (ROOT / "src" / "browsertap_mcp" / "physical_input.py").read_text(
+        encoding="utf-8"
+    )
+    # Proof the docs are describing something real, in both directions: the field
+    # is emitted, and `enforced` is computed rather than hardcoded to True.
+    assert '"input_quiet"' in physical
+    assert '"enforced": bool(observed)' in physical
+
+    guides = {
+        "README.md": ROOT / "README.md",
+        "README.zh-CN.md": ROOT / "README.zh-CN.md",
+        "docs/USAGE.md": ROOT / "docs" / "USAGE.md",
+        "docs/USAGE.zh-CN.md": ROOT / "docs" / "USAGE.zh-CN.md",
+        "docs/TROUBLESHOOTING.md": ROOT / "docs" / "TROUBLESHOOTING.md",
+        "docs/TROUBLESHOOTING.zh-CN.md": ROOT / "docs" / "TROUBLESHOOTING.zh-CN.md",
+    }
+    for name, path in guides.items():
+        text = path.read_text(encoding="utf-8")
+        assert "input_quiet" in text, f"{name} describes the gate without its report"
+
+    # The troubleshooting guides are where someone lands with the value in hand,
+    # so they carry the reason as well as the field, in both languages.
+    english = guides["docs/TROUBLESHOOTING.md"].read_text(encoding="utf-8")
+    chinese = guides["docs/TROUBLESHOOTING.zh-CN.md"].read_text(encoding="utf-8")
+    assert "input_quiet.enforced: false" in english
+    # These guides are hard-wrapped, so search for words rather than phrases:
+    # "accessibility permission" straddles a line break today and re-wrapping a
+    # paragraph must not read as the caveat having been deleted.
+    assert "Wayland" in english and "accessibility" in english
+    assert "unverified" in english
+    assert "`input_quiet.enforced`" in chinese
+    assert "Wayland" in chinese
+    assert "未经验证" in chinese
+
+
 def test_public_maintenance_commands_use_module_invocation():
     # Only documents that ship. `docs/superpowers/` was untracked and
     # gitignored in 0.3.14, so naming a file there made this contract

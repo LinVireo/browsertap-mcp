@@ -1114,6 +1114,105 @@ def test_wait_for_quiet_ignores_unavailable_marker_components(monkeypatch):
     P.wait_for_quiet(quiet_seconds=0)
 
 
+# --- A gate that observed nothing must not read as a gate ------------------
+# `os_last_input_time` is Windows-only and the pointer probe answers
+# `(None, None)` on Wayland, in a headless container, and on macOS without the
+# accessibility permission. With nothing comparable there is nothing to compare,
+# so the window elapses and the check passes whatever the human is doing --
+# while README:17/60/331/545 and docs/USAGE.md:98 promise it is always enforced.
+# Refusing would take physical input away from machines where it works, so the
+# gate reports instead, the way `_activate()` reports `on_screen`.
+
+
+def test_wait_for_quiet_reports_that_it_could_not_observe_anything(monkeypatch):
+    """The defect. A pass here is not evidence that the machine was idle."""
+    monkeypatch.setattr(P, "last_input_marker", lambda: (None, None, None))
+    monkeypatch.setattr(P.time, "sleep", lambda _seconds: None)
+
+    report = P.wait_for_quiet(quiet_seconds=0)
+
+    assert report["enforced"] is False
+    assert report["observed"] == []
+    # Spelled out, because a bare False is the kind of thing a caller skips.
+    assert "unverified" in report["note"]
+
+
+def test_wait_for_quiet_reports_which_markers_it_could_watch(monkeypatch):
+    """A partly observable machine is still a real gate, and says which half."""
+    markers = iter([(None, 1, 1), (None, 1, 1)])
+    monkeypatch.setattr(P, "last_input_marker", lambda: next(markers))
+    monkeypatch.setattr(P.time, "sleep", lambda _seconds: None)
+
+    report = P.wait_for_quiet(quiet_seconds=0)
+
+    assert report["enforced"] is True
+    assert report["observed"] == ["pointer_x", "pointer_y"]
+    assert "note" not in report
+    assert report["quiet_seconds"] == 0.0
+
+
+def test_wait_for_quiet_names_all_three_markers_when_all_three_answer(monkeypatch):
+    """Windows with a live pointer: the strongest reading the gate can give."""
+    markers = iter([(10, 4, 5), (10, 4, 5)])
+    monkeypatch.setattr(P, "last_input_marker", lambda: next(markers))
+    monkeypatch.setattr(P.time, "sleep", lambda _seconds: None)
+
+    report = P.wait_for_quiet(quiet_seconds=0)
+
+    assert report["observed"] == list(P.QUIET_MARKER_NAMES)
+    assert report["enforced"] is True
+
+
+def test_run_physical_action_attaches_the_quiet_report_to_the_result(monkeypatch, tmp_path):
+    """The report is useless unless it leaves the process with the result.
+
+    Nothing outside this module can tell an enforced gate from a vacuous one, so
+    the tool result is the only place the distinction can be read.
+    """
+    monkeypatch.setattr(P, "last_input_marker", lambda: (None, None, None))
+    monkeypatch.setattr(P.time, "sleep", lambda _seconds: None)
+
+    result = P.run_physical_action(
+        "click",
+        lambda: {"status": "ok"},
+        lock_path=tmp_path / "l",
+        quiet_seconds=0,
+    )
+
+    assert result["status"] == "ok"
+    assert result["input_quiet"]["enforced"] is False
+
+
+def test_run_physical_action_does_not_overwrite_a_report_the_action_supplied(
+    monkeypatch, tmp_path
+):
+    """setdefault, not assignment: an action that knows better keeps its answer."""
+    monkeypatch.setattr(P, "last_input_marker", lambda: (10, 1, 1))
+    monkeypatch.setattr(P.time, "sleep", lambda _seconds: None)
+
+    result = P.run_physical_action(
+        "click",
+        lambda: {"status": "ok", "input_quiet": {"enforced": "supplied"}},
+        lock_path=tmp_path / "l",
+        quiet_seconds=0,
+    )
+
+    assert result["input_quiet"] == {"enforced": "supplied"}
+
+
+def test_run_physical_action_returns_a_non_dict_result_untouched(monkeypatch, tmp_path):
+    """There is nowhere to attach a report on a non-dict, and that is not a failure."""
+    monkeypatch.setattr(P, "last_input_marker", lambda: (10, 1, 1))
+    monkeypatch.setattr(P.time, "sleep", lambda _seconds: None)
+
+    assert (
+        P.run_physical_action(
+            "click", lambda: "plain", lock_path=tmp_path / "l", quiet_seconds=0
+        )
+        == "plain"
+    )
+
+
 def test_action_is_not_called_when_input_changes(monkeypatch, tmp_path):
     markers = iter([(10, 1, 1), (11, 1, 1)])
     monkeypatch.setattr(P, "last_input_marker", lambda: next(markers))

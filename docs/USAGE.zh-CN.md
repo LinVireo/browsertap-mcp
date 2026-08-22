@@ -88,6 +88,8 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 1. 仅在用户需要查看页面或桌面操作依赖可见状态时，显式激活目标标签页。
 2. BTAP 验证目标窗口、标签页所有权和 `on_screen` 状态。
 3. BTAP 获取跨进程输入锁并等待安静窗口；若检测到用户鼠标或键盘活动，本次操作取消。
+   要检测得到这种活动，靠的是操作系统给的信号，而不是每台机器都有：一个信号都
+   拿不到时，窗口照样等完但什么也看不见，结果会在 `input_quiet.enforced` 里如实说明。
 4. 无法确认目标显示在屏幕上时，返回 `activation_failed`，且不发送输入。
 
 默认 `lab` profile 免 elicitation，以支持连续自动化。设置

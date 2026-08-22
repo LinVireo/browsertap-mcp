@@ -6,6 +6,25 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-23
+
+### Fixed
+
+- The quiet-input gate now reports what it was able to observe instead of
+  passing silently when it could observe nothing. It raises only when a marker
+  present in *both* samples changed, and the markers are a Windows-only
+  last-input timestamp plus the pointer position -- which is unavailable under
+  Wayland, in a headless container, and on macOS without the accessibility
+  permission. With all three missing the gate degraded to a bare `sleep()`
+  that passed no matter what the person at the keyboard was doing, and said
+  nothing about it, while four places in this documentation promised the gate
+  is always enforced. Refusing on such a machine would take physical input
+  away from systems where it otherwise works, so the gate now does what
+  `_activate()` already does for `on_screen`: it acts and reports honestly.
+  Every physical-input result carries `input_quiet` with `observed` (the
+  markers actually sampled), `quiet_seconds`, and `enforced: false` when
+  nothing could be sampled at all.
+
 ## [0.4.4] - 2026-08-23
 
 ### Fixed
@@ -662,7 +681,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.1...v0.4.2

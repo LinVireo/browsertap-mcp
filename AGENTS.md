@@ -182,6 +182,21 @@ answer is the proof. Two rules survive any change here:
   are already out; a repeat could double the click. Report that it may not have
   landed and let the caller check the page, exactly as the timeout path does.
 
+The quiet-input gate in front of these tools has the same shape a third time. It
+raises `input_activity_detected` only when a marker present in **both** samples
+changed, and the markers are a **Windows-only** last-input timestamp plus the
+pointer position -- unavailable under Wayland, in a headless container, and on
+macOS without the accessibility permission. All three missing means nothing to
+compare, so the gate was a bare `sleep()` that passed unconditionally and said
+nothing, on the machines least likely to be watched. It now returns a report and
+`run_physical_action` attaches it to the result as `input_quiet`. Two things must
+survive an edit: **a vacuous pass is reported, not refused** -- refusing would
+take physical input away from machines where pyautogui works fine, which is why
+this mirrors `on_screen` rather than `activation_failed`; and **`enforced` is
+computed from what was comparable in both samples**, so hardcoding it True puts
+the silence back. Never read a pass as "the desktop was idle" without checking
+that field.
+
 The same shape has a second half: a resolved element can be *found* and still not
 be the thing at that pixel. A cookie banner, a modal backdrop or a sticky header
 over the target left `Input.dispatchMouseEvent` reporting success while the click

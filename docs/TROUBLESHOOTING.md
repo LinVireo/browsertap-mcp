@@ -240,6 +240,18 @@ Mouse or keyboard activity occurred during the quiet-input window, so BTAP sent
 no physical input. Retry only when the desktop is idle, or use a page-level tool
 that does not interact with the desktop.
 
+### A result reports `input_quiet.enforced: false`
+
+The quiet-input window ran, but this machine exposes no input signal BTAP can
+sample, so it could not tell whether someone was using the keyboard or mouse.
+Only Windows exposes a last-input timestamp; the pointer position is unavailable
+under Wayland, in a headless container, and on macOS without the accessibility
+permission. The action was **not** blocked -- refusing would take physical input
+away from machines where it otherwise works -- but treat the pass as unverified
+rather than as a confirmed idle desktop, and prefer the page-level tools when
+someone may be at the keyboard. `input_quiet.observed` lists the markers that did
+answer, so a partly observable machine still shows what it was watched for.
+
 ### Physical input returns `activation_failed`
 
 BTAP could not verify that the requested target was visible on screen and sent

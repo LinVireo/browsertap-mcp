@@ -436,8 +436,26 @@ def last_input_marker() -> _Marker:
     return last_input_time, pointer_x, pointer_y
 
 
-def wait_for_quiet(quiet_seconds: float = 0.75) -> None:
-    """Raise if any marker available in both samples changes in the window."""
+# The names are part of a tool result, so they are the caller's vocabulary for
+# what this machine could actually be watched for. Order matches _Marker.
+QUIET_MARKER_NAMES = ("os_last_input_time", "pointer_x", "pointer_y")
+
+
+def wait_for_quiet(quiet_seconds: float = 0.75) -> dict[str, Any]:
+    """Raise if any marker available in both samples changes in the window.
+
+    Returns what the gate was able to observe, which is not a detail: only
+    Windows exposes `os_last_input_time`, and the pointer probe answers
+    `(None, None)` on Wayland, in a headless container, and on macOS without the
+    accessibility permission. With no marker available in both samples there is
+    nothing to compare, so the window elapses and the check passes no matter what
+    the human at the keyboard is doing. Refusing instead would take physical
+    input away from every such machine, where it otherwise works; the honest
+    move is the one `_activate()` already makes for `on_screen` -- do the thing
+    and report what is actually known. `enforced` is False for exactly that case
+    and rides along in the tool result, because a caller cannot tell the
+    difference from the outside.
+    """
     if (
         isinstance(quiet_seconds, bool)
         or not isinstance(quiet_seconds, (int, float))
@@ -448,11 +466,28 @@ def wait_for_quiet(quiet_seconds: float = 0.75) -> None:
     before = last_input_marker()
     time.sleep(quiet_seconds)
     after = last_input_marker()
-    if any(
-        old is not None and new is not None and old != new
-        for old, new in zip(before, after)
-    ):
+    comparable = [
+        (name, old, new)
+        for name, old, new in zip(QUIET_MARKER_NAMES, before, after)
+        if old is not None and new is not None
+    ]
+    if any(old != new for _name, old, new in comparable):
         raise InputActivityDetected("physical input changed during the quiet window")
+    observed = [name for name, _old, _new in comparable]
+    report: dict[str, Any] = {
+        "quiet_seconds": float(quiet_seconds),
+        "observed": observed,
+        "enforced": bool(observed),
+    }
+    if not observed:
+        # Said in full rather than as a flag: this is the one line that stops a
+        # pass from reading as "the human was idle".
+        report["note"] = (
+            "this machine exposes no OS input signal that BTAP can sample, so the "
+            "quiet window elapsed without being able to detect concurrent human "
+            "input; treat a pass as unverified rather than as an idle machine"
+        )
+    return report
 
 
 def _default_lock_path() -> Path:
@@ -470,5 +505,12 @@ def run_physical_action(
     """Run one action closure after acquiring the lease and quiet gate."""
     path = _default_lock_path() if lock_path is None else Path(lock_path)
     with PhysicalInputLease(path=path, ttl_seconds=ttl_seconds, action_summary=action_summary):
-        wait_for_quiet(quiet_seconds)
-        return action()
+        quiet = wait_for_quiet(quiet_seconds)
+        result = action()
+        # Attached the way server.py already attaches `activated`, and with
+        # setdefault so an action that reported its own gate keeps it. Non-dict
+        # results are left alone: there is nowhere to put it and no caller of
+        # this module returns one.
+        if isinstance(result, dict):
+            result.setdefault("input_quiet", quiet)
+        return result

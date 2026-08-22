@@ -11,7 +11,7 @@
 `browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.4**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.5**。
 
 当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
@@ -324,7 +324,8 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 **自动化 profile。** 未设置 `BROWSERTAP_MODE` 时默认使用 `lab`，并按
 `BROWSERTAP_LAB_NO_ELICIT=1` 处理，物理输入和站点 `allow` 不进行 elicitation。
 `safe` profile 对每次操作进行询问。两种 profile 均保留跨进程锁、安静窗口、目标激活、所有权
-和 `on_screen` 检查。
+和 `on_screen` 检查。安静窗口能看到多少取决于操作系统暴露了什么，而不是取决于
+profile；结果中的 `input_quiet.enforced` 说明它到底能不能观测这台机器。
 
 **对话框策略必须显式理解。** `execute_js(dialog_policy=...)`、`open_url(beforeunload=...)` 和
 `handle_dialog(action=...)` 均支持 `dismiss`（默认）、`accept` 和 `manual`。全局默认优先保留页面；
@@ -564,7 +565,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 `safe` 模式下这五个直接工具逐次 elicitation;默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 免询问执行,显式设为 false 才恢复会话级批准。拒绝、取消或不支持 elicitation 时返回 `requires_user_action`;无论哪种模式,锁/安静窗口/ownership/目标提前台与屏幕确认都不会跳过。`resolve_leave_dialog` 是第六条物理输入路径，只能在两次协议处理失败后用 Enter 兜底，并经过相同闸门。
 
 物理输入按固定顺序执行：获取跨进程锁（已占用时立即返回 `busy`，不排队）；等待短暂安静窗口
-（检测到鼠标或键盘活动时返回 `input_activity_detected`，不发送输入）；激活目标标签页；发送输入。
+（检测到鼠标或键盘活动时返回 `input_activity_detected`，不发送输入）；激活目标标签页；发送输入。这个窗口到底能检测到什么，取决于操作系统给不给信号：只有 Windows 提供最后输入时间戳，而指针位置在 Wayland、无头容器、以及未授予辅助功能权限的 macOS 上都读不到。一个信号都拿不到时，窗口照样等完，但没有任何东西可供比对，所以每个结果都带一个 `input_quiet` 字段，列出它实际采样到的标记；一个都没有时 `enforced: false`——这种机器上通过只能当作未经验证，不能当作桌面确实空闲。
 五个直接工具都接受与其他工具相同的 `session_id`。省略时使用全局共享默认目标，该目标可能已被
 其他任务修改。仅在有意操作当前可见桌面或原生 UI 时使用 `activate_session="none"`。无法确认标签页显示
 在屏幕上时返回 `activation_failed`，且不发送输入。
