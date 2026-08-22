@@ -6,6 +6,27 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-23
+
+### Fixed
+
+- A tab's lifecycle generation now survives a service-worker eviction, which is
+  the one thing it exists to do. The snapshot in `chrome.storage.session` is
+  written whole -- that write is also what prunes generations for closed tabs --
+  so a worker that started, failed to read the store and then wrote its own map
+  deleted every generation it did not happen to contain, and a fresh worker's map
+  contains none of them. Measured once on a real browser: an eviction mid-run
+  re-minted all 15 tabs inside a single millisecond, `close_tabs` then refused
+  two tabs its caller owned as `lifecycle generation changed`, and they leaked
+  until a human closed them. An unreadable store is now a different fact from an
+  empty one -- nothing is published until the store has actually been read, the
+  failed read is retried instead of being memoised for the worker's lifetime, the
+  durable value wins over anything minted during the outage, and a generation
+  minted for a tab the store never knew is kept and published once the read
+  succeeds. `bridge_status` also reports `tab_generation_load_failures`, because
+  the original failure left no trace at all: the only symptom was a refused close
+  minutes later.
+
 ## [0.4.3] - 2026-08-23
 
 ### Added
@@ -641,7 +662,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.0...v0.4.1

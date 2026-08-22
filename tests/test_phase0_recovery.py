@@ -48,6 +48,41 @@ def _create_operation_source() -> str:
     return source[prefix_start:prefix_end] + "\n" + source[create_start:create_end]
 
 
+def _tab_generation_source() -> str:
+    """The generation bookkeeping, sliced so node can run it for real.
+
+    Everything this touches is `chrome.storage.session` and `chrome.tabs.query`,
+    both of which the harness fakes, so the eviction behaviour that matters here
+    is testable offline -- which the browser it protects is not.
+    """
+    source = BACKGROUND.read_text(encoding="utf-8")
+    prefix_start = source.index("const TAB_GENERATIONS_KEY")
+    prefix_end = source.index("\n// Native tab creation is a two-step side effect")
+    body_start = source.index("function newTabGeneration")
+    body_end = source.index("\nasync function validateTabCloseGenerations")
+    return source[prefix_start:prefix_end] + "\n" + source[body_start:body_end]
+
+
+def _run_generation_harness(script: str) -> dict:
+    """Run one generation scenario, keeping the module's own logging off stdout.
+
+    The failure path logs, and the harness passes its result back as the only
+    thing on stdout, so an unstubbed `console.log` would corrupt the JSON. The
+    collected lines are worth asserting on anyway: being silent is what let this
+    failure go unnoticed.
+    """
+    full = (
+        "const logs = [];\nconsole.log = (...args) => logs.push(args.join(' '));\n"
+        + script.replace("__SOURCE__", _tab_generation_source())
+    )
+    completed = subprocess.run(
+        ["node", "-e", full], capture_output=True, text=True
+    )
+    if completed.returncode:
+        raise AssertionError(f"node harness failed: {completed.stderr.strip()}")
+    return json.loads(completed.stdout)
+
+
 def _batch_source() -> str:
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("function batchDeadlineRemainingMs")
@@ -4370,3 +4405,244 @@ eval(source.slice(captureStart, captureEnd));
     assert outcome["detachCalls"] == 2
     assert outcome["trackedAfterAll"] == 0
     assert outcome["pendingAfterAll"] == 0
+
+
+# --- Generation snapshots have to survive a service-worker eviction ---------
+# Measured on 2026-08-23: an eviction mid-live-run (bridge log, 04:53:01,671
+# close / 04:53:01,837 reconnect) left all 15 scriptable tabs holding a
+# generation minted in the same millisecond, counters 1..16 from a fresh
+# `nextTabGeneration`. Nothing had been restored, everything had been re-minted,
+# and the damaged map had been written back as the truth -- so two tabs the live
+# suite owned could not be closed again and leaked into a real person's browser.
+
+_GENERATION_TAIL = """
+(async () => {
+  const out = await scenario();
+  process.stdout.write(JSON.stringify({
+    ...out,
+    logs,
+    stored,
+    setCalls,
+    getCalls,
+    loaded: tabGenerationsLoaded,
+    failures: tabGenerationLoadFailures,
+    provisional: [...provisionalTabGenerations],
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+
+
+def test_a_readable_generation_snapshot_is_restored_rather_than_re_minted():
+    """The case that has to keep working, and the one that was not happening.
+
+    A worker that starts after an eviction has an empty map and a full store, so
+    restoring is the entire mechanism. If this path silently stops working the
+    only symptom is a refused close much later, which is why it is asserted on
+    values rather than on "no exception".
+    """
+    outcome = _run_generation_harness(
+        """
+const stored = {btapTabGenerationsV1: {'7': 'gen-seven', '8': 'gen-eight'}};
+let setCalls = 0;
+let getCalls = 0;
+const chrome = {
+  storage: {session: {
+    get: async key => { getCalls += 1; return {[key]: stored[key]}; },
+    set: async value => { setCalls += 1; Object.assign(stored, value); },
+  }},
+  tabs: {query: async () => [{id: 7}, {id: 8}]},
+};
+__SOURCE__
+async function scenario() {
+  return {seven: await tabGenerationFor(7), eight: await tabGenerationFor(8)};
+}
+"""
+        + _GENERATION_TAIL
+    )
+
+    assert outcome["seven"] == "gen-seven"
+    assert outcome["eight"] == "gen-eight"
+    assert outcome["failures"] == 0
+    assert outcome["loaded"] is True
+    assert outcome["provisional"] == []
+    assert outcome["logs"] == []
+
+
+def test_an_unreadable_generation_snapshot_is_not_overwritten():
+    """This is the defect. The store must come out of it untouched.
+
+    The snapshot is written whole -- that is also how dead tabs get pruned -- so
+    a write from a map that was never read deletes every generation it does not
+    contain, and a fresh worker's map contains none of them. `No SW` from a
+    `chrome.*` call during worker startup is routine, so this is not a rare path.
+    """
+    outcome = _run_generation_harness(
+        """
+const stored = {btapTabGenerationsV1: {'7': 'gen-seven', '8': 'gen-eight'}};
+let setCalls = 0;
+let getCalls = 0;
+const chrome = {
+  storage: {session: {
+    get: async () => { getCalls += 1; throw new Error('No SW'); },
+    set: async value => { setCalls += 1; Object.assign(stored, value); },
+  }},
+  tabs: {query: async () => [{id: 7}, {id: 8}]},
+};
+__SOURCE__
+async function scenario() {
+  return {seven: await tabGenerationFor(7)};
+}
+"""
+        + _GENERATION_TAIL
+    )
+
+    # Nothing was published, so the durable answer is still the durable answer.
+    assert outcome["setCalls"] == 0
+    assert outcome["stored"]["btapTabGenerationsV1"] == {"7": "gen-seven", "8": "gen-eight"}
+    assert outcome["loaded"] is False
+    # The caller still gets an answer: breaking list_tabs would be worse than
+    # handing back a generation that is only good for this worker's lifetime.
+    assert isinstance(outcome["seven"], str) and outcome["seven"]
+    assert outcome["seven"] != "gen-seven"
+    assert outcome["provisional"] == [7]
+    # And it is no longer silent, which is what made the original invisible.
+    assert outcome["failures"] == 1
+    assert any("tab generations unreadable" in line for line in outcome["logs"])
+
+
+def test_a_failed_generation_read_is_retried_and_the_durable_value_wins():
+    """A transient `No SW` must not cost the worker its whole lifetime.
+
+    The load used to be memoised on the way in, so one failed read left every
+    later caller guessing until the worker was collected again. Retrying is only
+    half of it: the value that comes back from the store has to beat the one
+    minted during the outage, because that is the one other callers were handed
+    to keep.
+    """
+    outcome = _run_generation_harness(
+        """
+const stored = {btapTabGenerationsV1: {'7': 'gen-seven'}};
+let setCalls = 0;
+let getCalls = 0;
+const chrome = {
+  storage: {session: {
+    get: async key => {
+      getCalls += 1;
+      if (getCalls === 1) throw new Error('No SW');
+      return {[key]: stored[key]};
+    },
+    set: async value => { setCalls += 1; Object.assign(stored, value); },
+  }},
+  tabs: {query: async () => [{id: 7}]},
+};
+__SOURCE__
+async function scenario() {
+  const duringOutage = await tabGenerationFor(7);
+  const afterRetry = await tabGenerationFor(7);
+  return {duringOutage, afterRetry};
+}
+"""
+        + _GENERATION_TAIL
+    )
+
+    assert outcome["getCalls"] == 2, "the failed read was memoised"
+    assert outcome["duringOutage"] != "gen-seven"
+    assert outcome["afterRetry"] == "gen-seven"
+    assert outcome["stored"]["btapTabGenerationsV1"]["7"] == "gen-seven"
+    assert outcome["loaded"] is True
+    assert outcome["provisional"] == []
+
+
+def test_a_tab_opened_during_the_outage_keeps_the_generation_it_was_given():
+    """A provisional generation for a tab the store never knew is a real one.
+
+    The tab was opened while the store was unreadable, so there is no durable
+    value to lose and its caller is holding the only one there is. Discarding it
+    on the retry would refuse that caller's close for no reason at all.
+    """
+    outcome = _run_generation_harness(
+        """
+const stored = {btapTabGenerationsV1: {'7': 'gen-seven'}};
+let setCalls = 0;
+let getCalls = 0;
+const chrome = {
+  storage: {session: {
+    get: async key => {
+      getCalls += 1;
+      if (getCalls === 1) throw new Error('No SW');
+      return {[key]: stored[key]};
+    },
+    set: async value => { setCalls += 1; Object.assign(stored, value); },
+  }},
+  tabs: {query: async () => [{id: 7}, {id: 9}]},
+};
+__SOURCE__
+async function scenario() {
+  const openedDuringOutage = await tabGenerationFor(9);
+  const seven = await tabGenerationFor(7);
+  const stillTheSame = await tabGenerationFor(9);
+  return {openedDuringOutage, seven, stillTheSame};
+}
+"""
+        + _GENERATION_TAIL
+    )
+
+    assert outcome["openedDuringOutage"] == outcome["stillTheSame"]
+    assert outcome["seven"] == "gen-seven"
+    # Kept *and* published, so the next eviction can restore it.
+    assert (
+        outcome["stored"]["btapTabGenerationsV1"]["9"] == outcome["openedDuringOutage"]
+    )
+    assert outcome["provisional"] == []
+
+
+def test_losing_the_tab_list_does_not_wipe_the_generation_snapshot_either():
+    """The same deletion through the other door.
+
+    Restoring is gated on the tab being live, so an empty tab list drops every
+    stored entry as belonging to a tab that no longer exists -- and the write at
+    the end of the load then makes that permanent. `chrome.tabs.query` fails the
+    same way `chrome.storage.session` does, at the same moment, for the same
+    reason.
+    """
+    outcome = _run_generation_harness(
+        """
+const stored = {btapTabGenerationsV1: {'7': 'gen-seven', '8': 'gen-eight'}};
+let setCalls = 0;
+let getCalls = 0;
+const chrome = {
+  storage: {session: {
+    get: async key => { getCalls += 1; return {[key]: stored[key]}; },
+    set: async value => { setCalls += 1; Object.assign(stored, value); },
+  }},
+  tabs: {query: async () => { throw new Error('No SW'); }},
+};
+__SOURCE__
+async function scenario() {
+  return {seven: await tabGenerationFor(7)};
+}
+"""
+        + _GENERATION_TAIL
+    )
+
+    assert outcome["setCalls"] == 0
+    assert outcome["stored"]["btapTabGenerationsV1"] == {"7": "gen-seven", "8": "gen-eight"}
+    assert outcome["failures"] == 1
+    assert outcome["loaded"] is False
+
+
+def test_the_generation_failsafe_is_advertised_without_being_required():
+    """Advertised so it can be checked, not required because it is not a protocol.
+
+    An extension without it still speaks version 3 and answers every command --
+    it just re-mints generations after an eviction. Putting it in the required
+    set would report a working install as broken, and would turn the required
+    set from "cannot interoperate" into "any behavioural fix". The shared
+    version number is what makes a stale build visible; this says which
+    behaviour is loaded, and the counter says whether it ever fired.
+    """
+    source = BACKGROUND.read_text(encoding="utf-8")
+
+    assert "tab_generation_load_failsafe: true," in source
+    assert "tab_generation_load_failures: tabGenerationLoadFailures," in source
+    assert "tab_generation_load_failsafe" not in S._REQUIRED_EXTENSION_CAPABILITIES

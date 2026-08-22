@@ -108,6 +108,34 @@ filters are preferences with a fallback: a browser showing only such pages
 behaves exactly as it did before rather than starting to refuse, and a tab the
 caller named explicitly still gets the real error.
 
+The other half of "never remember a tab id" is that the *generation* paired with
+one has to outlive the service worker, and that is not automatic. The snapshot
+lives in `chrome.storage.session` and is written **whole**, because that write is
+also what prunes generations for tabs that are gone -- so a worker that starts,
+fails to read the store and then writes its own map deletes every generation it
+does not happen to contain, which for a fresh worker is all of them. Neither read
+is exotic: `No SW` from a `chrome.*` call during worker startup is routine
+(section 8). Measured once on a real browser: an eviction mid-live-run re-minted
+all 15 tabs inside a single millisecond, and `close_tabs` then refused two tabs
+the suite owned with `lifecycle generation changed` until a human closed them.
+
+`loadTabGenerations` therefore treats an unreadable store as a different fact
+from an empty one. Three things must survive an edit there:
+
+- **`tabGenerationsLoaded` gates every write.** A map that was never read is a
+  local guess, and publishing a guess is the deletion described above.
+- **A failed read is not memoised.** It used to be, so one transient `No SW` left
+  the worker guessing until it was collected again.
+- **The durable value wins.** A generation minted while the store was unreadable
+  is provisional and loses to the stored one on the retry; one minted for a tab
+  the store never knew is real, and is kept and published instead.
+
+Do not simplify that back into a single `catch` that yields `{}`. Both halves
+then read as "the store is empty", and the symptom shows up minutes later as a
+refused close. `tests/test_phase0_recovery.py` runs the real function under node
+with a faked `chrome.storage.session`, so the eviction behaviour is checked
+offline.
+
 In tests, never hardcode a real id. The sentinel is
 `chrome_nonexistent:999999`.
 

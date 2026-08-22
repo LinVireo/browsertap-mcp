@@ -61,12 +61,26 @@ const MAX_CDP_TIMEOUT_MS = 120000;
 // lifecycle with a generation that survives service-worker eviction (session
 // storage lasts for the browser session) so open_new_tab never accepts a stale
 // registration merely because the numeric id matches.
+//
+// Surviving eviction is the whole point and it is not automatic. The snapshot is
+// written whole, so a worker that starts, fails to read the store and then writes
+// its own map deletes every generation it does not happen to contain -- and since
+// a fresh worker's map is empty, that is all of them. Measured once: an eviction
+// mid-run re-minted all 15 tabs inside one millisecond, and two tabs the caller
+// owned could never be closed again. Hence `tabGenerationsLoaded`: until the
+// stored snapshot has actually been read, this worker's map is a local guess and
+// must not be published. A generation minted during that window is *provisional*
+// -- it is the best answer available, and it loses to the durable one as soon as
+// the read succeeds.
 const TAB_GENERATIONS_KEY = 'btapTabGenerationsV1'; // gitleaks:allow - storage key, not a credential
 const tabGenerations = new Map();
 const tabGenerationAssignments = new Map();
+const provisionalTabGenerations = new Set();
 let tabGenerationsLoadPromise = null;
 let tabGenerationWriteQueue = Promise.resolve();
 let nextTabGeneration = 1;
+let tabGenerationsLoaded = false;
+let tabGenerationLoadFailures = 0;
 
 // Native tab creation is a two-step side effect (create, then record the
 // result). Persist the operation before create so a service-worker restart
@@ -194,6 +208,12 @@ function newTabGeneration() {
 function persistTabGenerations() {
   const area = chrome.storage?.session;
   if (!area) return Promise.resolve();
+  // The one line that makes eviction survivable. Writing the snapshot is also
+  // how dead tabs get pruned, so it has to be a whole-map write -- which means a
+  // write from a map that was never loaded is a deletion of everything else.
+  // Skipping it costs nothing: the stored snapshot is still correct, and the
+  // next successful load is what publishes anything minted in the meantime.
+  if (!tabGenerationsLoaded) return Promise.resolve();
   const snapshot = Object.fromEntries(tabGenerations);
   tabGenerationWriteQueue = tabGenerationWriteQueue
     .then(() => area.set({ [TAB_GENERATIONS_KEY]: snapshot }))
@@ -203,25 +223,61 @@ function persistTabGenerations() {
 
 async function loadTabGenerations() {
   if (tabGenerationsLoadPromise) return await tabGenerationsLoadPromise;
-  tabGenerationsLoadPromise = (async () => {
-    let stored = {};
+  // `null` means the half could not be read, which is a different fact from an
+  // empty one: an empty store says every generation is ours to mint, an
+  // unreadable store says nothing at all. Both used to arrive here as `{}`.
+  const attempt = (async () => {
+    const area = chrome.storage?.session;
+    let stored = null;
+    if (area) {
+      try {
+        stored = (await area.get(TAB_GENERATIONS_KEY))[TAB_GENERATIONS_KEY] || {};
+      } catch (_) {
+        stored = null;
+      }
+    } else {
+      // No session storage at all: nothing durable to lose and nothing to
+      // restore, so this worker's map is the only truth there can be.
+      stored = {};
+    }
+    let tabs = null;
     try {
-      const area = chrome.storage?.session;
-      if (area) stored = (await area.get(TAB_GENERATIONS_KEY))[TAB_GENERATIONS_KEY] || {};
-    } catch (_) {}
-    const tabs = await chrome.tabs.query({}).catch(() => []);
+      tabs = await chrome.tabs.query({});
+    } catch (_) {
+      // Losing the tab list is the same wipe by another door: every stored
+      // generation would read as belonging to a tab that no longer exists.
+      tabs = null;
+    }
+    if (stored === null || tabs === null) {
+      tabGenerationLoadFailures += 1;
+      // Not memoised: a `No SW` on either call is transient, and memoising it
+      // would keep this worker guessing for the rest of its life.
+      if (tabGenerationsLoadPromise === attempt) tabGenerationsLoadPromise = null;
+      console.log(
+        '[BTAP-WS] tab generations unreadable; keeping the stored snapshot',
+        `(failures=${tabGenerationLoadFailures})`,
+      );
+      return;
+    }
     const live = new Set(tabs.map(tab => String(tab.id)));
     for (const [rawId, generation] of Object.entries(stored)) {
       if (live.has(String(rawId)) && typeof generation === 'string') {
+        // The durable value wins over anything minted while the store was
+        // unreadable: it is the one other callers were handed to keep.
         tabGenerations.set(Number(rawId), generation);
       }
     }
+    tabGenerationsLoaded = true;
+    // What is left provisional is for a tab the store never knew -- opened
+    // during the outage -- so it is real and the write below publishes it.
+    provisionalTabGenerations.clear();
     for (const tab of tabs) {
       if (!tabGenerations.has(tab.id)) tabGenerations.set(tab.id, newTabGeneration());
     }
     await persistTabGenerations();
   })();
-  return await tabGenerationsLoadPromise;
+  tabGenerationsLoadPromise = attempt;
+  return await attempt;
 }
 
 function scheduleNewTabGeneration(tabId) {
@@ -230,6 +286,7 @@ function scheduleNewTabGeneration(tabId) {
     await loadTabGenerations();
     const generation = newTabGeneration();
     tabGenerations.set(tabId, generation);
+    if (!tabGenerationsLoaded) provisionalTabGenerations.add(tabId);
     await persistTabGenerations();
     return generation;
   })().finally(() => tabGenerationAssignments.delete(tabId));
@@ -243,6 +300,7 @@ async function tabGenerationFor(tabId) {
   await loadTabGenerations();
   if (!tabGenerations.has(tabId)) {
     tabGenerations.set(tabId, newTabGeneration());
+    if (!tabGenerationsLoaded) provisionalTabGenerations.add(tabId);
     await persistTabGenerations();
   }
   return tabGenerations.get(tabId);
@@ -253,6 +311,9 @@ async function forgetTabGeneration(tabId) {
   if (pending) await pending.catch(() => {});
   await loadTabGenerations();
   tabGenerations.delete(tabId);
+  provisionalTabGenerations.delete(tabId);
+  // A load that failed makes this write a no-op, which is harmless: the tab is
+  // gone, so the next successful load drops its stored entry as not-live.
   await persistTabGenerations();
 }
 
@@ -2996,7 +3057,16 @@ async function handleExtMessage(msg, sender) {
         network_stop_filter: true,
         full_page_screenshot: true,
         content_command_channel_removed: true,
+        // Advertised, but deliberately not in the server's required set: an
+        // extension without it still speaks this protocol, it just re-mints
+        // generations after an eviction. The shared version number is what
+        // makes the stale build visible; this says which behaviour is loaded.
+        tab_generation_load_failsafe: true,
       },
+      // Zero on a healthy worker. Anything else means a generation snapshot
+      // could not be read, which used to leave no trace at all -- the only
+      // symptom was a close_tabs refusal much later, and a leaked tab.
+      tab_generation_load_failures: tabGenerationLoadFailures,
       knownCommands,
     } };
   }
