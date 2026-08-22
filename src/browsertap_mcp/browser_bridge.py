@@ -132,6 +132,14 @@ RETRY_SAFE_DELIVERY_STATES = frozenset({'undelivered', 'sent_unconfirmed'})
 # loading. See BrowserBridge._pick_failover_session for what that broke.
 FAILOVER_SETTLE_SECONDS = 2.0
 
+# How long the socket owning a clientId namespace may say nothing before another
+# socket is allowed to take it over. The extension pings every 20s (KEEPALIVE_MS
+# in background.js), so this is three missed ticks: long enough that a live
+# extension is never displaced, short enough that a half-open zombie cannot hold
+# the namespace for more than a minute. See BrowserBridge._claim_ext_client for
+# why refusing a takeover outright is not an option.
+CLIENT_TAKEOVER_GRACE_SECONDS = 60.0
+
 # Pages Chrome refuses to script no matter who asks. The extensions gallery is
 # the trap in this list: it is an ordinary https:// page, so the content script
 # registers a session there and the tab joins every automatic pick like any
@@ -460,6 +468,13 @@ class Session:
 
 
 class BrowserBridge:
+    # Refused ext_clients takeovers, and the last one, for diagnose(). Class
+    # level so a driver built without __init__ still reads a number instead of
+    # raising -- the offline tests build one that way because __init__ binds
+    # ports, and remote mode skips half of it too.
+    rejected_client_takeovers = 0
+    last_rejected_takeover = None
+
     def __init__(self, host: str = '127.0.0.1', port: int = 18765):
         self.host, self.port = host, port
         self.sessions, self.results, self.acks = {}, {}, {}
@@ -783,20 +798,34 @@ class BrowserBridge:
                                 self._fallback_cid = f"conn_{uuid.uuid4().hex[:10]}"
                             client_id = self._fallback_cid
                         browser = data.get('browser', '')
-                        driver.last_ext_seen = time.time()
-                        if client_id: driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
                         # Keep the CLIENT-level socket. It is one per browser and
                         # exists regardless of tab count, so SW-side commands
                         # (chrome.tabs.create) still work with zero open tabs —
-                        # per-tab sessions can't express that.
-                        if client_id:
-                            driver.ext_clients[client_id] = {'ws': self, 'browser': browser, 'ts': time.time()}
+                        # per-tab sessions can't express that. The claim can be
+                        # refused, and then everything below is skipped on
+                        # purpose: a socket that does not own the namespace must
+                        # not push tabs into it, and must not move the last-seen
+                        # clocks either, or `doctor` would report a dead
+                        # extension as having just checked in. Closing it is what
+                        # makes the refusal self-healing -- the real extension
+                        # reconnects and wins the moment the zombie ages out,
+                        # where a silently ignored socket would look connected
+                        # and receive nothing forever.
+                        if not driver._claim_ext_client(client_id, browser, self):
+                            try: self.close()
+                            except Exception: pass
+                            return
+                        driver.last_ext_seen = time.time()
+                        driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
                         driver._apply_extension_tabs(client_id, browser, tabs, self)
                     elif data.get('type') == 'ping':
                         # Liveness reply so the extension can tell a live socket
                         # from a half-open zombie (TCP ESTABLISHED but dead). No
                         # pong within a couple keepalive ticks => extension force-
                         # reconnects instead of pushing tabs into a black hole.
+                        # It is also the only regular traffic on an idle browser,
+                        # so it is what keeps a namespace owner's ts fresh.
+                        driver._touch_ext_client(self)
                         try: self.send_message(json.dumps({'type': 'pong'}))
                         except Exception: pass
                     elif data.get('type') == 'ack': driver.acks[data.get('id','')] = time.time()
@@ -936,6 +965,72 @@ class BrowserBridge:
         # a closed connection instead of failing over to a live browser.
         for cid in [c for c, v in list(self.ext_clients.items()) if v.get('ws') is client]:
             self.ext_clients.pop(cid, None)
+
+    def _claim_ext_client(self, client_id: str, browser: str, client: WebSocket) -> bool:
+        """Bind client_id to this socket, or refuse. True once it owns it.
+
+        `clientId` is self-reported and used to be written straight into
+        ext_clients, so the last socket to send ext_ready took the namespace
+        outright. The WS port is guarded by the handshake Origin alone -- a
+        prefix the extension cannot keep secret and any local process can put in
+        a header -- so that overwrite was the whole exploit: forge one ext_ready
+        carrying the browser's clientId and every later ext_cmd is written to the
+        forger's socket instead of the extension's. The HTTP port demands a
+        bearer token for strictly less than that.
+
+        First live socket wins closes it with no protocol change, because
+        handle_close() already unbinds a socket that goes away: an ordinary
+        reconnect finds no incumbent and is not a conflict at all. Only an
+        incumbent that is still open can be in the way.
+
+        The grace window is what keeps this from becoming a lockout. A half-open
+        zombie (TCP ESTABLISHED, peer already gone) is real here -- it is the
+        reason the extension pings at all -- and refusing every newcomer against
+        one would wedge the bridge until a human restarted it. So an incumbent
+        that has said nothing for CLIENT_TAKEOVER_GRACE_SECONDS is treated as
+        gone and handed over. Its `ts` is refreshed by every message it sends,
+        keepalive pings included, so it measures the socket's own liveness rather
+        than when it first connected.
+        """
+        now = time.time()
+        incumbent = self.ext_clients.get(client_id)
+        if incumbent is not None and incumbent.get('ws') is not client:
+            stamp = incumbent.get('ts')
+            # An entry with no usable stamp cannot prove it is alive, and the
+            # lockout is the worse failure, so it counts as ancient.
+            idle = now - stamp if isinstance(stamp, (int, float)) else now
+            if idle <= CLIENT_TAKEOVER_GRACE_SECONDS:
+                self.rejected_client_takeovers += 1
+                self.last_rejected_takeover = {
+                    # Truncated because it is the newcomer's own string, and
+                    # this ends up in a diagnose() report.
+                    'client_id': str(client_id)[:64],
+                    'incumbent_idle_seconds': round(idle, 1),
+                    'peer': str(getattr(client, 'address', '')),
+                    'ts': now,
+                }
+                logger.warning(
+                    "Refused WS takeover of client_id=%r from %s: the socket holding it "
+                    "was heard from %.1fs ago (grace %.0fs)",
+                    str(client_id)[:64], getattr(client, 'address', '?'), idle,
+                    CLIENT_TAKEOVER_GRACE_SECONDS)
+                return False
+            logger.warning(
+                "Handing client_id=%r to a new socket: the previous one went silent "
+                "%.1fs ago", str(client_id)[:64], idle)
+        self.ext_clients[client_id] = {'ws': client, 'browser': browser, 'ts': now}
+        return True
+
+    def _touch_ext_client(self, client: WebSocket) -> None:
+        """Mark whatever namespaces this socket owns as heard-from, just now.
+
+        Only ext_clients[*]['ts'] moves. last_ext_seen and client_last_seen are
+        left alone on purpose: those are `doctor`'s answer to "has the extension
+        pushed tabs recently", and a keepalive ping is not that.
+        """
+        now = time.time()
+        for entry in list(self.ext_clients.values()):
+            if entry.get('ws') is client: entry['ts'] = now
 
     def _live_default_session_id(self) -> Optional[str]:
         """The remembered default tab, or a fresh pick if it has died.
@@ -1439,6 +1534,9 @@ class BrowserBridge:
             "ever_registered": ever,
             "last_ext_seen_seconds_ago": round(now - self.last_ext_seen, 1) if ever else None,
             "clients": per_client,
+            # Zero unless something spoke the extension's protocol while the
+            # real extension still held the namespace; see _claim_ext_client.
+            "rejected_client_takeovers": self.rejected_client_takeovers,
             # Resolved by the daemon, which is the process that actually reads
             # the token file -- a client's own answer can differ, and that
             # difference is the whole diagnosis.
@@ -1455,6 +1553,8 @@ class BrowserBridge:
             result["extension_capabilities"] = extension_status.get("capabilities", {})
         if extension_status_error:
             result["extension_status_error"] = extension_status_error
+        if self.last_rejected_takeover:
+            result["last_rejected_takeover"] = dict(self.last_rejected_takeover)
         return result
 
     def find_session(self, url_pattern: str):

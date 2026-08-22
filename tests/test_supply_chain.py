@@ -165,3 +165,50 @@ def test_git_agrees_that_those_files_are_ignored():
     )
     ignored = set(completed.stdout.split())
     assert ignored == set(names), completed.stdout or completed.stderr
+
+
+def test_every_action_is_pinned_to_a_commit_except_the_one_documented_exception():
+    """A floating tag is a third party that can change between green runs.
+
+    `actions/checkout@v4` is a moving pointer: whoever controls that tag decides
+    what runs next time, on a runner holding this repository's checkout and, in
+    release.yml, an OIDC identity that can publish to PyPI. Pinning to a commit
+    is what makes a green run reproducible.
+
+    The publish step is the deliberate exception: PyPA ships Trusted Publishing
+    fixes onto `release/v1` and asks callers to track it, and a stale pin there
+    fails closed on the one step that cannot be retried by hand. Listing it here
+    by name is the point -- a second floating action fails this test instead of
+    quietly becoming the convention.
+    """
+    allowed_floating = {"pypa/gh-action-pypi-publish@release/v1"}
+    floating = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            match = re.search(r"uses:\s*(\S+)", line)
+            if not match:
+                continue
+            ref = match.group(1)
+            if ref.startswith("./") or ref in allowed_floating:
+                continue
+            if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref):
+                floating.append(f"{path.name}:{line_no} {ref}")
+    assert not floating, "unpinned actions: " + ", ".join(floating)
+
+
+def test_the_pinned_actions_still_say_which_version_they_are():
+    """A bare 40-character SHA tells a reader nothing about how old it is.
+
+    Without the trailing version comment the only way to find out whether a pin
+    is a year behind is to resolve it against the upstream repository, which is
+    exactly the work nobody does. It is a comment, so it can lie -- it is here to
+    give a reviewer a starting point, not to be authoritative.
+    """
+    unlabelled = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"uses:\s*\S+@[0-9a-f]{40}", line) and not re.search(
+                r"#\s*v\d+\.\d+", line
+            ):
+                unlabelled.append(f"{path.name}:{line_no}")
+    assert not unlabelled, "pins with no version comment: " + ", ".join(unlabelled)

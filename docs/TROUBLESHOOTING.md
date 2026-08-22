@@ -113,7 +113,13 @@ a state-changing operation without first verifying whether it landed.
 ### Bridge port conflict or custom port
 
 BTAP uses three consecutive ports: `BROWSERTAP_BRIDGE_PORT` for WebSocket,
-`PORT+1` for HTTP, and `PORT+2` for the singleton lock. A listener owned by
+`PORT+1` for HTTP, and `PORT+2` for the singleton lock. Only the first two carry
+traffic; the third is held open for as long as a bridge is hosting, so a second
+bridge that loses the race keeps running and works through the first one instead
+of exiting. It is a different mechanism from the `spawn.lock` file in the state
+directory, which is what keeps several MCP sessions starting at the same moment
+from each launching a daemon -- so seeing exactly one listener on `PORT+2` is not
+by itself evidence that only one daemon was started. A listener owned by
 another application can make the client appear to be connected to the wrong
 service. On Windows, inspect the owners without stopping anything:
 

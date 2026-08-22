@@ -11,7 +11,7 @@
 `browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.1**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.2**。
 
 当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
@@ -217,7 +217,7 @@ mcp_servers:
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | 桥的绑定地址 |
-| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为单 bridge 锁 socket。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
+| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为锁 socket，保证同时只有一个 bridge **持有**前两个端口（第二个 bridge 不会退出，会转为通过第一个工作）。它与状态目录下的 `spawn.lock` 文件是两回事：后者负责避免多个 MCP 会话同时拉起多个守护进程。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
 | `BROWSERTAP_NO_SPAWN` | 未设置 | 设为 `1` 后 MCP 服务不自动启动 bridge，适用于由运维流程单独管理 bridge 的环境 |
 | `BROWSERTAP_BRIDGE_AUTH` | 启用 | 仅在明确可信的本机兼容环境中设为 `off`。默认 BTAP 使用持久用户 token 保护 `/link`。 |
 | `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | 覆盖共享 token 文件位置。各编辑器不需要分别配置 token。 |

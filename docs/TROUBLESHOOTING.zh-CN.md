@@ -94,8 +94,11 @@ switch_tab and retry.
 ### Bridge 端口冲突或自定义端口
 
 BTAP 连续使用三个端口：`BROWSERTAP_BRIDGE_PORT` 为 WebSocket，`PORT+1` 为 HTTP，`PORT+2`
-为单 bridge 锁。其他应用占用这些端口时，客户端可能误判为已连接到错误服务。Windows 可先只读
-检查端口持有者：
+为单 bridge 锁。只有前两个承载流量；第三个在某个 bridge 持有期间一直保持打开，因此抢锁失败的
+第二个 bridge 不会退出，而是转为通过第一个工作。它与状态目录下的 `spawn.lock` 文件是两套机制：
+后者负责避免多个 MCP 会话在同一时刻各拉起一个守护进程——所以"`PORT+2` 上只有一个监听者"本身
+并不能证明只启动过一个守护进程。其他应用占用这些端口时，客户端可能误判为已连接到错误服务。
+Windows 可先只读检查端口持有者：
 
 ```powershell
 Get-NetTCPConnection -State Listen -LocalPort 18765,18766,18767 |

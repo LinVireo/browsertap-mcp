@@ -81,6 +81,19 @@ physical input.
   extension URL schemes and the WebSocket port carries no token, so it keeps
   ordinary web pages out but does not distinguish the real extension from a
   local process that sends an extension-shaped `Origin` header.
+- What that local process cannot do is take the connected extension's place.
+  The client id in an `ext_ready` message is self-reported, and it used to be
+  written straight into the routing table, so one forged message re-pointed
+  every subsequent command at the sender. A client id now stays bound to the
+  socket holding it: a second socket claiming the same id is refused and closed
+  while the incumbent is still being heard from, and the refusal is counted in
+  `browsertap doctor` as `rejected_client_takeovers`, with the last one
+  described under `last_rejected_takeover`. A non-zero count on a machine where
+  only the browser should be speaking that protocol is worth investigating.
+  Takeover is allowed only after the incumbent has been silent for a minute,
+  because a socket can be dead while the operating system still reports it as
+  connected, and refusing forever would leave the bridge unusable until someone
+  restarted it by hand.
 - The extension has broad browser permissions because BTAP can inspect and
   modify the real session, including cookies, downloads, tabs, bookmarks,
   extension management, CDP debugger access, and site content on `<all_urls>`.

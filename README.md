@@ -12,7 +12,7 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.1**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.2**.
 
 It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 
@@ -221,7 +221,7 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 | Variable | Default | Purpose |
 |---|---|---|
 | `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | Bridge bind address. |
-| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge hosting. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md). |
+| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge *hosting* those two (a second bridge stays up and works through the first). Not to be confused with the separate `spawn.lock` file, which is what stops several MCP sessions from starting several daemons at once. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md). |
 | `BROWSERTAP_NO_SPAWN` | unset | Set to `1` to stop the MCP server from auto-starting the bridge. Use it when you run the bridge yourself. |
 | `BROWSERTAP_BRIDGE_AUTH` | enabled | Set to `off` only for an explicitly trusted local compatibility setup. By default BTAP authenticates `/link` with a persistent per-user token. |
 | `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | Override the shared token file location. Editors do not need individual token configuration. |

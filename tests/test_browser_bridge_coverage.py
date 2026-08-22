@@ -1406,3 +1406,206 @@ def test_jump_delegates_to_execute_js_with_json_quoted_url():
     assert calls == [
         ('window.location.href="https://x.test/a\\"b"', {"timeout": 4})
     ]
+
+
+def ws_handler_for(driver, monkeypatch):
+    """The WS handler class the driver installs, with no socket ever bound."""
+    captured = {}
+
+    class Server:
+        def __init__(self, host, port, handler):
+            captured["handler"] = handler
+
+    monkeypatch.setattr(T, "WebSocketServer", Server)
+    monkeypatch.setattr(T.threading, "Thread", DormantThread)
+    driver.start_ws_server()
+    return captured["handler"]
+
+
+def ws_peer(handler, data, *, origin="chrome-extension://abc", address=("local", 1)):
+    """One connected peer. Sends are captured and close() is recorded, not real."""
+    peer = object.__new__(handler)
+    peer.data = data if isinstance(data, str) else json.dumps(data)
+    peer.request = SimpleNamespace(headers={"Origin": origin})
+    peer.address = address
+    peer.sent = []
+    peer.closed = False
+    peer.send_message = lambda message: peer.sent.append(json.loads(message))
+    peer.close = lambda: setattr(peer, "closed", True)
+    return peer
+
+
+def ext_ready(client_id="chrome", *, tab_id=7, url="https://x"):
+    return {
+        "type": "ext_ready",
+        "clientId": client_id,
+        "browser": "chrome",
+        "tabs": [{"id": tab_id, "url": url, "generation": "g1"}],
+    }
+
+
+def test_a_live_socket_keeps_its_client_id_against_a_forged_ext_ready(monkeypatch):
+    """The WS port takes no token, so this guard is the only thing in the way.
+
+    The handshake Origin is a prefix any local process can write into a header,
+    and the clientId is whatever the sender claims, so one forged ext_ready used
+    to re-point ext_clients at the forger -- after which every ext_cmd,
+    execute_js included, was written to it instead of to the extension.
+    """
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    ext = ws_peer(handler, ext_ready())
+    ext.handle()
+    assert driver.ext_clients["chrome"]["ws"] is ext
+    seen_before = driver.last_ext_seen
+
+    forger = ws_peer(
+        handler, ext_ready(tab_id=99, url="https://evil.test"), address=("local", 2)
+    )
+    forger.handle()
+
+    assert driver.ext_clients["chrome"]["ws"] is ext
+    assert "chrome:99" not in driver.sessions
+    assert forger.closed is True
+    assert driver.rejected_client_takeovers == 1
+    assert driver.last_rejected_takeover["client_id"] == "chrome"
+    # A refused socket must not be able to make a dead extension read as fresh.
+    assert driver.last_ext_seen == seen_before
+
+
+def test_a_silent_incumbent_hands_its_client_id_over(monkeypatch):
+    """Refusing forever would be a lockout rather than a fix.
+
+    A half-open socket -- TCP still ESTABLISHED, peer already gone -- is exactly
+    the case the extension's own ping exists to detect. If one could hold the
+    namespace, the bridge would need a manual restart to come back.
+    """
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    zombie = ws_peer(handler, ext_ready())
+    zombie.handle()
+    driver.ext_clients["chrome"]["ts"] = (
+        time.time() - T.CLIENT_TAKEOVER_GRACE_SECONDS - 1
+    )
+
+    fresh = ws_peer(handler, ext_ready(tab_id=8), address=("local", 2))
+    fresh.handle()
+
+    assert driver.ext_clients["chrome"]["ws"] is fresh
+    assert "chrome:8" in driver.sessions
+    assert fresh.closed is False
+    assert driver.rejected_client_takeovers == 0
+
+
+def test_the_owning_socket_may_resend_without_conflicting_with_itself(monkeypatch):
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    ext = ws_peer(handler, ext_ready())
+    ext.handle()
+    ext.data = json.dumps(
+        {"type": "tabs_update", "clientId": "chrome", "browser": "chrome", "tabs": []}
+    )
+    ext.handle()
+
+    assert driver.ext_clients["chrome"]["ws"] is ext
+    assert ext.closed is False
+    assert driver.rejected_client_takeovers == 0
+
+
+def test_a_reconnect_after_a_close_finds_no_incumbent(monkeypatch):
+    """This is why the guard needs no protocol change: handle_close() already
+    unbinds the socket, so the ordinary reconnect never reaches it."""
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    first = ws_peer(handler, ext_ready())
+    first.handle()
+    first.handle_close()
+
+    second = ws_peer(handler, ext_ready(), address=("local", 2))
+    second.handle()
+
+    assert driver.ext_clients["chrome"]["ws"] is second
+    assert second.closed is False
+    assert driver.rejected_client_takeovers == 0
+
+
+def test_an_incumbent_with_no_usable_stamp_does_not_block_a_takeover(monkeypatch):
+    """Nothing there proves liveness, and the lockout is the worse failure."""
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    driver.ext_clients["chrome"] = {"ws": FakeSocket(), "browser": "chrome"}
+
+    ext = ws_peer(handler, ext_ready())
+    ext.handle()
+
+    assert driver.ext_clients["chrome"]["ws"] is ext
+    assert driver.rejected_client_takeovers == 0
+
+
+def test_a_refusal_truncates_the_client_id_it_records(monkeypatch):
+    """The id is the newcomer's own string and it ends up in a doctor report."""
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    long_id = "c" * 200
+    driver.ext_clients[long_id] = {
+        "ws": FakeSocket(),
+        "browser": "chrome",
+        "ts": time.time(),
+    }
+
+    forger = ws_peer(handler, ext_ready(client_id=long_id))
+    forger.handle()
+
+    assert len(driver.last_rejected_takeover["client_id"]) == 64
+    assert driver.ext_clients[long_id]["ws"] is not forger
+
+
+def test_keepalive_ping_refreshes_the_owner_stamp_and_nothing_else(monkeypatch):
+    """The stamp has to mean "this socket is alive".
+
+    Otherwise the grace window expires on a perfectly healthy idle browser and
+    the namespace becomes available to anyone. The two `doctor` clocks are left
+    alone on purpose: they answer "has the extension pushed tabs recently", and
+    a keepalive ping is not that.
+    """
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    ext = ws_peer(handler, ext_ready())
+    ext.handle()
+    stale = time.time() - T.CLIENT_TAKEOVER_GRACE_SECONDS - 1
+    driver.ext_clients["chrome"]["ts"] = stale
+    driver.last_ext_seen = stale
+    driver.client_last_seen["chrome"]["ts"] = stale
+
+    ext.data = json.dumps({"type": "ping"})
+    ext.handle()
+
+    assert ext.sent == [{"type": "pong"}]
+    assert driver.ext_clients["chrome"]["ts"] > stale
+    assert driver.last_ext_seen == stale
+    assert driver.client_last_seen["chrome"]["ts"] == stale
+
+    # And a socket owning nothing cannot refresh somebody else's stamp.
+    driver.ext_clients["chrome"]["ts"] = stale
+    stranger = ws_peer(handler, {"type": "ping"}, address=("local", 2))
+    stranger.handle()
+    assert driver.ext_clients["chrome"]["ts"] == stale
+
+
+def test_local_diagnose_reports_refused_takeovers():
+    """A silent refusal is an invisible attack, so the count has to be readable
+    from `doctor` -- zero on a healthy bridge, non-zero only when something
+    spoke the extension's protocol while the extension itself was connected."""
+    driver = driver_stub()
+    driver.clean_sessions = lambda: None
+    driver.ext_cmd = lambda *args, **kwargs: {"data": {}}
+
+    assert driver.diagnose()["rejected_client_takeovers"] == 0
+    assert "last_rejected_takeover" not in driver.diagnose()
+
+    driver.rejected_client_takeovers = 3
+    driver.last_rejected_takeover = {"client_id": "chrome", "peer": "('local', 2)"}
+    result = driver.diagnose()
+
+    assert result["rejected_client_takeovers"] == 3
+    assert result["last_rejected_takeover"]["client_id"] == "chrome"

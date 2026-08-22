@@ -32,11 +32,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
           cache: pip
@@ -105,7 +105,7 @@ jobs:
       # dist/ to the index, and a stray .json there would either be rejected or
       # published as part of the release.
       - name: Upload the SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: btap-sbom
           path: sbom/
@@ -115,7 +115,7 @@ jobs:
       - name: Report the version being published
         run: python -c "import pathlib; print('\n'.join(p.name for p in sorted(pathlib.Path('dist').iterdir())))"
       - name: Upload built distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: btap-dist
           path: dist/
@@ -138,10 +138,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download built distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: btap-dist
           path: dist/
+      # The only action here not pinned to a commit. PyPA publishes security and
+      # protocol fixes for Trusted Publishing onto this branch and asks callers
+      # to track it, and a stale pin on the one step holding `id-token: write`
+      # fails closed in the worst place -- a release that cannot upload. The
+      # trade-off is deliberate and asserted in tests/test_supply_chain.py, so
+      # adding a second floating action is a test failure rather than a habit.
       - name: Publish to TestPyPI
         if: github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi'
         uses: pypa/gh-action-pypi-publish@release/v1

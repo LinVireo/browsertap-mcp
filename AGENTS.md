@@ -213,6 +213,31 @@ the two facts that catch people writing code here:
   sees a dropped connection instead of a 401. Copy that helper for any new
   authenticated route.
 
+The WebSocket port is the asymmetric half, and the thing that makes it
+survivable is not the origin check. `clientId` arrives in the message body and
+the sender chooses it, so writing it straight into `ext_clients` handed the
+namespace to whoever spoke last -- and every later `ext_cmd` with it.
+`_claim_ext_client` binds an id to one socket instead, which needs no protocol
+change because `handle_close` already unbinds a socket that goes away: an
+ordinary reconnect finds no incumbent, so only a *still-open* one can be in the
+way. Two halves of that must survive an edit:
+
+- **A refused socket is closed, and nothing else about it is recorded.** Not its
+  tabs, and not `last_ext_seen` / `client_last_seen` -- refreshing those would
+  let a stranger make a dead extension read as freshly checked in, which is the
+  one field `doctor` uses to tell those apart. Closing is what makes it
+  self-heal: the real extension reconnects and wins the moment the stale socket
+  ages out, where a silently ignored socket would look connected forever.
+- **`CLIENT_TAKEOVER_GRACE_SECONDS` is not padding.** A half-open socket (TCP
+  ESTABLISHED, peer gone) is real here -- it is why the extension pings at all
+  -- so refusing every newcomer unconditionally locks the bridge out until a
+  human restarts it. The stamp it is measured against is refreshed by every
+  message the owner sends, keepalive pings included, so an idle browser at 20 s
+  per ping is never near the 60 s window.
+
+Refusals are counted rather than swallowed (`rejected_client_takeovers` in
+`diagnose`), because the failure this prevents is silent by construction.
+
 Because this lives in the bridge, a change here needs a bridge restart
 (section 1). Restarting your editor is not what does it.
 

@@ -6,6 +6,49 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-23
+
+### Security
+
+- A local process can no longer displace the connected extension on the
+  WebSocket port. That port carries no token -- it is guarded by the handshake
+  `Origin`, which is a prefix the extension cannot keep secret and any local
+  program can put in a header -- and the client id identifying a browser arrived
+  in the message body, chosen by the sender, and was written straight into the
+  routing table. One forged `ext_ready` therefore re-pointed every subsequent
+  command, `execute_js` included, at the sender's socket. A client id now stays
+  bound to the socket holding it: a second socket claiming the same id is refused
+  and closed while the incumbent is still being heard from. Takeover is allowed
+  only after the incumbent has been silent for a minute, because a socket can be
+  dead while the operating system still reports it as connected and refusing
+  forever would leave the bridge unusable until someone restarted it by hand; the
+  keepalive ping the extension already sends every 20 seconds is what keeps a
+  live socket's claim fresh. Refusals are counted rather than swallowed --
+  `browsertap doctor` reports `rejected_client_takeovers` and describes the last
+  one under `last_rejected_takeover` -- because the failure this prevents is
+  silent by construction.
+
+### Changed
+
+- Every GitHub Action used in CI is pinned to a commit SHA instead of a moving
+  major tag, so a green run stays reproducible and no third party can change what
+  executes on a runner holding this repository's checkout. The PyPI publish step
+  is the one documented exception: PyPA ships Trusted Publishing fixes onto
+  `release/v1` and asks callers to track it, and a stale pin on the only step
+  holding `id-token: write` fails closed on a release that cannot be retried by
+  hand. The offline suite now fails on any other floating action, and on a pin
+  with no version comment next to it.
+
+### Fixed
+
+- The documentation no longer leaves the impression that one lock does both jobs.
+  `PORT+2` is a lock socket deciding which bridge *hosts* the other two ports --
+  a bridge that loses it keeps running and works through the winner -- while a
+  separate `spawn.lock` file is what stops several MCP sessions starting at the
+  same moment from each launching a daemon. Only the second one has anything to
+  do with duplicate daemons, so a single listener on `PORT+2` was being read as
+  proof of something it does not show.
+
 ## [0.4.1] - 2026-08-22
 
 ### Security
@@ -567,7 +610,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.14...v0.4.0
 [0.3.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.13...v0.3.14
