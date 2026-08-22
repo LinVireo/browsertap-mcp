@@ -8,6 +8,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [0.4.3] - 2026-08-23
 
+### Added
+
+- The live suite refuses to run when the browser is not running the checkout
+  under test. It travels through three programs and only one of them is the code
+  pytest imported: the bridge daemon and the extension are long-lived and keep
+  whatever build they started with until each is restarted or reloaded by hand.
+  So a live round could pass, hand over 55/55 tool evidence and be sealed as a
+  release while the build that actually answered was the previous one -- and
+  nothing noticed, because no gate and no sealed artifact recorded which build
+  had answered. The session fixture now asks `get_setup_status()` first, fails
+  the run naming every stale component with the one step that fixes it, and
+  records what each of the three processes was running in
+  `artifacts/live-preflight.json`.
+
 ### Fixed
 
 - A working install no longer collects red `tabs_update failed` entries on

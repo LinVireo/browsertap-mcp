@@ -251,9 +251,18 @@ python -m pytest tests/ -q
 python -m pytest tests/ -q -m live
 ```
 
-Two things decide whether the live run means anything, and skipping either wastes
-the whole run:
+Three things decide whether the live run means anything, and skipping any of them
+wastes the whole run:
 
+- **The bridge and the extension have to be running this checkout.** Both are
+  long-lived and keep whatever build they started with (section 1), so a green
+  live run can certify code that is not in the tree -- and until the fixture
+  checked it, nothing downstream recorded which build had answered, so a stale
+  extension could be sealed as a release. The session fixture now asks
+  `get_setup_status()` before it samples anything and fails the run naming every
+  stale component with its one fix. There is no override for this one, and it is
+  a failure rather than a skip on purpose:
+  `tests/live_preflight.stale_component_reason` says why.
 - **Leave the browser alone.** With someone opening and closing tabs, failover
   can pick a tab that is still loading and the CDP fallback loses its debugger
   mid-command. Measured: browser in use → 8 minutes and one failure; idle

@@ -107,6 +107,13 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
         assert "BTAP_LIVE_ALLOW_BUSY_BROWSER=1" in text
         assert "tests/live_preflight.py" in text
         assert "artifacts/live-preflight.json" in text
+        # The third precondition is the one a reader cannot infer: two of the
+        # three processes are long-lived, so a live pass can be a pass for code
+        # that is not in the tree. A guide that omits it leaves the reader with
+        # the impression that running the suite is enough to have tested the
+        # checkout, which is exactly the belief that let a stale extension
+        # through a whole release round.
+        assert "get_setup_status()" in text
 
 
 def test_the_readmes_open_with_a_three_step_start():

@@ -7,6 +7,13 @@ notes, which is the same as not having them -- a violated precondition showed up
 as a mystery failure, and the "did the suite close one of my tabs" question was
 answered by hand, after the fact, from memory.
 
+A third precondition came from the same notes and was the last one still being
+checked by hand. The live suite exercises three programs at once and only one of
+them is the code pytest imported: the bridge daemon and the Chrome extension are
+long-lived and keep running whatever build they started with. So a green live run
+can certify code that is not in the tree, and nothing downstream noticed --
+neither a gate nor a sealed artifact recorded which build answered.
+
 Two neighbouring rules from the same notes are already mechanised elsewhere and
 deliberately not repeated here: the failover flake became
 `FAILOVER_SETTLE_SECONDS` in the driver (`browser_bridge._pick_failover_session`)
@@ -229,3 +236,116 @@ def drift_problem(diff: Mapping[str, Any]) -> str | None:
             "check which one it was before believing either.",
         ]
     )
+
+
+# The `get_setup_status()` flags that mean the live layer would not be testing
+# this checkout, each with the one thing that fixes it. Reading the bridge's own
+# verdict is deliberate: it already handles the direction that matters -- a
+# component *newer* than this process cannot be repaired by reloading it, so the
+# verdict names the package as the stale side instead -- and the capability check
+# that an old extension fails with no version skew at all. Deriving either again
+# here would be a second implementation to keep in step with the first.
+_STALE_COMPONENTS = (
+    (
+        "reload_extension_required",
+        "the Chrome extension",
+        "press Reload once on chrome://extensions (this cannot be automated)",
+    ),
+    (
+        "restart_bridge_required",
+        "the bridge daemon",
+        "run `browsertap bridge --restart`",
+    ),
+    (
+        "restart_mcp_session_required",
+        "this process",
+        "a counterpart is running a newer build than this checkout, so nothing "
+        "here is the stale side: run the suite from that build instead",
+    ),
+)
+
+
+def stale_component_reason(status: Mapping[str, Any] | None) -> str | None:
+    """Why a live round would prove nothing about this checkout, or None.
+
+    A live pass is a claim about the code in the tree, and two of the three
+    processes it travels through are long-lived: the bridge daemon holds its own
+    routing code and the extension holds its own `background.js` until each is
+    restarted or reloaded by hand. Nothing about running pytest changes either.
+    So the suite can pass, the tool evidence can come out 55/55 and the seal can
+    be written, while the build that actually answered was the previous one.
+
+    This is refused rather than skipped, and there is no override. A skip would
+    not sneak a seal through -- `scripts/acceptance_report.py` fails the live gate
+    on any skipped case -- but it would get there late, after the offline suite,
+    the coverage round, the wheel build and the whole live suite had run, and it
+    would report itself as "live cases were skipped" instead of naming the build
+    skew. A skip is also the honest signal for a condition that was absent, which
+    is what a browser someone is using is; a component running the previous build
+    is a setup error with a one-click fix. Refusing up front says which click.
+    """
+    if not isinstance(status, Mapping):
+        return None
+    # An unreachable bridge is not a stale one: it reports no version at all,
+    # which every comparison downstream then reads as a mismatch. That case has
+    # its own skip in the fixture, and naming a reload here would send the
+    # reader to the one thing that cannot help.
+    if status.get("status") == "bridge_unreachable":
+        return None
+    stale = [
+        (label, fix) for flag, label, fix in _STALE_COMPONENTS if status.get(flag) is True
+    ]
+    if not stale:
+        return None
+    missing = list(status.get("missing_extension_capabilities") or ())
+    return "\n".join(
+        [
+            "the live layer would not be testing this checkout: "
+            + ", ".join(label for label, _ in stale)
+            + (" is" if len(stale) == 1 else " are")
+            + " running a different build.",
+            f"  package {status.get('package_version')}"
+            f" / bridge {status.get('bridge_version')}"
+            f" / extension {status.get('extension_version')}"
+            f" (protocol {status.get('protocol_version')},"
+            f" expected {status.get('expected_protocol_version')})",
+            *([f"  the extension is missing: {', '.join(missing)}"] if missing else []),
+            *(f"  {label}: {fix}" for label, fix in stale),
+            "This is not a flake to re-run: a pass here would describe code that "
+            "is not in the tree.",
+        ]
+    )
+
+
+def component_versions(status: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What each process was running, narrowed to what may be published.
+
+    Without this the evidence never says which build answered, which is the
+    whole reason a stale extension could go unnoticed for a full release round.
+
+    The fields are named one at a time rather than copied wholesale because
+    `get_setup_status()` also answers where this machine keeps its state: an
+    absolute state directory, the token file path and the token's fingerprint.
+    This record is written into `artifacts/`, which live.yml uploads and which
+    gets attached to an external review, so a whitelist keeps a field added
+    upstream tomorrow out by default -- a blacklist would publish it and wait to
+    be noticed.
+    """
+    if not isinstance(status, Mapping):
+        return None
+    return {
+        field: status.get(field)
+        for field in (
+            "status",
+            "action",
+            "package_version",
+            "bridge_version",
+            "extension_version",
+            "protocol_version",
+            "expected_protocol_version",
+            "missing_extension_capabilities",
+            "reload_extension_required",
+            "restart_bridge_required",
+            "restart_mcp_session_required",
+        )
+    }

@@ -220,6 +220,27 @@ def _write_live_preflight(record: dict) -> None:
         record["notes"].append(f"could not write live-preflight.json: {exc}")
 
 
+def _setup_status(record: dict) -> dict | None:
+    """What the three processes are each running, or None.
+
+    Same rule as `_tab_inventory`: a precondition that can break the live layer
+    is worse than the manual step it replaces, so a status this cannot read is a
+    recorded note and the run continues. Being unable to ask is not evidence of
+    a skew.
+    """
+    from browsertap_mcp import server as S
+
+    try:
+        status = S.get_setup_status()
+    except Exception as exc:
+        record["notes"].append(f"component versions unavailable: {type(exc).__name__}: {exc}")
+        return None
+    if not isinstance(status, dict):
+        record["notes"].append(f"component versions unreadable: {str(status)[:200]}")
+        return None
+    return status
+
+
 @pytest.fixture(scope="session")
 def driver():
     """A BrowserBridge talking to an already-running bridge, or skip.
@@ -249,6 +270,23 @@ def driver():
 
     override = os.environ.get(P.OVERRIDE_ENV, "").strip().lower() not in ("", "0", "false", "off")
     record: dict = {"override": override, "notes": []}
+
+    # Before measuring anything about the browser: is this the code under test?
+    # Neither of the two long-lived processes is restarted by running pytest, so
+    # this is checked first and costs nothing when it passes.
+    status = _setup_status(record)
+    if status is not None:
+        record["components"] = P.component_versions(status)
+    stale = P.stale_component_reason(status)
+    if stale:
+        record["notes"].append(stale.splitlines()[0])
+        _write_live_preflight(record)
+        # Deliberately a failure and not a skip, and deliberately outside
+        # P.OVERRIDE_ENV. A skip is the honest signal for a condition that was
+        # absent -- the browser being in use -- and the release chain would
+        # eventually reject one anyway, but only after running everything else
+        # and while naming the wrong problem. See stale_component_reason.
+        pytest.fail(stale, pytrace=False)
 
     # Two samples, not one: an inventory on its own cannot tell an idle browser
     # from a busy one, and "busy" is the state that invalidates the whole run.

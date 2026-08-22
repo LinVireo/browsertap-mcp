@@ -70,9 +70,19 @@ live tests; those would test a different product contract.
 
 Two preconditions used to be written here and left to a human to keep: nobody may
 be using the browser while the suite runs, and the tab inventory has to come out
-the way it went in. The session fixture in `tests/conftest.py` now enforces both
-(`tests/live_preflight.py` holds the reasoning):
+the way it went in. A third was written in the agent notes instead: the bridge
+daemon and the extension have to be running this checkout. The session fixture in
+`tests/conftest.py` now enforces all three (`tests/live_preflight.py` holds the
+reasoning):
 
+- Before anything else it asks `get_setup_status()` what build each of the three
+  processes is running. The bridge daemon and the extension are long-lived and
+  keep whatever build they started with, so a live pass can certify code that is
+  not in the tree -- and until this check existed, no gate and no sealed artifact
+  recorded which build had answered. A skew fails the run before the browser is
+  even sampled, naming every stale component with the one step that fixes it.
+  This one has no override: reloading the extension is a single click and
+  restarting the bridge is a single command.
 - Before the first live test it samples the tab list twice, 1.5s apart. If a tab
   was opened, closed, navigated or focused in between, someone is using that
   browser and the whole live layer is skipped rather than run against a moving
@@ -81,8 +91,9 @@ the way it went in. The session fixture in `tests/conftest.py` now enforces both
 - After the last one it compares the inventory against that baseline. A tab the
   suite left behind, closed, or navigated fails the run in teardown. The
   foreground moving does not: the suite raises tabs on purpose.
-- Both verdicts, and whether the browser was idle at all, are written to
-  `artifacts/live-preflight.json`, which `live.yml` uploads with the junit.
+- Every verdict, the build each of the three processes was running, and whether
+  the browser was idle at all, are written to `artifacts/live-preflight.json`,
+  which `live.yml` uploads with the junit.
 
 Set `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` to run anyway on a machine that is never
 idle; the end-of-run check drops to a warning and the report records that the
