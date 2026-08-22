@@ -91,6 +91,11 @@ REQUIRED_SKILL_TEXT = {
         "get_setup_status.package_version",
         # ...and the way back to the calling contract.
         "[[browsertap-default]]",
+        # A 401 whose body says only "missing or bad bridge token" is not
+        # diagnosable by guessing: the field that names which process read which
+        # file has to stay in the recovery instructions, or the reader is back to
+        # restarting editors at random.
+        "state_paths_disagreement",
     ),
 }
 REQUIRED_DEFAULT_PARAMETERS = {

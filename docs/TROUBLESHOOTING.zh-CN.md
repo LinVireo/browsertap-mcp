@@ -15,8 +15,11 @@
    浏览器前台状态。`reload_extension_required=true` 表示必须手动重新加载未打包扩展。
 4. 再次运行 `doctor`，确认至少存在一个正常页面连接。
 
-Bridge 日志位于 `~/.browsertap/bridge.log`。诊断输出可能包含 URL 或其他浏览器上下文，
-对外提供前应先检查内容。
+Bridge 日志位于 `~/.browsertap/bridge.log`，上限 5 MB，轮转时保留一份
+`bridge.log.old`。URL 在写入日志时已做脱敏 —— 保留 scheme、host 与截断后的 path，
+去掉 query 与 fragment —— 但日志仍能看出浏览器访问过哪些站点，也仍包含来自页面的错误文本，
+两个文件对外提供前都要先检查内容。哪些内容允许出现、哪些不允许，见
+[SECURITY.md](../SECURITY.md)。
 
 ## 连接问题
 
@@ -27,9 +30,9 @@ Bridge 日志位于 `~/.browsertap/bridge.log`。诊断输出可能包含 URL �
 
 ### MCP 客户端无法启动服务
 
-确认 Python 包已安装，且 `browsertap-mcp` 可通过 `PATH` 访问。使用虚拟环境安装时，应在
+确认 Python 包已安装，且 `browsertap` 可通过 `PATH` 访问。使用虚拟环境安装时，应在
 MCP 客户端配置中填写可执行文件的绝对路径。Windows 通常为
-`<repo>\.venv\Scripts\browsertap-mcp.exe`，Linux/macOS 为
+`<repo>\.venv\Scripts\browsertap.exe`，Linux/macOS 为
 `<repo>/.venv/bin/browsertap`。
 
 若操作系统级输入或桌面截图报告依赖缺失，应安装 desktop extra：
@@ -41,8 +44,13 @@ MCP 客户端配置中填写可执行文件的绝对路径。Windows 通常为
 ### `/link` 返回 HTTP 401
 
 Bridge 与 MCP 进程必须解析到同一个 token 文件，默认路径为
-`~/.browsertap/bridge-token`，无需为不同编辑器分别设置 token。若两端均使用默认路径，
-可能仍有旧版本 bridge 进程在运行。重新启动 bridge 后重试；不得在诊断输出中打印或复制 token。
+`~/.browsertap/bridge-token`，无需为不同编辑器分别设置 token。不要靠猜判断各进程读的是哪个
+文件：`browsertap doctor` 会给出运行它的那个进程的 `state_paths`，两端不一致时另有
+`state_paths_disagreement`，逐字段列出 `this_process` 与 `bridge` 的取值。token 之间按截断的
+`sha256:` 指纹比对，因此这项诊断不会打印或复制 token 本身。出现
+`bridge_token_is_from_before_the_file_changed` 说明守护进程在启动时把旧 token 锁进了内存：
+重启 bridge 后重试。若差异在 `state_dir` 或 `token_file` 上，则是两个进程的环境不同，
+在路径一致之前重启无效。
 结果回传与轮询通道（`/api/result`、`/api/longpoll`）使用同一个 token，返回同样的 `401`，
 响应正文是纯文本行 `unauthorized: missing or bad bridge token`，不是 JSON；按
 `{"error": ...}` 解析所有错误的客户端只会报解析失败，看不到真实原因。

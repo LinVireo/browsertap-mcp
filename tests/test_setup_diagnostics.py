@@ -255,3 +255,115 @@ def test_setup_status_resurrects_cached_remote_bridge(monkeypatch):
     assert spawned == ["spawned"]
     assert result["status"] == "healthy"
     assert result["connected_tabs"] == 1
+
+
+# --- state directory and token file ------------------------------------------
+# The bridge daemon and the MCP server resolve these independently, each from
+# its own environment, and a mismatch shows up only as a 401 whose body names no
+# path at all. get_setup_status therefore reports both answers and says which
+# fields differ; `doctor` prints the same payload.
+_LOCAL_PATHS = {
+    "state_dir": "/home/u/.browsertap",
+    "state_dir_exists": True,
+    "state_dir_kind": "default",
+    "state_dir_env": None,
+    "default_state_dir_name": ".browsertap",
+    "token_file": "/home/u/.browsertap/bridge-token",
+    "token_file_exists": True,
+    "token_file_from_env": False,
+    "auth_enabled": True,
+    "token_fingerprint": "sha256:aaaaaaaa",
+}
+
+
+def _healthy(**extra):
+    diagnosis = {
+        "cause": "healthy",
+        "ok": True,
+        "bridge_version": __version__,
+        "extension_version": __version__,
+        "protocol_version": 3,
+        "extension_capabilities": {"content_command_channel_removed": True},
+    }
+    diagnosis.update(extra)
+    return diagnosis
+
+
+def _paths_status(monkeypatch, bridge_paths, local=None):
+    monkeypatch.setattr(S, "state_paths_report", lambda: dict(local or _LOCAL_PATHS))
+    diagnosis = _healthy() if bridge_paths is None else _healthy(state_paths=bridge_paths)
+    return _status(monkeypatch, diagnosis)
+
+
+def test_setup_status_reports_the_resolved_state_directory(monkeypatch):
+    result = _paths_status(monkeypatch, dict(_LOCAL_PATHS))
+
+    assert result["state_paths"]["state_dir"] == "/home/u/.browsertap"
+    assert result["state_paths"]["token_file"].endswith("bridge-token")
+    assert result["state_paths"]["auth_enabled"] is True
+    # Agreement is silence: nothing to fix, nothing added to notes.
+    assert "state_paths_disagreement" not in result
+
+
+def test_setup_status_reports_the_bridge_answer_next_to_its_own(monkeypatch):
+    bridge_paths = dict(_LOCAL_PATHS)
+    result = _paths_status(monkeypatch, bridge_paths)
+
+    assert result["diagnosis"]["state_paths"] == bridge_paths
+
+
+def test_setup_status_flags_two_processes_on_different_state_directories(monkeypatch):
+    # The upgrade case: the daemon started before the new directory existed, so
+    # it is still serving out of the pre-0.4.0 one with a different token.
+    bridge_paths = dict(
+        _LOCAL_PATHS,
+        state_dir="/home/u/.agent-browser-mcp",
+        state_dir_kind="legacy",
+        token_file="/home/u/.agent-browser-mcp/bridge-token",
+        token_fingerprint="sha256:bbbbbbbb",
+    )
+
+    result = _paths_status(monkeypatch, bridge_paths)
+
+    disagreement = result["state_paths_disagreement"]
+    assert set(disagreement) == {"state_dir", "token_file", "token_fingerprint"}
+    assert disagreement["token_file"] == {
+        "this_process": "/home/u/.browsertap/bridge-token",
+        "bridge": "/home/u/.agent-browser-mcp/bridge-token",
+    }
+    # Leading note, because every other field in the payload looks healthy here.
+    assert "state_paths_disagreement" in result["notes"][0]
+    assert "different environments" in result["notes"][0]
+
+
+def test_setup_status_separates_a_stale_daemon_from_a_path_mismatch(monkeypatch):
+    # Same paths, but the daemon locked its token in memory before the file was
+    # replaced. This one a bridge restart does fix, and the note says so.
+    bridge_paths = dict(_LOCAL_PATHS, token_matches_file=False)
+
+    result = _paths_status(monkeypatch, bridge_paths)
+
+    disagreement = result["state_paths_disagreement"]
+    assert disagreement == {"bridge_token_is_from_before_the_file_changed": True}
+    assert "browsertap bridge --restart" in result["notes"][0]
+
+
+def test_setup_status_flags_auth_enabled_on_only_one_side(monkeypatch):
+    bridge_paths = dict(_LOCAL_PATHS, auth_enabled=False, token_fingerprint=None)
+
+    result = _paths_status(monkeypatch, bridge_paths)
+
+    assert result["state_paths_disagreement"]["auth_enabled"] == {
+        "this_process": True,
+        "bridge": False,
+    }
+
+
+def test_setup_status_stays_quiet_when_the_bridge_predates_the_report(monkeypatch):
+    # An older daemon does not send state_paths at all. Absence is not a
+    # mismatch, or every upgrade would report a fault it cannot explain.
+    result = _paths_status(monkeypatch, None)
+
+    assert "state_paths_disagreement" not in result
+    assert result["state_paths"] == _LOCAL_PATHS
+    assert result["status"] == "healthy"

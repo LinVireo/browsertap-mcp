@@ -145,6 +145,29 @@ answer is the proof. Two rules survive any change here:
   are already out; a repeat could double the click. Report that it may not have
   landed and let the caller check the page, exactly as the timeout path does.
 
+The same shape has a second half: a resolved element can be *found* and still not
+be the thing at that pixel. A cookie banner, a modal backdrop or a sticky header
+over the target left `Input.dispatchMouseEvent` reporting success while the click
+went to the overlay, and a target below the fold got a click at negative
+viewport coordinates -- both indistinguishable from a real click in the result.
+`page_click` therefore hit-tests the point with `document.elementFromPoint`
+(`_HIT_TEST_JS`, the browser's own answer, same as `simphtml` uses for z-index)
+inside the **same** resolver batch, before any dispatch: below the fold it
+`scrollIntoView`s once and re-probes, and a point owned by anything else refuses
+with `obscured` + `occluded_by` or `outside_viewport` having dispatched nothing.
+Three things must survive an edit here:
+
+- **A hit is not identity.** `hit === el`, `el.contains(hit)` and
+  `hit.contains(el)` are all hits (a label's text node, an icon inside a button),
+  and the shadow-host chain is climbed because `elementFromPoint` stops at the
+  host. Tighten that to equality and ordinary buttons start refusing.
+- **Only selector mode.** Coordinates name a pixel, not an element, so there is
+  nothing to compare them against; `verify_hit` stays False for `page_drag` and
+  for the coordinate path.
+- **Do not scroll inside a frame.** The frame offsets are measured before the
+  probe, and scrolling can move an ancestor frame too, which invalidates them.
+  Framed targets refuse instead, which is why the scroll is guarded by `!framed`.
+
 ## 5. MV3 `chrome.alarms` has a 60-second floor
 
 Passing a smaller value raises **no error**; Chrome silently rounds it up. That
@@ -238,8 +261,23 @@ the assertion turns flaky.
   it immediately, later arrivals were still failing the port check (binding takes
   time), took the lock again and spawned another -- 12 concurrent instances
   produced 8 daemons. Do not "fix" that back.
-- The bridge log rotates at 5 MB. The daemon is detached and created with
+- The bridge log rotates at 5 MB, in **two** places that must keep the same cap
+  (`bridge.LOG_MAX_BYTES`). `server._bridge_log_path` renames the file at spawn
+  time, which is the only moment it can: the handle it opens becomes the daemon's
+  stdout and stderr and is then held for the process's whole life. So that half
+  never fires on a bridge that stays up for weeks -- which is the case the cap
+  exists for. `bridge.rotate_own_log` covers it from inside the daemon, every
+  `LOG_CHECK_SECONDS`, by copying to `bridge.log.old` and calling `os.ftruncate`
+  on its own fd. It must stay a copy-and-truncate: Windows refuses to rename a
+  file that has an open handle unless the opener asked for `FILE_SHARE_DELETE`,
+  and Python does not. The daemon is detached and created with
   `CREATE_NO_WINDOW`, so a crash leaves a trace **only** in that file.
+- What may be written into that log is a **policy**, not a formatting choice:
+  `redact_url` at every logging call site, `redact_pattern` for a caller's search
+  string, and never the token in any form. `SECURITY.md` states it to operators
+  and `tests/test_log_redaction.py` scans the module's source for a `logger.*`
+  line carrying a raw `.url` / `['url']` / `url_pattern`, so a new log line that
+  writes a URL straight through fails the offline suite rather than shipping.
 - If a manual `execute_js` debugging session left a CDP debugger attached, the
   whole live suite fails afterwards with "debugger already attached". Suspect
   your own leftovers before blaming a code change; re-verify in a clean browser.

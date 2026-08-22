@@ -48,6 +48,52 @@ def _command(method: str, **params: Any) -> dict[str, Any]:
     return {"cmd": "cdp", "method": method, "params": params}
 
 
+#: Browser-side proof that the point about to be clicked belongs to the element
+#: that was resolved. Without it a resolved rect is only evidence that the
+#: element exists somewhere in the layout: a cookie banner, a modal backdrop or a
+#: sticky header can sit on top of it, and an element below the fold resolves to
+#: a point outside the viewport. In both cases ``Input.dispatchMouseEvent``
+#: reports success, the click lands on whatever is really there, and nothing
+#: anywhere reports a problem -- the same failure shape as the physical-input
+#: tools in AGENTS.md section 4, one layer down.
+#:
+#: ``document.elementFromPoint`` is the browser's own answer to "who is on top
+#: here", already used for z-index ground truth in ``simphtml``. Coordinates are
+#: viewport-local, so the test runs in the element's own document and the caller
+#: adds any frame offset afterwards.
+_HIT_TEST_JS = r"""
+  const hitTest = (el, px, py) => {
+    const doc = el.ownerDocument;
+    const view = (doc && doc.defaultView) || window;
+    const width = view.innerWidth || 0;
+    const height = view.innerHeight || 0;
+    if (px < 0 || py < 0 || px >= width || py >= height) return {ok:false, status:'outside_viewport'};
+    let hit = null;
+    try { hit = doc.elementFromPoint(px, py); }
+    catch (_) { return {ok:true, note:'hit_test_unavailable'}; }
+    if (!hit) return {ok:false, status:'outside_viewport'};
+    // A label whose text node is on top, or an icon inside a button, is a hit.
+    if (hit === el || el.contains(hit) || hit.contains(el)) return {ok:true};
+    // elementFromPoint stops at a shadow host, so climb el's chain of hosts.
+    let node = el;
+    for (let depth = 0; depth < 32 && node; depth += 1) {
+      const root = node.getRootNode && node.getRootNode();
+      const host = root && root.host;
+      if (!host) break;
+      if (host === hit || hit.contains(host)) return {ok:true};
+      node = host;
+    }
+    const classes = (typeof hit.className === 'string' ? hit.className : '').trim();
+    const label = [
+      (hit.tagName || '?').toLowerCase(),
+      hit.id ? '#' + hit.id : '',
+      classes ? '.' + classes.split(/\s+/).slice(0, 3).join('.') : ''
+    ].join('');
+    return {ok:false, status:'obscured', occludedBy:label};
+  };
+"""
+
+
 def _number(value: Any, name: str) -> float | int:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise InputValidationError(f"{name} must be a finite number")
@@ -387,6 +433,9 @@ def structured_locator_script(
     offset_x: float = 0,
     offset_y: float = 0,
     select_all: bool = False,
+    verify_hit: bool = False,
+    center_x: bool = False,
+    center_y: bool = False,
 ) -> str:
     """Build the strict browser-side resolver for structured locators."""
     locator = normalize_locator(locator)  # type: ignore[assignment]
@@ -396,14 +445,24 @@ def structured_locator_script(
         raise InputValidationError("locator purpose must be query, click, or type")
     offset_x = _number(offset_x, "offset_x")
     offset_y = _number(offset_y, "offset_y")
-    if not isinstance(select_all, bool):
-        raise InputValidationError("select_all must be a boolean")
+    for name, flag in (
+        ("select_all", select_all),
+        ("verify_hit", verify_hit),
+        ("center_x", center_x),
+        ("center_y", center_y),
+    ):
+        if not isinstance(flag, bool):
+            raise InputValidationError(f"{name} must be a boolean")
     return f"""(() => {{
   const locator = {json.dumps(locator, ensure_ascii=False)};
   const purpose = {json.dumps(purpose)};
   const offsetX = {json.dumps(offset_x)};
   const offsetY = {json.dumps(offset_y)};
   const selectAll = {json.dumps(select_all)};
+  const verifyHit = {json.dumps(verify_hit)};
+  const centerX = {json.dumps(center_x)};
+  const centerY = {json.dumps(center_y)};
+  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS.replace("{", "{{").replace("}", "}}")}
   const clean = value => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
   const same = (actual, expected, exact) => exact ? clean(actual) === clean(expected) : clean(actual).includes(clean(expected));
   const implicitRole = el => {{
@@ -502,9 +561,28 @@ def structured_locator_script(
     }}
     return {{found:true, status:'found', targetKind:helper ? 'xterm' : 'element', tagName:el.tagName || ''}};
   }}
-  const rect = el.getBoundingClientRect();
+  let rect = el.getBoundingClientRect();
   const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
   if (purpose === 'click' && (rect.width <= 0 || rect.height <= 0 || el.disabled || ariaDisabled)) return {{found:false, status:'not_interactable'}};
+  let hitVerified = false;
+  let scrolledIntoView = false;
+  if (purpose === 'click' && verifyHit) {{
+    const pointX = () => rect.left + (centerX ? rect.width / 2 : offsetX);
+    const pointY = () => rect.top + (centerY ? rect.height / 2 : offsetY);
+    let probe = hitTest(el, pointX(), pointY());
+    if (!probe.ok && probe.status === 'outside_viewport' && !framed) {{
+      // Below the fold is the common case and scrolling is what a person would
+      // do. Not inside a frame: scrolling there can move an ancestor frame too,
+      // which would invalidate the frame offsets measured above.
+      try {{ el.scrollIntoView({{block:'center', inline:'center'}}); }}
+      catch (_) {{ try {{ el.scrollIntoView(); }} catch (_) {{}} }}
+      scrolledIntoView = true;
+      rect = el.getBoundingClientRect();
+      probe = hitTest(el, pointX(), pointY());
+    }}
+    if (!probe.ok) return {{found:false, status:probe.status, occludedBy:probe.occludedBy || null, scrolledIntoView}};
+    hitVerified = !probe.note;
+  }}
   const challengeSelector = '.cf-turnstile, cf-turnstile, iframe[src*="challenges.cloudflare.com"], [src*="challenges.cloudflare.com"]';
   const elementSignal = [el.tagName, el.id, el.className, el.getAttribute && el.getAttribute('src'), el.getAttribute && el.getAttribute('name')].filter(Boolean).join(' ').toLowerCase();
   const pageSignal = [document.title, location.hostname, location.href].join(' ').toLowerCase();
@@ -513,7 +591,7 @@ def structured_locator_script(
   const markerElement = elementIsChallenge ? el : pageChallengeElement;
   const challenge = elementIsChallenge || pageSignal.includes('challenges.cloudflare.com') || !!pageChallengeElement || /cloudflare.*challenge|challenge.*cloudflare|just a moment/.test(document.title.toLowerCase());
   const challengeMarker = challenge ? [location.origin, location.pathname, markerElement ? markerElement.tagName : 'page', markerElement ? markerElement.id : '', markerElement ? markerElement.className : '', markerElement && markerElement.getAttribute ? markerElement.getAttribute('src') || '' : '', markerElement && markerElement.getAttribute ? markerElement.getAttribute('data-sitekey') || '' : ''].join('|') : null;
-  return {{found:true, status:'found', x:frameOffsetX + rect.left + offsetX, y:frameOffsetY + rect.top + offsetY, width:rect.width, height:rect.height, challengeMarker}};
+  return {{found:true, status:'found', x:frameOffsetX + rect.left + offsetX, y:frameOffsetY + rect.top + offsetY, width:rect.width, height:rect.height, challengeMarker, hitVerified, scrolledIntoView}};
 }})()"""
 
 
@@ -531,25 +609,53 @@ def resolve_selector_script(
     offset_y: float = 0,
     *,
     require_interactable: bool = False,
+    verify_hit: bool = False,
+    center_x: bool = False,
+    center_y: bool = False,
 ) -> str:
     """Return a browser-side selector resolver with deterministic JSON quoting."""
     if not isinstance(selector, str) or not selector:
         raise InputValidationError("selector must be a non-empty string")
     offset_x = _number(offset_x, "offset_x")
     offset_y = _number(offset_y, "offset_y")
-    if not isinstance(require_interactable, bool):
-        raise InputValidationError("require_interactable must be a boolean")
+    for name, flag in (
+        ("require_interactable", require_interactable),
+        ("verify_hit", verify_hit),
+        ("center_x", center_x),
+        ("center_y", center_y),
+    ):
+        if not isinstance(flag, bool):
+            raise InputValidationError(f"{name} must be a boolean")
     return """(() => {
   const selector = %s;
   const offsetX = %s;
   const offsetY = %s;
   const requireInteractable = %s;
+  const verifyHit = %s;
+  const centerX = %s;
+  const centerY = %s;%s
   const element = document.querySelector(selector);
   if (!element) return {found:false};
-  const rect = element.getBoundingClientRect();
+  let rect = element.getBoundingClientRect();
   const ariaDisabled = String(element.getAttribute('aria-disabled') || '').trim().toLowerCase() === 'true';
   if (requireInteractable && (rect.width <= 0 || rect.height <= 0 || element.disabled || ariaDisabled)) {
     return {found:false, status:'not_interactable'};
+  }
+  let hitVerified = false;
+  let scrolledIntoView = false;
+  if (verifyHit) {
+    const pointX = () => rect.left + (centerX ? rect.width / 2 : offsetX);
+    const pointY = () => rect.top + (centerY ? rect.height / 2 : offsetY);
+    let probe = hitTest(element, pointX(), pointY());
+    if (!probe.ok && probe.status === 'outside_viewport') {
+      try { element.scrollIntoView({block:'center', inline:'center'}); }
+      catch (_) { try { element.scrollIntoView(); } catch (_) {} }
+      scrolledIntoView = true;
+      rect = element.getBoundingClientRect();
+      probe = hitTest(element, pointX(), pointY());
+    }
+    if (!probe.ok) return {found:false, status:probe.status, occludedBy:probe.occludedBy || null, scrolledIntoView:scrolledIntoView};
+    hitVerified = !probe.note;
   }
   const challengeSelector = '.cf-turnstile, cf-turnstile, iframe[src*="challenges.cloudflare.com"], [src*="challenges.cloudflare.com"]';
   const elementSignal = [element.tagName, element.id, element.className, element.getAttribute('src'), element.getAttribute('name')]
@@ -574,13 +680,19 @@ def resolve_selector_script(
     y:rect.top + offsetY,
     width:rect.width,
     height:rect.height,
-    challengeMarker:challengeMarker
+    challengeMarker:challengeMarker,
+    hitVerified:hitVerified,
+    scrolledIntoView:scrolledIntoView
   };
 })()""" % (
         json.dumps(selector),
         json.dumps(offset_x),
         json.dumps(offset_y),
         json.dumps(require_interactable),
+        json.dumps(verify_hit),
+        json.dumps(center_x),
+        json.dumps(center_y),
+        _HIT_TEST_JS,
     )
 
 

@@ -11,12 +11,38 @@
 `browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.0**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.1**。
 
 当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
 profile 对物理输入进行询问；默认 `lab` profile 免询问执行，也可通过配置恢复会话级询问。
 两种 profile 均保留输入锁、安静窗口、目标激活和屏幕确认。
+
+## 60 秒上手
+
+三步。每一步的完整说明（包括 Windows PowerShell 路径和各个客户端的配置）
+见下方**快速开始**一节。
+
+```bash
+# 1. 源码安装。目前还没发到 PyPI。
+git clone https://github.com/LinVireo/browsertap-mcp.git && cd browsertap-mcp
+python -m venv .venv && ./.venv/bin/python -m pip install -e ".[desktop]"
+./.venv/bin/browsertap extension-path   # 打印第 2 步要用的目录
+
+# 3. 把 MCP 客户端指向同一个可执行文件（以 Claude Code 为例）。
+claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
+```
+
+Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
+`.\.venv\Scripts\browsertap.exe`。
+
+**第 2 步是手工的，也是最耗时的一步。** 目前没有上 Chrome 应用商店，所以扩展需要
+手动加载：打开 `chrome://extensions`，开启**开发者模式**，点**加载已解压的扩展程序**，
+选 `extension-path` 刚打印的目录。然后打开一个普通的 `http://` 或 `https://` 页面 ——
+`about:blank` 上跑不了内容脚本，不会建立任何会话。
+
+接着直接问 agent：*我现在开了哪些标签页？* 如果返回为空，跑
+`browsertap doctor`：它会给出一个 `cause` 和对应的一句 `advice`。
 
 ## 核心能力
 
@@ -145,7 +171,7 @@ Windows PowerShell 应填写 `.venv\Scripts\browsertap.exe` 的绝对路径。
 <summary>VS Code</summary>
 
 ```bash
-code --add-mcp '{"name":"browsertap-mcp","command":"browsertap-mcp"}'
+code --add-mcp '{"name":"browsertap-mcp","command":"browsertap"}'
 ```
 
 也可将配置写入 `.vscode/mcp.json`。VS Code 使用的配置键为 `servers`，不是 `mcpServers`。
@@ -446,7 +472,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 
 `selector` 保持兼容 CSS 字符串,也可传结构化 locator 对象,主定位键必须且只能有一个:`css`、`role`(可带 `name`)、`text` 或 `label`;`exact` 控制 role/name 或 text 精确匹配;`frame` 逐层进入同源 iframe;`shadow` 逐层进入开放 Shadow DOM。零匹配返回 `not_found`,多匹配返回 `ambiguous`,跨域 iframe/关闭 shadow root 会明确上报且不派发输入。
 
-- **page_click** —— 点 CSS/结构化 `selector` 或视口坐标。定位方式二选一。selector 模式中,未提供 offset 的轴取元素中心;显式提供的 `offset_x`/`offset_y` 则从元素左上角按对应轴计算。缺失、歧义、不可交互、跨域 iframe 或关闭 shadow root 都返回结构化状态且不派发。验证码仍有 `challenge_detected`、`attempts` 与 `challenge_stalled` 上限
+- **page_click** —— 点 CSS/结构化 `selector` 或视口坐标。定位方式二选一。selector 模式中,未提供 offset 的轴取元素中心;显式提供的 `offset_x`/`offset_y` 则从元素左上角按对应轴计算。缺失、歧义、不可交互、跨域 iframe 或关闭 shadow root 都返回结构化状态且不派发。selector 模式还会在派发前在页面里做一次命中判定:在折叠线以下就先滚动进视口(`scrolled_into_view`),那个像素属于别的元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者,滚动后仍不在屏幕上返回 `outside_viewport` —— 这两种情况都不点,因为派发出去的点击会落在别的元素上并报成功。命中通过的点击带 `hit_verified: true`。坐标模式不做命中判定:坐标指的是像素,不是元素。验证码仍有 `challenge_detected`、`attempts` 与 `challenge_stalled` 上限
   - `selector`(string/object,可选)、`x`(number,可选)、`y`(number,可选)、`offset_x`(number,可选)、`offset_y`(number,可选)、`button`(string,可选):默认 `left`、`clicks`(integer,可选):默认 `1`、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
 - **page_type** —— 往 CSS/结构化 locator 选中的字段输入;省略 `selector` 时使用当前焦点。Xterm.js 自动改投 helper textarea;缺失、歧义、只读或不可输入目标不会收到文本/按键。`clear=true` 先选中已有内容,`submit_key` 事后按键
   - `text`(string)、`selector`(string/object,可选)、`clear`(boolean,可选):默认 `false`、`submit_key`(string,可选)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`

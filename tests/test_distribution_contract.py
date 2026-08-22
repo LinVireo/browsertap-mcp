@@ -437,7 +437,36 @@ def test_every_module_the_package_imports_is_a_declared_dependency():
         requirement.startswith("tomli")
         for requirement in project["project"]["optional-dependencies"]["dev"]
     )
+    # trio is likewise dev-only, and likewise imported by nothing: anyio's pytest
+    # plugin parametrises `anyio_backend` over the backends it can import, so
+    # dropping it here silently deletes 51 `[trio]` variants from the suite and
+    # the pass count starts depending on which interpreter ran it. Neither CI nor
+    # a fresh dev install had it, so that half was never gated.
+    assert "trio" not in runtime
+    assert any(
+        requirement.startswith("trio")
+        for requirement in project["project"]["optional-dependencies"]["dev"]
+    )
 
+
+
+def test_the_environment_running_the_suite_has_both_async_backends():
+    """Otherwise the suite quietly runs at half its async width.
+
+    `anyio_backend` is parametrised over importable backends, so a missing trio
+    removes 51 variants and nothing reports it -- the run is green, the count is
+    just smaller, and a release sealed from that run has never exercised the trio
+    path. Declaring trio in the `dev` extra is not enough on its own: an
+    environment created before that line existed keeps passing while covering
+    less. Fix by reinstalling the extra:
+    `python -m pip install -e ".[dev,desktop]"`.
+    """
+    import importlib.util
+
+    assert importlib.util.find_spec("trio") is not None, (
+        "trio is missing, so the [trio] half of the async matrix will not be "
+        'collected; run: python -m pip install -e ".[dev,desktop]"'
+    )
 
 
 def test_distribution_contract_ships_packaged_skills_but_rejects_stray_copies(tmp_path):

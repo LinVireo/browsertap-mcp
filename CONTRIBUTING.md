@@ -33,12 +33,24 @@ python -m scripts.check_tool_docs --format markdown
 python -m scripts.versioning check
 python -m build --wheel --sdist --outdir artifacts/dist
 python -m scripts.check_distribution artifacts/dist
+python -m scripts.check_install artifacts/dist --no-deps
 ```
 
 This is the order `scripts/finalize_change.py` and `.github/workflows/test.yml`
-use, and the last two lines belong together: `check_distribution` inspects the
-archives the build step just wrote, so running it on its own reports
-`no wheel found` rather than a pass.
+use, and the last three lines belong together: the build writes the archives that
+`check_distribution` reads and `check_install` installs, so running either on its
+own reports `no wheel found` rather than a pass.
+
+`check_distribution` and `check_install` answer different questions.
+`check_distribution` reads what is *inside* the archive; `check_install` puts the
+wheel into a throwaway virtual environment with no repository on the path and
+exercises it there, which is the only way "does `pip install browsertap-mcp`
+leave a stranger with something that runs" stops being a guess. Locally it is
+`--no-deps`: no index access, so it proves the layout only -- metadata version,
+console script, packaged skills, extension files. CI runs it without that flag
+and really executes `browsertap --version`, `skill-path` and `extension-path`.
+The report's `mode` and `proves_cli` fields say which of the two ran, so a
+layout-only pass is never read as "the CLI works".
 
 `ruff check` is the enforced rule set. `ruff format` is not a gate and most of
 the existing sources are not format-clean, so running it across a file you are
@@ -52,10 +64,29 @@ python -m pytest tests -q -m live
 ```
 
 They drive a real connected browser and may temporarily affect the foreground.
-Run them only on a prepared machine, record the initially active user tab, use
-the shared scratch fixture, and verify cleanup/restoration afterward. Do not add
-headless or Playwright fallback paths to live tests; those would test a different
-product contract.
+Run them only on a prepared machine and use the shared scratch fixture rather
+than opening a tab per test. Do not add headless or Playwright fallback paths to
+live tests; those would test a different product contract.
+
+Two preconditions used to be written here and left to a human to keep: nobody may
+be using the browser while the suite runs, and the tab inventory has to come out
+the way it went in. The session fixture in `tests/conftest.py` now enforces both
+(`tests/live_preflight.py` holds the reasoning):
+
+- Before the first live test it samples the tab list twice, 1.5s apart. If a tab
+  was opened, closed, navigated or focused in between, someone is using that
+  browser and the whole live layer is skipped rather than run against a moving
+  target. A skip is not a pass -- `scripts/acceptance_report.py` fails the live
+  gate on any skipped case.
+- After the last one it compares the inventory against that baseline. A tab the
+  suite left behind, closed, or navigated fails the run in teardown. The
+  foreground moving does not: the suite raises tabs on purpose.
+- Both verdicts, and whether the browser was idle at all, are written to
+  `artifacts/live-preflight.json`, which `live.yml` uploads with the junit.
+
+Set `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` to run anyway on a machine that is never
+idle; the end-of-run check drops to a warning and the report records that the
+evidence was produced against a browser in use.
 
 The public `test.yml` workflow runs only offline gates on GitHub-hosted runners.
 `live.yml` is manual-only and targets a prepared self-hosted Windows runner. Set
@@ -72,6 +103,7 @@ tree that will be published:
 ```text
 python -m scripts.finalize_change --bump none --skip-live
 python -m scripts.evidence_manifest --check
+python -m scripts.check_release_tag --allow-missing-tag
 ```
 
 The finalizer first moves prior evidence into a timestamped
@@ -175,8 +207,25 @@ verify.
   channel has been removed. That file must not exist in Git or Python
   distributions; the distribution gate rejects it.
 - Never include bridge tokens, cookies, `.env` files, browser profiles, or
-  copied user content. Run a secret scan over both the working tree and complete
-  Git history before publishing to a public repository.
+  copied user content. `.github/workflows/supply-chain.yml` scans both the
+  working tree and the complete Git history on every push, using a gitleaks build
+  pinned by version *and* sha256. Run the same two scans locally before
+  publishing to a public repository:
+
+  ```bash
+  gitleaks git . --no-banner --redact
+  gitleaks dir . --no-banner --redact
+  ```
+
+  The history half is the one that matters after the fact: a secret that was
+  committed and later deleted is still published, and only rewriting history
+  removes it -- another commit does not. `--redact` keeps the scanner from
+  printing the secret it found into build output that anyone can read.
+- The same workflow resolves the closure a plain `pip install` produces, audits
+  it against the advisory database, and publishes a CycloneDX SBOM as a build
+  artifact. That audit is informational there and blocking in `release.yml`: an
+  advisory published overnight should not turn every branch red, but it is a
+  perfectly good reason not to ship a new version.
 - Upload wheel and source-distribution files as GitHub Release assets. Do not
   commit them, local acceptance reports, or live-browser evidence to Git.
 
@@ -232,9 +281,21 @@ metadata the index needs to render and classify the release) and
 hand: it is the only check that renders the long description the way the index
 will, and the last one that is still free.
 
+It then installs the wheel it just built into a throwaway virtual environment and
+runs the console script there (`scripts.check_install`), audits the dependency
+closure that wheel pulls onto a user's machine, and writes a CycloneDX SBOM of
+that closure as a separate artifact -- separate because the publish job uploads
+everything under `dist/` to the index.
+
 A tag pointing at a commit other than the one the acceptance evidence was sealed
-on publishes something nobody verified. Confirm `git rev-parse HEAD` matches the
-`verified_at` commit in the sealed report before creating the Release.
+on publishes something nobody verified. `python -m scripts.check_release_tag`
+answers that mechanically: it fails when `v<source version>` does not exist,
+when it points at another commit -- naming both shas, the distance, and which
+production files differ -- or when production files are still uncommitted, since
+no tag can describe a file that is not in a commit. `release.yml` runs it before
+it installs or builds anything. Run it yourself after tagging and before
+publishing the Release, and confirm the sealed report's `verified_at` commit is
+that same commit.
 
 ## Pull request checklist
 

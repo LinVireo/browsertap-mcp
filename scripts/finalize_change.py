@@ -108,6 +108,11 @@ def _run_gates(skip_live: bool) -> None:
     _run(sys.executable, "-m", "scripts.check_tool_docs")
     _run(sys.executable, "-m", "build", "--wheel", "--sdist", "--outdir", "artifacts/dist")
     _run(sys.executable, "-m", "scripts.check_distribution", "artifacts/dist")
+    # Layout only, on purpose: a full install needs an index, and the
+    # finalizer has to run on a machine with no network as well. CI runs the
+    # same gate without --no-deps, where the console script and the imports
+    # are really executed, and the report says which of the two ran.
+    _run(sys.executable, "-m", "scripts.check_install", "artifacts/dist", "--no-deps")
     _run(sys.executable, "-m", "pip", "check")
     if not skip_live:
         _run(

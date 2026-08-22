@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import builtins
+import io
 import json
 from types import SimpleNamespace
 
@@ -362,3 +364,98 @@ def test_posix_process_identity_reads_starttime_past_a_spaced_comm(monkeypatch):
         "creation_ticks": 998877,
         "executable": "/usr/bin/python3",
     }
+
+
+def _oversized_log(tmp_path, monkeypatch, *, size):
+    """Point the state dir at tmp_path and hand back an open handle on the log."""
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
+    path = bridge.bridge_log_path()
+    path.write_bytes(b"x" * size)
+    handle = open(path, "ab")
+    monkeypatch.setattr(bridge.sys, "stderr", handle)
+    return path, handle
+
+
+def test_rotate_own_log_truncates_in_place_and_keeps_one_generation(
+    tmp_path, monkeypatch
+):
+    # The daemon holds this handle for its whole life, so rotation cannot rename
+    # the file -- Windows refuses that outright. It copies aside and truncates.
+    path, handle = _oversized_log(tmp_path, monkeypatch, size=64)
+    try:
+        assert bridge.rotate_own_log(max_bytes=16) is True
+        handle.write(b"after rotation\n")
+        handle.flush()
+    finally:
+        handle.close()
+    assert path.with_suffix(".log.old").read_bytes() == b"x" * 64
+    # Truncated, not renamed: the same path is still the live log.
+    assert path.read_bytes() == b"after rotation\n"
+
+
+def test_rotate_own_log_leaves_a_log_under_the_cap_alone(tmp_path, monkeypatch):
+    path, handle = _oversized_log(tmp_path, monkeypatch, size=16)
+    try:
+        assert bridge.rotate_own_log(max_bytes=1024) is False
+    finally:
+        handle.close()
+    assert path.read_bytes() == b"x" * 16
+    assert not path.with_suffix(".log.old").exists()
+
+
+def test_rotate_own_log_is_a_noop_when_stderr_is_not_a_file(monkeypatch):
+    # Under pytest capture, and in any embedding that replaces stderr, fileno()
+    # raises. Rotation must decline rather than crash the daemon loop.
+    monkeypatch.setattr(bridge.sys, "stderr", io.StringIO())
+    assert bridge.rotate_own_log(max_bytes=0) is False
+
+
+def test_rotate_own_log_survives_an_unwritable_previous_generation(
+    tmp_path, monkeypatch
+):
+    path, handle = _oversized_log(tmp_path, monkeypatch, size=64)
+    real_open = builtins.open
+
+    def refuse_old(file, *args, **kwargs):
+        if str(file).endswith(".log.old"):
+            raise OSError("read-only state dir")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", refuse_old)
+    try:
+        assert bridge.rotate_own_log(max_bytes=16) is False
+    finally:
+        monkeypatch.undo()
+        handle.close()
+    # Appending to an oversized log beats losing it.
+    assert path.read_bytes() == b"x" * 64
+
+
+def test_idle_loop_checks_the_log_instead_of_only_sleeping(monkeypatch):
+    driver = FakeDriver()
+    rotations = []
+    slept = []
+
+    def sleep_then_stop(seconds):
+        slept.append(seconds)
+        if len(slept) > 1:
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(bridge, "BrowserBridge", lambda **kwargs: driver)
+    monkeypatch.setattr(bridge.time, "sleep", sleep_then_stop)
+    monkeypatch.setattr(bridge, "rotate_own_log", lambda: rotations.append(True))
+    monkeypatch.setattr(bridge, "_write_bridge_record", lambda **kwargs: {})
+    monkeypatch.setattr(bridge, "_remove_record_if_owned", lambda record: None)
+
+    assert bridge.main([]) == 0
+    assert slept == [bridge.LOG_CHECK_SECONDS, bridge.LOG_CHECK_SECONDS]
+    assert rotations == [True]
+
+
+def test_spawn_side_and_daemon_side_share_one_cap():
+    # Two rotation paths, one documented "rotates at 5 MB". A literal in either
+    # place makes that sentence true of only one of them.
+    from browsertap_mcp import server
+
+    assert server.bridge_module.LOG_MAX_BYTES is bridge.LOG_MAX_BYTES
+    assert bridge.LOG_MAX_BYTES == 5 * 1024 * 1024

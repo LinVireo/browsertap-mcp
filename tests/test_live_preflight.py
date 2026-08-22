@@ -1,0 +1,224 @@
+"""The live layer's preconditions, tested offline.
+
+The checks themselves need a browser; their reasoning does not, which is why it
+lives in a pure module. What is pinned here is the part that used to be a
+maintainer's judgement: what counts as a browser someone is using, what counts as
+the suite having disturbed it, and that the two verdicts are not the same one.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from tests import live_preflight as P
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFTEST = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+
+
+def _tabs(*specs: tuple[int, str, bool]) -> list[dict[str, object]]:
+    return [
+        {"id": tab_id, "url": url, "title": f"tab {tab_id}", "active": active, "windowId": 1}
+        for tab_id, url, active in specs
+    ]
+
+
+def test_inventory_keys_tabs_by_id_as_text():
+    """Native ids arrive as ints and session ids carry them as text.
+
+    Keying on the raw value would make one browser look like two sets of tabs,
+    reported as every tab opening and closing at once.
+    """
+    indexed = P.inventory(_tabs((7, "https://example.com/", True)))
+
+    assert list(indexed) == ["7"]
+    assert indexed["7"] == {
+        "id": "7",
+        "url": "https://example.com/",
+        "title": "tab 7",
+        "active": True,
+        "window": "1",
+    }
+
+
+def test_inventory_ignores_entries_it_cannot_identify():
+    """An unreadable payload must not invent tabs; a missing id is not a tab."""
+    indexed = P.inventory([{"url": "https://example.com/"}, "nonsense", None, {"id": 3}])
+
+    assert list(indexed) == ["3"]
+    assert indexed["3"]["url"] == ""
+    assert indexed["3"]["active"] is False
+
+
+def test_inventory_tolerates_no_payload_at_all():
+    assert P.inventory(None) == {}
+
+
+def test_the_foreground_tab_is_stable_when_several_windows_each_have_one():
+    """chrome.tabs.query reports one active tab per window.
+
+    Picking whichever came first would report the foreground moving on every
+    sample and turn an idle browser into a busy one.
+    """
+    tabs = P.inventory(_tabs((9, "https://b.example/", True), (4, "https://a.example/", True)))
+
+    assert P._focused(tabs) == "4"
+    assert P._focused(P.inventory(_tabs((9, "https://b.example/", False)))) is None
+
+
+def test_an_untouched_browser_produces_no_difference():
+    tabs = P.inventory(_tabs((1, "https://a.example/", True), (2, "https://b.example/", False)))
+
+    diff = P.compare(tabs, tabs)
+
+    assert diff["changed"] is False
+    assert diff["disturbed"] is False
+    assert diff["opened"] == [] and diff["closed"] == [] and diff["navigated"] == []
+    assert diff["focus_moved"] is None
+    assert (diff["tabs_before"], diff["tabs_after"]) == (2, 2)
+    assert P.busy_browser_reason(diff) is None
+    assert P.drift_problem(diff) is None
+
+
+def test_each_kind_of_change_is_reported_as_itself():
+    before = P.inventory(
+        _tabs(
+            (1, "https://kept.example/", True),
+            (2, "https://gone.example/", False),
+            (3, "https://before.example/", False),
+        )
+    )
+    after = P.inventory(
+        _tabs(
+            (1, "https://kept.example/", False),
+            (3, "https://after.example/", True),
+            (4, "https://new.example/", False),
+        )
+    )
+
+    diff = P.compare(before, after)
+
+    assert [tab["id"] for tab in diff["opened"]] == ["4"]
+    assert [tab["id"] for tab in diff["closed"]] == ["2"]
+    assert diff["navigated"] == [
+        {
+            "id": "3",
+            "from": "https://before.example/",
+            "to": "https://after.example/",
+            "title": "tab 3",
+        }
+    ]
+    assert diff["focus_moved"] == {"from": "1", "to": "3"}
+    assert diff["disturbed"] is True and diff["changed"] is True
+
+
+def test_the_description_leads_with_the_change_that_cannot_be_undone():
+    diff = P.compare(
+        P.inventory(_tabs((1, "https://kept.example/", True), (2, "https://gone.example/", False))),
+        P.inventory(_tabs((1, "https://moved.example/", True), (3, "https://new.example/", False))),
+    )
+
+    lines = P.describe(diff)
+
+    assert lines[0].startswith("closed: 2 (https://gone.example/")
+    assert lines[1].startswith("opened: 3 (https://new.example/")
+    assert lines[2] == "navigated: 1 https://kept.example/ -> https://moved.example/"
+
+
+def test_a_blank_url_is_still_named_in_the_description():
+    """An empty pair of brackets sends the reader looking for a bug in the gate."""
+    diff = P.compare(P.inventory([{"id": 5}]), {})
+
+    assert P.describe(diff) == ["closed: 5 (about:blank)"]
+
+
+def test_focus_moving_on_its_own_means_a_human_is_there():
+    """Nothing was damaged, so it is not drift -- but it is not an idle browser.
+
+    The suite raises tabs itself, which is why the two verdicts differ on
+    exactly this case.
+    """
+    before = P.inventory(_tabs((1, "https://a.example/", True), (2, "https://b.example/", False)))
+    after = P.inventory(_tabs((1, "https://a.example/", False), (2, "https://b.example/", True)))
+
+    diff = P.compare(before, after)
+
+    assert diff["changed"] is True
+    assert diff["disturbed"] is False
+    assert P.busy_browser_reason(diff) is not None
+    assert P.drift_problem(diff) is None
+
+
+def test_the_busy_message_says_what_moved_and_how_to_proceed_anyway():
+    diff = P.compare({}, P.inventory(_tabs((1, "https://new.example/", True))))
+
+    reason = P.busy_browser_reason(diff)
+
+    assert "the browser is in use" in reason
+    assert "opened: 1 (https://new.example/)" in reason
+    assert str(P.IDLE_WINDOW_SECONDS) in reason
+    assert P.OVERRIDE_ENV in reason
+
+
+def test_the_drift_message_carries_both_counts_and_the_ambiguity():
+    before = P.inventory(_tabs((1, "https://a.example/", True), (2, "https://b.example/", False)))
+    after = P.inventory(_tabs((1, "https://a.example/", True)))
+
+    problem = P.drift_problem(P.compare(before, after))
+
+    assert "did not leave the browser as it found it" in problem
+    assert "(2 tabs before, 1 after)" in problem
+    assert "closed: 2 (https://b.example/)" in problem
+    # The maintainer notes say it themselves: rule out a human before believing
+    # the fixtures leaked.
+    assert "A fixture leak and a human using the browser look identical" in problem
+
+
+def test_the_fields_read_here_are_the_fields_the_extension_sends():
+    """Binds the reader to its source.
+
+    A rename on the extension side should break this test rather than quietly
+    reporting an unchanged browser because every field came back empty.
+    """
+    background = (ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "background.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "{ id: t.id, url: t.url, title: t.title, active: t.active, windowId: t.windowId }"
+        in background
+    )
+
+
+def test_the_live_fixture_samples_twice_and_acts_on_both_verdicts():
+    """A preflight nothing calls is prose with extra steps."""
+    fixture = CONFTEST.split("def driver()", 1)[1]
+
+    assert "time.sleep(P.IDLE_WINDOW_SECONDS)" in fixture
+    assert fixture.count("_tab_inventory(record)") == 3  # first, baseline, final
+    assert "P.busy_browser_reason(idle)" in fixture
+    assert "pytest.skip(reason)" in fixture
+    assert "P.drift_problem(drift)" in fixture
+    assert "raise AssertionError(problem)" in fixture
+    # The verdict is reached in teardown, so it must be reached even when a live
+    # test failed: a suite that closed a user tab has to say so either way.
+    assert "finally:" in fixture.split("yield d", 1)[1]
+
+
+def test_an_unreadable_inventory_does_not_fail_the_live_layer():
+    """The manual step this replaces could not fail a run either."""
+    reader = CONFTEST.split("def _tab_inventory", 1)[1].split("def _write_live_preflight", 1)[0]
+
+    assert "except Exception as exc:" in reader
+    assert reader.count("return None") == 2
+    assert 'record["notes"].append' in reader
+
+
+def test_the_override_is_recorded_rather_than_silent():
+    """Evidence produced against a browser in use has to say that it was."""
+    fixture = CONFTEST.split("def driver()", 1)[1]
+
+    assert "P.OVERRIDE_ENV" in fixture
+    assert '"override": override' in fixture
+    assert "warnings.warn(problem" in fixture
+    assert "live-preflight.json" in CONFTEST

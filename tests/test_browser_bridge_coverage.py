@@ -947,6 +947,48 @@ def test_local_diagnose_classifies_every_lifecycle_state(
     assert result["clients"]["c"]["seconds_ago"] == 10.0
 
 
+def test_local_diagnose_reports_the_paths_the_daemon_itself_resolved():
+    """The daemon is the process whose answer matters for a 401.
+
+    A client can resolve a different state directory from a different editor
+    environment, so the report has to come from here -- and it has to carry the
+    token the daemon locked into memory at start-up, not a fresh read of the
+    file, or the "daemon predates the file" case would look like a match.
+    """
+    driver = driver_stub()
+    driver.clean_sessions = lambda: None
+    driver.ext_cmd = lambda *args, **kwargs: {"data": {}}
+    driver.link_token = "token-the-daemon-is-enforcing"
+
+    paths = driver.diagnose()["state_paths"]
+
+    assert paths["state_dir"]
+    assert paths["token_file"].endswith("bridge-token")
+    assert paths["enforced_token_fingerprint"] == T.token_fingerprint(driver.link_token)
+    assert "token-the-daemon-is-enforcing" not in repr(paths)
+
+
+@pytest.mark.parametrize("link_token", [None, ""])
+def test_local_diagnose_claims_no_token_mismatch_when_none_is_enforced(link_token):
+    """Two ways there is nothing to compare, neither of them a fault.
+
+    ``diagnose`` also runs on a driver that never started the HTTP server (the
+    WS-only and test paths), so ``link_token`` may not exist yet; and with
+    ``BROWSERTAP_BRIDGE_AUTH=off`` it exists and is empty. Reporting either as a
+    token mismatch would send a reader chasing a 401 that cannot happen.
+    """
+    driver = driver_stub()
+    driver.clean_sessions = lambda: None
+    driver.ext_cmd = lambda *args, **kwargs: {"data": {}}
+    if link_token is not None:
+        driver.link_token = link_token
+
+    paths = driver.diagnose()["state_paths"]
+
+    assert "token_matches_file" not in paths
+    assert "enforced_token_fingerprint" not in paths
+
+
 def test_local_diagnose_records_extension_status_failure(monkeypatch):
     driver = driver_stub()
     driver.clean_sessions = lambda: None

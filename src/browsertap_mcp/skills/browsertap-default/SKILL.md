@@ -62,7 +62,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 ## 工具选择优先级（按这个顺序，别一上来就动物理输入）
 
 1. **页面读取/JS/页面 API**：`scan_page`、`execute_js`、`wait_for*`、`scroll_page`、`get_cookies`、`storage_get` —— 不打扰用户、不需要批准。
-2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。坐标是**视口**坐标（相对页面区域），不是桌面坐标。
+2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。`page_click` 的 selector 模式在派发前还会命中判定那个像素：被遮挡返回 `obscured`（带 `occluded_by`），滚动后仍不在视口返回 `outside_viewport`，两者都没点。坐标是**视口**坐标（相对页面区域），不是桌面坐标。
 3. **结构化中断**：对话框用 `handle_dialog`（配 `execute_js(dialog_policy="manual")` / `open_url(beforeunload="manual")`）；站点权限用 `set_site_permission` / `reset_site_permissions`（租约 60–600 秒，到期自动恢复）。
 4. **物理输入**（最后手段）：`mouse_move` / `mouse_click` / `mouse_drag` / `type_text` / `hotkey` 这 5 个直接工具 —— 只用于浏览器 chrome、原生文件选择器、扩展弹窗、OS 对话框。`safe` 逐次批准；默认 `lab` 免询问，显式把 `BROWSERTAP_LAB_NO_ELICIT` 设为 false 才恢复会话级批准。`resolve_leave_dialog` 另有一条仅在两次协议处理失败后使用 Enter 的后备路径；`capture_desktop_screenshot` 只读、不需批准。
 
@@ -74,6 +74,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 - **`execute_js` 全链路定向**：baseline/diff/transient monitor、无 ACK 安全重试、导航落点读取都继续使用同一个显式 `session_id`，不会在中间步骤掉回共享默认；`timeout` 是覆盖策略设置、执行、重试、monitor 与清理的单一总 deadline，不要再为各阶段额外叠加等待。
 - **Xterm/ttyd 输入**：`page_type(selector=".xterm", ...)`、传 xterm 后代，或在页面只有一个 `.xterm-helper-textarea` 时省略 selector，都会自动聚焦 helper textarea 后派发受信任输入。要清当前 shell 行时先 `page_press("ctrl,u", session_id=...)`，不要把表单语义的 `clear=true` 当作终端清行。
 - **坐标**：`page_click`/`page_drag` 的 `x`/`y` 是**视口**坐标。优先用 `selector`（点元素中心，可加 `offset_x`/`offset_y` 偏移）—— 跨域 iframe 里的 Cloudflare Turnstile 复选框可以点，不需要伸进 iframe 的 DOM。
+- **`page_click` 的命中判定（只在 selector 模式）**：派发前先问页面那个坐标上到底是谁。折叠线以下会先滚进视口（结果带 `scrolled_into_view`）；那个像素属于 cookie 横幅、遮罩层或别的覆盖元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者，滚动后仍在视口外返回 `outside_viewport` —— **这两种情况一个事件都没派发**，先处理遮挡（关横幅 / `scroll_page` / 点别的 locator）再重试，不要当作点过了。命中通过的结果带 `hit_verified: true`。坐标模式不做这项判定：坐标指的是像素，落在谁身上由页面决定。
 - **验证码（Turnstile 等）留在用户的浏览器里**：在同一个已连接 tab 里用 `page_click` 处理，尝试次数有上限（回复带 `challenge_detected` 和 `attempts`）；验证码不再推进时结果是 `challenge_stalled`，**停下来把 tab 交还给用户自己处理**。绝不另起 Playwright / headless 浏览器 / 独立自动化 profile 兜底。
 - **选择器没匹配**：返回 `not_found`，什么都没派发。
 

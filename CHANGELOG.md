@@ -6,6 +6,104 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-22
+
+### Security
+
+- The bridge log no longer records page URLs verbatim. `bridge.log` lives for the
+  life of an install and is the file operators are asked to attach to a bug
+  report, so an OAuth callback, a signed download link or a search query used to
+  be written to disk and handed out with it. URLs are now redacted at the logging
+  call rather than by a scrubber afterwards: scheme, host and a truncated path
+  survive, query strings and fragments become `?...`/`#...`, credentials in the
+  authority are dropped, and `file:`, `data:`, `blob:` and `javascript:` URLs are
+  reduced to `<scheme>:<redacted>` because for those the location is the content.
+  A caller's `wait_for_url` pattern gets the same treatment. What the log may and
+  may not contain is now stated in `SECURITY.md`, and the offline suite scans the
+  module for a log line that passes a URL straight through.
+
+### Fixed
+
+- `page_click` proves in the page that the point it is about to click belongs to
+  the target, instead of dispatching and reporting success either way. A cookie
+  banner, a modal backdrop or a sticky header over the element left
+  `Input.dispatchMouseEvent` returning success while the click went to the
+  overlay, and an element below the fold was clicked at negative viewport
+  coordinates -- neither was distinguishable from a real click in the result. In
+  selector mode the point is now hit-tested with `document.elementFromPoint`
+  inside the same resolver round trip: a target below the fold is scrolled into
+  view once and re-probed (`scrolled_into_view`), a point owned by something else
+  refuses with `obscured` and `occluded_by` naming it, and a point still off
+  screen refuses with `outside_viewport`. Both refusals dispatch nothing and carry
+  a `next_action`. A verified click reports `hit_verified: true`. Coordinate mode
+  is unchanged: coordinates name a pixel, not an element.
+- The bridge rotates its own log while it is running. The 5 MB cap was only ever
+  checked when a bridge was spawned, and the handle opened there becomes the
+  daemon's stdout for the whole life of the process -- so a bridge that stayed up
+  for weeks grew its log without bound and restarting it was what appeared to
+  "fix" the size. The daemon now checks every five minutes and rotates in place
+  by copying to `bridge.log.old` and truncating its own descriptor, which is what
+  Windows allows on a file that still has an open handle.
+- A `401` from `/link` can be diagnosed without guessing. `get_setup_status` and
+  `browsertap doctor` report `state_paths` -- the `state_dir`, `token_file`,
+  `auth_enabled` and a truncated `sha256:` token fingerprint that the reporting
+  process actually resolved, plus whether the directory came from the
+  environment, the default, or a pre-0.4.0 `~/.agent-browser-mcp` -- and the
+  running daemon reports its own. When the two disagree the result adds
+  `state_paths_disagreement`, naming each differing field for `this_process` and
+  for `bridge`, and separates the two causes that need different fixes: a daemon
+  holding a token from before the file changed needs one bridge restart, whereas
+  differing paths mean the processes have different environments and a restart
+  will not help. The token value itself is never printed.
+- The VS Code snippet in `README.md` registered `command: browsertap-mcp`, which
+  is the distribution name and not an executable; the console script is
+  `browsertap`.
+
+### Added
+
+- `README.md` opens with a three-command install, and says plainly that step 2 --
+  loading the unpacked extension by hand -- is manual and is the slow one,
+  because there is no Web Store listing yet.
+- The offline gates run on Windows as well as Linux. Every OS-specific failure
+  this product has is a Windows one (a rejected request with an unread body being
+  reset by wsgiref, the `SO_EXCLUSIVEADDRUSE` host lock, `pythonw.exe`'s
+  forwarding stub, a minimised window that accepts focus calls, a log file that
+  cannot be renamed while it is open), and `bridge.py` -- where most of that
+  lives -- is the least covered module in the package.
+- `trio` is a declared development dependency. anyio's pytest plugin parametrises
+  over the backends it can import, so whether trio was installed silently decided
+  whether 51 `[trio]` variants of the async tests existed at all; MCP's server
+  stack is anyio's, so a client may well host it on trio. The suite now asserts
+  both backends are present rather than passing with half the matrix missing.
+- `scripts/check_install.py` answers the question `check_distribution` cannot:
+  not what is inside the archive, but what a stranger has after `pip install`.
+  The wheel goes into a throwaway environment with no repository on the path and
+  the console script, the packaged skills and the extension files are exercised
+  there. It runs in the offline gates, in the release workflow before publishing,
+  and in `finalize_change` (layout only there, since that has to work offline).
+- `scripts/check_release_tag.py` fails a release whose git tag names a different
+  commit than the tree being published, before anything is installed or built.
+  A TestPyPI rehearsal may run from an untagged branch, so there a missing tag is
+  a note while a misplaced one is still a failure.
+- The release workflow audits the dependency closure the wheel actually installs
+  against the advisory database and uploads a CycloneDX SBOM of it, as a separate
+  artifact rather than into `dist/`. A new `supply-chain.yml` runs the same audit
+  on a schedule, informationally.
+- The live suite checks its own preconditions instead of relying on the reader.
+  It samples the tab list twice before the first live test and skips the whole
+  layer when the browser is in use, since a tab that is still loading makes the
+  failover test fail for reasons that have nothing to do with the change under
+  test; a skip is a live-gate failure in the acceptance report rather than a
+  pass. At the end it compares the inventory again, so a fixture that leaks a tab,
+  closes one of the user's, or navigates the page they were reading fails in
+  teardown. Both verdicts are written to `artifacts/live-preflight.json` and
+  uploaded with the junit results. `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` overrides the
+  skip and is recorded in the report.
+- `_pick_failover_session` skips a tab that registered within
+  `FAILOVER_SETTLE_SECONDS`, which is the product-side half of the same problem:
+  the escape hatch used to pick the most recently registered tab, and a tab that
+  is mid-navigation loses its CDP debugger with no retry behind it.
+
 ## [0.4.0] - 2026-08-21
 
 ### Changed
@@ -459,7 +557,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.14...v0.4.0
 [0.3.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.3.12...v0.3.13

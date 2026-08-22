@@ -74,6 +74,16 @@ dev = [
   # packaging tests). The installed package never imports it, so it is not a
   # runtime dependency of `pip install browsertap-mcp`.
   "tomli>=2.0; python_version < '3.11'",
+  # Not imported by any test. anyio's pytest plugin parametrises `anyio_backend`
+  # over the backends it can *import*, so whether trio is installed silently
+  # decides whether half of the async matrix exists at all: 51 `[trio]` variants
+  # across test_physical_input, test_site_permissions, test_phase0_recovery and
+  # test_offline appear with it and vanish without. Both CI and a fresh dev
+  # install used to land on the without side, so the pass count moved with the
+  # environment and the trio half was never gated. MCP's server stack is anyio's,
+  # not asyncio's, so a client may well host it on trio -- pinning it here makes
+  # that configuration a gate instead of an accident.
+  "trio>=0.27",
 ]
 
 [tool.coverage.run]

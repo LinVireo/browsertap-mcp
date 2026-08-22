@@ -63,6 +63,12 @@ jobs:
         run: python -m build --wheel --sdist --outdir artifacts/dist
       - name: Check distribution contents
         run: python -m scripts.check_distribution artifacts/dist
+      # The other half of the same question: not what is inside the archive,
+      # but what a stranger has after `pip install`. Runs on every version in
+      # the matrix, because package data and console scripts are exactly what
+      # breaks on one interpreter and not another.
+      - name: Check a clean install of the built wheel
+        run: python -m scripts.check_install artifacts/dist
       - name: Check installed dependency consistency
         run: python -m pip check
       # The evidence chain is only meaningful if something other than the release
@@ -87,5 +93,71 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: btap-offline-${{ matrix.python-version }}
+          path: artifacts/
+          if-no-files-found: ignore
+
+  # Every OS-specific failure this product has is a Windows one: wsgiref resets a
+  # rejected request that still has an unread body (so a 401 reaches the caller as
+  # a dropped connection), the host lock is `SO_EXCLUSIVEADDRUSE`, `pythonw.exe`
+  # is a forwarding stub whose child holds the port, a minimised window accepts
+  # focus calls that put nothing on screen, and a log file cannot be renamed while
+  # the daemon holds it open. The job above runs on Linux only, so none of that was
+  # ever exercised by CI -- and `bridge.py`, where most of it lives, is the least
+  # covered module in the package. Oldest and newest interpreter only: this is
+  # about the platform, and the version matrix is already covered above.
+  windows-offline:
+    name: Windows offline (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        # Deliberately the same shell as the Linux job. `mkdir -p` and the folded
+        # multi-line commands below are POSIX, and a step whose text differs
+        # between the two jobs stops being a comparison of the platform.
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.13']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,desktop]"
+      - name: Compile Python sources
+        run: python -m compileall -q src
+      - name: Prepare evidence directory
+        run: mkdir -p artifacts
+      # No coverage gate here: the threshold is enforced once, on Linux, and a
+      # second instrumented run would only add wall clock. The junit file is kept
+      # because which test failed on Windows is the whole point of this job.
+      - name: Run offline tests
+        run: >-
+          python -m pytest tests -q
+          --junitxml=artifacts/windows-offline-junit.xml
+      # What a stranger has after `pip install` on the platform most of this
+      # product's users run, where the console script is a generated .exe rather
+      # than a shebang. Newest interpreter only, to keep the job short.
+      - name: Build distributions
+        if: matrix.python-version == '3.13'
+        run: python -m build --wheel --sdist --outdir artifacts/dist
+      - name: Check distribution contents
+        if: matrix.python-version == '3.13'
+        run: python -m scripts.check_distribution artifacts/dist
+      - name: Check a clean install of the built wheel
+        if: matrix.python-version == '3.13'
+        run: python -m scripts.check_install artifacts/dist
+      - name: Check installed dependency consistency
+        run: python -m pip check
+      - name: Upload gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btap-windows-offline-${{ matrix.python-version }}
           path: artifacts/
           if-no-files-found: ignore

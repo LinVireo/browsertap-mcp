@@ -149,26 +149,8 @@ def test_production_changes_require_a_strict_version_increment():
         validate_version_increment("0.3.0", "0.3.0", ["scripts/finalize_change.py"])
 
 
-def _tagged_repo(root: Path, version: str, tag: str) -> None:
-    """A throwaway repository whose single commit is a tagged release."""
-
-    def run(*args: str) -> None:
-        subprocess.run(("git", *args), cwd=root, check=True, capture_output=True, text=True)
-
-    package = root / "src" / "browsertap_mcp"
-    package.mkdir(parents=True, exist_ok=True)
-    (package / "_version.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
-    (package / "server.py").write_text("VALUE = 1\n", encoding="utf-8")
-    run("init", "-q")
-    run("config", "user.email", "btap-test@example.invalid")
-    run("config", "user.name", "BTAP Test")
-    run("config", "commit.gpgsign", "false")
-    run("add", "-A")
-    run("commit", "-q", "-m", "release")
-    run("tag", tag)
-
-
-def test_uncommitted_production_changes_still_require_a_version_increment(tmp_path):
+def test_uncommitted_production_changes_still_require_a_version_increment(tmp_path, tagged_repo
+):
     """The finalizer runs before the commit, so the check must see the worktree.
 
     A commit-range comparison reports an empty change set for a round that is
@@ -176,7 +158,7 @@ def test_uncommitted_production_changes_still_require_a_version_increment(tmp_pa
     while carrying real behaviour changes: the only wiring for this check was a
     CI push event, and nothing had been pushed.
     """
-    _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
+    tagged_repo(tmp_path, "0.3.0", "v0.3.0")
     (tmp_path / "src" / "browsertap_mcp" / "server.py").write_text(
         "VALUE = 2\n", encoding="utf-8"
     )
@@ -224,15 +206,15 @@ def test_base_version_is_readable_from_the_pre_rename_package_path(tmp_path):
     assert result["production_changed"] is True
 
 
-def test_unknown_base_ref_still_reports_a_usable_error(tmp_path):
-    _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
+def test_unknown_base_ref_still_reports_a_usable_error(tmp_path, tagged_repo):
+    tagged_repo(tmp_path, "0.3.0", "v0.3.0")
 
     with pytest.raises(VersionError, match="cannot compare version against"):
         validate_version_bump(tmp_path, "v9.9.9")
 
 
-def test_worktree_comparison_counts_untracked_production_files(tmp_path):
-    _tagged_repo(tmp_path, "0.3.0", "v0.3.0")
+def test_worktree_comparison_counts_untracked_production_files(tmp_path, tagged_repo):
+    tagged_repo(tmp_path, "0.3.0", "v0.3.0")
     (tmp_path / "src" / "browsertap_mcp" / "added.py").write_text("X = 1\n", encoding="utf-8")
 
     with pytest.raises(VersionError, match="did not increase"):
@@ -294,3 +276,24 @@ def test_offline_workflow_has_explicit_quality_gates():
         "pull_request"
         not in workflow.split("Check SemVer bump on release branches", 1)[1].split("- name:", 1)[0]
     )
+
+
+def test_the_offline_gate_runs_on_windows_as_well_as_linux():
+    """The platform every OS-specific failure in this product belongs to.
+
+    A rejected request whose body is left unread resets the connection on
+    wsgiref, the host lock is `SO_EXCLUSIVEADDRUSE`, `pythonw.exe` forwards to a
+    child that holds the port, and an open log file cannot be renamed -- none of
+    which Linux can show. The suite ran on ubuntu only, so every one of those
+    paths was gated by a maintainer's local run and nothing else.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+
+    assert "runs-on: windows-latest" in workflow
+    windows = workflow.split("windows-offline:", 1)[1]
+    assert "--junitxml=artifacts/windows-offline-junit.xml" in windows
+    # The whole point is a second platform, not a second Python matrix, so the
+    # suite itself has to run rather than only the packaging checks.
+    assert "python -m pytest tests -q" in windows
+    # A `shell:` other than bash would make the two jobs' steps stop matching.
+    assert "shell: bash" in windows

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +17,62 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+class _GitRepo:
+    """A throwaway repository, addressed by the operations the gates need."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+
+    def run(self, *args: str) -> str:
+        completed = subprocess.run(
+            ("git", *args),
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    def commit(self, message: str = "change") -> str:
+        """Commit everything in the worktree and return the new commit's sha."""
+        self.run("add", "-A")
+        self.run("commit", "-q", "-m", message)
+        return self.head()
+
+    def head(self) -> str:
+        return self.run("rev-parse", "HEAD")
+
+    def commit_of(self, ref: str) -> str:
+        return self.run("rev-parse", f"{ref}^{{commit}}")
+
+
+@pytest.fixture
+def tagged_repo():
+    """Factory for a repository whose single commit is a tagged release.
+
+    Every version and tag gate compares against a release tag, so several test
+    modules need the same starting point: one commit, one tag, a real version
+    source at the current package path. One builder for all of them, so "what a
+    tagged release looks like" cannot drift between the modules that test it.
+    """
+
+    def build(root: Path, version: str = "0.3.0", tag: str | None = None) -> _GitRepo:
+        repo = _GitRepo(root)
+        package = repo.root / "src" / "browsertap_mcp"
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "_version.py").write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+        (package / "server.py").write_text("VALUE = 1\n", encoding="utf-8")
+        repo.run("init", "-q")
+        repo.run("config", "user.email", "btap-test@example.invalid")
+        repo.run("config", "user.name", "BTAP Test")
+        repo.run("config", "commit.gpgsign", "false")
+        repo.commit("release")
+        repo.run("tag", tag if tag is not None else f"v{version}")
+        return repo
+
+    return build
 
 
 def _free_port_base() -> int:
@@ -122,10 +179,65 @@ def link_bridge_open(monkeypatch):
         bridge.driver.stop_http_server()
 
 
+def _tab_inventory(record: dict) -> dict | None:
+    """The tab set, read the way the maintainer notes read it by hand.
+
+    Returns None when it cannot be read. A preflight that can break the live
+    layer is worse than the manual step it replaces, so an unreadable inventory
+    is a recorded note and the run continues without the check.
+    """
+    from browsertap_mcp import server as S
+    from tests import live_preflight as P
+
+    try:
+        payload = S.list_all_tabs()
+    except Exception as exc:
+        record["notes"].append(f"tab inventory unavailable: {type(exc).__name__}: {exc}")
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        record["notes"].append(f"tab inventory unreadable: {str(payload)[:200]}")
+        return None
+    return P.inventory(data)
+
+
+def _write_live_preflight(record: dict) -> None:
+    """Leave the evidence next to the junit, or say nothing.
+
+    live.yml uploads all of artifacts/, so this is what turns "was the browser
+    idle" from something a maintainer remembers into something the run reports.
+    """
+    import json
+
+    try:
+        target = Path(__file__).resolve().parents[1] / "artifacts"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "live-preflight.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True, default=str) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:  # never let bookkeeping fail a run
+        record["notes"].append(f"could not write live-preflight.json: {exc}")
+
+
 @pytest.fixture(scope="session")
 def driver():
-    """A BrowserBridge talking to an already-running bridge, or skip."""
+    """A BrowserBridge talking to an already-running bridge, or skip.
+
+    Every live test reaches this fixture, directly or through
+    `scratch_session`, which makes it the only place that sees the browser
+    before the first live test and after the last one. So it is also where the
+    live layer's two written preconditions are enforced: nobody may be using
+    the browser while the suite runs, and the tab inventory has to come out the
+    way it went in. `tests/live_preflight.py` holds the reasoning; the sampling,
+    the waiting and the verdict live here.
+    """
+    import os
+    import time
+    import warnings
+
     from browsertap_mcp.browser_bridge import BrowserBridge
+    from tests import live_preflight as P
 
     d = BrowserBridge()
     try:
@@ -134,7 +246,42 @@ def driver():
         pytest.skip(f"bridge unreachable: {e}")
     if not sessions:
         pytest.skip("bridge is up but no tab is connected")
-    return d
+
+    override = os.environ.get(P.OVERRIDE_ENV, "").strip().lower() not in ("", "0", "false", "off")
+    record: dict = {"override": override, "notes": []}
+
+    # Two samples, not one: an inventory on its own cannot tell an idle browser
+    # from a busy one, and "busy" is the state that invalidates the whole run.
+    first = _tab_inventory(record)
+    time.sleep(P.IDLE_WINDOW_SECONDS)
+    baseline = _tab_inventory(record)
+    if first is not None and baseline is not None:
+        idle = P.compare(first, baseline)
+        record["idle_check"] = idle
+        reason = P.busy_browser_reason(idle)
+        if reason:
+            record["notes"].append(reason.splitlines()[0])
+            if not override:
+                _write_live_preflight(record)
+                pytest.skip(reason)
+
+    try:
+        yield d
+    finally:
+        final = _tab_inventory(record) if baseline is not None else None
+        problem = None
+        if baseline is not None and final is not None:
+            drift = P.compare(baseline, final)
+            record["drift_check"] = drift
+            problem = P.drift_problem(drift)
+        _write_live_preflight(record)
+        if problem:
+            # Teardown, so this cannot be attributed to one test -- which is
+            # right: the claim is about the suite, not about any single case.
+            if override:
+                warnings.warn(problem, stacklevel=1)
+            else:
+                raise AssertionError(problem)
 
 
 @pytest.fixture(scope="session")

@@ -223,6 +223,13 @@ token 不一致，不是扩展坏了**：
 
 - **症状**：curl `/link` 直接 401；MCP 工具报 unauthorized；扩展那边一切正常（WS 18765 不走
   token，按 origin 校验）。
+- **先别猜路径，让两边自己报**：`browsertap doctor`（或 `get_setup_status`）里的 `state_paths`
+  是**当前这个进程**解析出来的 `state_dir` / `token_file` / `token_fingerprint`（`sha256:` 前 8 位，
+  不是 token 本身）/ `auth_enabled`，`state_dir_kind` 会说明它来自 `env`、`default` 还是
+  pre-0.4.0 的 `legacy`（`~/.agent-browser-mcp`）目录。常驻 bridge 在 `diagnose` 里报**它自己**那一份，
+  两边不一致时结果里多出 `state_paths_disagreement`，逐字段列出 `this_process` 与 `bridge` 的值，
+  并把处置写进 `notes` 第一条：只有 `bridge_token_is_from_before_the_file_changed` 才是
+  "重启 bridge 一次"；路径本身不同则是两个进程的环境不同，重启没用，得先让路径一致。
 - **正常生命周期**：首次启动自动创建文件；关闭浏览器/编辑器不会轮换。卸载扩展或重装 Python 包也
   保留该文件，所以旧 token 是可复用状态，不会阻碍重装。
 - **旧 env 迁移**：只有文件不存在时，`BROWSERTAP_BRIDGE_TOKEN` 才导入一次；文件存在后它不能
@@ -262,6 +269,11 @@ token 不一致，不是扩展坏了**：
 - **xterm 输入不是桥故障**：`page_type` 会把 `.xterm` 容器/后代自动改投 `.xterm-helper-textarea`。
   终端无输入先确认扩展已 Reload 到当前版本，再显式传该页的 `session_id`；清当前 shell 行用
   `page_press("ctrl,u")`，不要因 `clear=true` 不符合终端行编辑语义就重启桥。
+- **`obscured` / `outside_viewport` 不是桥故障**：`page_click` 的 selector 模式在派发前会问页面那个
+  坐标上是谁，`occluded_by` 里的元素（cookie 横幅、遮罩、sticky 页头）盖住了目标就**一个事件都不派发**，
+  滚动后仍在视口外则是 `outside_viewport`。桥、扩展、CDP 都是好的，是页面挡住了：关掉遮挡物、
+  `scroll_page`、或换一个 locator 再重试。不要因此重启桥或改走物理输入 —— 旧行为是照点并报成功，
+  那才是真正的静默失败。成功的点击带 `hit_verified: true`；坐标模式不做这项判定。
 - **对话框/验证码/权限不是桥故障**：`blocked_by_dialog`/`blocked_by_beforeunload` →
   `handle_dialog`；`challenge_stalled` → 把同一 tab 交还用户；`busy` → 稍后重试，别循环。
   `set_site_permission` 返回 `unsupported` 表示浏览器无法提供可精确恢复的 API（如 clipboard/托管/

@@ -17,9 +17,12 @@ failures. For normal operating workflows, see the [usage guide](USAGE.md).
    requires a manual reload of the unpacked extension.
 4. Re-run `doctor` and confirm that at least one normal page is connected.
 
-Bridge logs are stored at `~/.browsertap/bridge.log`. Diagnostic output
-may contain URLs or other browser context and should be reviewed before it is
-shared.
+Bridge logs are stored at `~/.browsertap/bridge.log`, capped at 5 MB with one
+previous generation kept as `bridge.log.old`. URLs are redacted where they are
+logged -- scheme, host and a truncated path survive, query strings and fragments
+do not -- but the log still identifies which sites the browser visited and still
+carries error text from the page, so review both files before sharing them.
+[SECURITY.md](../SECURITY.md) states exactly what may and may not appear there.
 
 ## Connection problems
 
@@ -32,10 +35,10 @@ or open a new URL, then run `doctor` again.
 
 ### The MCP client cannot start the server
 
-Confirm that the package is installed and that `browsertap-mcp` is available
+Confirm that the package is installed and that `browsertap` is available
 on `PATH`. When the package is installed in a virtual environment, configure
 the MCP client with the absolute executable path. On Windows this is typically
-`<repo>\.venv\Scripts\browsertap-mcp.exe`; on Linux/macOS it is
+`<repo>\.venv\Scripts\browsertap.exe`; on Linux/macOS it is
 `<repo>/.venv/bin/browsertap`.
 
 If OS-level input or desktop capture reports a missing dependency, reinstall
@@ -49,9 +52,15 @@ with the desktop extra, for example:
 
 The bridge and the MCP process must resolve the same token file. The default is
 `~/.browsertap/bridge-token`; separate editor-specific token values are
-not required. If both processes use the default path, a bridge from an older
-installation may still be running. Restart the bridge and retry without
-printing or copying the token into diagnostics. The result and long-poll
+not required. Do not guess which file each process read: `browsertap doctor`
+reports `state_paths` for the process that ran it and, when the two disagree,
+`state_paths_disagreement` naming each differing field for `this_process` and
+for `bridge`. Tokens are compared as a truncated `sha256:` fingerprint, so the
+comparison never prints or copies the token itself.
+`bridge_token_is_from_before_the_file_changed` means the daemon locked an older
+token into memory at start-up: restart the bridge and retry. Differing
+`state_dir` or `token_file` values mean the two processes have different
+environments, and a restart will not help until the paths agree. The result and long-poll
 channels (`/api/result`, `/api/longpoll`) use the same token and answer the same
 `401`. The response body is the plain-text line
 `unauthorized: missing or bad bridge token`, not JSON, so a client that parses
@@ -120,7 +129,7 @@ If another application owns the range, choose a free three-port range and set
 the base WebSocket port in `BROWSERTAP_BRIDGE_PORT` for the MCP/bridge process.
 The extension cannot read environment variables, so tell it the same base port
 once: open `chrome://extensions`, click **service worker** under **BrowserTap
-MCP Bridge**, and run this in the console that opens:
+Bridge**, and run this in the console that opens:
 
 ```js
 chrome.storage.local.set({ btap_port: 19765 })   // use your base port

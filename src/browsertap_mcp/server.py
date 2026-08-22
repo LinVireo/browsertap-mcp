@@ -49,7 +49,12 @@ from . import (
     physical_input,  # noqa: E402
     simphtml,  # noqa: E402
 )
-from .browser_bridge import BridgeNoResponseError, BrowserBridge  # noqa: E402
+from . import bridge as bridge_module  # noqa: E402
+from .browser_bridge import (  # noqa: E402
+    BridgeNoResponseError,
+    BrowserBridge,
+    state_paths_report,
+)
 from .page_input import (  # noqa: E402
     ChallengeAttemptTracker,
     InputValidationError,
@@ -385,9 +390,18 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def _bridge_log_path() -> Path:
+    """The daemon's log, rotated by rename if the *last* daemon left it oversized.
+
+    This runs in the spawning process, where nothing holds the file open, so a
+    rename is safe here. It is not the whole story: the handle opened below is
+    inherited by the daemon and held for its entire life, so this check cannot
+    fire again while a bridge is up. The long-lived half of the cap lives in
+    ``bridge.rotate_own_log``, and the cap itself is shared so the two cannot
+    drift apart.
+    """
     path = state_dir(create=True) / "bridge.log"
     try:
-        if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
+        if path.exists() and path.stat().st_size > bridge_module.LOG_MAX_BYTES:
             path.replace(path.with_suffix(".log.old"))
     except OSError:
         pass
@@ -955,6 +969,30 @@ def get_setup_status() -> dict[str, Any]:
         # something the newer extension deliberately dropped.
         or (bool(missing_extension_capabilities) and not extension_is_newer)
     )
+    # The 401 this catches has no other symptom: the rejection body names no
+    # path, so "which token file did each side read?" is unanswerable from the
+    # error alone. Compare only the fields that decide the check, and only when
+    # the daemon actually reported its own -- an older bridge does not.
+    local_state_paths = state_paths_report()
+    bridge_state_paths = diagnosis.get("state_paths")
+    state_paths_disagreement: dict[str, Any] = {}
+    state_paths_advice = ""
+    if isinstance(bridge_state_paths, dict):
+        for field in ("state_dir", "token_file", "token_fingerprint", "auth_enabled"):
+            mine, theirs = local_state_paths.get(field), bridge_state_paths.get(field)
+            if mine != theirs:
+                state_paths_disagreement[field] = {"this_process": mine, "bridge": theirs}
+        if bridge_state_paths.get("token_matches_file") is False:
+            state_paths_disagreement["bridge_token_is_from_before_the_file_changed"] = True
+    if state_paths_disagreement:
+        state_paths_advice = (
+            "The bridge daemon and this process disagree about their state directory, "
+            "token file or token (see state_paths_disagreement). A token file that both "
+            "sides name identically but the daemon no longer matches means the daemon "
+            "predates the file: run `browsertap bridge --restart`. Different paths mean "
+            "the two processes were started with different environments; fix that first, "
+            "because a restart will not."
+        )
     if bridge_error or diagnosis.get("cause") == "bridge_unreachable":
         component_status = "bridge_unreachable"
         component_action = "restart_bridge"
@@ -988,6 +1026,10 @@ def get_setup_status() -> dict[str, Any]:
         "bridge_host": _DRIVER_HOST,
         "bridge_ws_port": _DRIVER_PORT,
         "bridge_http_port": _DRIVER_PORT + 1,
+        # Where *this* process keeps state and which token file it reads. The
+        # daemon answers the same question inside `diagnosis.state_paths`, and
+        # the two can disagree -- see the note added below.
+        "state_paths": local_state_paths,
         "remote_mode": driver.is_remote,
         "connected_tabs": len(sessions),
         "default_session_id": driver.default_session_id,
@@ -1012,6 +1054,9 @@ def get_setup_status() -> dict[str, Any]:
         status["bridge_error"] = bridge_error
     if extension_status_error:
         status["extension_status_error"] = extension_status_error
+    if state_paths_disagreement:
+        status["state_paths_disagreement"] = state_paths_disagreement
+        status["notes"].insert(0, state_paths_advice)
     return status
 
 
@@ -3946,7 +3991,19 @@ def _page_selector_info(
     offset_y: float,
     session_id: str,
     timeout: float,
+    *,
+    verify_hit: bool = False,
+    center_x: bool = False,
+    center_y: bool = False,
 ) -> dict[str, Any]:
+    """Resolve a locator to a click point, optionally proving the point is hittable.
+
+    ``verify_hit`` costs nothing extra: the proof runs inside the resolver's own
+    round trip, before any ``Input.*`` command exists. ``center_x``/``center_y``
+    say that the caller omitted that offset, so the point under test is the
+    element centre -- the same point the caller is about to compute from
+    ``width``/``height`` below.
+    """
     normalized = normalize_locator(selector)
     script = (
         resolve_selector_script(
@@ -3954,10 +4011,19 @@ def _page_selector_info(
             offset_x,
             offset_y,
             require_interactable=True,
+            verify_hit=verify_hit,
+            center_x=center_x,
+            center_y=center_y,
         )
         if isinstance(normalized, str)
         else structured_locator_script(
-            normalized, purpose="click", offset_x=offset_x, offset_y=offset_y
+            normalized,
+            purpose="click",
+            offset_x=offset_x,
+            offset_y=offset_y,
+            verify_hit=verify_hit,
+            center_x=center_x,
+            center_y=center_y,
         )
     )
     response = exec_js(
@@ -4018,7 +4084,11 @@ def _page_type_target_info(
         "Click a CSS/structured locator or viewport coordinates in a specific real browser tab "
         "using background CDP input. Ambiguous or unreachable targets dispatch nothing; the tab "
         "is not activated and the desktop cursor does not move. Selector offsets are measured "
-        "from the element's top-left corner; an omitted axis uses the element centre."
+        "from the element's top-left corner; an omitted axis uses the element centre. In selector "
+        "mode the point is hit-tested before anything is dispatched: an element below the fold is "
+        "scrolled into view, and a point owned by another element returns status 'obscured' (with "
+        "occluded_by) or 'outside_viewport' having clicked nothing. Coordinate mode is not "
+        "hit-tested -- coordinates name a pixel, not an element."
     )
 )
 def page_click(
@@ -4059,7 +4129,14 @@ def page_click(
         resolver_x = 0 if offset_x is None else offset_x
         resolver_y = 0 if offset_y is None else offset_y
         before = _page_selector_info(
-            selector, resolver_x, resolver_y, target_session, timeout
+            selector,
+            resolver_x,
+            resolver_y,
+            target_session,
+            timeout,
+            verify_hit=True,
+            center_x=offset_x is None,
+            center_y=offset_y is None,
         )
         if not before.get("found"):
             _clear_page_challenge(target_session)
@@ -4073,6 +4150,23 @@ def page_click(
                 "target": {"selector": selector},
                 **({"matches": before["matches"]} if before.get("matches") is not None else {}),
                 **({"stage": before["stage"]} if before.get("stage") else {}),
+                **({"occluded_by": before["occludedBy"]} if before.get("occludedBy") else {}),
+                **(
+                    {"scrolled_into_view": True}
+                    if before.get("scrolledIntoView")
+                    else {}
+                ),
+                **(
+                    {
+                        "next_action": (
+                            "Nothing was dispatched: another element owns that pixel. "
+                            "Dismiss the overlay, or scroll or resize the tab, then call "
+                            "page_click again."
+                        )
+                    }
+                    if before.get("status") in {"obscured", "outside_viewport"}
+                    else {}
+                ),
             }
 
         resolved_x = before.get("x")
@@ -4117,6 +4211,11 @@ def page_click(
             "y": resolved_y,
             "offset_x": offset_x,
             "offset_y": offset_y,
+            # Proven before dispatch: this point resolved to the target element,
+            # not to whatever is drawn on top of it. False only where the page
+            # denied the browser its own hit test.
+            "hit_verified": bool(before.get("hitVerified")),
+            "scrolled_into_view": bool(before.get("scrolledIntoView")),
         }
 
         after = _page_selector_info(

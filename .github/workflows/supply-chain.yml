@@ -1,0 +1,125 @@
+name: BTAP supply chain
+
+# Two questions this repository could not answer before: did a credential ever
+# reach a commit, and what exactly does `pip install browsertap-mcp` pull onto a
+# stranger's machine. Both are answered here on every push and once a week --
+# weekly because an advisory can appear without a single line of this repository
+# changing.
+on:
+  push:
+  pull_request:
+  schedule:
+    # Monday morning, off the hour so it does not queue behind everyone's cron.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # The whole point is the history: a secret that was committed and then
+          # deleted is still published. A shallow clone would scan one commit and
+          # report a clean repository.
+          fetch-depth: 0
+      - name: Install the pinned gitleaks build
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          # sha256 of gitleaks_8.30.1_linux_x64.tar.gz, read out of that release's
+          # own checksums file. Version and digest are bumped together and never
+          # separately: a scanner resolved at run time is a third party that can
+          # change what it does to this repository between two green runs.
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          base=https://github.com/gitleaks/gitleaks/releases/download
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location --output gitleaks.tar.gz \
+            "${base}/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+      # --redact is not cosmetic: a scan report is world-readable build output, so
+      # printing the secret it found would publish the very thing it detected.
+      - name: Scan the full history for secrets
+        run: >-
+          ./gitleaks git . --no-banner --redact --exit-code 1
+          --report-format json --report-path gitleaks-history.json
+      - name: Scan the working tree for secrets
+        run: >-
+          ./gitleaks dir . --no-banner --redact --exit-code 1
+          --report-format json --report-path gitleaks-worktree.json
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btap-secret-scan
+          path: |
+            gitleaks-history.json
+            gitleaks-worktree.json
+          if-no-files-found: ignore
+
+  dependencies:
+    name: Dependency audit and SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      # The runtime closure, not this job's environment: development extras are
+      # not what a user installs, and auditing them would report risk nobody is
+      # exposed to while hiding nothing.
+      - name: Resolve the closure a plain install produces
+        run: |
+          set -euo pipefail
+          python -m venv runtime-venv
+          ./runtime-venv/bin/python -m pip install --quiet --upgrade pip
+          ./runtime-venv/bin/python -m pip install --quiet .
+          ./runtime-venv/bin/python -m pip freeze --exclude-editable > runtime-requirements.txt
+          cat runtime-requirements.txt
+      # Informational here, blocking in release.yml. An advisory published
+      # overnight would otherwise turn every branch red for a reason unrelated to
+      # the commit that is being pushed -- but it is a perfectly good reason not
+      # to publish a new version, which is where the same check is required.
+      - name: Audit the closure against the advisory database (informational)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pip-audit==2.10.1
+          pip-audit --requirement runtime-requirements.txt --no-deps --strict --desc \
+            --format markdown --output pip-audit.md
+          cat pip-audit.md
+      - name: Describe the closure as a CycloneDX SBOM
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet cyclonedx-bom==7.3.1
+          mkdir -p sbom
+          python -m cyclonedx_py environment ./runtime-venv --spec-version 1.6 \
+            --output-format JSON --output-file sbom/browsertap-mcp.cdx.json
+          python -c "import json; print(len(json.load(open('sbom/browsertap-mcp.cdx.json')).get('components', [])), 'components described')"
+      - name: Upload the audit and the SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btap-supply-chain
+          path: |
+            runtime-requirements.txt
+            pip-audit.md
+            sbom/
+          if-no-files-found: ignore

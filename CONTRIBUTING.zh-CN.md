@@ -30,11 +30,20 @@ python -m scripts.check_tool_docs --format markdown
 python -m scripts.versioning check
 python -m build --wheel --sdist --outdir artifacts/dist
 python -m scripts.check_distribution artifacts/dist
+python -m scripts.check_install artifacts/dist --no-deps
 ```
 
-这就是 `scripts/finalize_change.py` 与 `.github/workflows/test.yml` 使用的顺序；最后两条
-必须成对执行：`check_distribution` 检查的正是上一条 build 写出的归档，单独运行只会报
-`no wheel found`，不是通过。
+这就是 `scripts/finalize_change.py` 与 `.github/workflows/test.yml` 使用的顺序；最后三条
+必须连在一起执行：build 写出的归档正是 `check_distribution` 读取、`check_install` 安装的
+那批，单独运行任一条只会报 `no wheel found`，不是通过。
+
+`check_distribution` 与 `check_install` 回答的不是同一个问题。前者读归档**内部**有什么；
+后者把 wheel 装进一个全新虚拟环境（路径上没有本仓库）并在那里真的用起来 —— 这是让
+"陌生人 `pip install browsertap-mcp` 之后手里的东西能不能跑"从猜测变成结论的唯一办法。
+本地跑的是 `--no-deps`：不访问索引，因此只证明**布局** —— 元数据版本、命令入口、随包
+skills、扩展文件。CI 不带这个开关，会真的执行 `browsertap --version`、`skill-path`、
+`extension-path`。报告里的 `mode` 与 `proves_cli` 会说明跑的是哪一种，所以只过了布局
+的那次不会被当成"CLI 可用"。
 
 门禁规则集是 `ruff check`。`ruff format` 不是门禁，且现有源码大多不符合它的格式，
 对只做局部修改的文件跑一遍会让无关的重排淹没本次改动。请按周围代码的既有风格书写。
@@ -45,9 +54,26 @@ live 测试必须显式运行：
 python -m pytest tests -q -m live
 ```
 
-live 测试会操作已连接的真实浏览器，并可能暂时影响前台。只能在准备好的机器上运行；
-运行前记录用户当前激活的标签页，复用共享 scratch fixture，结束后核对清理与现场恢复。
-不得为 live 测试增加 headless 或 Playwright 回退路径，因为它们验证的是另一套产品契约。
+live 测试会操作已连接的真实浏览器，并可能暂时影响前台。只能在准备好的机器上运行，
+并复用共享 scratch fixture，不要每个测试各开一个标签页。不得为 live 测试增加 headless 或
+Playwright 回退路径，因为它们验证的是另一套产品契约。
+
+有两个前置条件原本写在这里、靠人自己遵守：跑的时候不能有人在用那个浏览器；
+标签页清单进去什么样、出来就要是什么样。现在 `tests/conftest.py` 的 session fixture
+会强制检查两者（判定逻辑在 `tests/live_preflight.py`）：
+
+- 第一个 live 测试之前，相隔 1.5 秒取两次标签页快照。期间只要有标签页新开、
+  关闭、跳转或切前台，就说明有人在用，此时直接 skip 整个 live 层，而不是对着一个
+  不断变动的目标硬跑。skip 不等于通过：`scripts/acceptance_report.py` 只要看到有
+  skipped 就会判 live 门禁失败。
+- 最后一个测试之后，拿当时的基线再比一次。测试套件留下的标签页、关掉的标签页、
+  或把用户正在看的页面弄跳转了，都会在 teardown 里失败。前台焦点变动不算：
+  把标签页提到前台本身就是它要做的事。
+- 两个判定，以及“当时浏览器到底空不空”，都会写进
+  `artifacts/live-preflight.json`，由 `live.yml` 跟 junit 一起上传。
+
+机器实在没有空闲的时候，可以设 `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` 照跑：结束时的检查降为
+警告，报告里会记下“这份证据是对着有人在用的浏览器跑出来的”。
 
 公开的 `test.yml` 只在 GitHub 托管 runner 上运行离线门禁。`live.yml` 只能手动触发，
 目标是预先配置的 Windows 自托管 runner。若 runner 的 `python` 不是指定解释器，应设置
@@ -61,6 +87,7 @@ environment 保护规则。
 ```text
 python -m scripts.finalize_change --bump none --skip-live
 python -m scripts.evidence_manifest --check
+python -m scripts.check_release_tag --allow-missing-tag
 ```
 
 finalizer 会先把上一轮证据移动到带时间戳的 `artifacts/archive/`，再生成一套规范证据：
@@ -141,7 +168,20 @@ python -m scripts.check_tool_docs --check-installed-skills \
 - 旧版 `src/browsertap_mcp/chrome_extension/config.js`/TID 页面命令通道已删除。
   该文件不得进入 Git 或 Python 发行包，发行门禁会拒绝它。
 - 不得包含 bridge token、Cookie、`.env` 文件、浏览器 profile 或复制的用户内容。
-  公开仓库发布前，对工作树和完整 Git 历史运行 secret scan。
+  `.github/workflows/supply-chain.yml` 每次 push 都会扫描工作树与完整 Git 历史，
+  用的 gitleaks 同时锁定版本**和** sha256。公开仓库发布前，本地也跑同样两条：
+
+  ```bash
+  gitleaks git . --no-banner --redact
+  gitleaks dir . --no-banner --redact
+  ```
+
+  事后真正起作用的是历史那一半：提交过又删掉的 secret 依然是公开的，只有改写历史能
+  移除它，再补一个提交不行。`--redact` 保证扫描器不会把它发现的 secret 打进任何人都
+  能读到的构建输出。
+- 同一个 workflow 还会解析 `pip install` 实际拉进来的依赖闭包、对着漏洞库审计它，并把
+  CycloneDX SBOM 作为构建产物发布。该审计在这里是提示性的，在 `release.yml` 里是阻断性
+  的：一夜之间新增的公告不该让所有分支变红，但它确实是"这个版本先别发"的正当理由。
 - wheel 与 source distribution 应作为 GitHub Release 资产上传。不要把它们、本地验收
   报告或 live 浏览器证据提交到 Git。
 
@@ -186,8 +226,17 @@ workflow 会针对**即将上传的那批归档**重跑离线测试、文档检�
 `python -m twine check --strict dist/*`：只有它会按索引的方式渲染长描述，而且是最后一次
 还免费的检查。
 
-tag 指向的提交若不是封存验收证据的那个提交，发布出去的就是没人验证过的东西。创建 Release
-之前先确认 `git rev-parse HEAD` 与封存报告里的 `verified_at` 一致。
+之后它会把刚构建出的 wheel 装进一个全新虚拟环境、在那里运行命令入口
+（`scripts.check_install`），审计这个 wheel 会拉到用户机器上的依赖闭包，并把该闭包的
+CycloneDX SBOM 作为**单独**产物写出 —— 单独是因为 publish 作业会把 `dist/` 下的所有东西
+上传到索引。
+
+tag 指向的提交若不是封存验收证据的那个提交，发布出去的就是没人验证过的东西。
+`python -m scripts.check_release_tag` 用机械方式回答这件事：`v<源码版本>` 不存在、指向
+别的提交（会同时报出两个 sha、相差几个提交、哪些生产文件不同），或者仍有未提交的生产
+文件（任何 tag 都无法描述还没进提交的文件）时，它都会失败。`release.yml` 在安装和构建
+任何东西之前先跑它。打完 tag、发布 Release 之前请自己也跑一次，并确认封存报告里的
+`verified_at` 就是那个提交。
 
 ## Pull Request 检查表
 

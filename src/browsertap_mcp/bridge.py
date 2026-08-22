@@ -29,6 +29,73 @@ def bridge_pid_path() -> Path:
     return bridge_state_dir() / "bridge.pid"
 
 
+def bridge_log_path() -> Path:
+    return bridge_state_dir() / "bridge.log"
+
+
+#: Size at which the bridge log rotates. Mirrors the check in
+#: ``server._bridge_log_path``; both must agree or the documented "rotates at
+#: 5 MB" is true of only one of them.
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+#: How often the idle daemon wakes to look at its own log. The loop used to
+#: sleep for an hour at a time and do nothing else.
+LOG_CHECK_SECONDS = 300.0
+
+
+def rotate_own_log(*, max_bytes: int = LOG_MAX_BYTES) -> bool:
+    """Rotate this daemon's log, in place, while it is still open.
+
+    ``server._bridge_log_path`` rotates by renaming -- but it runs in the
+    *spawning* process, and the handle it opens is inherited by this daemon as
+    stdout and stderr and then held for the whole lifetime of the process. So
+    that check only ever fires at spawn time: a bridge that stays up for weeks
+    grows its log without bound, which is exactly the long-lived case the 5 MB
+    cap exists for. Restarting the bridge is what used to "fix" it.
+
+    Rotating from inside the daemon has to work on a file that is still open,
+    which rules out the rename: Windows refuses to rename a file that has an
+    open handle without ``FILE_SHARE_DELETE``, and Python does not ask for it.
+    Copy the contents aside and truncate in place instead. The handle keeps
+    pointing at the same file, so nothing needs to re-open stderr and a crash
+    traceback still lands where the operator is told to look.
+
+    Returns True when it rotated. A few lines written between the copy and the
+    truncate are lost; for a log that is already being discarded at 5 MB that is
+    a better trade than either unbounded growth or a second handle.
+    """
+    stream = getattr(sys, "stderr", None)
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return False  # captured, closed, or not a real file: nothing to rotate
+    try:
+        stream.flush()
+        size = os.fstat(fd).st_size
+    except (OSError, ValueError):
+        return False
+    if size <= max_bytes:
+        return False
+    path = bridge_log_path()
+    try:
+        with open(path, "rb") as current, open(
+            path.with_suffix(".log.old"), "wb"
+        ) as previous:
+            while True:
+                chunk = current.read(1024 * 1024)
+                if not chunk:
+                    break
+                previous.write(chunk)
+    except OSError:
+        return False  # keep appending rather than lose the log entirely
+    try:
+        os.ftruncate(fd, 0)
+    except OSError:
+        return False
+    logger.info("Rotated bridge log at %s bytes", size)
+    return True
+
+
 class ProcessIdentityUnavailable(RuntimeError):
     """The pid may well exist, but this process cannot identify it.
 
@@ -384,7 +451,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         logger.info("Bridge started: ws=%s http=%s pid=%s", port, port + 1, os.getpid())
         while True:
-            time.sleep(3600)
+            time.sleep(LOG_CHECK_SECONDS)
+            rotate_own_log()
     except KeyboardInterrupt:
         logger.info("Bridge stopped")
         return 0

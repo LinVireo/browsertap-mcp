@@ -7,7 +7,7 @@ trust boundary.
 
 ## Supported versions
 
-Security fixes are applied to the current `0.3.x` release line. Reproduce a
+Security fixes are applied to the current `0.4.x` release line. Reproduce a
 report against the latest release before submitting it when practical.
 
 ## Reporting a vulnerability
@@ -46,9 +46,33 @@ physical input.
 - `BROWSERTAP_BRIDGE_AUTH=off` (also `0`, `false`, `disabled`) disables that
   authentication entirely: every token-guarded route then accepts any local
   request, with the consequence described above. It exists only for an
-  explicitly trusted local compatibility setup, it is not reported by
-  `get_setup_status` or `browsertap doctor`, and a value left in an
-  editor's environment is therefore silent. Leave it unset.
+  explicitly trusted local compatibility setup. `get_setup_status` and
+  `browsertap doctor` report it as `state_paths.auth_enabled`, for the MCP
+  session and for the running daemon separately, because the two are different
+  processes with different environments and only the daemon's answer decides
+  whether a route is actually guarded. Leave it unset.
+- The state directory reported as `state_paths.state_dir` (`~/.browsertap`, or
+  `~/.agent-browser-mcp` on an install that predates 0.4.0) holds the token,
+  the pid record, and `bridge.log`. Its contents are readable by the local
+  user; BTAP does not rely on file permissions for the token's secrecy, only on
+  the local-user trust boundary stated above.
+- `bridge.log` is the file operators are asked to attach to a bug report, so
+  what may be written into it is a policy, not an accident. Page URLs are
+  redacted at the log call: the scheme, host, and a truncated path survive;
+  query strings and fragments become `?...`/`#...`, credentials in the
+  authority are dropped, and `file:`, `data:`, `blob:`, and `javascript:` URLs
+  are reduced to `<scheme>:<redacted>` because for those the location *is* the
+  content. A caller's `wait_for_url` pattern gets the same treatment. The token
+  value is never logged in any form; the log records only the path of the file
+  it was read from, and the diagnostics in `get_setup_status` compare tokens as
+  a truncated `sha256:` fingerprint rather than by value. What the log does
+  still contain is tab ids, timings, client
+  names, error text from the browser, and enough of each URL to identify a
+  site — review it before attaching it, and note that `execute_js` script text
+  or page data reaching the log through an exception message is not redacted.
+  It caps at 5 MB: the daemon copies the file to `bridge.log.old` and truncates
+  in place every 5 minutes when oversized, so exactly one previous generation
+  is kept and both files need the same review.
 - WebSocket handshakes accept extension origins by default and reject missing
   origins. `BROWSERTAP_WS_ALLOWED_ORIGINS` adds exact trusted origins;
   `BROWSERTAP_WS_ALLOW_NO_ORIGIN=1` permits origin-less local clients. Both

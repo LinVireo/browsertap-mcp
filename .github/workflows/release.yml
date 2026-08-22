@@ -40,6 +40,19 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
+      # The version being published comes from the source tree, not from the ref
+      # that started this run, so a tag left behind on an older commit would ship
+      # a tree nobody validated under that name. This is the cheapest step that
+      # can fail, so it runs before anything is installed or built.
+      # A TestPyPI rehearsal may legitimately run from a branch that is not tagged
+      # yet, so there a missing tag is a note -- but a tag that points somewhere
+      # else is still a failure.
+      - name: Check the release tag names this commit (rehearsal)
+        if: github.event_name == 'workflow_dispatch' && inputs.index == 'testpypi'
+        run: python -m scripts.check_release_tag --allow-missing-tag
+      - name: Check the release tag names this commit
+        if: github.event_name == 'release' || inputs.index == 'pypi'
+        run: python -m scripts.check_release_tag
       - name: Install package and development dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,desktop]"
       # A release must not ship a tree that fails its own gates. This is the
@@ -58,11 +71,45 @@ jobs:
       # no machine-local data, and the publishing metadata the index needs.
       - name: Check distribution contents and metadata
         run: python -m scripts.check_distribution dist
+      # And this is the other question a reader actually cares about: does a
+      # stranger's `pip install` leave them with something that runs. The wheel
+      # goes into a throwaway virtual environment with no repository on the path,
+      # and the console script, the packaged skills, and the extension files are
+      # exercised there rather than inferred from the archive listing.
+      - name: Check a clean install of the built wheel
+        run: python -m scripts.check_install dist
       # `twine check` is the other half: it renders the long description the way
       # the index will. Only a built archive can be checked this way, and only
       # before the upload -- afterwards the version is spent.
       - name: Check the rendered long description
         run: python -m twine check --strict dist/*
+      # Supply-chain evidence for exactly what is about to be published: the
+      # dependency closure this wheel pulls onto a user's machine, audited against
+      # the advisory database, plus a CycloneDX SBOM of that same closure. Blocking
+      # on purpose, unlike the informational run in supply-chain.yml -- a
+      # known-vulnerable dependency is a reason not to publish, and this is the
+      # last point at which not publishing is still free.
+      - name: Audit and describe what the wheel installs
+        run: |
+          set -euo pipefail
+          python -m venv sbom-venv
+          ./sbom-venv/bin/python -m pip install --quiet --no-input dist/*.whl
+          ./sbom-venv/bin/python -m pip freeze --exclude-editable > runtime-requirements.txt
+          cat runtime-requirements.txt
+          python -m pip install --quiet pip-audit==2.10.1 cyclonedx-bom==7.3.1
+          pip-audit --requirement runtime-requirements.txt --no-deps --strict --desc
+          mkdir -p sbom
+          python -m cyclonedx_py environment ./sbom-venv --spec-version 1.6 \
+            --output-format JSON --output-file sbom/browsertap-mcp.cdx.json
+      # A separate artifact, never dist/: the publish job uploads everything under
+      # dist/ to the index, and a stray .json there would either be rejected or
+      # published as part of the release.
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: btap-sbom
+          path: sbom/
+          if-no-files-found: error
       # The version the archives carry is what the index will hold forever, so it
       # is printed here rather than inferred from the tag by a reader later.
       - name: Report the version being published

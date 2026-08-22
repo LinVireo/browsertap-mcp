@@ -62,8 +62,10 @@ jobs:
 
             python -m pytest tests/ -q -m live
 
-          and leave the browser idle while they run -- CONTRIBUTING.md explains
-          why a browser in use makes the failover test flaky.
+          and leave the browser idle while they run. The suite checks that for
+          itself now: it samples the tab list before the first test and skips the
+          whole live layer if anything moved, then compares the inventory again
+          at the end. CONTRIBUTING.md describes both checks and the override.
           EOF
           exit 1
       - name: Report prerequisites satisfied

@@ -88,6 +88,58 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
         # `ruff format` is not a gate and most sources are not format-clean;
         # telling contributors to run it produces unrelated reflow diffs.
         assert "ruff format --check path/to/changed.py" not in text
+        # The install gate sits in the same block as the build, and locally it is
+        # the layout-only variant: a guide that omits that flag sends a reader
+        # with no index access into a failure that proves nothing about the tree.
+        assert "python -m scripts.check_install artifacts/dist --no-deps" in text
+        assert text.index("python -m scripts.check_distribution artifacts/dist") < text.index(
+            "python -m scripts.check_install artifacts/dist --no-deps"
+        )
+        # Both guides carry the tag check and both halves of the secret scan, or
+        # one language ships a weaker release procedure than the other.
+        assert "python -m scripts.check_release_tag --allow-missing-tag" in text
+        assert "gitleaks git . --no-banner --redact" in text
+        assert "gitleaks dir . --no-banner --redact" in text
+        # The live preconditions are enforced by a fixture now, so both guides
+        # have to name the override and stop telling readers to check the tab
+        # inventory by hand -- a guide that still asks for the manual step is a
+        # guide that says the automated one does not exist.
+        assert "BTAP_LIVE_ALLOW_BUSY_BROWSER=1" in text
+        assert "tests/live_preflight.py" in text
+        assert "artifacts/live-preflight.json" in text
+
+
+def test_the_readmes_open_with_a_three_step_start():
+    """The first screen has to hand the reader a command, not a feature list.
+
+    Checked per language rather than in the shared loop above: a first-screen
+    block is exactly the kind of edit that lands in one README and is forgotten
+    in the other, and the shared loop cannot tell which text it is holding.
+    """
+    for name, heading, features in (
+        ("README.md", "## Start in 60 seconds", "## Key features"),
+        ("README.zh-CN.md", u"## 60 秒上手", u"## 核心能力"),
+    ):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert heading in text, name
+        # Above the feature list, or it is not on the first screen any more.
+        assert text.index(heading) < text.index(features), name
+        block = text.split(heading, 1)[1].split(features, 1)[0]
+
+        # All three steps, in the one place a stranger will actually read.
+        assert 'pip install -e ".[desktop]"' in block, name
+        assert "browsertap extension-path" in block, name
+        assert "claude mcp add browsertap" in block, name
+        # The step that cannot be scripted has to be named as manual here; it is
+        # the whole reason the other two being one-liners is not the full story.
+        assert "chrome://extensions" in block, name
+        assert ("Load unpacked" in block) or (
+            u"加载已解压的扩展程序" in block
+        ), name
+        # And the first prompt returning nothing is the most likely outcome of a
+        # 60-second install, so the diagnostic belongs in the block, not 500
+        # lines down under Troubleshooting.
+        assert "browsertap doctor" in block, name
 
 
 def test_public_docs_preserve_background_and_coordinate_semantics():

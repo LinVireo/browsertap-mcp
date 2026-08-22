@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import json
 import logging
@@ -10,6 +11,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import bottle
 import requests
@@ -17,9 +19,83 @@ from bottle import request
 from simple_websocket_server import WebSocket, WebSocketServer
 
 from ._version import __version__
-from .paths import state_dir
+from .paths import (
+    DEFAULT_STATE_DIR_NAME,
+    LEGACY_STATE_DIR_NAME,
+    STATE_DIR_ENV,
+    state_dir,
+)
 
 logger = logging.getLogger(__name__)
+
+
+#: Longest path kept in a log line. Enough to tell two pages of one site apart.
+LOG_URL_PATH_LIMIT = 48
+
+
+def redact_url(url: Any, *, path_limit: int = LOG_URL_PATH_LIMIT) -> str:
+    """Return a URL trimmed to what a log needs: origin plus a short path.
+
+    ``bridge.log`` is the file operators are told to attach to a bug report, and
+    it survives for the life of an install. Logging the tab URL verbatim put the
+    query string in it -- OAuth codes, signed download links, session tokens and
+    search terms all live there -- so a routine "here is my log" handed those out
+    with it. The origin and a truncated path answer every question the log is
+    actually read for ("which tab was this?"), so drop the rest at the source
+    rather than asking anyone to scrub the file afterwards.
+
+    Marks what it removed instead of hiding it: a trailing ``?...`` means there
+    was a query, ``#...`` a fragment, and ``...`` a path that was longer.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return "<no url>"
+    text = url.strip()
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return "<unparsable url>"
+    if not parsed.scheme:
+        # A bare relative reference carries no origin worth keeping.
+        return "<relative url>"
+    if parsed.scheme in {"file", "data", "blob", "javascript"}:
+        # A local path, an inline payload and a bookmarklet are all content, not
+        # location. None of them identify a tab better than the scheme does.
+        return f"{parsed.scheme}:<redacted>"
+    host = parsed.netloc
+    if "@" in host:  # strip any userinfo, credentials included
+        host = host.rsplit("@", 1)[1]
+    path = parsed.path or ""
+    if len(path) > path_limit:
+        path = path[:path_limit] + "..."
+    suffix = "?..." if parsed.query else ""
+    if parsed.fragment:
+        suffix += "#..."
+    # about:blank and chrome://newtab differ in whether they have an authority;
+    # inventing "//" for the first spells a URL that does not exist.
+    separator = "://" if parsed.netloc else ":"
+    return f"{parsed.scheme}{separator}{host}{path}{suffix}"
+
+
+def redact_pattern(pattern: Any, *, limit: int = LOG_URL_PATH_LIMIT) -> str:
+    """Redact a caller-supplied URL *pattern* the same way, without over-cutting.
+
+    ``set_session`` matches this as a plain substring, so it is normally a bare
+    host or a path fragment -- ``redact_url`` would reduce that to
+    ``<relative url>`` and log nothing useful. It can still be a whole URL that
+    the caller pasted, query string included, so everything past a ``?`` or
+    ``#`` goes, and the markers say so exactly as above.
+    """
+    if not isinstance(pattern, str) or not pattern.strip():
+        return "<no pattern>"
+    text, marker = pattern.strip(), ""
+    for cut in ("?", "#"):
+        head, sep, _ = text.partition(cut)
+        if sep:
+            text, marker = head, sep + "..."
+            break
+    if len(text) > limit:
+        text, marker = text[:limit], "..." + marker
+    return text + marker
 
 
 class SessionNotConnectedError(ValueError):
@@ -183,6 +259,72 @@ def bridge_token() -> str:
     return _persist_token(path, legacy or secrets.token_urlsafe(32))
 
 
+def token_fingerprint(token: Any) -> Optional[str]:
+    """A short, comparable stand-in for a token that is safe to print.
+
+    Diagnostics have to answer "are the bridge and this client using the same
+    token?" without ever putting the token itself in a log, a bug report or an
+    MCP result. 32 bits of a SHA-256 is enough to spot a mismatch and far too
+    little to work backwards from a 256-bit secret.
+    """
+    if not isinstance(token, str) or not token:
+        return None
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+def state_paths_report(*, enforced_token: Any = None) -> dict[str, Any]:
+    """Report where *this* process resolved its state directory and token file.
+
+    Both are resolved per process from the environment, and the two that matter
+    are started by different things at different times: the daemon by whichever
+    MCP session lost the spawn race, the client by the editor. When their
+    environments disagree the only symptom is a 401 whose body says nothing
+    about paths, and an install that predates 0.4.0 adds a second way to differ
+    (``~/.agent-browser-mcp`` is still used when it is the only directory that
+    exists -- see :func:`paths.state_dir`). Nothing here discloses the token:
+    ``token_fingerprint`` is a hash, and ``enforced_token`` -- the value the
+    daemon locked into memory at start-up -- only ever contributes one.
+
+    That last field is what separates the two ways a token check can fail: a
+    ``token_matches_file`` of false with equal paths means the daemon is running
+    from before the file changed, so restarting the bridge fixes it; unequal
+    paths mean the environments differ and restarting fixes nothing.
+    """
+    directory = state_dir()
+    configured_dir = bool((os.environ.get(STATE_DIR_ENV) or "").strip())
+    if configured_dir:
+        kind = "env"
+    elif directory.name == LEGACY_STATE_DIR_NAME:
+        kind = "legacy"
+    else:
+        kind = "default"
+    token_path = bridge_token_path()
+    stored = _read_token_file(token_path)
+    auth_mode = (os.environ.get(TOKEN_AUTH_ENV) or "").strip().lower()
+    report: dict[str, Any] = {
+        "state_dir": str(directory),
+        "state_dir_exists": directory.is_dir(),
+        "state_dir_kind": kind,
+        "state_dir_env": STATE_DIR_ENV if configured_dir else None,
+        "default_state_dir_name": DEFAULT_STATE_DIR_NAME,
+        "token_file": str(token_path),
+        "token_file_exists": bool(stored),
+        "token_file_from_env": bool((os.environ.get(TOKEN_FILE_ENV) or "").strip()),
+        "auth_enabled": auth_mode not in {"0", "false", "off", "disabled"},
+        "token_fingerprint": token_fingerprint(stored),
+    }
+    # An empty enforced token is not a mismatch: that is what `bridge_token`
+    # returns when authentication is deliberately off, and reporting it as one
+    # would turn every BROWSERTAP_BRIDGE_AUTH=off install into a false alarm.
+    # `auth_enabled` is the field that describes that case.
+    if isinstance(enforced_token, str) and enforced_token:
+        report["enforced_token_fingerprint"] = token_fingerprint(enforced_token)
+        report["token_matches_file"] = bool(
+            stored and hmac.compare_digest(stored, enforced_token)
+        )
+    return report
+
+
 def header_token(headers) -> str:
     """从 Authorization: Bearer <t> 或 X-Bridge-Token 取 token，取不到返回 ''。
 
@@ -267,7 +409,7 @@ class Session:
         # MCP session -- and their log lines buried everything else.
         if self.disconnect_at is not None:
             return
-        logger.info("Tab disconnected: %s (session=%s)", self.url, self.id)
+        logger.info("Tab disconnected: %s (session=%s)", redact_url(self.url), self.id)
         self.disconnect_at = time.time()
 
 
@@ -366,7 +508,7 @@ class BrowserBridge:
             session_info = {'url': data.get('url'), 'title': data.get('title', ''), 'type': 'http'}
             if session_id not in self.sessions:
                 session = Session(session_id, session_info, queue.Queue())
-                logger.info("Browser HTTP connected: %s (session=%s)", session.url, session_id)
+                logger.info("Browser HTTP connected: %s (session=%s)", redact_url(session.url), session_id)
                 self.sessions[session_id] = session
             session = self.sessions[session_id]
             if session.disconnect_at is not None and session.type != 'http': session.reconnect(queue.Queue(), session_info)
@@ -726,11 +868,11 @@ class BrowserBridge:
         if is_new_session:
             session = Session(session_id, session_info, client)
             self.sessions[session_id] = session
-            logger.info("New tab connected: %s (session=%s)", session.url, session_id)
+            logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
         else:
             session = self.sessions[session_id]
             session.reconnect(client, session_info)
-            logger.info("Tab reconnected: %s (session=%s)", session.url, session_id)
+            logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
 
         self.latest_session_id = session_id
         if self.default_session_id is None: self.default_session_id = session_id
@@ -1243,6 +1385,12 @@ class BrowserBridge:
             "ever_registered": ever,
             "last_ext_seen_seconds_ago": round(now - self.last_ext_seen, 1) if ever else None,
             "clients": per_client,
+            # Resolved by the daemon, which is the process that actually reads
+            # the token file -- a client's own answer can differ, and that
+            # difference is the whole diagnosis.
+            "state_paths": state_paths_report(
+                enforced_token=getattr(self, "link_token", None)
+            ),
         }
         if isinstance(extension_status, dict):
             result["extension_version"] = (
@@ -1274,7 +1422,7 @@ class BrowserBridge:
         else:
             matched = self.find_session(url_pattern)
         if not matched:
-            logger.warning("No session URL contains %r", url_pattern)
+            logger.warning("No session URL contains %r", redact_pattern(url_pattern))
             return None
         if len(matched) > 1:
             candidates = ", ".join(
@@ -1286,7 +1434,11 @@ class BrowserBridge:
                 f"{candidates}. Pass the full session_id to select one."
             )
         self.default_session_id, info = matched[0]
-        logger.info("Default session set to %s: %s", self.default_session_id, info['url'])
+        logger.info(
+            "Default session set to %s: %s",
+            self.default_session_id,
+            redact_url(info.get('url')),
+        )
         return self.default_session_id
 
     def jump(self, url, timeout=10): self.execute_js(f"window.location.href={json.dumps(url)}", timeout=timeout)

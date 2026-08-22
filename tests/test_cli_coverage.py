@@ -113,6 +113,34 @@ def test_doctor_healthy_returns_zero_and_prints_details(monkeypatch, capsys):
     assert "[OK] healthy: ready" in captured.err
 
 
+def test_doctor_passes_the_resolved_state_paths_through(monkeypatch, capsys):
+    # cmd_doctor rewrites parts of the payload; the state directory and token
+    # file have to survive that, because "which file did each side read?" is the
+    # question a 401 leaves unanswered and doctor is where a reader looks.
+    driver = FakeDriver()
+    state_paths = {
+        "state_dir": "/home/u/.agent-browser-mcp",
+        "state_dir_kind": "legacy",
+        "token_file": "/home/u/.agent-browser-mcp/bridge-token",
+        "auth_enabled": True,
+        "token_fingerprint": "sha256:deadbeef",
+    }
+    _install_doctor_fakes(
+        monkeypatch,
+        driver,
+        {
+            "status": "healthy",
+            "action": "none",
+            "diagnosis": driver.diagnosis,
+            "state_paths": state_paths,
+        },
+    )
+
+    assert cli.cmd_doctor() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state_paths"] == state_paths
+
+
 def test_doctor_reload_extension_returns_nonzero(monkeypatch, capsys):
     driver = FakeDriver(diagnosis={"cause": "healthy", "ok": True})
     _install_doctor_fakes(

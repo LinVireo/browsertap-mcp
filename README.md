@@ -12,9 +12,36 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.0**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.1**.
 
 It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
+
+## Start in 60 seconds
+
+Three steps. Each one is spelled out in full under **Getting started** below,
+with the Windows PowerShell paths and the config for every supported client.
+
+```bash
+# 1. Install from source. There is no PyPI release yet.
+git clone https://github.com/LinVireo/browsertap-mcp.git && cd browsertap-mcp
+python -m venv .venv && ./.venv/bin/python -m pip install -e ".[desktop]"
+./.venv/bin/browsertap extension-path   # prints the directory step 2 needs
+
+# 3. Point your MCP client at that same executable (Claude Code shown).
+claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
+```
+
+On Windows the same three commands use `.\.venv\Scripts\python.exe` and
+`.\.venv\Scripts\browsertap.exe`.
+
+**Step 2 is manual, and it is the slow one.** There is no Chrome Web Store
+listing yet, so the extension is loaded by hand: open `chrome://extensions`, turn
+on **Developer mode**, click **Load unpacked**, and pick the directory
+`extension-path` printed. Then open an ordinary `http://` or `https://` page --
+`about:blank` runs no content script, so no session is established.
+
+Then ask your agent *what tabs do I have open?* If the list comes back empty, run
+`browsertap doctor`: it names one `cause` and the one matching `advice`.
 
 ## Key features
 
@@ -149,7 +176,7 @@ Put the standard config in `.cursor/mcp.json` for one project, or `~/.cursor/mcp
 <summary>VS Code</summary>
 
 ```bash
-code --add-mcp '{"name":"browsertap-mcp","command":"browsertap-mcp"}'
+code --add-mcp '{"name":"browsertap-mcp","command":"browsertap"}'
 ```
 
 Or write it into `.vscode/mcp.json` by hand — note that VS Code's key is `servers`, not `mcpServers`.
@@ -428,7 +455,7 @@ Pass `session_id` explicitly: the call binds the driver to that tab for its dura
 
 `selector` remains backward-compatible with CSS strings and also accepts a locator object with exactly one primary key: `css`, `role` (optional `name`), `text`, or `label`. `exact` applies to role/name or text matching; `frame` walks one or more same-origin iframe locators; `shadow` walks open Shadow DOM hosts. Zero matches return `not_found`, multiple matches return `ambiguous`, and cross-origin or closed roots are reported without dispatching input.
 
-- **page_click** — click a CSS/structured `selector` or viewport coordinates. Exactly one targeting mode: either `selector`, or both `x` and `y`. With a selector, each omitted offset axis uses the element centre; a supplied `offset_x` or `offset_y` is measured from the element's top-left corner on that axis. Missing, ambiguous, non-interactable, cross-origin-frame, and closed-shadow targets return structured status without input dispatch. Challenge replies keep the bounded `challenge_detected`/`attempts`/`challenge_stalled` behavior.
+- **page_click** — click a CSS/structured `selector` or viewport coordinates. Exactly one targeting mode: either `selector`, or both `x` and `y`. With a selector, each omitted offset axis uses the element centre; a supplied `offset_x` or `offset_y` is measured from the element's top-left corner on that axis. Missing, ambiguous, non-interactable, cross-origin-frame, and closed-shadow targets return structured status without input dispatch. In selector mode the point is also hit-tested in the page before dispatch: a target below the fold is scrolled into view (`scrolled_into_view`), one whose pixel belongs to something else returns `obscured` with `occluded_by` naming the overlay, and one still off screen returns `outside_viewport` — in both cases nothing is clicked, because a dispatched click would have landed on the other element and reported success. A verified click carries `hit_verified: true`. Coordinate mode is not hit-tested: coordinates name a pixel, not an element. Challenge replies keep the bounded `challenge_detected`/`attempts`/`challenge_stalled` behavior.
   - `selector` (string/object, optional), `x` (number, optional), `y` (number, optional), `offset_x` (number, optional), `offset_y` (number, optional), `button` (string, optional): default `left`, `clicks` (integer, optional): default `1`, `session_id` (string, optional), `timeout` (number, optional): default `15`
 - **page_type** — insert text into a CSS/structured-locator field, or into whatever already has focus when `selector` is omitted. Xterm.js containers/descendants retarget to `.xterm-helper-textarea`. Missing, ambiguous, read-only, or otherwise unusable targets return a structured status without dispatching text or keys. `clear=true` selects the existing value first; `submit_key` sends one key afterwards.
   - `text` (string), `selector` (string/object, optional), `clear` (boolean, optional): default `false`, `submit_key` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `15`
