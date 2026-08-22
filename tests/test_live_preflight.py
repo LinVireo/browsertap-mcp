@@ -174,6 +174,66 @@ def test_the_drift_message_carries_both_counts_and_the_ambiguity():
     assert "A fixture leak and a human using the browser look identical" in problem
 
 
+def test_a_tab_that_came_back_under_a_new_id_is_not_a_leak():
+    """Chrome discarding a background tab used to fail the end-of-run check.
+
+    Memory saver restores the page under a new tab id, so the inventory shows one
+    close and one open at the same URL with the tab count unchanged -- identical
+    in shape to the suite closing someone's tab and leaving its own behind.
+    Measured in a seal run: three tabs nobody had touched failed the check this
+    way. The idle check must still trip on it, because a browser reorganising
+    itself is a moving target; the damage verdict must not.
+    """
+    before = P.inventory(_tabs((1, "https://kept.example/", True), (2, "https://saved.example/", False)))
+    after = P.inventory(_tabs((1, "https://kept.example/", True), (7, "https://saved.example/", False)))
+
+    diff = P.compare(before, after)
+
+    assert diff["reidentified"] == [
+        {"url": "https://saved.example/", "was": "2", "now": "7", "title": "tab 7"}
+    ]
+    assert diff["damaged"] is False
+    assert P.drift_problem(diff) is None
+    # ...and the idle check keeps its stricter reading of the same two samples.
+    assert diff["disturbed"] is True and diff["changed"] is True
+    assert P.busy_browser_reason(diff) is not None
+
+
+def test_a_re_identified_tab_does_not_cover_for_a_real_leak():
+    before = P.inventory(_tabs((1, "https://saved.example/", True)))
+    after = P.inventory(
+        _tabs((8, "https://saved.example/", True), (9, "https://leaked.example/", False))
+    )
+
+    problem = P.drift_problem(P.compare(before, after))
+
+    assert "opened: 9 (https://leaked.example/)" in problem
+    assert "saved.example" not in problem  # the pair is context, not damage
+    assert "(1 more tab(s) only changed id, not counted)" in problem
+
+
+def test_pairing_a_re_identified_tab_is_one_to_one():
+    """Two tabs closed at one URL and one opened there is still a lost tab."""
+    before = P.inventory(
+        _tabs((1, "https://twice.example/", True), (2, "https://twice.example/", False))
+    )
+    after = P.inventory(_tabs((3, "https://twice.example/", True)))
+
+    diff = P.compare(before, after)
+
+    assert len(diff["reidentified"]) == 1
+    assert [tab["id"] for tab in diff["damage"]["closed"]] == ["2"]
+    assert diff["damaged"] is True
+
+
+def test_an_unknown_url_is_not_evidence_that_two_tabs_are_one():
+    """A tab with no URL pairs with nothing: it identifies no page to match."""
+    diff = P.compare(P.inventory([{"id": 5}]), P.inventory([{"id": 6}]))
+
+    assert diff["reidentified"] == []
+    assert diff["damaged"] is True
+
+
 def test_the_fields_read_here_are_the_fields_the_extension_sends():
     """Binds the reader to its source.
 

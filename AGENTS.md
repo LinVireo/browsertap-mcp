@@ -99,6 +99,15 @@ The current rule, which must survive any change here:
   another tab. A "click checkout" landing on the wrong page is far worse than an
   error.
 
+Both automatic picks (that one and `_pick_failover_session`) also skip tabs
+Chrome will never let the extension script -- `is_scriptable_url`. The trap is
+that the Web Store is an ordinary `https://` page, so a content script registers
+there and the tab joins the pool like any other, while every injection comes back
+`The extensions gallery cannot be scripted.` with nothing dispatched. Both
+filters are preferences with a fallback: a browser showing only such pages
+behaves exactly as it did before rather than starting to refuse, and a tab the
+caller named explicitly still gets the real error.
+
 In tests, never hardcode a real id. The sentinel is
 `chrome_nonexistent:999999`.
 

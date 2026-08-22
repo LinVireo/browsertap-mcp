@@ -132,6 +132,52 @@ RETRY_SAFE_DELIVERY_STATES = frozenset({'undelivered', 'sent_unconfirmed'})
 # loading. See BrowserBridge._pick_failover_session for what that broke.
 FAILOVER_SETTLE_SECONDS = 2.0
 
+# Pages Chrome refuses to script no matter who asks. The extensions gallery is
+# the trap in this list: it is an ordinary https:// page, so the content script
+# registers a session there and the tab joins every automatic pick like any
+# other, yet the injection is rejected with "The extensions gallery cannot be
+# scripted." and nothing is dispatched -- which reads as a bridge fault rather
+# than a bad target. Measured in a live run: the failover escape hatch chose
+# chromewebstore.google.com/category/extensions and failed deterministically,
+# where the same test passed the moment that tab was not the newest one.
+#
+# Only automatic picks consult this. A caller that names such a tab still gets
+# the real error, because refusing on its behalf would hide which tab it asked
+# for -- same rule as a dead tab that was named explicitly.
+UNSCRIPTABLE_URL_PREFIXES = (
+    'chrome://', 'edge://', 'about:', 'devtools://', 'view-source:',
+    'chrome-extension://', 'moz-extension://', 'chrome-untrusted://',
+    'https://chromewebstore.google.com/', 'https://chrome.google.com/webstore',
+    'https://microsoftedge.microsoft.com/addons',
+)
+
+
+def is_scriptable_url(url: Any) -> bool:
+    """Whether an automatic pick may land on *url*.
+
+    Unknown and empty URLs count as scriptable: a session only exists because a
+    content script ran in it, so the benefit of the doubt matches how the tab
+    got here, and being wrong costs one ordinary error instead of narrowing the
+    pool to nothing.
+    """
+    if not isinstance(url, str):
+        return True
+    text = url.strip().lower()
+    if not text:
+        return True
+    return not text.startswith(UNSCRIPTABLE_URL_PREFIXES)
+
+
+def _prefer_scriptable(pool: list) -> list:
+    """Drop un-scriptable tabs from *pool*, unless that would empty it.
+
+    Same shape as the settle filter below: a preference, not a requirement. A
+    browser showing nothing but chrome:// pages behaves exactly as it did
+    before rather than starting to refuse.
+    """
+    return [s for s in pool if is_scriptable_url(getattr(s, 'url', ''))] or pool
+
+
 
 class BridgeNoResponseError(RuntimeError):
     """A command has no result, with explicit delivery and retry semantics."""
@@ -912,6 +958,10 @@ class BrowserBridge:
         alive = [s for s in list(self.sessions.values()) if s.is_active()]
         if not alive:
             return cur  # nothing to pick; let the caller's error path report it
+        # Skip tabs Chrome will not let us script, for the same reason this
+        # re-picks at all: the caller named nothing, so handing it a tab where
+        # every call fails is worse than handing it any other live tab.
+        alive = _prefer_scriptable(alive)
         latest = self.sessions.get(self.latest_session_id)
         chosen = latest if latest in alive else alive[-1]
         if cur:
@@ -935,13 +985,17 @@ class BrowserBridge:
         finished loading, and keep the previous order *inside* that set — a
         settled newest tab still wins, and a browser with nothing settled yet
         behaves exactly as before rather than refusing.
+
+        Un-scriptable tabs are filtered first, on the same terms: the gallery
+        page below is where this went wrong a second time.
         """
         now = time.time()
+        usable = _prefer_scriptable(pool)
         settled = [
-            s for s in pool
+            s for s in usable
             if now - float(getattr(s, 'connect_at', 0.0) or 0.0) >= FAILOVER_SETTLE_SECONDS
         ]
-        candidates = settled or pool
+        candidates = settled or usable
         latest = self.sessions.get(self.latest_session_id)
         return latest if latest in candidates else candidates[-1]
 

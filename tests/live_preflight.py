@@ -66,16 +66,57 @@ def _focused(tabs: Mapping[str, Mapping[str, Any]]) -> str | None:
     return active[0] if active else None
 
 
+def _pair_reidentified(
+    opened: list[dict[str, Any]],
+    closed: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Match up a tab that only changed its id, and return what is left over.
+
+    Chrome's memory saver discards an idle background tab and restores it under
+    a *new* tab id at the same URL, so the extension unregisters one session and
+    registers another. Nothing was gained, lost or navigated -- but it is
+    byte-for-byte the signature of the suite closing someone's tab and leaving
+    its own behind, which is what this module exists to catch. Measured in a
+    seal run against a browser nobody was touching: three background tabs
+    (chrome://extensions, a PyPI page, the Web Store) came back with new ids and
+    failed the end-of-run check, while the tab count was identical.
+
+    Matching is one-to-one and by URL, so two closes against one open still
+    leave a close reported, and an empty URL never pairs -- an unknown location
+    is not evidence that two tabs are the same tab.
+    """
+    pairs: list[dict[str, Any]] = []
+    remaining = list(closed)
+    opened_left: list[dict[str, Any]] = []
+    for tab in opened:
+        url = tab.get("url") or ""
+        match = next((c for c in remaining if url and c.get("url") == url), None)
+        if match is None:
+            opened_left.append(tab)
+            continue
+        remaining.remove(match)
+        pairs.append({"url": url, "was": match.get("id"), "now": tab.get("id"),
+                      "title": tab.get("title", "")})
+    return pairs, opened_left, remaining
+
+
 def compare(
     before: Mapping[str, Mapping[str, Any]],
     after: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Diff two inventories.
 
-    `disturbed` is the part that matters for a verdict -- a tab appeared,
-    vanished, or went somewhere else. Focus moving is reported separately: it is
-    proof that a human is present when nothing else moved, but the suite raises
-    tabs itself, so on its own it is not damage.
+    Two verdicts come out of this, and they are deliberately not the same one.
+    `disturbed` answers "did anything at all move", which is what the idle check
+    wants: during a 1.5s window even the browser reorganising itself means the
+    run is about to be measured against a moving target. `damaged` answers "is
+    any of it the suite's fault", which is what the end-of-run check wants: over
+    a five-minute run Chrome discarding a background tab is expected, and
+    calling it a fixture leak would train the reader to ignore the check.
+
+    Focus moving is reported separately again: it is proof that a human is
+    present when nothing else moved, but the suite raises tabs itself, so on its
+    own it is not damage.
     """
     opened = [dict(tab) for key, tab in sorted(after.items()) if key not in before]
     closed = [dict(tab) for key, tab in sorted(before.items()) if key not in after]
@@ -96,10 +137,15 @@ def compare(
         else {"from": focus_before, "to": focus_after}
     )
     disturbed = bool(opened or closed or navigated)
+    reidentified, opened_left, closed_left = _pair_reidentified(opened, closed)
+    damage = {"opened": opened_left, "closed": closed_left, "navigated": navigated}
     return {
         "opened": opened,
         "closed": closed,
         "navigated": navigated,
+        "reidentified": reidentified,
+        "damage": damage,
+        "damaged": bool(opened_left or closed_left or navigated),
         "focus_moved": focus_moved,
         "disturbed": disturbed,
         "changed": disturbed or focus_moved is not None,
@@ -125,6 +171,11 @@ def describe(diff: Mapping[str, Any]) -> list[str]:
         )
     for move in diff.get("navigated") or ():
         lines.append(f"navigated: {move['id']} {move['from']} -> {move['to']}")
+    for pair in diff.get("reidentified") or ():
+        lines.append(
+            "same tab, new id (Chrome discarded and restored it): "
+            f"{pair['was']} -> {pair['now']} ({pair['url'] or 'about:blank'})"
+        )
     focus = diff.get("focus_moved")
     if focus:
         lines.append(f"foreground tab: {focus.get('from')} -> {focus.get('to')}")
@@ -156,15 +207,24 @@ def drift_problem(diff: Mapping[str, Any]) -> str | None:
     """Why the browser did not come out the way it went in, or None.
 
     The suite is allowed to raise tabs; it is not allowed to leave one behind,
-    close one it did not create, or navigate a page the user was reading.
+    close one it did not create, or navigate a page the user was reading. A tab
+    that came back under a new id is none of those (see `_pair_reidentified`),
+    so it is reported as context and does not fail the run.
     """
-    if not diff.get("disturbed"):
+    if not diff.get("damaged"):
         return None
+    damage = diff.get("damage") or {}
+    context = list(diff.get("reidentified") or ())
     return "\n".join(
         [
             "the live layer did not leave the browser as it found it "
             f"({diff.get('tabs_before')} tabs before, {diff.get('tabs_after')} after):",
-            *(f"  {line}" for line in describe(diff)),
+            *(f"  {line}" for line in describe({**damage, "focus_moved": None})),
+            *(
+                [f"  ({len(context)} more tab(s) only changed id, not counted)"]
+                if context
+                else []
+            ),
             "A fixture leak and a human using the browser look identical here; "
             "check which one it was before believing either.",
         ]

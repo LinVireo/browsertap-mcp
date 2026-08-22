@@ -1153,11 +1153,12 @@ def test_execute_js_rejects_explicit_dead_tab_but_can_fail_over(monkeypatch):
 
 
 def _failover_pool(driver, ages):
-    """Register one session per (id, age-in-seconds) pair and return them in order."""
+    """Register one session per (id, age-in-seconds[, url]) tuple, in order."""
     now = time.time()
     pool = []
-    for session_id, age in ages:
-        session = T.Session(session_id, {"url": "https://x", "type": "ext_ws", "tab_id": 1}, FakeSocket())
+    for session_id, age, *rest in ages:
+        url = rest[0] if rest else "https://x"
+        session = T.Session(session_id, {"url": url, "type": "ext_ws", "tab_id": 1}, FakeSocket())
         session.connect_at = now - age
         driver.sessions[session_id] = session
         pool.append(session)
@@ -1200,6 +1201,83 @@ def test_failover_tolerates_a_session_without_connect_at():
     # connect_at missing reads as epoch 0, i.e. settled -- never as "skip me",
     # which would leave failover with an empty candidate list.
     assert driver._pick_failover_session([legacy]) is legacy
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://chromewebstore.google.com/category/extensions",
+        "https://chrome.google.com/webstore/detail/abc",
+        "chrome://extensions/",
+        "edge://settings",
+        "devtools://devtools/bundled/inspector.html",
+        "view-source:https://example.com/",
+        "chrome-extension://abcdef/options.html",
+        "  CHROME://Extensions  ",
+    ],
+)
+def test_pages_chrome_refuses_to_script_are_known_as_such(url):
+    assert T.is_scriptable_url(url) is False
+
+
+@pytest.mark.parametrize("url", ["https://example.com/", "http://localhost:3000/", "", None, 7])
+def test_anything_else_counts_as_scriptable(url):
+    """A session exists because a content script ran in it, so the benefit of the
+    doubt matches how the tab got here; being wrong costs one ordinary error."""
+    assert T.is_scriptable_url(url) is True
+
+
+def test_failover_skips_a_tab_chrome_will_not_let_it_script():
+    driver = driver_stub()
+    gallery, normal = _failover_pool(
+        driver,
+        [("c:gallery", 30.0, "https://chromewebstore.google.com/category/extensions"),
+         ("c:normal", 30.0, "https://example.com/")],
+    )
+    driver.latest_session_id = gallery.id
+    # The gallery is an ordinary https page, so the content script registers there
+    # and it joins the pool like any other tab -- but every injection comes back
+    # "The extensions gallery cannot be scripted." with nothing dispatched, which
+    # reads as a bridge fault. Measured in a live run: the escape hatch chose it
+    # and failed deterministically.
+    assert driver._pick_failover_session([gallery, normal]) is normal
+
+
+def test_being_scriptable_outranks_having_settled():
+    driver = driver_stub()
+    gallery, fresh = _failover_pool(
+        driver,
+        [("c:gallery", 90.0, "https://chromewebstore.google.com/"),
+         ("c:fresh", 0.0, "https://example.com/")],
+    )
+    driver.latest_session_id = gallery.id
+    # A settled tab that can never run the command is not a candidate at all; a
+    # fresh one only risks the race the settle filter exists to reduce.
+    assert driver._pick_failover_session([gallery, fresh]) is fresh
+
+
+def test_failover_uses_an_unscriptable_tab_when_that_is_all_there_is():
+    driver = driver_stub()
+    (only,) = _failover_pool(driver, [("c:only", 30.0, "chrome://extensions/")])
+    driver.latest_session_id = only.id
+    # Same shape as the settle filter: a preference, not a requirement. A browser
+    # showing nothing but chrome:// pages behaves as it did before rather than
+    # starting to refuse, and the real Chrome error still reaches the caller.
+    assert driver._pick_failover_session([only]) is only
+
+
+def test_the_implicit_default_skips_a_tab_chrome_will_not_let_it_script():
+    driver = driver_stub()
+    for session_id, url in [("c:normal", "https://example.com/"),
+                            ("c:gallery", "https://chromewebstore.google.com/")]:
+        driver.sessions[session_id] = T.Session(
+            session_id, {"url": url, "type": "ext_ws", "tab_id": 1}, FakeSocket()
+        )
+    driver.default_session_id = None
+    driver.latest_session_id = "c:gallery"
+    # This path re-picks silently for a caller that named nothing, so pinning the
+    # default to a tab where every call fails is the worse half of the same bug.
+    assert driver._live_default_session_id() == "c:normal"
 
 
 def test_execute_js_implicit_default_reselects_live_session(monkeypatch):

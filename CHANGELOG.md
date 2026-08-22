@@ -24,6 +24,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- An automatic tab pick no longer lands on a page Chrome refuses to script. The
+  extensions gallery is an ordinary `https://` page, so a content script
+  registers a session there and the tab joined every automatic pick like any
+  other, while each injection came back `The extensions gallery cannot be
+  scripted.` with nothing dispatched -- reported as a bridge fault rather than a
+  bad target. Both automatic paths (the implicit default and the failover escape
+  hatch) now skip gallery, `chrome://`, `edge://`, `devtools://`, `view-source:`
+  and extension pages, on the same terms as the settle filter: a browser showing
+  nothing but such pages behaves exactly as before rather than refusing, and a
+  tab the caller names explicitly still gets the real error.
 - `page_click` proves in the page that the point it is about to click belongs to
   the target, instead of dispatching and reporting success either way. A cookie
   banner, a modal backdrop or a sticky header over the element left
