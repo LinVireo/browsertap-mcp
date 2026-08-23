@@ -3398,6 +3398,28 @@ eval(source.slice(start, end));
     assert outcome["result"] == {"value": 2}
 
 
+# The two tests below hand `attachBtapDebugger` a single-digit-millisecond
+# budget, and the code re-reads `Date.now()` between fixing the deadline and
+# arming the watchdog. Real milliseconds spent starting Node or resolving the
+# target could blow the budget before the watchdog existed, so the caller failed
+# out of `debuggerAttachRemainingMs` instead -- a different path carrying the
+# same `cdp_timeout` code, which is why the failure read as unrelated. Measured
+# under 16-way load before this was frozen: 3 of 120 runs for the first test and
+# 6 of 200 for the second, and one of them was the Windows/3.13 CI failure on
+# 0027e84.
+#
+# Freezing the clock the extension code reads leaves the watchdog as the only
+# thing that can fire, on a real `setTimeout` that the frozen deadline sizes
+# exactly. Timers still run on the real clock; only the deadline arithmetic is
+# pinned. The harness keeps `RealDate` for its own elapsed-time measurement,
+# which would otherwise read a constant 0 and assert nothing.
+_FROZEN_ATTACH_CLOCK_JS = """const RealDate = globalThis.Date;
+const FROZEN_NOW = RealDate.now();
+class Date extends RealDate {
+  static now() { return FROZEN_NOW; }
+}"""
+
+
 def test_debugger_attach_watchdog_cleans_late_attach_and_allows_reattach():
     script = f"""
 const fs = require('fs');
@@ -3426,6 +3448,7 @@ const chrome = {{ debugger: {{
   detach() {{ detachCalls += 1; return Promise.resolve(); }},
   sendCommand() {{ return Promise.resolve({{}}); }},
 }} }};
+{_FROZEN_ATTACH_CLOCK_JS}
 eval(source.slice(start, end));
 (async () => {{
   let failure = null;
@@ -3502,13 +3525,14 @@ const chrome = {{ debugger: {{
   detach() {{ detachCalls += 1; return Promise.resolve(); }},
   sendCommand() {{ return Promise.resolve({{}}); }},
 }} }};
+{_FROZEN_ATTACH_CLOCK_JS}
 eval(source.slice(start, end));
 (async () => {{
-  const startedAt = Date.now();
+  const startedAt = RealDate.now();
   const firstPromise = attachBtapDebugger({{ tabId: 46 }}, 20);
   const secondPromise = attachBtapDebugger({{ tabId: 46 }}, 1000);
   const settled = await Promise.allSettled([firstPromise, secondPromise]);
-  const elapsedMs = Date.now() - startedAt;
+  const elapsedMs = RealDate.now() - startedAt;
   const failures = settled.map(result => ({{
     status: result.status,
     code: result.reason?.code,
@@ -3549,6 +3573,109 @@ eval(source.slice(start, end));
     }
     assert outcome["attachCalls"] == 2
     assert outcome["detachCalls"] == 2
+
+
+def test_abandoned_attach_promise_never_becomes_an_unhandled_rejection():
+    """A caller can leave between creating the shared attach promise and racing it.
+
+    `debuggerAttachRemainingMs` throws when the deadline is already gone, and it
+    is checked once more after that promise exists -- so a budget spent
+    resolving the target takes the promise's only reader with it. Chrome's
+    attach then completes into a promise nobody reads, and the late-completion
+    branch rejects it deliberately, to mark an abandoned lease. With no reader
+    that rejection surfaces on `chrome://extensions` as an uncaught error for an
+    install that is working: the same reader-facing damage as a mis-filed
+    `No SW` (AGENTS.md section 8), and it was reached by an ordinary short
+    budget, not by anything exotic.
+
+    The clock is advanced inside `getTargets` rather than by sleeping, because
+    the window under test is one microtask wide. Racing a real 20ms against it
+    is what made two neighbouring tests flaky in CI to begin with.
+    """
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('function debuggerTargetKey');
+const end = source.indexOf('\\nasync function handleProtocolDialog', start);
+if (start < 0 || end < 0) throw new Error('debugger helpers not found');
+const unhandled = [];
+process.on('unhandledRejection', error => {{
+  unhandled.push({{ code: error?.code, timeoutMs: error?.timeoutMs }});
+}});
+const dialogAttachedTabs = new Set();
+const debuggerAttachments = new Map();
+const debuggerRecoveryPromises = new Map();
+const protocolDialogStates = new Map();
+const dialogEventSequences = new Map();
+const runtimeExecutionContexts = new Map();
+const execDialogPolicies = new Map();
+let attachCalls = 0;
+let detachCalls = 0;
+let resolveAttach;
+const RealDate = globalThis.Date;
+const BASE_NOW = RealDate.now();
+let nowOffset = 0;
+class Date extends RealDate {{
+  static now() {{ return BASE_NOW + nowOffset; }}
+}}
+const chrome = {{ debugger: {{
+  getTargets() {{
+    // Spend the whole budget here: the deadline is fixed before this stage and
+    // re-checked after it, which is the one-microtask window being tested.
+    nowOffset = 5000;
+    return Promise.resolve([{{ id: 'T1', type: 'page', tabId: 51 }}]);
+  }},
+  attach() {{
+    attachCalls += 1;
+    return new Promise(resolve => {{ resolveAttach = resolve; }});
+  }},
+  detach() {{ detachCalls += 1; return Promise.resolve(); }},
+  sendCommand() {{ return Promise.resolve({{}}); }},
+}} }};
+eval(source.slice(start, end));
+(async () => {{
+  let failure = null;
+  try {{
+    await attachBtapDebugger({{ targetId: 'T1' }}, 20);
+  }} catch (error) {{
+    failure = {{
+      code: error.code,
+      timeoutMs: error.timeoutMs,
+      message: error.message,
+    }};
+  }}
+  const afterThrow = {{
+    tracked: debuggerAttachments.size, attachCalls, detachCalls,
+  }};
+  resolveAttach();
+  // Node reports an unhandled rejection once the microtask queue drains, so
+  // yielding ticks is the observation; no wall-clock delay is involved.
+  for (let i = 0; i < 3; i += 1) await new Promise(resolve => setTimeout(resolve, 0));
+  process.stdout.write(JSON.stringify({{
+    failure,
+    afterThrow,
+    afterLateAttach: {{ tracked: debuggerAttachments.size, detachCalls }},
+    unhandled,
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    completed = subprocess.run(
+        ["node", "-"], input=script, text=True, capture_output=True, timeout=5
+    )
+    assert completed.returncode == 0, completed.stderr
+    outcome = json.loads(completed.stdout)
+    # The caller still gets the honest bounded failure, and it names the stage.
+    assert outcome["failure"]["code"] == "cdp_timeout"
+    assert outcome["failure"]["timeoutMs"] == 20
+    assert "calling chrome.debugger.attach" in outcome["failure"]["message"]
+    # Leaving early still cleans up: the entry is dropped on the way out, and
+    # the attach that lands afterwards is detached rather than left owning the
+    # target.
+    assert outcome["afterThrow"]["tracked"] == 0
+    assert outcome["afterLateAttach"] == {"tracked": 0, "detachCalls": 1}
+    # The point of the test. Dropping the terminal `.catch` on `attachPromise`
+    # in `background.js` puts one `cdp_timeout` entry here instead.
+    assert outcome["unhandled"] == []
 
 
 @pytest.mark.parametrize("pending_stage", ["detach", "reattach"])

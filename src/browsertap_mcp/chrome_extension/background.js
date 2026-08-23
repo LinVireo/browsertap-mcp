@@ -1881,6 +1881,15 @@ async function attachBtapDebuggerBeforeDeadline(
         attachment.attachSettled = true;
         if (attachment.target.tabId) dialogAttachedTabs.add(attachment.target.tabId);
       });
+    // The `Promise.race` below is this promise's only reader, and a caller can
+    // leave before reaching it: a deadline that expires while arming the
+    // watchdog throws out of `debuggerAttachRemainingMs` and takes the last
+    // reader with it. The late-completion branch above then rejects with
+    // nobody listening, which here is an uncaught error on chrome://extensions
+    // for an install that is working (same class as `isWorkerGoneError`). Keep
+    // one terminal reader; every real waiter still races the promise itself and
+    // still sees the rejection.
+    attachment.attachPromise.catch(() => {});
   } else {
     for (const alias of identity.aliases) attachment.aliases.add(alias);
   }
