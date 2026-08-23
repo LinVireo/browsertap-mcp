@@ -12,7 +12,7 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.9**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.11**.
 
 It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 
@@ -568,19 +568,24 @@ BTAP is maintained by `LinVireo`. The MIT copyright notice in
 unchanged (`zhea`); maintenance and copyright attribution are distinct roles. The
 canonical public repository for this distribution is `LinVireo/browsertap-mcp`.
 
-A small part of the browser layer here originates in
-[GenericAgent](https://github.com/lsdefine/GenericAgent). Thanks to that project and
-its author for the original implementation. The files listed below started there and
-have each been substantially rewritten since; everything else in this distribution --
-the MCP tool surface, the bridge and its token authentication, the Chrome extension,
-the release evidence pipeline, the test suite, and both READMEs -- was written here.
+The browser layer here began as
+[GenericAgent](https://github.com/lsdefine/GenericAgent)'s, and part of it still is.
+Thanks to that project and its author for the original implementation.
 
 Originally from GenericAgent:
+- `simphtml.py` -- still substantially upstream's file, extended here
 - `TMWebDriver.py` (now maintained as `browser_bridge.py`)
-- `simphtml.py`
 - the `tmwd_cdp_bridge` Chrome extension resources
 
-If you fork or redistribute this, please keep the attribution.
+GenericAgent is MIT-licensed, so its copyright notice has to reach anyone who
+receives a copy of this. It is reproduced in full, with a line-for-line
+measurement of how much of each file is still upstream's, in
+[THIRD-PARTY-NOTICES.md](https://github.com/LinVireo/browsertap-mcp/blob/main/THIRD-PARTY-NOTICES.md) -- which ships inside both the wheel and the
+sdist, not only in this repository. Everything else in this distribution -- the
+MCP tool surface, the bridge and its token authentication, the release evidence
+pipeline, the test suite, and both READMEs -- was written here.
+
+If you fork or redistribute this, keep both notices: `LICENSE` and that file.
 
 ## License
 

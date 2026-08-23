@@ -7,6 +7,18 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+# A licence obligation, not packaging tidiness: the wheel is the copy most people
+# receive, and part of what it carries is upstream's code under upstream's MIT
+# notice. A wheel without these two distributes that code with its notice
+# stripped. Kept apart from REQUIRED_WHEEL_SUFFIXES because these are the only
+# required members the build generates rather than copies out of the tree, so the
+# `src/` + suffix mapping that checks the others against `git ls-files` does not
+# apply -- their tree counterparts are `LICENSE` and `THIRD-PARTY-NOTICES.md`,
+# which REQUIRED_SDIST_SUFFIXES already pins.
+REQUIRED_WHEEL_METADATA_SUFFIXES = (
+    "/licenses/LICENSE",
+    "/licenses/THIRD-PARTY-NOTICES.md",
+)
 REQUIRED_WHEEL_SUFFIXES = (
     "/browsertap_mcp/browser_bridge.py",
     "/browsertap_mcp/chrome_extension/background.js",
@@ -25,6 +37,8 @@ REQUIRED_WHEEL_SUFFIXES = (
 )
 REQUIRED_SDIST_SUFFIXES = (
     "/.gitignore",
+    "/LICENSE",
+    "/THIRD-PARTY-NOTICES.md",
     "/CONTRIBUTING.zh-CN.md",
     "/src/browsertap_mcp/browser_bridge.py",
     "/src/browsertap_mcp/skills/browsertap-default/SKILL.md",
@@ -258,7 +272,7 @@ def validate_archive(path: Path) -> list[str]:
         f"{name}: {reason}" for name in names if (reason := _forbidden_reason(name)) is not None
     ]
     if path.suffix == ".whl":
-        for suffix in REQUIRED_WHEEL_SUFFIXES:
+        for suffix in (*REQUIRED_WHEEL_SUFFIXES, *REQUIRED_WHEEL_METADATA_SUFFIXES):
             if not any(name.endswith(suffix) for name in normalised_names):
                 violations.append(f"missing required wheel file: {suffix.lstrip('/')}")
     if path.name.endswith((".tar.gz", ".tgz")):

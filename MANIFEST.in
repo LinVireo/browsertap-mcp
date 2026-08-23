@@ -4,6 +4,7 @@ include .gitignore
 include README.md
 include README.zh-CN.md
 include LICENSE
+include THIRD-PARTY-NOTICES.md
 include SECURITY.md
 include CONTRIBUTING.md
 include CONTRIBUTING.zh-CN.md

@@ -6,6 +6,34 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-08-23
+
+### Added
+
+- `THIRD-PARTY-NOTICES.md`, carrying upstream GenericAgent's MIT notice in full.
+  Part of the browser layer is still upstream's code -- measured line-for-line,
+  780 of `simphtml.py`'s 873 upstream lines are unchanged here, longest identical
+  run 192 -- and MIT puts its notice obligation on every copy, not on the
+  repository. `LICENSE` did not discharge it: its body is upstream's word for
+  word with only the copyright line swapped, so a reader of `LICENSE` alone was
+  told the wrong holder, and the README credit is prose attribution rather than
+  the notice. The file ships inside the wheel and the sdist, not only in the
+  tree: `license-files` is now explicit so both land in `.dist-info/licenses/`,
+  and `check_distribution` requires them there -- a wheel is the copy most
+  people receive, and one without them distributes upstream's code with its
+  notice stripped. `tests/test_documentation_contract.py` compares the
+  reproduced grant against `LICENSE`'s own body, so a paraphrase of either
+  fails, and requires every file the notice credits to still exist under that
+  name.
+
+### Changed
+
+- Corrected the credit in both READMEs. It said the derived files "have each
+  been substantially rewritten since", which does not hold for `simphtml.py` at
+  89% unchanged; it now says what is still upstream's and points at the measured
+  table. Both READMEs also now name the notice file, and the credit asks a
+  redistributor to keep both notices rather than the attribution alone.
+
 ## [0.4.9] - 2026-08-23
 
 ### Added
@@ -823,7 +851,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...HEAD
+[0.4.11]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...v0.4.11
 [0.4.9]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.6...v0.4.7

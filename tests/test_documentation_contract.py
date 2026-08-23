@@ -525,3 +525,72 @@ def test_the_registry_listing_describes_environment_variables_that_exist(monkeyp
     monkeypatch.delenv("BROWSERTAP_MODE", raising=False)
     monkeypatch.setattr(btap_server, "_AUTOMATION_MODE_OVERRIDE", None)
     assert stated.group("default") == btap_server._automation_mode()
+
+
+def test_the_upstream_mit_notice_travels_with_every_copy():
+    """Part of the browser layer is still GenericAgent's, under its MIT licence.
+
+    MIT puts the obligation on the copy, not on the repository: the notice has
+    to be included in "all copies or substantial portions". `LICENSE` here does
+    not carry it -- its body is upstream's word for word with only the copyright
+    line swapped -- so a reader of `LICENSE` alone is told the wrong holder. The
+    README credit is prose attribution, which is good practice and not the
+    notice. `THIRD-PARTY-NOTICES.md` is, and it is only worth anything if it
+    reaches the artifact, so `license-files` and the distribution gate carry it
+    too.
+    """
+    notices = ROOT / "THIRD-PARTY-NOTICES.md"
+    assert notices.exists(), "THIRD-PARTY-NOTICES.md is gone; upstream's notice ships nowhere"
+    text = notices.read_text(encoding="utf-8")
+
+    assert "Copyright (c) 2025 lsdefine" in text, "upstream's copyright line is not reproduced"
+    assert "https://github.com/lsdefine/GenericAgent" in text
+
+    # The reproduced grant must be the real MIT text, not a paraphrase. Our own
+    # LICENSE body is the same text, so comparing against it needs no vendored
+    # copy and fails if either drifts.
+    licence_body = [
+        line
+        for line in (ROOT / "LICENSE").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("Copyright (c)")
+    ]
+    notice_lines = [line.strip() for line in text.splitlines()]
+    for line in licence_body:
+        assert line in notice_lines, f"reproduced licence is missing: {line[:60]}"
+
+    # Every file the table claims is derived has to still be there under that
+    # name. A rename that skipped this file would leave the notice pointing at
+    # nothing while the code it covers kept shipping.
+    claimed = []
+    for line in text.splitlines():
+        if not line.startswith("| `src/"):
+            continue
+        first = line.split("|")[1].strip().strip("`")
+        claimed.append(first)
+        assert (ROOT / first).exists(), f"THIRD-PARTY-NOTICES.md credits a missing file: {first}"
+    assert len(claimed) >= 3, "the derived-file table stopped parsing; this check is now vacuous"
+    assert "src/browsertap_mcp/simphtml.py" in claimed
+
+    # Reaching the artifact is the whole point of the file.
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        metadata = tomllib.load(handle)
+    declared = metadata["project"]["license-files"]
+    assert "THIRD-PARTY-NOTICES.md" in declared, f"license-files is {declared}"
+    assert "LICENSE" in declared, f"license-files dropped LICENSE: {declared}"
+
+    from scripts.check_distribution import (
+        REQUIRED_SDIST_SUFFIXES,
+        REQUIRED_WHEEL_METADATA_SUFFIXES,
+    )
+
+    assert "/licenses/THIRD-PARTY-NOTICES.md" in REQUIRED_WHEEL_METADATA_SUFFIXES
+    assert "/licenses/LICENSE" in REQUIRED_WHEEL_METADATA_SUFFIXES
+    assert "/THIRD-PARTY-NOTICES.md" in REQUIRED_SDIST_SUFFIXES
+    assert "/LICENSE" in REQUIRED_SDIST_SUFFIXES
+
+    for name in ("README.md", "README.zh-CN.md"):
+        readme = (ROOT / name).read_text(encoding="utf-8")
+        assert "THIRD-PARTY-NOTICES.md" in readme, f"{name} no longer points at the notice"
+        assert "lsdefine/GenericAgent" in readme, f"{name} dropped the upstream credit"

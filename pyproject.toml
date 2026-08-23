@@ -9,6 +9,10 @@ description = "Real-browser MCP server with a BrowserBridge/CDP transport, scree
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+# Explicit, not the implicit default glob: the upstream notice in
+# THIRD-PARTY-NOTICES.md has to reach whoever receives a copy, and most
+# people receive the wheel. Both files land in `.dist-info/licenses/`.
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 authors = [
   { name = "zhea" }
 ]

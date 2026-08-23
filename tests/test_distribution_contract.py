@@ -20,6 +20,7 @@ import zipfile
 
 from scripts.check_distribution import (
     REQUIRED_SDIST_SUFFIXES,
+    REQUIRED_WHEEL_METADATA_SUFFIXES,
     REQUIRED_WHEEL_SUFFIXES,
     validate_archive,
     validate_dist_dir,
@@ -84,7 +85,14 @@ def _write_wheel(path: Path, names, *, version: str = "0.3.4", metadata: str | N
 
 
 def _wheel_names() -> list[str]:
-    return [suffix.lstrip("/") for suffix in REQUIRED_WHEEL_SUFFIXES]
+    # The licence members are generated into `dist-info` rather than copied out
+    # of the package tree, so they carry that prefix instead of a bare package
+    # path. The gate matches on suffix, so the version in it is immaterial.
+    prefix = "browsertap_mcp-0.3.4.dist-info"
+    return [
+        *(suffix.lstrip("/") for suffix in REQUIRED_WHEEL_SUFFIXES),
+        *(f"{prefix}{suffix}" for suffix in REQUIRED_WHEEL_METADATA_SUFFIXES),
+    ]
 
 
 def _sdist_names() -> list[str]:

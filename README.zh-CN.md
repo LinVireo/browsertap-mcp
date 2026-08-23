@@ -11,7 +11,7 @@
 `browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.9**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.11**。
 
 当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
@@ -591,16 +591,21 @@ BTAP 由 `LinVireo` 维护。[LICENSE](https://github.com/LinVireo/browsertap-mc
 中的 MIT 版权声明按原样保留（`zhea`）；维护者与版权归属是两个不同角色。本发行版的权威公开仓库为
 `LinVireo/browsertap-mcp`。
 
-这里的浏览器层有一小部分来自 [GenericAgent](https://github.com/lsdefine/GenericAgent)，
-感谢该项目及其作者提供的原始实现。下列文件源出于此，且此后均已大幅重写；本发行版的其余部分——
-MCP 工具面、bridge 及其 token 鉴权、Chrome 扩展、发布证据链、测试套件与两份 README——均在此编写。
+这里的浏览器层起自 [GenericAgent](https://github.com/lsdefine/GenericAgent)，其中一部分至今仍是。
+感谢该项目及其作者提供的原始实现。
 
 源出 GenericAgent 的部分：
+- `simphtml.py` —— 至今仍主要是上游那个文件，在此基础上扩展
 - `TMWebDriver.py`（现由 `browser_bridge.py` 维护）
-- `simphtml.py`
 - `tmwd_cdp_bridge` Chrome 扩展资源
 
-Fork 或二次分发时应保留上述致谢。
+GenericAgent 采用 MIT 许可，因此其版权声明必须随每一份副本一同交付。声明全文，以及每个文件
+还有多少行逐字来自上游的实测数据，见
+[THIRD-PARTY-NOTICES.md](https://github.com/LinVireo/browsertap-mcp/blob/main/THIRD-PARTY-NOTICES.md)——它同时打进 wheel 与 sdist，不只存在于本仓库。
+本发行版的其余部分——MCP 工具面、bridge 及其 token 鉴权、发布证据链、测试套件与两份
+README——均在此编写。
+
+Fork 或二次分发时请同时保留两份声明：`LICENSE` 与该文件。
 
 ## 许可证
 
