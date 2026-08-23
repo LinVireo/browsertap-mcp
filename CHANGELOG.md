@@ -10,6 +10,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Two MCP instances starting at the same moment can no longer both spawn a
+  bridge daemon -- the duplicate the spawn lock exists to prevent. `O_EXCL`
+  publishes the lock file before the owner's pid is written into it, and an
+  instance arriving in that window read it empty, took "no pid" to mean "the
+  owner is gone", deleted the winner's lock and spawned. An unreadable pid is
+  now a different fact from a dead one: only a pid that parsed and whose
+  process is really gone recycles the lock, and a genuinely corrupt lock is
+  still recovered by the 30-second staleness window that exists for it.
+  Measured off Windows only, at 12 concurrent callers and 2 daemons; the
+  window is real everywhere but its width is scheduler-specific.
 - `download_file` validates the name it actually sends. The payload rewrites
   backslashes to `/`, and the check ran before that rewrite against the
   server's *native* path flavour -- so on Linux and macOS `filename`
@@ -31,6 +41,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   call against `OSError` while reading the missing constant raises
   `AttributeError` -- so every test that needs a real port (the whole
   `/link` token-auth group, 26 of them) errored out before it started.
+- Four deadline tests no longer depend on how loaded the machine is. They let a
+  fake driver really `sleep()` through a budget measured in tens of
+  milliseconds, so a shared CI runner spent the remainder before the next
+  dispatch and the tests failed on Linux and macOS while passing here. They now
+  advance a fake monotonic clock, which is what they were always asserting
+  about. One of them compared two budgets with a strict `<` that needed
+  measurable clock movement inside 10 ms -- below Windows' 15.6 ms timer
+  granularity, so both sides read the same float.
 
 
 ## [0.4.7] - 2026-08-23

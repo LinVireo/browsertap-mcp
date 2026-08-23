@@ -323,7 +323,14 @@ def test_execute_js_rich_pins_explicit_session_for_every_page_roundtrip(monkeypa
     assert driver.default_session_id == "c:other"
 
 
-def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
+def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace(monkeypatch):
+    # The driver spends exactly the budget it was handed, on a fake clock instead
+    # of a real sleep. The reserve split leaves the retry only a few ms of real
+    # time inside a 0.12s deadline, so scheduler noise on a shared runner spent it
+    # before the second dispatch and timeouts dropped to 1 -- measured on the
+    # macOS CI runner. Same idiom as the other deadline tests in this file.
+    clock = [100.0]
+
     class SlowDriver:
         default_session_id = "c:42"
 
@@ -333,11 +340,12 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
         def execute_js(self, _script, timeout=15, session_id=None):
             assert session_id == "c:42"
             self.timeouts.append(timeout)
-            time.sleep(max(0.0, timeout))
+            clock[0] += max(0.0, timeout)
             return {"result": f"No response data in {timeout}s (no ACK, script may not have been delivered)"}
 
     driver = SlowDriver()
-    started = time.monotonic()
+    monkeypatch.setattr(simphtml.time, "monotonic", lambda: clock[0])
+    started = time.perf_counter()
     result = simphtml.execute_js_rich(
         "return 1",
         driver,
@@ -346,8 +354,6 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
         before_sids=set(),
         session_id="c:42",
     )
-    elapsed = time.monotonic() - started
-
     assert result["status"] == "no_response"
     assert result["delivery_state"] == "undelivered"
     assert result["retry_safe"] is True
@@ -356,11 +362,10 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace():
     assert result["btap_retried"] is True
     assert sum(driver.timeouts) <= 0.16
     # The budgets above are the contract -- they read what the code handed the
-    # driver, so they hold under any machine load. This wall clock is only a
-    # backstop for a retry sleeping outside the recorded timeout, whose failure
-    # mode is a re-armed 15s default, so the ceiling is loose on purpose. A
-    # tight one (0.30s) failed for scheduler noise under coverage instrumentation.
-    assert elapsed < 1.0
+    # driver. This wall clock is only a backstop for a retry sleeping outside the
+    # recorded timeout, whose failure mode is a re-armed 15s default, so the
+    # ceiling is loose on purpose. perf_counter because monotonic is patched.
+    assert time.perf_counter() - started < 5.0
 
 
 def test_undelivered_retry_split_reserves_a_reachable_retry_window():
@@ -1363,6 +1368,24 @@ def test_a_crashed_spawner_does_not_block_forever(tmp_path, monkeypatch):
     assert S._acquire_spawn_lock() is not None
 
 
+def test_a_lock_being_written_is_not_a_dead_owner(tmp_path, monkeypatch):
+    """The window between O_EXCL and the pid write is not an abandoned lock.
+
+    os.open() publishes the file first and writes the pid after, so a second
+    instance can read it empty. Treating that as "owner gone" made the loser
+    unlink the winner's lock and spawn the duplicate the lock exists to prevent
+    -- it is the race behind `spawned 2 daemons` in the concurrent test below.
+    A corrupt lock is still recovered, by the _SPAWN_LOCK_STALE window.
+    """
+    monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
+    lock = S._spawn_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("", encoding="utf-8")     # created, pid not written yet
+
+    assert S._acquire_spawn_lock() is None    # stand down, do not steal
+    assert lock.exists()                      # and the winner still holds it
+
+
 def test_concurrent_starts_still_spawn_one_daemon(tmp_path, monkeypatch):
     """The sequential lock check is not enough on its own.
 
@@ -1693,11 +1716,20 @@ def test_spawn_lock_recycled_when_owner_pid_is_dead(tmp_path, monkeypatch):
     """A daemon that crashed seconds after spawn used to hold the lock for the
     full _SPAWN_LOCK_STALE window; now a dead owner pid frees it immediately."""
     import os as _os
+    import subprocess
+    import sys
+
     monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
     lock = S._acquire_spawn_lock()
     assert lock is not None
-    # Write a pid that is guaranteed not to exist (nothing uses pid 0).
-    lock.write_text("0", encoding="utf-8")
+    # A real process that has exited, which is what a crashed spawner leaves
+    # behind. Not the "0" this used to write: an unparseable or absent pid is now
+    # deliberately *not* treated as a dead owner, because that is also what the
+    # window between O_EXCL and the pid write looks like -- see
+    # test_a_lock_being_written_is_not_a_dead_owner.
+    dead = subprocess.Popen([sys.executable, "-c", ""])
+    dead.wait()
+    lock.write_text(str(dead.pid), encoding="utf-8")
     # Make mtime recent so the age-based path does NOT fire; only pid liveness
     # should recycle it.
     fresh = time.time()

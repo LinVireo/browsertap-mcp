@@ -479,11 +479,21 @@ def _acquire_spawn_lock() -> Optional[Path]:
             if time.time() - lock.stat().st_mtime > _SPAWN_LOCK_STALE:
                 recycle = True
             else:
+                # An unreadable pid is NOT the same fact as a dead one, and the
+                # difference is the whole race this lock exists to close. O_EXCL
+                # publishes the file before the pid is written, so an instance
+                # arriving in that window reads it empty -- and "empty means the
+                # owner is gone" made it delete the winner's lock and spawn the
+                # duplicate. Only a pid that parsed and whose process is really
+                # gone may be recycled here; a corrupt lock is left to the
+                # _SPAWN_LOCK_STALE window above, which is what that window is
+                # for. Measured: 12 concurrent callers, 2 daemons, off Windows
+                # only -- the window is real but its width is scheduler-specific.
                 try:
                     old_pid = int(lock.read_text(encoding="utf-8").strip())
                 except (ValueError, OSError):
                     old_pid = 0
-                if not _pid_alive(old_pid):
+                if old_pid and not _pid_alive(old_pid):
                     recycle = True
             if recycle:
                 lock.unlink(missing_ok=True)

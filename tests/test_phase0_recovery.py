@@ -362,6 +362,14 @@ def test_open_url_timeout_does_not_repeat_an_unknown_navigation(monkeypatch):
 
 
 def test_open_url_unknown_command_fallback_uses_one_total_deadline(monkeypatch):
+    # Fake clock: the driver spends the budget without a real sleep. Three real
+    # 0.03s sleeves plus dispatch overhead do fit inside 0.2s on this machine and
+    # did not on a shared CI runner, where the third call found the deadline gone
+    # and the result came back navigation_timeout instead of redirected. What the
+    # test pins is how the budget is *split*, which the fake clock preserves
+    # exactly. `S.time` is the time module itself, so this patch is process-wide.
+    clock = [100.0]
+
     class DeadlineDriver:
         default_session_id = "chrome:profile:7"
 
@@ -370,7 +378,7 @@ def test_open_url_unknown_command_fallback_uses_one_total_deadline(monkeypatch):
 
         def ext_cmd(self, payload, client_id=None, timeout=15.0):
             self.calls.append((payload, client_id, timeout))
-            time.sleep(0.03)
+            clock[0] += 0.03
             if payload.get("cmd") == "navigate":
                 raise RuntimeError("Unknown cmd: navigate")
             if payload.get("method") == "Runtime.evaluate":
@@ -388,6 +396,7 @@ def test_open_url_unknown_command_fallback_uses_one_total_deadline(monkeypatch):
 
     driver = DeadlineDriver()
     _install(monkeypatch, driver)
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
 
     result = S.open_url(
         "https://new.test/", session_id="chrome:profile:7", timeout=0.2
@@ -530,14 +539,22 @@ def test_handle_dialog_normalizes_native_no_dialog_error(monkeypatch, message):
 
 
 def test_open_url_session_resolution_uses_one_bounded_snapshot(monkeypatch):
+    # Fake clock so the snapshot provably consumes part of the budget. The final
+    # assertion is that the driver gets *less* than the snapshot was given, and a
+    # real 10ms sleep does not always show up as movement: Windows' timer
+    # granularity is 15.6ms, so both sides read the same float and a strict `<`
+    # failed. Relaxing it to `<=` would have made the test pass while no longer
+    # asserting anything.
+    clock = [100.0]
     driver = _Driver([{"data": {"status": "ok", "url": "https://new.test/"}}])
     monkeypatch.setattr(S, "require_driver", lambda: driver)
     monkeypatch.setattr(S, "invalidate_sessions_cache", lambda: None)
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
     calls = []
 
     def sessions(timeout=None, fresh=False):
         calls.append((timeout, fresh))
-        time.sleep(0.01)
+        clock[0] += 0.01
         return _sessions(url="https://shell.example/terminal")
 
     monkeypatch.setattr(S, "active_sessions", sessions)
@@ -628,6 +645,12 @@ def test_execute_js_policy_timeout_never_dispatches_fallback_script(monkeypatch)
 
 
 def test_direct_cdp_fallback_uses_only_remaining_deadline(monkeypatch):
+    # Fake clock, same reason as the fallback test above: a real 0.03s sleep left
+    # so little of the 0.08s deadline that a loaded runner exhausted it and the
+    # page fallback raised instead of being handed the remainder. The assertions
+    # read the split, not the elapsed time.
+    clock = [100.0]
+
     class DeadlineDriver:
         default_session_id = "chrome:profile:7"
 
@@ -636,7 +659,7 @@ def test_direct_cdp_fallback_uses_only_remaining_deadline(monkeypatch):
 
         def ext_cmd(self, payload, client_id=None, timeout=15.0):
             self.timeouts.append(("ext", timeout, payload["timeoutMs"]))
-            time.sleep(0.03)
+            clock[0] += 0.03
             raise RuntimeError("Unknown cmd: cdp")
 
         def execute_js(self, payload, timeout=15.0, session_id=None):
@@ -645,6 +668,7 @@ def test_direct_cdp_fallback_uses_only_remaining_deadline(monkeypatch):
 
     driver = DeadlineDriver()
     _install(monkeypatch, driver)
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
     deadline = time.monotonic() + 0.08
 
     result = S._direct_cdp(
