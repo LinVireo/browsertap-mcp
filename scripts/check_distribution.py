@@ -31,7 +31,11 @@ REQUIRED_SDIST_SUFFIXES = (
     "/src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
     "/.github/workflows/live.yml",
     "/.github/workflows/release.yml",
+    "/.github/workflows/supply-chain.yml",
     "/.github/workflows/test.yml",
+    # Not packaging metadata: `scripts/versioning.py` and two test modules read
+    # it, and all three ship, so leaving it out turns a gate into a traceback.
+    "/server.json",
     "/examples/claude-desktop-config.json",
     "/examples/cursor-mcp.json",
     "/examples/hermes-config.yaml",

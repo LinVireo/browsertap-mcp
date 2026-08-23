@@ -18,6 +18,10 @@ exclude SKILL.md
 # stray `SKILL.md` dropped in the repository root is a caller's own copy and
 # stays out, while the two packaged agent skills ship as package data.
 recursive-include src/browsertap_mcp/skills SKILL.md
+# The sdist carries `scripts/` and `tests/`, so the gates are runnable from it --
+# and three of them read `server.json`. Shipping them without it makes
+# `versioning check` raise instead of answer.
+include server.json
 include pyproject.toml
 include MANIFEST.in
 recursive-include scripts *.py
