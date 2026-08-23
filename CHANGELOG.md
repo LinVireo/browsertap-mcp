@@ -34,6 +34,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   table. Both READMEs also now name the notice file, and the credit asks a
   redistributor to keep both notices rather than the attribution alone.
 
+### Fixed
+
+- An abandoned CDP attach no longer surfaces as an uncaught error on
+  `chrome://extensions` for an install that is working. The shared attach promise
+  had exactly one reader, and the deadline is re-checked after the promise
+  exists, so a caller whose budget ran out resolving the target threw and took
+  that reader with it; the late-completion branch then rejected on purpose to
+  mark the abandoned lease, with nobody listening. A terminal `.catch` keeps one
+  reader that cannot walk away, and every real waiter still races the promise
+  itself and still sees the rejection. Two node harnesses that raced real
+  milliseconds against a 10ms and a 20ms budget now freeze the clock the
+  extension reads, which is what made them fail on the slowest CI runner for a
+  reason unrelated to what they test, and the leak gets a test of its own.
+
 ## [0.4.9] - 2026-08-23
 
 ### Added
