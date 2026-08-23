@@ -15,9 +15,9 @@ instead -- see `TestUnknownBounds`.
 from __future__ import annotations
 
 import types
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from browsertap_mcp import physical_input as P
 from browsertap_mcp import server as S
