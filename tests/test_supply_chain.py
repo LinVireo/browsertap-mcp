@@ -85,6 +85,27 @@ def test_the_audit_is_informational_on_a_push_and_blocking_on_a_release():
     assert "continue-on-error" not in RELEASE
 
 
+@pytest.mark.parametrize("workflow", (RELEASE, SUPPLY_CHAIN), ids=("release", "supply-chain"))
+def test_the_package_under_audit_is_not_audited_as_its_own_dependency(workflow):
+    """Without this the first release of any name cannot be published at all.
+
+    `pip freeze` lists the installed package next to its dependencies, and a local
+    install records a PEP 610 direct reference, so `pip-audit --strict` reports
+    "Dependency not found on PyPI and could not be audited: browsertap-mcp
+    (0.4.12)" -- for the very version about to be uploaded, which is never on the
+    index beforehand. Observed on run 32650528671, which failed with nothing
+    uploaded. In supply-chain.yml the same step is `continue-on-error`, so there it
+    reported no advisories because it had audited nothing, not because there were
+    none.
+    """
+    trim = "sed -i -E '/^browsertap[-_]mcp([[:space:]=@]|$)/d' runtime-requirements.txt"
+    assert trim in workflow
+    # Order matters: the freeze has to be written and printed first, or the log
+    # loses the wheel and its hash, which is the evidence of what was audited.
+    assert workflow.index("pip freeze --exclude-editable > runtime-requirements.txt") < workflow.index(trim)
+    assert workflow.index(trim) < workflow.index("pip-audit --requirement")
+
+
 def test_the_sbom_describes_the_wheel_that_is_about_to_be_published():
     build_stage, publish_stage = RELEASE.split("publish:", 1)
     assert "pip install --quiet --no-input dist/*.whl" in build_stage

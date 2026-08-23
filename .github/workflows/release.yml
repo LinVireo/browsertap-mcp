@@ -96,6 +96,20 @@ jobs:
           ./sbom-venv/bin/python -m pip install --quiet --no-input dist/*.whl
           ./sbom-venv/bin/python -m pip freeze --exclude-editable > runtime-requirements.txt
           cat runtime-requirements.txt
+          # `pip freeze` lists the package under audit alongside its dependencies,
+          # and because it was installed from a local wheel it comes out as a PEP
+          # 610 direct reference -- `browsertap-mcp @ file:///.../*.whl#sha256=...`.
+          # `pip-audit --strict` then fails the whole run with "Dependency not found
+          # on PyPI and could not be audited", naming the exact version this
+          # workflow is about to upload, which by definition is not on the index
+          # yet. That made the first release of any name impossible to publish and
+          # went unnoticed because the same step does not block in
+          # supply-chain.yml. The subject of an audit is not one of its own
+          # dependencies, so it is dropped from the auditor's input -- after the
+          # full freeze has been printed above, so the wheel and its hash stay in
+          # the log as evidence. The SBOM below still describes the whole
+          # environment, package included, which is what an SBOM is for.
+          sed -i -E '/^browsertap[-_]mcp([[:space:]=@]|$)/d' runtime-requirements.txt
           python -m pip install --quiet pip-audit==2.10.1 cyclonedx-bom==7.3.1
           pip-audit --requirement runtime-requirements.txt --no-deps --strict --desc
           mkdir -p sbom

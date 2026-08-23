@@ -93,6 +93,13 @@ jobs:
           ./runtime-venv/bin/python -m pip install --quiet .
           ./runtime-venv/bin/python -m pip freeze --exclude-editable > runtime-requirements.txt
           cat runtime-requirements.txt
+          # The package itself is in that list, as a PEP 610 direct reference to
+          # the local checkout, and `pip-audit --strict` treats a requirement it
+          # cannot resolve on PyPI as a failure. Here the step is
+          # `continue-on-error`, so the job stayed green while the audit had in
+          # fact stopped -- the whole closure was going unaudited and the report
+          # said so to nobody. Same removal as release.yml, where it is fatal.
+          sed -i -E '/^browsertap[-_]mcp([[:space:]=@]|$)/d' runtime-requirements.txt
       # Informational here, blocking in release.yml. An advisory published
       # overnight would otherwise turn every branch red for a reason unrelated to
       # the commit that is being pushed -- but it is a perfectly good reason not
