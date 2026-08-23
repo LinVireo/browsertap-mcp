@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -13,6 +14,11 @@ from browsertap_mcp import server as S
 ROOT = Path(__file__).resolve().parents[1]
 BACKGROUND = ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "background.js"
 MANIFEST = ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json"
+
+# Absolute on the platform the test is running on. "C:/downloads" is absolute
+# only on Windows, so on POSIX the directory check refused it first and the
+# wait=true parameter below never reached the rule it exists to pin.
+ABSOLUTE_DIR = "C:/downloads" if os.name == "nt" else "/downloads"
 
 
 class _Driver:
@@ -394,11 +400,14 @@ def test_download_file_preserves_structured_extension_failure(monkeypatch):
         ({"url": "https://example.test/a", "filename": "\\escape.bin"}, "filename"),
         ({"url": "https://example.test/a", "filename": "C:escape.bin"}, "filename"),
         ({"url": "https://example.test/a", "filename": "."}, "filename"),
+        # A UNC root: rejected by the POSIX half of the check, which is the
+        # direction PureWindowsPath alone would let through as a share name.
+        ({"url": "https://example.test/a", "filename": "//host/share/x.bin"}, "filename"),
         ({"url": "https://example.test/a", "directory": "relative/path"}, "absolute"),
         (
             {
                 "url": "https://example.test/a",
-                "directory": "C:/downloads",
+                "directory": ABSOLUTE_DIR,
                 "wait": False,
             },
             "wait=true",

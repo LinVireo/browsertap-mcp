@@ -6,6 +6,33 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-08-23
+
+### Fixed
+
+- `download_file` validates the name it actually sends. The payload rewrites
+  backslashes to `/`, and the check ran before that rewrite against the
+  server's *native* path flavour -- so on Linux and macOS `filename`
+  `"\escape.bin"` looked like one ordinary path component, passed, and
+  reached Chrome as the absolute path `/escape.bin`. The check now runs on the
+  rewritten value against both flavours, so `"C:escape.bin"` (drive-relative
+  to Chrome on Windows) and `"//host/share/x"` are refused everywhere and the
+  answer no longer depends on which OS the server happens to run on.
+- The offline suite can complete on Python 3.10 and 3.11 again. A test asked
+  for the other platform's virtualenv layout by patching `os.name`
+  process-wide; on those versions `pathlib.Path` reads that global to pick its
+  concrete class, so every `Path(...)` in the process raised
+  `NotImplementedError` -- including the ones pytest runs while formatting a
+  report, which turned one assertion into an `INTERNALERROR` that abandoned
+  the run after 411 of 1331 tests. `check_install._venv_paths` now takes the
+  platform as an argument.
+- The offline suite runs on Linux and macOS. Its free-port probe set
+  `SO_EXCLUSIVEADDRUSE`, which does not exist off Windows, and guarded the
+  call against `OSError` while reading the missing constant raises
+  `AttributeError` -- so every test that needs a real port (the whole
+  `/link` token-auth group, 26 of them) errored out before it started.
+
+
 ## [0.4.7] - 2026-08-23
 
 ### Fixed
@@ -742,7 +769,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.4...v0.4.5

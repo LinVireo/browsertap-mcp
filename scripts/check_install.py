@@ -115,9 +115,17 @@ def _run(command: list[str], *, cwd: Path, timeout: int) -> dict[str, object]:
     }
 
 
-def _venv_paths(venv: Path) -> tuple[Path, Path]:
-    """The interpreter and the console-script directory inside a virtual env."""
-    if os.name == "nt":
+def _venv_paths(venv: Path, *, os_name: str | None = None) -> tuple[Path, Path]:
+    """The interpreter and the console-script directory inside a virtual env.
+
+    ``os_name`` is here so a caller can ask for the other platform's layout
+    without patching ``os.name`` process-wide. On Python 3.10 and 3.11
+    ``pathlib.Path`` picks its concrete class from that global, so patching it
+    makes every ``Path(...)`` in the process raise NotImplementedError --
+    including the ones pytest itself runs while formatting a report, which turns
+    one failing assertion into an INTERNALERROR that abandons the whole run.
+    """
+    if (os_name or os.name) == "nt":
         return venv / "Scripts" / "python.exe", venv / "Scripts"
     return venv / "bin" / "python", venv / "bin"
 

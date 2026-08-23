@@ -94,10 +94,17 @@ def _free_port_base() -> int:
                 # Windows 上普通 bind 会被 SO_REUSEADDR 的双重绑定骗过（探测
                 # "成功"，实际端口已被泄漏的旧测试桥占着，请求随机落到旧桥）。
                 # 独占探测才回答"这端口真没人用"。
-                try:
-                    sock.setsockopt(_s.SOL_SOCKET, _s.SO_EXCLUSIVEADDRUSE, 1)
-                except OSError:
-                    pass  # 非 Windows 无此选项
+                #
+                # POSIX 根本没有这个常量，读属性就抛 AttributeError，
+                # 只 catch OSError 拦不住，_free_port_base 本身会爆掉，
+                # 所有需要真端口的测试跟着一起错。不设不影响正确性：
+                # 没有 SO_REUSEADDR 的 bind 在 POSIX 上本来就是独占的。
+                exclusive = getattr(_s, "SO_EXCLUSIVEADDRUSE", None)
+                if exclusive is not None:
+                    try:
+                        sock.setsockopt(_s.SOL_SOCKET, exclusive, 1)
+                    except OSError:
+                        pass
                 sock.bind(("127.0.0.1", base + offset))
                 socks.append(sock)
         except OSError:

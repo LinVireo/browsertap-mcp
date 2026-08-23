@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -2422,15 +2422,30 @@ def download_file(
         raise ValueError("timeout must be between 0 and 1800 seconds")
 
     relative_name: Optional[Path] = None
+    wire_name: Optional[str] = None
     if filename is not None:
         filename = str(filename).strip()
-        relative_name = Path(filename)
-        if (not filename or not relative_name.parts or relative_name.anchor
-                or relative_name.is_absolute()
-                or ".." in relative_name.parts):
+        # Validate what actually goes on the wire, not what came in: the payload
+        # below rewrites backslashes to "/", so a native check on POSIX passed
+        # "\escape.bin" (one ordinary part) and Chrome received the absolute
+        # path "/escape.bin".
+        wire_name = filename.replace("\\", "/")
+        # Both flavours, so the answer cannot depend on the OS the server happens
+        # to run on. PurePosixPath calls "C:escape.bin" an ordinary name while
+        # Chrome on Windows reads it as drive-relative; PureWindowsPath is the
+        # half that objects. The other direction is "//host/share".
+        candidates = (PurePosixPath(wire_name), PureWindowsPath(wire_name))
+        if not wire_name or any(
+            not candidate.parts
+            or candidate.anchor
+            or candidate.is_absolute()
+            or ".." in candidate.parts
+            for candidate in candidates
+        ):
             raise ValueError(
                 "filename must be a non-empty relative download name without '..'"
             )
+        relative_name = Path(wire_name)
 
     target_directory: Optional[Path] = None
     if directory is not None:
@@ -2463,8 +2478,8 @@ def download_file(
         "wait": bool(wait),
         "timeoutMs": max(1, int(timeout * 1000)),
     }
-    if filename is not None:
-        payload["filename"] = filename.replace("\\", "/")
+    if wire_name is not None:
+        payload["filename"] = wire_name
     response = require_driver().ext_cmd(
         payload,
         client_id=client_id,

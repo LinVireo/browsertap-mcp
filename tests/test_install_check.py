@@ -330,10 +330,13 @@ def test_the_probe_environment_cannot_reach_a_development_checkout(monkeypatch):
     ("os_name", "interpreter", "scripts"),
     [("nt", "Scripts/python.exe", "Scripts"), ("posix", "bin/python", "bin")],
 )
-def test_venv_layout_follows_the_platform(monkeypatch, tmp_path, os_name, interpreter, scripts):
-    monkeypatch.setattr(C.os, "name", os_name)
-
-    python, scripts_dir = C._venv_paths(tmp_path / "venv")
+def test_venv_layout_follows_the_platform(tmp_path, os_name, interpreter, scripts):
+    # os_name is passed in rather than monkeypatched onto the os module: on
+    # Python 3.10/3.11 `pathlib.Path` reads that global to choose its concrete
+    # class, so patching it makes Path() raise NotImplementedError everywhere in
+    # the process -- pytest's own report formatting included, which ends the run
+    # with an INTERNALERROR instead of a test failure.
+    python, scripts_dir = C._venv_paths(tmp_path / "venv", os_name=os_name)
 
     assert python == tmp_path / "venv" / Path(interpreter)
     assert scripts_dir == tmp_path / "venv" / scripts
