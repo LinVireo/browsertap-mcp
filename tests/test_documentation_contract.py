@@ -571,8 +571,13 @@ def test_the_upstream_mit_notice_travels_with_every_copy():
     assert len(claimed) >= 3, "the derived-file table stopped parsing; this check is now vacuous"
     assert "src/browsertap_mcp/simphtml.py" in claimed
 
-    # Reaching the artifact is the whole point of the file.
-    import tomllib
+    # Reaching the artifact is the whole point of the file. `tomllib` is 3.11+ and
+    # this package still supports 3.10, where the `dev` extra pins `tomli` for
+    # exactly this -- the same fallback `scripts/versioning.py` uses.
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
+        import tomli as tomllib
 
     with (ROOT / "pyproject.toml").open("rb") as handle:
         metadata = tomllib.load(handle)

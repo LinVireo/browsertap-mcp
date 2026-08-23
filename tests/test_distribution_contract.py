@@ -477,6 +477,67 @@ def test_the_environment_running_the_suite_has_both_async_backends():
     )
 
 
+def _tomllib_imports(path: Path) -> tuple[list[int], list[int]]:
+    """Line numbers of `import tomllib` in one file, split guarded / bare."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        rescued = {
+            alias.name
+            for handler in node.handlers
+            for statement in ast.walk(handler)
+            if isinstance(statement, ast.Import)
+            for alias in statement.names
+        }
+        if "tomli" not in rescued:
+            continue
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if isinstance(inner, ast.Import) and any(
+                    alias.name == "tomllib" for alias in inner.names
+                ):
+                    guarded.add(inner.lineno)
+    found = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        and any(alias.name == "tomllib" for alias in node.names)
+    ]
+    return sorted(guarded), sorted(line for line in found if line not in guarded)
+
+
+def test_every_tomllib_import_has_the_3_10_fallback():
+    """`tomllib` is 3.11+, and `requires-python` here is >=3.10.
+
+    A bare `import tomllib` is invisible on a developer machine and in five of
+    the eight CI jobs: it raises `ModuleNotFoundError` only under 3.10, so the
+    failure arrives after a push, in one platform column, on a line that has
+    nothing to do with what the test was about. The `dev` extra pins `tomli` for
+    exactly this and two call sites already use the fallback -- which is what
+    makes the third one worth gating rather than remembering.
+    """
+    root = Path(__file__).resolve().parents[1]
+    guarded_files = 0
+    bare: dict[str, list[int]] = {}
+    for directory in ("src", "scripts", "tests"):
+        for path in sorted((root / directory).rglob("*.py")):
+            guarded, unguarded = _tomllib_imports(path)
+            if unguarded:
+                bare[path.relative_to(root).as_posix()] = unguarded
+            if guarded:
+                guarded_files += 1
+
+    assert not bare, (
+        "import tomllib without the `tomli` fallback breaks Python 3.10: "
+        f"{bare}; copy the try/except from scripts/versioning.py"
+    )
+    # Otherwise a rename could leave this passing over nothing at all.
+    assert guarded_files >= 2, (
+        f"only {guarded_files} file(s) still parse pyproject.toml; this check is now vacuous"
+    )
+
 def test_distribution_contract_ships_packaged_skills_but_rejects_stray_copies(tmp_path):
     """The skills ship *from one place only*.
 
