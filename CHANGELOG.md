@@ -6,6 +6,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-23
+
+### Fixed
+
+- The extension refuses to disable *itself*. `chrome.management.setEnabled`
+  is the one documented way to make Chrome re-read `background.js`, and
+  aiming it at the bridge is unrecoverable: nothing is left that could
+  re-enable it, so the transport goes down until a human intervenes. The
+  sibling operations already refused a self-target -- `uninstall` and
+  `call_extension` both do -- and the one with the worst outcome was the one
+  left open, reachable through the `set_extension_enabled` tool whose
+  description never mentioned it.
+- `set_extension_enabled` reports a refusal as `status: error` with the
+  extension's code. It used to return `status: ok` no matter what came back
+  and put the real answer in a nested `result`, so any failed toggle -- not
+  just this one -- read as a completed one in the field a caller checks.
+
 ## [0.4.6] - 2026-08-23
 
 ### Added
@@ -725,7 +742,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.3...v0.4.4

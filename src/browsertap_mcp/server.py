@@ -2276,19 +2276,25 @@ def list_extensions(session_id: Optional[str] = None) -> dict[str, Any]:
 @mcp.tool(
     description=(
         "Enable or disable an installed extension by id. Chrome exposes no API to INSTALL "
-        "an extension, so this only toggles ones already present; use list_extensions for ids."
+        "an extension, so this only toggles ones already present; use list_extensions for ids. "
+        "The BTAP bridge refuses to disable itself -- nothing would be left to re-enable it -- "
+        "so ask a human to press Reload on chrome://extensions to pick up a new build."
     )
 )
 def set_extension_enabled(extension_id: str, enabled: bool,
                           session_id: Optional[str] = None) -> dict[str, Any]:
-    driver = require_driver()
-    client_id = (str(session_id).rsplit(":", 1)[0]
-                 if session_id and ":" in str(session_id) else None)
-    result = driver.ext_cmd(
+    response = require_driver().ext_cmd(
         {"cmd": "management", "method": "enable" if enabled else "disable",
          "extId": extension_id},
-        client_id=client_id, timeout=20.0)
-    return {"status": "ok", "extension_id": extension_id, "enabled": enabled, "result": result}
+        client_id=_extension_client_id(session_id), timeout=20.0)
+    # This used to return `status: ok` unconditionally with the extension's
+    # answer tucked into `result`, so a refusal -- the self-disable guard
+    # above all -- read as a completed toggle in the one field a caller
+    # checks before moving on. `uninstall_extension` already routed through
+    # this helper; the toggle did not.
+    return _extension_operation_result(
+        response, operation="set_extension_enabled",
+        extension_id=extension_id, enabled=enabled)
 
 
 def _extension_client_id(session_id: Optional[str]) -> Optional[str]:

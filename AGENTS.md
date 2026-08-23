@@ -39,7 +39,11 @@ alone.
   `background.js` from disk. You reconnect to the same old build.
 - `chrome.management.setEnabled(self, false)` does force a re-read, but the only
   thing that could re-enable the extension is the extension itself, so the
-  bridge goes down permanently and needs manual recovery. **Never call it.**
+  bridge goes down permanently and needs manual recovery. The extension now
+  **refuses** it (`self_disable_unsupported`), because a rule that lives only
+  in this file is one an agent reaching for `set_extension_enabled` never
+  reads -- and that tool is the exposed path to exactly this call. Do not
+  remove the guard to "force a reload"; there is no automated reload.
 
 Ask the human to press Reload once on `chrome://extensions`. To find out which
 component is stale, run `browsertap doctor` and read `action`:

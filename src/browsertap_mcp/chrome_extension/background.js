@@ -2831,6 +2831,22 @@ async function handleExtMessage(msg, sender) {
         return { ok: true, data: all.map(e => ({ id: e.id, name: e.name, enabled: e.enabled, type: e.type, version: e.version })) };
       }
       if (msg.method === 'disable') {
+        // Disabling ourselves is the one management call with no way back:
+        // the only thing that could re-enable this extension is this
+        // extension, so the bridge goes down for good and a human has to
+        // recover it by hand. It is also a tempting call, because it is the
+        // one documented way to make Chrome re-read background.js -- which
+        // is precisely why the refusal has to live here rather than in a
+        // note asking agents not to try it. `uninstall` and
+        // `call_extension` already guard the same way; this branch was the
+        // one left open, and it is the one with the worst outcome.
+        if (msg.extId === chrome.runtime.id) {
+          return {
+            ok: false,
+            code: 'self_disable_unsupported',
+            error: 'Disabling the BTAP bridge would take down the only path that could re-enable it; ask a human to press Reload on chrome://extensions to pick up a new build.',
+          };
+        }
         await chrome.management.setEnabled(msg.extId, false);
         return { ok: true };
       }

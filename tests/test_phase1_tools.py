@@ -135,6 +135,40 @@ def test_extension_source_routes_cross_extension_messages_and_blocks_self_uninst
         )
     ]
     assert "self_uninstall_unsupported" in management
+    # The disable branch is the one with no recovery path, so it has to
+    # refuse too -- and inside its own branch, not merely somewhere in the
+    # management block.
+    disable_branch = management[
+        management.index("if (msg.method === 'disable')") : management.index(
+            "if (msg.method === 'enable')"
+        )
+    ]
+    assert "self_disable_unsupported" in disable_branch
+    assert "msg.extId === chrome.runtime.id" in disable_branch
+    assert disable_branch.index("chrome.runtime.id") < disable_branch.index(
+        "chrome.management.setEnabled"
+    )
+
+
+def test_set_extension_enabled_reports_a_refusal_instead_of_a_successful_toggle(monkeypatch):
+    """A refused toggle must not come back as `status: ok`.
+
+    The self-disable guard is only useful if its answer survives the trip
+    home: the caller reads `status`, and this tool used to hardcode `ok` and
+    bury the extension's reply one level down in `result`.
+    """
+    driver = _install(monkeypatch, [
+        {"data": {"ok": False, "code": "self_disable_unsupported",
+                  "error": "would take down the only path that could re-enable it"}},
+    ])
+    result = S.set_extension_enabled("btap-own-id", False)
+    assert result["status"] == "error"
+    assert result["code"] == "self_disable_unsupported"
+    assert result["operation"] == "set_extension_enabled"
+    # The context the caller needs to know what was refused is still there.
+    assert result["extension_id"] == "btap-own-id"
+    assert result["enabled"] is False
+    assert [call[0]["method"] for call in driver.calls] == ["disable"]
 
 
 def test_capture_tools_route_to_the_requested_tab_and_flatten_results(monkeypatch):
