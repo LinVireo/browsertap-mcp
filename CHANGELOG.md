@@ -6,6 +6,42 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-08-23
+
+### Added
+
+- `server.json`, the MCP Registry manifest, so the package can actually be
+  listed. README.md has carried the `mcp-name` ownership marker since 0.3.12
+  with nothing beside it to claim, which is half a submission. The manifest is
+  wired into the single-version mechanism rather than left standing alone: it
+  states the version twice -- the label the registry displays and the version a
+  client installs -- and `scripts/versioning.py` rewrites both, requires them to
+  agree with the other six surfaces, and refuses a listing whose `identifier`,
+  `registryType` or `repository.url` stops describing this package. A stale or
+  redirected listing is invisible from the repository once accepted, so it is
+  gated here instead, down to the environment-variable block: every name has to
+  be one a module really reads, and `BROWSERTAP_MODE` has to name the profiles
+  `_AUTOMATION_MODES` accepts and the default `_automation_mode` resolves to. The
+  first draft of the listing offered `strict, standard or lab` and claimed a
+  `standard` default, none of which exists -- a stranger setting `standard` is
+  folded straight back to `lab`, so the listing would have told them they had
+  asked for approval prompts on the profile that skips them and drives real mouse
+  and keyboard input. Every other check passed it, because none of them reads
+  that block.
+- `.github/dependabot.yml` for the GitHub Actions ecosystem, monthly and
+  grouped. Every action is pinned by commit SHA, which has no update channel of
+  its own; this is that channel. The Python side is deliberately absent --
+  `supply-chain.yml` already runs pip-audit and builds an SBOM, and the upper
+  bounds on the `dev` extra are load-bearing, so a bot raising them would undo
+  the thing they exist for.
+
+### Changed
+
+- Both READMEs say under Requirements that there is no Docker image and why: the
+  server attaches to the browser you are signed into, through an extension a
+  human loads once, so a container has nothing to drive. It was the one
+  install-shaped question the docs left a reader to guess at.
+
 ## [0.4.8] - 2026-08-23
 
 ### Fixed
@@ -787,7 +823,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.5...v0.4.6

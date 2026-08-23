@@ -11,7 +11,7 @@
 `browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.8**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.9**。
 
 当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
@@ -66,6 +66,8 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - Python 3.10+
 - Chrome、Edge 或 Opera
 - Linux、macOS 或 Windows；Linux 的操作系统级输入需要 X11 桌面
+- 需要桌面会话，不能跑在容器里。**故意不提供 Docker 镜像**：服务接的是**你自己**已登录的
+  Chrome，扩展要人手动加载一次，容器里没有可驱动的浏览器
 - Claude Code 或其他 MCP 客户端
 
 ## 快速开始

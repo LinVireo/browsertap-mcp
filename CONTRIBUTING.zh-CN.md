@@ -165,10 +165,14 @@ python -m scripts.check_tool_docs --check-installed-skills \
 
 ## 版本与发布卫生
 
-- Python 包、bridge 协议、扩展 manifest、两份 README 与 CHANGELOG 最新版本必须一致。
-  提交改动前运行 `python -m scripts.versioning check`。用户可见改动先写入
-  `[Unreleased]`；`python -m scripts.versioning bump|sync` 会在发布时生成新版本段并
-  更新比较链接。
+- Python 包、bridge 协议、扩展 manifest、两份 README、MCP Registry manifest
+  （`server.json`）与 CHANGELOG 最新版本必须一致。提交改动前运行
+  `python -m scripts.versioning check`。用户可见改动先写入 `[Unreleased]`；
+  `python -m scripts.versioning bump|sync` 会在发布时生成新版本段并更新比较链接。
+- `server.json` 与 `src/`、`scripts/` 同属生产文件，改它必须提升版本。它把版本写了两遍：
+  顶层那个是注册表展示的标签，`packages[]` 里那个才是客户端真正安装的版本，两处都会被
+  改写并互相比对——只动标签的一次提升会让列表宣称一个版本、交付另一个版本。它的 `name`
+  必须与 README.md 里的 `mcp-name` 标记一致，那一对才是注册表认可的命名空间归属证明。
 - 普通 pull request 不需要提升发布版本。CI 的版本增量门禁仅适用于 `release/*` 分支的
   push，使发布协调者统一管理共享版本与 CHANGELOG 文件，避免所有贡献者在这些文件上
   产生冲突。
@@ -196,6 +200,11 @@ python -m scripts.check_tool_docs --check-installed-skills \
   事后真正起作用的是历史那一半：提交过又删掉的 secret 依然是公开的，只有改写历史能
   移除它，再补一个提交不行。`--redact` 保证扫描器不会把它发现的 secret 打进任何人都
   能读到的构建输出。
+- 每个第三方 action 都钉到 commit SHA，并在行尾注释里写明对应版本，
+  `tests/test_supply_chain.py` 会拒绝浮动 tag（仅有一个有据可查的例外）。SHA 自己没有
+  更新通道，所以 `.github/dependabot.yml` 就是那条通道：只管 actions 生态、每月一次、
+  合并成一个 pull request。Python 侧**故意不接**——上面那条审计已经覆盖，而 `dev` extra
+  的上界正是用来阻止门禁工具链自己漂移的，机器人把它们抬上去等于取消它们的作用。
 - 同一个 workflow 还会解析 `pip install` 实际拉进来的依赖闭包、对着漏洞库审计它，并把
   CycloneDX SBOM 作为构建产物发布。该审计在这里是提示性的，在 `release.yml` 里是阻断性
   的：一夜之间新增的公告不该让所有分支变红，但它确实是"这个版本先别发"的正当理由。
@@ -254,6 +263,26 @@ tag 指向的提交若不是封存验收证据的那个提交，发布出去的�
 文件（任何 tag 都无法描述还没进提交的文件）时，它都会失败。`release.yml` 在安装和构建
 任何东西之前先跑它。打完 tag、发布 Release 之前请自己也跑一次，并确认封存报告里的
 `verified_at` 就是那个提交。
+
+## 在 MCP Registry 上架
+
+`server.json` 就是那份列表条目。注册表只存元数据、不存构件，所以它只能在对应版本
+**已经上传到 PyPI 之后**提交——`packages[]` 里的版本会拿去索引上解析。
+
+PyPI 包的归属证明是一段 `mcp-name: <服务名>` 字符串，位置在"会成为 PyPI 包描述的那份
+README"里，本项目即 `README.md`（`pyproject.toml` 中 `readme = "README.md"`）。它在第 1 行、
+写在 HTML 注释里，`server.json` 的 `name` 必须与它完全一致；
+`tests/test_documentation_contract.py` 会检查这一对。标记后面必须跟一个边界字符，所以让它
+单独占一行——在结尾粘一个句号就匹配不上了。用 GitHub 认证时，名字还必须以
+`io.github.<owner>/` 开头。
+
+提交由注册表自己的 `mcp-publisher` CLI 完成：`login`（GitHub 是它支持的多种方式之一）、
+`validate`（只校验 manifest 是否符合已发布 schema，不提交）、然后在仓库根目录 `publish`。
+先跑 `validate`：JSON Schema 本身只在那里被强制，本仓库只门禁它能在本地证明的字段——
+两处版本、identifier、registryType 与 repository URL——并不把 schema 拷进来。
+
+注册表目前是 preview 状态，官方声明在正式发布前可能重置数据，所以把一次成功上架当成
+可重做的事、不是永久的。每个新版本都要重新提交一次：提版本、发 PyPI、再 publish 一次。
 
 ## Pull Request 检查表
 

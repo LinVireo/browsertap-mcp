@@ -204,11 +204,19 @@ verify.
 
 ## Version and release hygiene
 
-- Keep the Python package, bridge protocol, extension manifest, READMEs, and
-  latest changelog release synchronized. Use `python -m scripts.versioning
-  check` before submitting a change. Add user-visible changes under
-  `[Unreleased]`; `python -m scripts.versioning bump|sync` moves them into the new
-  dated release and updates comparison links.
+- Keep the Python package, bridge protocol, extension manifest, READMEs, the MCP
+  Registry manifest (`server.json`) and the latest changelog release
+  synchronized. Use `python -m scripts.versioning check` before submitting a
+  change. Add user-visible changes under `[Unreleased]`;
+  `python -m scripts.versioning bump|sync` moves them into the new dated release
+  and updates comparison links.
+- `server.json` counts as a production file, alongside `src/` and `scripts/`, so
+  editing it requires a version increment. It states the version twice -- the
+  top-level one is the label the registry displays, the one in `packages[]` is
+  what a client installs -- and both are rewritten and compared, because a bump
+  that moved only the label would list one release and hand over another. Its
+  `name` has to match the `mcp-name` marker in README.md, which is the pair the
+  registry accepts as proof that the namespace belongs to this repository.
 - Ordinary pull requests do not bump the release version. The CI increment gate
   applies only to pushes on `release/*` branches, where release coordination can
   own the shared version and changelog files without forcing every contributor
@@ -245,6 +253,14 @@ verify.
   committed and later deleted is still published, and only rewriting history
   removes it -- another commit does not. `--redact` keeps the scanner from
   printing the secret it found into build output that anyone can read.
+- Every third-party action is pinned to a commit SHA, with the version it
+  corresponds to in a trailing comment, and `tests/test_supply_chain.py` refuses
+  a floating tag apart from the one documented exception. A SHA has no update
+  channel of its own, so `.github/dependabot.yml` is that channel: the actions
+  ecosystem only, monthly, grouped into one pull request. The Python side is
+  deliberately absent -- the audit above already covers it, and the upper bounds
+  on the `dev` extra exist to stop the gate toolchain moving on its own, so a bot
+  raising them would undo the thing they are for.
 - The same workflow resolves the closure a plain `pip install` produces, audits
   it against the advisory database, and publishes a CycloneDX SBOM as a build
   artifact. That audit is informational there and blocking in `release.yml`: an
@@ -320,6 +336,60 @@ no tag can describe a file that is not in a commit. `release.yml` runs it before
 it installs or builds anything. Run it yourself after tagging and before
 publishing the Release, and confirm the sealed report's `verified_at` commit is
 that same commit.
+
+## Listing on the MCP Registry
+
+`server.json` is the listing. The registry stores metadata only, never archives,
+so it can be submitted only **after** the PyPI upload for that exact version
+exists -- the version in `packages[]` is resolved against the index.
+
+Ownership of a PyPI package is proved by an `mcp-name: <server name>` string in
+the README that becomes the package description on PyPI, which for this project
+is `README.md` (`readme = "README.md"` in `pyproject.toml`). It is line 1, inside
+an HTML comment, and `server.json`'s `name` has to match it exactly;
+`tests/test_documentation_contract.py` checks that pair. The marker must be
+followed by a boundary, so keep it on its own line -- gluing a full stop onto the
+end stops the match. GitHub-based authentication additionally requires the name
+to start with `io.github.<owner>/`.
+
+The registry's own `mcp-publisher` CLI does the submission: `login` (GitHub is
+one of several supported methods), `validate` to check the manifest against the
+published schema without publishing, then `publish` from the repository root.
+Run `validate` first; it is the only place the JSON Schema itself is enforced,
+because this repository gates the fields it can prove locally -- the two version
+copies, the identifier, the registry type and the repository URL -- and does not
+vendor the schema.
+
+The registry is in preview and says data resets are possible before general
+availability, so treat a successful listing as re-doable rather than permanent.
+A new release needs a new submission: bump, release to PyPI, publish again.
+
+## Listing on the MCP Registry
+
+`server.json` is the listing. The registry stores metadata only, never archives,
+so it can be submitted only **after** the PyPI upload for that exact version
+exists -- the version in `packages[]` is resolved against the index.
+
+Ownership of a PyPI package is proved by an `mcp-name: <server name>` string in
+the README that becomes the package description on PyPI, which for this project
+is `README.md` (`readme = "README.md"` in `pyproject.toml`). It is line 1, inside
+an HTML comment, and `server.json`'s `name` has to match it exactly;
+`tests/test_documentation_contract.py` checks that pair. The marker must be
+followed by a boundary, so keep it on its own line -- gluing a full stop onto the
+end stops the match. GitHub-based authentication additionally requires the name
+to start with `io.github.<owner>/`.
+
+The registry's own `mcp-publisher` CLI does the submission: `login` (GitHub is
+one of several supported methods), `validate` to check the manifest against the
+published schema without publishing, then `publish` from the repository root.
+Run `validate` first; it is the only place the JSON Schema itself is enforced,
+because this repository gates the fields it can prove locally -- the two version
+copies, the identifier, the registry type and the repository URL -- and does not
+vendor the schema.
+
+The registry is in preview and says data resets are possible before general
+availability, so treat a successful listing as re-doable rather than permanent.
+A new release needs a new submission: bump, release to PyPI, publish again.
 
 ## Pull request checklist
 

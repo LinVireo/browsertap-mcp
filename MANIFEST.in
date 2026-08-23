@@ -12,6 +12,7 @@ include AGENTS.md
 recursive-include docs USAGE.md USAGE.zh-CN.md TROUBLESHOOTING.md TROUBLESHOOTING.zh-CN.md
 recursive-include examples *.json *.yaml
 recursive-include .github/workflows *.yml
+include .github/dependabot.yml
 exclude SKILL.md
 # Kept after the bare `exclude` above so the ordering reads unambiguously: a
 # stray `SKILL.md` dropped in the repository root is a caller's own copy and

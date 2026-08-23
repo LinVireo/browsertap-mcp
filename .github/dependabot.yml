@@ -1,0 +1,28 @@
+# Only the GitHub Actions ecosystem is watched here, and that is a decision
+# rather than an omission.
+#
+# Every action in this repository is pinned to a commit SHA (see release.yml),
+# which is the right thing for a workflow holding `id-token: write` -- but a SHA
+# has no update channel, so without this file the pins simply age. Dependabot is
+# that channel.
+#
+# The Python side is deliberately absent. `supply-chain.yml` already audits the
+# real dependency closure with pip-audit and publishes an SBOM, and the upper
+# bounds in pyproject.toml's `dev` extra are load-bearing: they exist so that a
+# new ruff or pytest minor cannot move a gate number with no commit behind it.
+# A bot raising those bounds would undo exactly what they are for. Runtime
+# dependencies carry lower bounds on purpose too -- a user's resolver picks the
+# version, not this repository.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+    groups:
+      actions:
+        patterns:
+          - "*"

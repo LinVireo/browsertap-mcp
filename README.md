@@ -12,7 +12,7 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.8**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.9**.
 
 It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 
@@ -65,6 +65,9 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - Python 3.10+
 - Chrome, Edge, or Opera
 - Linux, macOS, or Windows. OS-level input on Linux requires an X11 desktop.
+- A desktop session, not a container. There is no Docker image on purpose: the
+  server attaches to the Chrome *you* are signed into, through an extension a
+  human loads once, so an isolated container has no browser to drive.
 - Claude Code, or any other MCP client
 
 ## Getting started

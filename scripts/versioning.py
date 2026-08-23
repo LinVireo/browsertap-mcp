@@ -36,7 +36,10 @@ README_VERSION_PATTERNS = {
     ),
 }
 VERSIONED_PATH_PREFIXES = ("src/", "scripts/")
-VERSIONED_PATHS = {"pyproject.toml"}
+# `server.json` is the MCP Registry listing and states the version twice, so an
+# edit to it changes what a stranger installs. That makes it a production path
+# like `src/` and `scripts/`, not documentation.
+VERSIONED_PATHS = {"pyproject.toml", "server.json"}
 
 
 class VersionError(RuntimeError):
@@ -68,6 +71,10 @@ def _version_path(root: Path) -> Path:
 
 def _manifest_path(root: Path) -> Path:
     return root / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json"
+
+
+def _server_manifest_path(root: Path) -> Path:
+    return root / "server.json"
 
 
 def read_source_version(root: Path = ROOT) -> str:
@@ -137,6 +144,71 @@ def _read_manifest_version(root: Path) -> str:
     return version
 
 
+def _read_distribution_name(root: Path) -> str:
+    """The distribution name the index will serve, read from pyproject.
+
+    Hardcoding it here would add a second place to rename the package, which is
+    the failure the registry manifest check below exists to catch.
+    """
+    path = root / "pyproject.toml"
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise VersionError(f"cannot read pyproject.toml: {exc}") from exc
+    name = data.get("project", {}).get("name")
+    if not isinstance(name, str) or not name:
+        raise VersionError("pyproject.toml is missing project.name")
+    return name
+
+
+def _read_server_manifest_version(root: Path) -> str:
+    """The version the MCP Registry listing claims, proved to be stated once.
+
+    `server.json` carries the version twice: at the top level, which is what the
+    registry displays, and inside every `packages[]` entry, which is what a
+    client actually installs. Reading only the first would let a bump move the
+    label while the install stayed pinned to an older release -- a listing that
+    names one version and hands over another, which nobody downstream can
+    detect. So every copy is read and all of them have to agree.
+
+    The entry also has to describe *this* package. A merely stale manifest is
+    caught by the version comparison, but one pointing at another identifier or
+    another index would publish someone else's package under this repository's
+    namespace, and nothing looks at it again once the listing is accepted.
+    """
+    path = _server_manifest_path(root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VersionError(f"cannot read server.json: {exc}") from exc
+    version = data.get("version")
+    if not isinstance(version, str):
+        raise VersionError("server.json version must be a string")
+    _parse_version(version)
+    repository = data.get("repository")
+    if not isinstance(repository, dict) or repository.get("url") != CHANGELOG_REPOSITORY:
+        raise VersionError(f"server.json repository.url must be {CHANGELOG_REPOSITORY}")
+    packages = data.get("packages")
+    if not isinstance(packages, list) or not packages:
+        raise VersionError("server.json must list at least one package")
+    expected_name = _read_distribution_name(root)
+    for index, package in enumerate(packages):
+        if not isinstance(package, dict):
+            raise VersionError(f"server.json packages[{index}] must be an object")
+        if package.get("registryType") != "pypi":
+            raise VersionError(f"server.json packages[{index}].registryType must be pypi")
+        if package.get("identifier") != expected_name:
+            raise VersionError(
+                f"server.json packages[{index}].identifier must be {expected_name}"
+            )
+        if package.get("version") != version:
+            raise VersionError(
+                f"server.json packages[{index}].version is {package.get('version')!r} "
+                f"but the manifest names {version!r}"
+            )
+    return version
+
+
 def _read_readme_version(root: Path, name: str) -> str:
     path = root / name
     try:
@@ -178,6 +250,7 @@ def validate_versions(root: Path = ROOT) -> dict[str, str]:
         "source": source,
         "package": _read_package_version(root, source),
         "manifest": _read_manifest_version(root),
+        "server_manifest": _read_server_manifest_version(root),
         "readme": _read_readme_version(root, "README.md"),
         "readme_zh": _read_readme_version(root, "README.zh-CN.md"),
         "changelog": _read_changelog_version(root),
@@ -242,14 +315,22 @@ def sync_versions(root: Path, version: str) -> list[Path]:
     _parse_version(version)
     source_path = _version_path(root)
     manifest_path = _manifest_path(root)
+    server_manifest_path = _server_manifest_path(root)
     changelog_path = root / "CHANGELOG.md"
     readme_paths = [root / name for name in README_VERSION_PATTERNS]
 
     current_source = source_path.read_text(encoding="utf-8")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    server_manifest = json.loads(server_manifest_path.read_text(encoding="utf-8"))
     current_changelog = changelog_path.read_text(encoding="utf-8")
     _read_package_version(root, version)
     manifest["version"] = version
+    # Both copies, for the reason `_read_server_manifest_version` documents: the
+    # top-level one is the label, the per-package one is what gets installed.
+    server_manifest["version"] = version
+    for package in server_manifest.get("packages", []):
+        if isinstance(package, dict):
+            package["version"] = version
     readme_desired: dict[Path, str] = {}
     for path in readme_paths:
         pattern = README_VERSION_PATTERNS[path.name]
@@ -265,12 +346,14 @@ def sync_versions(root: Path, version: str) -> list[Path]:
     desired = {
         source_path: f'__version__ = "{version}"\n',
         manifest_path: json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        server_manifest_path: json.dumps(server_manifest, ensure_ascii=False, indent=2) + "\n",
         changelog_path: _sync_changelog(current_changelog, version),
         **readme_desired,
     }
     originals = {
         source_path: current_source,
         manifest_path: manifest_path.read_text(encoding="utf-8"),
+        server_manifest_path: server_manifest_path.read_text(encoding="utf-8"),
         changelog_path: current_changelog,
         **{path: path.read_text(encoding="utf-8") for path in readme_paths},
     }

@@ -380,3 +380,148 @@ def test_example_client_names_match_the_standard_config():
     hermes = (ROOT / "examples" / "hermes-config.yaml").read_text(encoding="utf-8")
     assert "  browsertap:\n" in hermes
     assert "browsertap_mcp" not in hermes
+
+
+def test_the_registry_listing_and_the_readme_claim_the_same_namespace():
+    """The pair is what proves the namespace belongs to this repository.
+
+    An MCP Registry submission is accepted only if `server.json`'s `name` and the
+    `mcp-name` marker in the published README agree: the marker is the proof of
+    ownership and the manifest is the claim. The marker has been in README.md
+    since 0.3.12 with no manifest beside it, so the two can drift the moment one
+    is edited -- and the failure surfaces at submission time, in a registry, with
+    nothing in the repository having complained.
+    """
+    marker = re.search(
+        r"^<!--\s*mcp-name:\s*(\S+)\s*-->$",
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert marker is not None, "README.md must carry the mcp-name ownership marker"
+
+    listing = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+    assert listing["name"] == marker.group(1)
+    # The namespace half has to be the repository owner, or the registry has no
+    # way to tie the marker to anyone.
+    assert listing["name"].startswith("io.github.")
+    # Read both halves off the repository URL rather than the checkout: a clone
+    # into a differently named directory is not a listing defect.
+    owner, repository = listing["repository"]["url"].rsplit("/", 2)[1:]
+    assert listing["name"] == f"io.github.{owner}/{repository}"
+    # `description` is what a stranger reads in the registry listing, and the
+    # schema caps it at 100 characters.
+    assert 0 < len(listing["description"]) <= 100
+    assert listing["packages"][0]["transport"] == {"type": "stdio"}
+
+
+def test_prose_tool_counts_track_the_registered_total():
+    """Five documents state the tool count in prose, and nothing checked it.
+
+    The count is pinned twice in `check_tool_docs` against a constant, so adding a
+    tool means editing that constant -- and at that moment every sentence saying
+    "55 tools" becomes wrong with no gate between it and a reader. These are the
+    lines a stranger uses to decide whether the table they are reading is the
+    whole contract.
+
+    The pattern is deliberately narrow: two digits or more, and not "3 tool
+    calls", so ordinary prose about a handful of tools does not turn this red.
+    Subset counts in these documents are spelled out in words.
+    """
+    report = build_report()
+    total = report["registered"]
+    pattern = re.compile(r"(\d{2,})[-\s]+(?:tools?\b(?!\s+calls?\b)|个工具)")
+
+    paths = [
+        ROOT / "README.md",
+        ROOT / "README.zh-CN.md",
+        ROOT / "AGENTS.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "CONTRIBUTING.zh-CN.md",
+        ROOT / "docs" / "USAGE.md",
+        ROOT / "docs" / "USAGE.zh-CN.md",
+        ROOT / "docs" / "TROUBLESHOOTING.md",
+        ROOT / "docs" / "TROUBLESHOOTING.zh-CN.md",
+    ]
+    paths += _shipped_skills()
+
+    found = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        name = path.relative_to(ROOT).as_posix()
+        for match in pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            found.append(f"{name}:{line}")
+            assert int(match.group(1)) == total, (
+                f"{name}:{line} says {match.group(1)} tools, but {total} are registered"
+            )
+
+    # A scan that matched nothing would pass while measuring nothing. If the
+    # prose counts were removed on purpose, remove this test with them.
+    assert found, "no document states the tool count any more; this check is now vacuous"
+
+
+def test_the_registry_listing_describes_environment_variables_that_exist(monkeypatch):
+    """The listing is the one surface no gate could reach from the repository.
+
+    `server.json` shipped saying `BROWSERTAP_MODE` took `strict, standard or lab`
+    and defaulted to `standard`. Two of those three names do not exist
+    (`server._AUTOMATION_MODES` is `lab`/`safe`) and the real default is `lab`, so
+    a stranger following the registry would set `standard`, be silently folded
+    back to `lab` by `_automation_mode`, and believe they had asked for approval
+    prompts on a profile that skips them and drives real mouse and keyboard input.
+    Every other gate passed: the namespace, the version copies, the identifier and
+    the schema were all correct, because none of them reads this block.
+
+    Once a listing is accepted it is invisible from here -- the repository is not
+    what a client reads -- so the description has to be pinned to the code while
+    both are still in one tree.
+    """
+    from browsertap_mcp import server as btap_server
+
+    listing = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+    declared = [
+        entry
+        for package in listing["packages"]
+        for entry in package.get("environmentVariables", [])
+    ]
+    assert declared, "the listing must describe how to configure the server"
+
+    # Every name has to be one the code actually reads. A renamed or invented
+    # variable is documentation for a knob that does not turn.
+    sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "src" / "browsertap_mcp").rglob("*.py"))
+    )
+    for entry in declared:
+        assert entry["name"] in sources, (
+            f"server.json documents {entry['name']}, which no module reads"
+        )
+        assert entry["description"].strip(), f"{entry['name']} has no description"
+
+    # `BROWSERTAP_MODE` is pinned further than the rest because it is the one
+    # whose wrong answer grants privilege rather than merely failing.
+    mode = next(e for e in declared if e["name"] == "BROWSERTAP_MODE")
+    stated = re.match(
+        r"Approval profile: (?P<values>[a-z]+(?:(?:, | or )[a-z]+)*)\."
+        r" Defaults to (?P<default>[a-z]+)[.,]",
+        mode["description"],
+    )
+    assert stated is not None, (
+        "the BROWSERTAP_MODE description must stay in the form "
+        "'Approval profile: <values>. Defaults to <value>.' so it can be checked: "
+        f"{mode['description']!r}"
+    )
+    values = re.split(r", | or ", stated.group("values"))
+    assert set(values) == set(btap_server._AUTOMATION_MODES), (
+        f"listing offers {sorted(values)}, code accepts "
+        f"{sorted(btap_server._AUTOMATION_MODES)}"
+    )
+    # Read the default off the resolver rather than a literal: it is the value an
+    # unset environment actually produces. Both inputs are cleared first, because
+    # an ambient `BROWSERTAP_MODE` or a leftover override from `set_automation_
+    # profile` would otherwise decide what this assertion means.
+    monkeypatch.delenv("BROWSERTAP_MODE", raising=False)
+    monkeypatch.setattr(btap_server, "_AUTOMATION_MODE_OVERRIDE", None)
+    assert stated.group("default") == btap_server._automation_mode()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -29,6 +30,7 @@ def test_all_runtime_and_manifest_versions_are_identical():
         "source",
         "package",
         "manifest",
+        "server_manifest",
         "readme",
         "readme_zh",
         "changelog",
@@ -78,6 +80,24 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.1.0**。\n",
         encoding="utf-8",
     )
+    (tmp_path / "server.json").write_text(
+        json.dumps(
+            {
+                "name": "io.github.LinVireo/browsertap-mcp",
+                "description": "Fake registry listing.",
+                "version": "0.1.0",
+                "repository": {"url": "https://github.com/LinVireo/browsertap-mcp"},
+                "packages": [
+                    {
+                        "registryType": "pypi",
+                        "identifier": "browsertap-mcp",
+                        "version": "0.1.0",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "CHANGELOG.md").write_text(
         "# Changelog\n\n"
         "## [Unreleased]\n\n"
@@ -96,6 +116,7 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "README.md",
         "README.zh-CN.md",
         "CHANGELOG.md",
+        "server.json",
     }
     assert read_source_version(tmp_path) == "0.3.0"
     assert (
@@ -105,10 +126,18 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "source": "0.3.0",
         "package": "0.3.0",
         "manifest": "0.3.0",
+        "server_manifest": "0.3.0",
         "readme": "0.3.0",
         "readme_zh": "0.3.0",
         "changelog": "0.3.0",
     }
+    listing = json.loads((tmp_path / "server.json").read_text(encoding="utf-8"))
+    # Both copies, not just the displayed one: the packages entry is what a
+    # client installs, so a bump that moved only the label would advertise one
+    # version and hand over another.
+    assert listing["version"] == "0.3.0"
+    assert [package["version"] for package in listing["packages"]] == ["0.3.0"]
+
     changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "## [Unreleased]\n\n## [0.3.0] - " in changelog
     assert "### Changed\n\n- Pending change." in changelog
@@ -119,6 +148,91 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
     assert (
         "[0.3.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.1.0...v0.3.0" in changelog
     )
+
+
+def _mirror_release_tree(root: Path) -> None:
+    """Copy every surface `validate_versions` reads out of the real checkout.
+
+    The registry manifest is checked against `pyproject.toml` and the version
+    source, so a hand-written stub would only prove that the stub agrees with
+    itself. Mirroring means each case below is one single mutation away from a
+    tree that really passes.
+    """
+    for name in ("pyproject.toml", "README.md", "README.zh-CN.md", "CHANGELOG.md", "server.json"):
+        shutil.copy2(ROOT / name, root / name)
+    extension = root / "src" / "browsertap_mcp" / "chrome_extension"
+    extension.mkdir(parents=True)
+    shutil.copy2(ROOT / "src" / "browsertap_mcp" / "_version.py", extension.parent / "_version.py")
+    shutil.copy2(
+        ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json",
+        extension / "manifest.json",
+    )
+
+
+def _break_top_level_version(listing: dict) -> None:
+    listing["version"] = "9.9.9"
+
+
+def _break_package_version(listing: dict) -> None:
+    listing["packages"][0]["version"] = "9.9.9"
+
+
+def _bump_both_version_copies(listing: dict) -> None:
+    listing["version"] = "9.9.9"
+    listing["packages"][0]["version"] = "9.9.9"
+
+
+def _break_identifier(listing: dict) -> None:
+    listing["packages"][0]["identifier"] = "browsertap"
+
+
+def _break_registry_type(listing: dict) -> None:
+    listing["packages"][0]["registryType"] = "npm"
+
+
+def _break_repository(listing: dict) -> None:
+    listing["repository"]["url"] = "https://github.com/someone-else/browsertap-mcp"
+
+
+def _drop_packages(listing: dict) -> None:
+    listing["packages"] = []
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        # The label moved and the install stayed pinned: the listing would name
+        # one release and hand over another, which no downstream check sees.
+        (_break_top_level_version, r"packages\[0\]\.version is '0\."),
+        (_break_package_version, r"packages\[0\]\.version is '9\.9\.9'"),
+        # Internally consistent, so only the comparison against the version
+        # source is left to catch it.
+        (_bump_both_version_copies, r"inconsistent: .*server_manifest=9\.9\.9"),
+        (_break_identifier, r"identifier must be browsertap-mcp"),
+        (_break_registry_type, r"registryType must be pypi"),
+        (_break_repository, r"repository\.url must be"),
+        (_drop_packages, r"at least one package"),
+    ],
+)
+def test_a_registry_manifest_that_stops_describing_this_package_is_rejected(
+    tmp_path, mutate, message
+):
+    """`server.json` is read by the registry once and never looked at again.
+
+    A stale version there publishes a listing that installs the wrong release,
+    and a wrong identifier or index publishes somebody else's package under this
+    repository's namespace. Neither is visible from the repository afterwards, so
+    every field the listing asserts about this package is gated here.
+    """
+    _mirror_release_tree(tmp_path)
+    assert validate_versions(tmp_path)["server_manifest"] == __version__
+
+    listing = json.loads((tmp_path / "server.json").read_text(encoding="utf-8"))
+    mutate(listing)
+    (tmp_path / "server.json").write_text(json.dumps(listing), encoding="utf-8")
+
+    with pytest.raises(VersionError, match=message):
+        validate_versions(tmp_path)
 
 
 def test_static_project_version_is_rejected(tmp_path):
