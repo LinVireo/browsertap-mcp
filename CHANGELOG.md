@@ -6,6 +6,50 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-23
+
+### Added
+
+- A macOS job in `test.yml`, so all three platforms this product runs on are
+  exercised by CI. Two code paths exist solely for that one --
+  `_macos_pointer_position` reads the cursor through Quartz, and
+  `_darwin_process_identity` is how the bridge decides whether the PID in its
+  lock file is still its own daemon -- and neither had ever been executed
+  anywhere but in a reviewer's head. It is also where the quiet-input gate
+  really degrades, because the pointer read needs an accessibility permission
+  a hosted runner never grants.
+- A per-file coverage floor in the acceptance report. The 85% gate is an
+  average, and an average hides a module that has stopped being tested:
+  `bridge.py` holds most of the platform-specific daemon code and sits around
+  63% while the total stays comfortably above the line. coverage.py has no
+  per-file threshold, so the floor is read out of the sealed `coverage.json`
+  and folded into the existing `code_coverage` gate. A coverage payload with
+  no per-file section fails rather than passing for want of data.
+
+### Changed
+
+- `artifacts/live-preflight.json` is now bound by the evidence manifest. It is
+  the record of which build each of the three processes was running and whether
+  the browser was idle -- the difference between a live run worth believing and
+  a junit full of passes -- and it was written and uploaded but never hashed,
+  so a seal could pair a passing suite with a preflight record from an older
+  run, or with none at all.
+- `bridge_status.version` now reports the extension's manifest version instead
+  of a string typed on the day it was written. That literal read the same
+  through every release while `extension_version` beside it moved, so the one
+  field a reader reaches for when asking whether an extension is stale was a
+  constant. The `unknown_cmd` reply, which is what a version skew actually
+  produces, carried the same frozen value.
+- The development extra now carries upper bounds. Every number in the
+  acceptance report is produced by `pytest`, `pytest-cov` and `ruff`, and they
+  were the last third party in the gate path resolved fresh on each run --
+  actions are pinned by commit, the secret scanner by version and digest, the
+  audit and SBOM tools by exact version. A ruff minor that adds a rule turns
+  the lint gate red with no commit behind it, and one that drops a rule stops
+  enforcing it just as quietly. These are bounds and not a hash-pinned
+  lockfile; the runtime dependencies a user installs are deliberately left
+  unbounded.
+
 ## [0.4.5] - 2026-08-23
 
 ### Fixed
@@ -681,7 +725,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.2...v0.4.3

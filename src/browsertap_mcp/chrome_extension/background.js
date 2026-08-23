@@ -3047,7 +3047,10 @@ async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'bridge_status') {
     const extensionVersion = chrome.runtime.getManifest().version;
     return { ok: true, data: {
-      version: '2026.08.12-pass2-final',
+      // Was a literal typed on the day it was written, so it read the same
+      // across every release and told a reader diagnosing a stale extension
+      // exactly nothing -- while looking like the one field that would.
+      version: extensionVersion,
       extension_version: extensionVersion,
       manifest_version: extensionVersion,
       protocol_version: 3,
@@ -3074,7 +3077,10 @@ async function handleExtMessage(msg, sender) {
     ok: false,
     code: 'unknown_cmd',
     error: `Unknown extension cmd: ${msg.cmd}`,
-    version: '2026.08.12-pass2-final',
+    // Same field, and this is the reply a version skew actually produces, so a
+    // frozen string here is the most misleading place for one. `extensionVersion`
+    // is scoped to the bridge_status branch above, hence the second read.
+    version: chrome.runtime.getManifest().version,
     knownCommands,
     hint: 'The extension command router is alive; compare knownCommands and reload the unpacked extension if this server expects a newer build.',
   };

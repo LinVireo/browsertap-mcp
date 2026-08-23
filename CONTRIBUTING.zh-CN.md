@@ -45,6 +45,14 @@ skills、扩展文件。CI 不带这个开关，会真的执行 `browsertap --ve
 `extension-path`。报告里的 `mode` 与 `proves_cli` 会说明跑的是哪一种，所以只过了布局
 的那次不会被当成"CLI 可用"。
 
+`--cov-fail-under=85` 管的是**总体**，而总体就是一个均值，均值会把“某个模块已经没人
+测了”盖过去。所以 `scripts/acceptance_report.py` 还会从已封存的 `artifacts/coverage.json`
+里读每个文件的覆盖率，只要有一个文件低于 `PER_FILE_COVERAGE_FLOOR`，就判同一个
+`code_coverage` 门禁失败 —— 这是 coverage.py 自己表达不了的东西。它是“腐坏探测器”
+而不是指标：目前它就压在最弱那个模块下面，所以该做的是等那个模块改善后把它
+调高，不是把它调低把红灯变绿。覆盖率文件里根本没有 per-file 那一段时也算失败，
+不会因为没数据而算通过。
+
 门禁规则集是 `ruff check`。`ruff format` 不是门禁，且现有源码大多不符合它的格式，
 对只做局部修改的文件跑一遍会让无关的重排淹没本次改动。请按周围代码的既有风格书写。
 
@@ -76,7 +84,10 @@ Playwright 回退路径，因为它们验证的是另一套产品契约。
   或把用户正在看的页面弄跳转了，都会在 teardown 里失败。前台焦点变动不算：
   把标签页提到前台本身就是它要做的事。
 - 每个判定、三个进程各自跑的构建，以及“当时浏览器到底空不空”，都会写进
-  `artifacts/live-preflight.json`，由 `live.yml` 跟 junit 一起上传。
+  `artifacts/live-preflight.json`，由 `live.yml` 跟 junit 一起上传，证据 manifest 也会
+  把它一起哈希绑定。这层绑定才能拦住“一边给出通过的套件、一边配一份更早那轮的前置
+  记录”；live 封存时这个文件不存在，封存直接报错并点名它，而不是把碰巧存在的
+  那半边封进去。
 
 机器实在没有空闲的时候，可以设 `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` 照跑：结束时的检查降为
 警告，报告里会记下“这份证据是对着有人在用的浏览器跑出来的”。

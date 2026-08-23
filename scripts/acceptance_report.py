@@ -17,6 +17,17 @@ from scripts.check_tool_docs import build_report as build_docs_report
 from scripts.check_tool_docs import report_ok as docs_ok
 from scripts.evidence_manifest import validate_manifest
 
+# A single global percentage is an average, and an average hides a module that
+# has stopped being tested: `bridge.py` holds most of the platform-specific
+# daemon code and is the least covered file in the package, while the total sat
+# comfortably above its gate the whole time. coverage.py has no per-file
+# threshold, so the floor is enforced here, from the same sealed artifact the
+# total is read from. It is a rot detector rather than a target: the weakest
+# module today is around 63%, so this passes now and fails when a file falls
+# away. Raise it when the weakest module improves; do not lower it to turn a
+# red gate green.
+PER_FILE_COVERAGE_FLOOR = 60.0
+
 GATE_WEIGHTS = {
     "tool_contract": 15,
     "offline_evidence": 15,
@@ -48,6 +59,55 @@ def _code_coverage(manifest: dict[str, object] | None) -> tuple[float | None, st
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None, "coverage artifact unavailable"
     return percent, relative
+
+
+def _per_file_coverage(
+    manifest: dict[str, object] | None, *, floor: float = PER_FILE_COVERAGE_FLOOR
+) -> tuple[dict[str, object], str]:
+    """Report every measured file under `floor`, and say when nothing was measured.
+
+    A coverage payload with no per-file section must not read as "no file is
+    below the floor" -- that is a pass produced by absence, the same shape as a
+    quiet-input gate with nothing to compare. `status` carries it explicitly and
+    the gate requires `ok`.
+    """
+    relative = "artifacts/coverage.json"
+    empty: dict[str, object] = {
+        "floor": floor,
+        "measured": 0,
+        "below": [],
+        "weakest": None,
+        "status": "not-bound",
+    }
+    if not _recorded(manifest, relative):
+        return empty, "coverage artifact is not bound by the evidence manifest"
+    try:
+        payload = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+        files = payload["files"]
+        if not isinstance(files, dict) or not files:
+            raise KeyError("files")
+        measured = {
+            str(name).replace("\\", "/"): float(entry["summary"]["percent_covered"])
+            for name, entry in files.items()
+        }
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return {**empty, "status": "unavailable"}, "per-file coverage unavailable"
+    below = sorted(
+        (
+            {"file": name, "percent": round(percent, 2)}
+            for name, percent in measured.items()
+            if percent < floor
+        ),
+        key=lambda row: (row["percent"], row["file"]),
+    )
+    weakest_file, weakest_percent = min(measured.items(), key=lambda row: (row[1], row[0]))
+    return {
+        "floor": floor,
+        "measured": len(measured),
+        "below": below,
+        "weakest": {"file": weakest_file, "percent": round(weakest_percent, 2)},
+        "status": "ok",
+    }, relative
 
 
 def _junit(relative: str, manifest: dict[str, object] | None) -> dict[str, object]:
@@ -183,6 +243,7 @@ def build_report_data() -> dict[str, object]:
     evidence_fresh = not evidence_problems
     tool_coverage, tool_coverage_source = _tool_coverage(evidence_manifest, live_passed)
     code_coverage, code_coverage_source = _code_coverage(evidence_manifest)
+    per_file_coverage, per_file_coverage_source = _per_file_coverage(evidence_manifest)
     docs = build_docs_report()
     versions = docs.get("versions") or {}
     distributions_ok, distribution_summary = _distribution_status(evidence_manifest)
@@ -207,7 +268,13 @@ def build_report_data() -> dict[str, object]:
             and tool_coverage.get("all_evidence_executed") is True
             and tool_coverage.get("fully_verified_tools") == registered == 55
         ),
-        "code_coverage": evidence_fresh and code_coverage is not None and code_coverage >= 85.0,
+        "code_coverage": (
+            evidence_fresh
+            and code_coverage is not None
+            and code_coverage >= 85.0
+            and per_file_coverage["status"] == "ok"
+            and not per_file_coverage["below"]
+        ),
         "documentation": docs_ok(docs),
         "versions": (
             not docs.get("version_error") and bool(versions) and len(set(versions.values())) == 1
@@ -227,6 +294,8 @@ def build_report_data() -> dict[str, object]:
         "tool_coverage_source": tool_coverage_source,
         "code_coverage": code_coverage,
         "code_coverage_source": code_coverage_source,
+        "per_file_coverage": per_file_coverage,
+        "per_file_coverage_source": per_file_coverage_source,
         "versions": versions,
         "live": live,
         "offline": offline,
@@ -248,6 +317,21 @@ def render_report(data: dict[str, object]) -> str:
     offline = data["offline"]
     assert isinstance(offline, dict)
     code_coverage = data["code_coverage"]
+    per_file = data["per_file_coverage"]
+    assert isinstance(per_file, dict)
+    below = per_file.get("below") or []
+    weakest = per_file.get("weakest")
+    if below:
+        per_file_summary = "below the per-file floor: " + ", ".join(
+            f"{row['file']} {float(row['percent']):.2f}%" for row in below
+        )
+    elif per_file.get("status") == "ok" and isinstance(weakest, dict):
+        per_file_summary = (
+            f"{per_file['measured']} files measured, weakest "
+            f"{weakest['file']} {float(weakest['percent']):.2f}%"
+        )
+    else:
+        per_file_summary = f"per-file coverage {per_file.get('status')}"
     registered = int(tool_coverage.get("registered", 0))
     contract_valid = int(tool_coverage.get("contract_valid_tools", 0))
     lines = [
@@ -271,9 +355,13 @@ def render_report(data: dict[str, object]) -> str:
         ),
         (
             f"- Code coverage: `{_status(bool(gates['code_coverage']))}` "
-            f"({float(code_coverage):.2f}% from `{data['code_coverage_source']}`, gate 85.00%)"
+            f"({float(code_coverage):.2f}% from `{data['code_coverage_source']}`, gate 85.00%; "
+            f"per-file floor {float(per_file['floor']):.2f}%, {per_file_summary})"
             if code_coverage is not None
-            else "- Code coverage: `FAIL` (coverage artifact missing, gate 85.00%)"
+            else (
+                "- Code coverage: `FAIL` (coverage artifact missing, gate 85.00%; "
+                f"per-file floor {float(per_file['floor']):.2f}%, {per_file_summary})"
+            )
         ),
         f"- Documentation contract: `{_status(bool(gates['documentation']))}`",
         f"- Unified versions: `{_status(bool(gates['versions']))}` ({data['versions']})",

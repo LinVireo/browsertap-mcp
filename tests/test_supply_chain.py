@@ -196,6 +196,30 @@ def test_every_action_is_pinned_to_a_commit_except_the_one_documented_exception(
     assert not floating, "unpinned actions: " + ", ".join(floating)
 
 
+def test_the_gate_toolchain_cannot_change_under_the_gates():
+    """The last third party in the gate path that was resolved fresh each run.
+
+    Actions are pinned by commit, the secret scanner by version and digest, the
+    audit and SBOM tools by exact version -- but the tools that produce every
+    number in the acceptance report were whatever the index served that day. A
+    ruff minor that adds a rule turns the lint gate red with no commit behind
+    it, and one that drops a rule stops enforcing it just as quietly. These are
+    bounds, not a hash-pinned lockfile, and the docstring is the honest limit of
+    what they buy: the runtime dependencies a user installs stay unbounded on
+    purpose.
+    """
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    dev = pyproject.split("\ndev = [", 1)[1].split("\n]", 1)[0]
+    requirements = [
+        line.strip().strip('",')
+        for line in dev.splitlines()
+        if line.strip().startswith('"')
+    ]
+    assert len(requirements) >= 7, f"the dev extra stopped listing requirements: {dev}"
+    unbounded = [item for item in requirements if "<" not in item]
+    assert not unbounded, "no upper bound in [dev]: " + ", ".join(unbounded)
+
+
 def test_the_pinned_actions_still_say_which_version_they_are():
     """A bare 40-character SHA tells a reader nothing about how old it is.
 

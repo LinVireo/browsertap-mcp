@@ -297,3 +297,21 @@ def test_the_offline_gate_runs_on_windows_as_well_as_linux():
     assert "python -m pytest tests -q" in windows
     # A `shell:` other than bash would make the two jobs' steps stop matching.
     assert "shell: bash" in windows
+
+
+def test_the_offline_gate_runs_on_macos_as_well():
+    """The third platform, and the only one nothing had ever executed.
+
+    Two code paths exist solely for it: `_macos_pointer_position` reads the
+    cursor through Quartz, and `_darwin_process_identity` is how the bridge
+    decides whether the PID in its lock file is still its own daemon. It is
+    also the platform where the quiet-input gate really degrades, because the
+    pointer read needs an accessibility permission a hosted runner never grants.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+
+    assert "runs-on: macos-latest" in workflow
+    macos = workflow.split("macos-offline:", 1)[1]
+    assert "--junitxml=artifacts/macos-offline-junit.xml" in macos
+    assert "python -m pytest tests -q" in macos
+    assert "shell: bash" in macos

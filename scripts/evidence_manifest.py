@@ -26,6 +26,15 @@ OFFLINE_ARTIFACTS = (
 LIVE_ARTIFACTS = (
     "artifacts/live-junit.xml",
     "artifacts/tool-coverage-live.json",
+    # The junit says which tests passed; this says whether the run was worth
+    # believing -- which build each of the three processes was running, whether
+    # the browser was idle, and whether the tab inventory came back the way it
+    # went in. It was written beside the others and uploaded by `live.yml`, but
+    # nothing bound it, so a seal could pair a passing suite with a preflight
+    # record left over from an older run, or with none at all. A live run that
+    # never reached the session fixture writes no such file, and sealing then
+    # fails naming it rather than sealing the half that happens to exist.
+    "artifacts/live-preflight.json",
 )
 
 

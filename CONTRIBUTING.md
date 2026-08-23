@@ -52,6 +52,16 @@ and really executes `browsertap --version`, `skill-path` and `extension-path`.
 The report's `mode` and `proves_cli` fields say which of the two ran, so a
 layout-only pass is never read as "the CLI works".
 
+`--cov-fail-under=85` is a *total*, and a total is an average that hides a
+module which has stopped being tested. `scripts/acceptance_report.py`
+therefore also reads the per-file percentages out of the sealed
+`artifacts/coverage.json` and fails the same `code_coverage` gate when any one
+file drops below `PER_FILE_COVERAGE_FLOOR`, which coverage.py itself cannot
+express. It is a rot detector, not a target: it sits below the weakest module
+today, so raise it when that module improves rather than lowering it to turn a
+red gate green. A coverage payload with no per-file section fails too, instead
+of passing for want of data.
+
 `ruff check` is the enforced rule set. `ruff format` is not a gate and most of
 the existing sources are not format-clean, so running it across a file you are
 only editing buries the change in unrelated reflows. Match the surrounding style
@@ -93,7 +103,10 @@ reasoning):
   foreground moving does not: the suite raises tabs on purpose.
 - Every verdict, the build each of the three processes was running, and whether
   the browser was idle at all, are written to `artifacts/live-preflight.json`,
-  which `live.yml` uploads with the junit.
+  which `live.yml` uploads with the junit and the evidence manifest hashes
+  alongside it. That binding is what stops a seal pairing a passing suite with
+  a preflight record left over from an older run: a live seal with no such file
+  fails naming it rather than sealing the half that happens to exist.
 
 Set `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` to run anyway on a machine that is never
 idle; the end-of-run check drops to a warning and the report records that the

@@ -51,8 +51,25 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     artifacts = tmp_path / "artifacts"
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
+    # Per-file percentages as coverage.py writes them, Windows separators and
+    # all: the floor is scored from this section, so a payload with only
+    # `totals` would make every test built on this fixture prove less than it
+    # looks like it does.
     (artifacts / "coverage.json").write_text(
-        json.dumps({"totals": {"percent_covered": 89.12}}), encoding="utf-8"
+        json.dumps(
+            {
+                "totals": {"percent_covered": 89.12},
+                "files": {
+                    "src\\browsertap_mcp\\server.py": {
+                        "summary": {"percent_covered": 83.56}
+                    },
+                    "src\\browsertap_mcp\\bridge.py": {
+                        "summary": {"percent_covered": 63.24}
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
     )
     passing_xml = '<testsuite><testcase classname="c" name="t" /></testsuite>'
     (artifacts / "offline-junit.xml").write_text(passing_xml, encoding="utf-8")
@@ -113,10 +130,76 @@ def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
     assert data["release_ready"] is True
     assert data["version"] == "9.9.9"
     assert data["code_coverage"] == 89.12
+    assert data["per_file_coverage"]["status"] == "ok"
+    assert data["per_file_coverage"]["below"] == []
+    assert data["per_file_coverage"]["weakest"] == {
+        "file": "src/browsertap_mcp/bridge.py",
+        "percent": 63.24,
+    }
     # A passing bound live run must promote the live tool evidence file.
     assert data["tool_coverage_source"] == "artifacts/tool-coverage-live.json"
     assert data["live"]["status"] == "pass"
     assert data["distribution_summary"] == "2 manifest-bound archive(s) validated"
+
+
+def test_a_module_rotting_away_fails_the_coverage_gate(monkeypatch, tmp_path):
+    """The 85% gate is an average, and an average hides a dead module.
+
+    `bridge.py` is where the platform-specific daemon code lives and the least
+    covered file in the package; the total stayed comfortably above the line the
+    whole time it did. The floor has to fail on one file falling away even while
+    the total still passes, which is the case a global threshold cannot see.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    (tmp_path / "artifacts" / "coverage.json").write_text(
+        json.dumps(
+            {
+                "totals": {"percent_covered": 89.12},
+                "files": {
+                    "src\\browsertap_mcp\\server.py": {
+                        "summary": {"percent_covered": 97.0}
+                    },
+                    "src\\browsertap_mcp\\bridge.py": {
+                        "summary": {"percent_covered": 11.5}
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data = A.build_report_data()
+
+    assert data["code_coverage"] == 89.12
+    per_file = data["per_file_coverage"]
+    assert per_file["status"] == "ok"
+    assert per_file["floor"] == A.PER_FILE_COVERAGE_FLOOR
+    assert per_file["below"] == [{"file": "src/browsertap_mcp/bridge.py", "percent": 11.5}]
+    assert data["gates"]["code_coverage"] is False
+    assert data["release_ready"] is False
+    # The reader has to be told which file, or the failure is unactionable.
+    assert "src/browsertap_mcp/bridge.py 11.50%" in A.render_report(data)
+
+
+def test_coverage_without_per_file_data_is_not_a_pass(monkeypatch, tmp_path):
+    """A floor with nothing to measure must not read as "nothing is below it".
+
+    This is the shape of every silent pass this repository has had to fix: a
+    missing input makes the predicate vacuously true, so the gate reports
+    success for the reason it should be reporting failure.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    (tmp_path / "artifacts" / "coverage.json").write_text(
+        json.dumps({"totals": {"percent_covered": 99.0}}), encoding="utf-8"
+    )
+
+    data = A.build_report_data()
+
+    assert data["code_coverage"] == 99.0
+    assert data["per_file_coverage"]["status"] == "unavailable"
+    assert data["per_file_coverage"]["measured"] == 0
+    assert data["gates"]["code_coverage"] is False
+    assert "per-file coverage unavailable" in A.render_report(data)
 
 
 def test_dirty_sealed_tree_forfeits_every_evidence_bound_gate(monkeypatch, tmp_path):
@@ -236,6 +319,14 @@ def test_main_returns_nonzero_when_release_gates_fail(monkeypatch, tmp_path):
         },
         "code_coverage": None,
         "code_coverage_source": "missing",
+        "per_file_coverage": {
+            "floor": A.PER_FILE_COVERAGE_FLOOR,
+            "measured": 0,
+            "below": [],
+            "weakest": None,
+            "status": "not-bound",
+        },
+        "per_file_coverage_source": "missing",
         "versions": {},
         "live": {
             "status": "not-run",

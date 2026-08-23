@@ -3240,9 +3240,24 @@ def test_extension_bridge_port_is_persistent_and_not_fixed_to_one_url():
     assert "HTTP_PROBE = `http://127.0.0.1:${bridgePort + 1}/link`" in source
 
 
-def test_extension_pass2_final_build_is_observable():
+def test_extension_reports_the_build_it_is_actually_running():
+    """A build string typed by hand cannot go stale, so it misleads for free.
+
+    `bridge_status.version` was a literal from the day it was written. It read
+    the same through every release while `extension_version` beside it moved,
+    so the one field a reader reaches for when asking whether an extension is
+    stale was a constant -- and it cost a diagnosis. Both sites now read the
+    manifest, which is also the only value a reload can change.
+    """
     source = BACKGROUND.read_text(encoding="utf-8")
-    assert source.count("2026.08.12-pass2-final") == 2
+
+    assert "pass2-final" not in source
+    assert source.count("chrome.runtime.getManifest().version") == 2
+    # The unknown_cmd reply is what a version skew actually produces, so it is
+    # the worst place of the two for a frozen string. `extensionVersion` is
+    # scoped to the bridge_status branch, hence the second manifest read.
+    unknown = source.split("code: 'unknown_cmd'", 1)[1]
+    assert "version: chrome.runtime.getManifest().version," in unknown
 
 
 def test_save_pdf_accepts_real_extension_ws_payload(tmp_path, monkeypatch):

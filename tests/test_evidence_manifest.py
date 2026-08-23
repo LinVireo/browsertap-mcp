@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from scripts import evidence_manifest as E
 
 
@@ -123,6 +125,65 @@ def test_validate_manifest_requires_live_binding(monkeypatch, tmp_path):
 
     assert "evidence manifest does not include live results" in problems
     assert any(problem.startswith("artifact records missing:") for problem in problems)
+
+
+def test_a_live_seal_binds_the_preflight_record_as_well_as_the_junit(monkeypatch, tmp_path):
+    """A passing junit with an unbound preflight record is the stale-build hole.
+
+    `live-preflight.json` is where the build of each of the three processes and
+    the idle-browser verdict are written. It sat beside the junit and was
+    uploaded with it, but nothing hashed it, so a seal could pair a passing
+    suite with a preflight record left over from an older run -- or with none,
+    which is what a run that never reached the session fixture leaves behind.
+    """
+    assert "artifacts/live-preflight.json" in E.LIVE_ARTIFACTS
+    monkeypatch.setattr(E, "ROOT", tmp_path)
+    monkeypatch.setattr(E, "source_identity", lambda: {})
+    artifacts = tmp_path / "artifacts"
+    dist = artifacts / "dist"
+    dist.mkdir(parents=True)
+    files = {
+        artifacts / "coverage.json": b"coverage",
+        artifacts / "offline-junit.xml": b"junit",
+        artifacts / "tool-coverage-offline.json": b"tools",
+        artifacts / "live-junit.xml": b"live junit",
+        artifacts / "tool-coverage-live.json": b"live tools",
+        dist / "package.whl": b"wheel",
+        dist / "package.tar.gz": b"sdist",
+    }
+    for path, content in files.items():
+        path.write_bytes(content)
+
+    # Sealing refuses outright rather than sealing the half that exists.
+    with pytest.raises(FileNotFoundError) as sealing:
+        E.build_manifest(include_live=True)
+    assert "artifacts/live-preflight.json" in str(sealing.value)
+
+    # And a manifest hand-built without the record fails validation, so an
+    # older seal cannot be presented as a current one either.
+    manifest_path = artifacts / "evidence-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": E.SCHEMA_VERSION,
+                "generated": "2026-08-23T00:00:00+00:00",
+                "include_live": True,
+                "source": {},
+                "artifacts": {
+                    path.relative_to(tmp_path).as_posix(): {
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "bytes": len(content),
+                    }
+                    for path, content in files.items()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _loaded, problems = E.validate_manifest(manifest_path, require_live=True)
+
+    assert "artifact records missing: artifacts/live-preflight.json" in problems
 
 
 def test_validate_manifest_rejects_extra_records_and_noncanonical_distribution_sets(
