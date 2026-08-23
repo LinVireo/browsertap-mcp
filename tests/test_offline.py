@@ -360,7 +360,7 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace(monkeypatch
     # The reserve makes the retry reachable; the total still fits one deadline.
     assert len(driver.timeouts) == 2
     assert result["btap_retried"] is True
-    assert sum(driver.timeouts) <= 0.16
+    assert sum(driver.timeouts) <= 0.16 + 1e-9   # float noise, see below
     # The budgets above are the contract -- they read what the code handed the
     # driver. This wall clock is only a backstop for a retry sleeping outside the
     # recorded timeout, whose failure mode is a re-armed 15s default, so the
@@ -918,7 +918,15 @@ def test_page_input_unknown_batch_router_uses_bounded_legacy_route(monkeypatch):
     assert result["status"] == "success"
     assert legacy_calls[0][0]["tabId"] == 42
     assert legacy_calls[0][1] == "c:42"
-    assert 0 < legacy_calls[0][2] <= 0.2
+    # The +1e-9 absorbs float noise, not a budget overrun. The remaining budget is
+    # computed as (monotonic() + timeout) - monotonic(), and that round-trips
+    # through a double whose ulp scales with the clock's magnitude -- ~6e-11 at
+    # 1e5 seconds of uptime. Whether it lands just under or just over the nominal
+    # timeout is pure rounding luck: this read 0.20000000000004547 on a CI runner
+    # and under 0.2 here, which is why it looked like a solid assertion for as
+    # long as it only ever ran on one machine. Same epsilon as the reserve split
+    # asserted further down this file.
+    assert 0 < legacy_calls[0][2] <= 0.2 + 1e-9
 
 
 def test_driver_does_not_dispatch_when_session_recovers_at_deadline(monkeypatch):

@@ -568,7 +568,11 @@ def test_open_url_session_resolution_uses_one_bounded_snapshot(monkeypatch):
     assert result["status"] == "ok"
     assert len(calls) == 1
     assert calls[0][1] is True
-    assert 0 < calls[0][0] <= 0.08
+    # +1e-9 for float noise: the budget is (monotonic() + timeout) - monotonic(),
+    # whose double round-trip lands just over the nominal timeout as often as just
+    # under, depending on the clock's magnitude. An overrun that matters is orders
+    # of magnitude larger.
+    assert 0 < calls[0][0] <= 0.08 + 1e-9
     assert driver.calls[0][2] < calls[0][0]
     assert driver.calls[0][0]["beforeunload"] == "accept"
 
@@ -581,7 +585,7 @@ def test_open_url_does_not_dispatch_after_session_resolution_exhausts_deadline(
     monkeypatch.setattr(S, "invalidate_sessions_cache", lambda: None)
 
     def sessions(timeout=None, fresh=False):
-        assert 0 < timeout <= 0.01
+        assert 0 < timeout <= 0.01 + 1e-9   # float noise, not an overrun
         assert fresh is True
         time.sleep(0.02)
         return _sessions()
@@ -1068,7 +1072,7 @@ def test_open_new_tab_reconciliation_passes_one_total_deadline(monkeypatch):
 
         def ext_cmd(self, payload, client_id=None, timeout=15.0):
             self.calls.append((payload, client_id, timeout))
-            assert timeout <= 0.12
+            assert timeout <= 0.12 + 1e-9   # float noise, not an overrun
             time.sleep(min(timeout, 0.02))
             raise TimeoutError("status ACK lost")
 
