@@ -6,6 +6,60 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-08-23
+
+### Added
+
+- Physical-input coordinates are checked against the real display geometry, and a
+  point on no display at all is refused with `coordinates_off_screen` before the
+  tab is raised and before anything is dispatched. Windows `SetCursorPos`
+  *clamps* an out-of-range point and reports success: measured on a 1920x1080
+  panel, `mouse_click(2400, 1300)` moved the cursor to `(1919, 1079)` and clicked
+  the bottom-right hot corner -- the one that can minimise every window -- while
+  the result said `status: "success"` and named the coordinates it had not used.
+  `mouse_move`, `mouse_click`, `mouse_drag`, and `type_text`'s focusing click all
+  go through the check; `hotkey` takes no coordinates and is unaffected.
+- `screen_bounds` on every physical-input result and on `pointer_info`: the
+  virtual-desktop rectangle across all displays, with `source` naming the probe
+  that answered. `pointer_info`'s existing `screen_width`/`screen_height` are the
+  *primary* display, which is the wrong bound on a multi-monitor desk and was the
+  only geometry the tool had ever reported.
+- `image_width`, `image_height`, and `pixel_space` on `capture_page_screenshot`,
+  parsed from the returned bytes (PNG, JPEG, WebP). The result previously carried
+  `size`, a byte count, as its only number, and a caller reading a point off the
+  picture had nothing telling it that CDP returns **device** pixels while
+  `page_click` takes **CSS** pixels. Measured at 125% display scaling: viewport
+  1482x780 CSS, screenshot 1852x975, and a link needing `page_click(340, 209)`
+  sat at screenshot pixel `(425, 261)` -- feeding that back made
+  `document.elementFromPoint` answer `HTML`, the page background. Coordinate mode
+  is the one input path with no hit test, so nothing reported the miss. A header
+  that cannot be parsed reports `null` dimensions plus a `dimensions_note` rather
+  than a fabricated `0x0`.
+- `pixel_space: "physical"` on `capture_desktop_screenshot`, with the model note
+  stating the image is not resized -- so unlike the page screenshot, its pixels
+  *are* `mouse_click`'s coordinates.
+
+### Changed
+
+- The `mouse_*`, `type_text`, `page_click`, `page_drag`, and both screenshot tool
+  descriptions now name their units instead of saying "coordinates". Three spaces
+  are in play -- physical screen pixels, viewport CSS pixels, and device pixels
+  -- and the two READMEs, both skills, and the tool descriptions each documented
+  only the page/desktop split, which does not distinguish the two that differ by
+  `devicePixelRatio`.
+- Where the display geometry cannot be read, the call proceeds with
+  `screen_bounds.enforced: false` and a note naming what was unavailable, rather
+  than refusing. This follows `input_quiet` and `on_screen`: refusing would take
+  physical input away from machines where pyautogui works fine. Read a pass on
+  such a machine as unverified, not as coordinates confirmed valid.
+- The Windows `GetSystemMetrics` probe declines outright unless the process is
+  already DPI-aware, because a DPI-unaware read is virtualized: measured cold on
+  a 1920x1080 panel at 125% scaling it returns 1536x864, which would have refused
+  every legitimate x between 1537 and 1919. `mss.monitors[0]` answers with the
+  true extent regardless of the caller's awareness -- it makes itself aware
+  internally -- so it is tried first, and neither probe loads the input backend
+  or changes this process's awareness level.
+
 ## [0.4.11] - 2026-08-23
 
 ### Added
@@ -865,7 +919,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...HEAD
+[0.4.12]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...v0.4.11
 [0.4.9]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.7...v0.4.8

@@ -152,7 +152,19 @@ def _success(tool, monkeypatch, tmp_path):
             S, "_pyautogui",
             lambda: SimpleNamespace(position=lambda: (11, 12), size=lambda: (800, 600)),
         )
-        assert S.pointer_info() == {"x": 11, "y": 12, "screen_width": 800, "screen_height": 600}
+        # The virtual-desktop rectangle is a real display read, so it is faked
+        # here for the same reason _pyautogui is: this suite must not touch the
+        # machine it runs on.
+        monkeypatch.setattr(
+            S.physical_input, "screen_bounds",
+            lambda: {"left": 0, "top": 0, "width": 800, "height": 600, "source": "test"},
+        )
+        assert S.pointer_info() == {
+            "x": 11, "y": 12, "screen_width": 800, "screen_height": 600,
+            "screen_bounds": {
+                "left": 0, "top": 0, "width": 800, "height": 600, "source": "test",
+            },
+        }
     elif tool == "reset_site_permissions":
         monkeypatch.setattr(S, "switch_session", lambda session_id=None: "chrome:7")
         assert S.reset_site_permissions(session_id="chrome:7")["status"] == "ok"

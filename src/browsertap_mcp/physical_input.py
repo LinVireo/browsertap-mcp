@@ -11,7 +11,7 @@ import secrets
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 
 from .paths import state_dir
 
@@ -22,6 +22,10 @@ class PhysicalInputBusy(RuntimeError):
 
 class InputActivityDetected(RuntimeError):
     """Raised when user input changes during the quiet window."""
+
+
+class CoordinatesOffScreen(RuntimeError):
+    """Raised when a requested point lies on no display at all."""
 
 
 _T = TypeVar("_T")
@@ -486,6 +490,216 @@ def wait_for_quiet(quiet_seconds: float = 0.75) -> dict[str, Any]:
             "this machine exposes no OS input signal that BTAP can sample, so the "
             "quiet window elapsed without being able to detect concurrent human "
             "input; treat a pass as unverified rather than as an idle machine"
+        )
+    return report
+
+
+def _process_is_dpi_aware() -> bool | None:
+    """Whether Windows is still virtualizing this process's screen metrics.
+
+    None means the question could not be answered, which is not the same as
+    False: `GetProcessDpiAwareness` is Windows 8.1+, and refusing to guess is
+    what keeps `_win32_virtual_screen` from reporting a scaled rectangle as if
+    it were the real one.
+    """
+    try:
+        level = ctypes.c_int(-1)
+        if ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(level)) == 0:
+            return level.value != 0
+    except (AttributeError, OSError):
+        pass
+    try:
+        return bool(ctypes.windll.user32.IsProcessDPIAware())
+    except (AttributeError, OSError):
+        return None
+
+
+def _win32_virtual_screen() -> dict[str, int] | None:
+    """Virtual-desktop rectangle from the Win32 metrics mss itself reads.
+
+    Only correct once the process is DPI-aware, and silently wrong before that:
+    measured on a 1920x1080 panel at 125% scaling, a DPI-unaware process reads
+    1536x864 here, so every x from 1537 to 1919 would look off-screen and a
+    legitimate click would be refused. So this declines instead of answering --
+    an unreadable bound is a reported gap, while a wrong bound is a refusal the
+    caller cannot argue with.
+
+    Nothing here sets the awareness level. pyautogui sets it to SYSTEM_AWARE
+    while importing and mss sets it to PER_MONITOR while constructing, whichever
+    runs first; a third setter in the validation path would decide that for a
+    process whose input half has not chosen yet.
+    """
+    if _process_is_dpi_aware() is not True:
+        return None
+    sm_x_virtualscreen, sm_y_virtualscreen = 76, 77
+    sm_cx_virtualscreen, sm_cy_virtualscreen = 78, 79
+    try:
+        user32 = ctypes.windll.user32
+        width = int(user32.GetSystemMetrics(sm_cx_virtualscreen))
+        height = int(user32.GetSystemMetrics(sm_cy_virtualscreen))
+        if width <= 0 or height <= 0:
+            return None
+        return {
+            "left": int(user32.GetSystemMetrics(sm_x_virtualscreen)),
+            "top": int(user32.GetSystemMetrics(sm_y_virtualscreen)),
+            "width": width,
+            "height": height,
+        }
+    except (AttributeError, OSError):
+        return None
+
+
+def _mss_virtual_screen() -> dict[str, int] | None:
+    """Virtual-desktop rectangle from mss, which answers on all three platforms.
+
+    Index 0 is the bounding rectangle over every display; 1..N are individual
+    monitors. This is the same read `capture_desktop_screenshot` reports as
+    `width`/`height`/`left`/`top`, deliberately: a refusal computed from one
+    rectangle and a screenshot framed by another would tell a caller to click a
+    point its own picture shows.
+
+    Unlike the Win32 fallback this needs no cooperation from the caller: mss
+    makes itself DPI-aware inside `mss.mss()` before reading, so it answers
+    1920x1080 on a 125% display even when the calling process is still
+    unaware -- measured. That is why it is tried first.
+    """
+    try:
+        import mss
+    except Exception:
+        # mss is part of the optional desktop extra, and binds to the display
+        # while importing on some platforms. Either way it is a missing
+        # capability, not an error to report.
+        return None
+    try:
+        with mss.mss() as sct:
+            if not sct.monitors:
+                return None
+            monitor = sct.monitors[0]
+            width = int(monitor.get("width", 0))
+            height = int(monitor.get("height", 0))
+            if width <= 0 or height <= 0:
+                return None
+            return {
+                "left": int(monitor.get("left", 0)),
+                "top": int(monitor.get("top", 0)),
+                "width": width,
+                "height": height,
+            }
+    except Exception:
+        return None
+
+
+def screen_bounds() -> dict[str, Any] | None:
+    """Return the virtual-desktop rectangle, or None when it cannot be read.
+
+    mss first because it covers every display on every platform and needs no
+    particular load order; the Win32 metrics are the fallback so a Windows
+    install carrying pyautogui without mss still gets a real bound instead of an
+    unchecked pass. The two agree where both answer (measured: 1920x1080 from
+    each, same origin).
+    """
+    for source, probe in (
+        ("mss_virtual_desktop", _mss_virtual_screen),
+        ("win32_virtual_screen", _win32_virtual_screen),
+    ):
+        rect = probe()
+        if rect is not None:
+            return {**rect, "source": source}
+    return None
+
+
+def check_screen_bounds(
+    points: Sequence[tuple[Any, Any]],
+    *,
+    bounds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Refuse points that are on no display, and report what could be checked.
+
+    This is the one gate here that refuses rather than reports, and the
+    difference is that the failure is provable from the request alone: a point
+    outside every display cannot be the point the caller meant. `SetCursorPos`
+    does not fail on one -- measured, it **clamps**: (2400, 1300) on a
+    1920x1080 desktop moved the cursor to (1919, 1079) and returned success,
+    which is the Windows bottom-right hot corner, so the observable result of a
+    typo is not a missed click but every window minimised. Substituting the
+    nearest edge for a named target is the substitution AGENTS.md section 3
+    forbids, and pyautogui reports nothing about it.
+
+    Unknown bounds are a different fact from an out-of-range point, and follow
+    `wait_for_quiet` instead: the window elapses, `enforced` is False, and the
+    action proceeds. Refusing there would take physical input away from every
+    machine whose display geometry cannot be read but whose input works.
+
+    Nothing here loads or configures the input backend, so this can run before
+    activation without reordering any desktop side effect: the mss probe makes
+    itself DPI-aware internally and the Win32 fallback declines rather than
+    answer from a virtualized metric.
+
+    `pyautogui.onScreen()` exists and is deliberately not used: its own
+    docstring says it does not work for secondary screens, so it would refuse
+    legitimate coordinates on the multi-monitor setups this check most needs to
+    be right about.
+    """
+    rect = screen_bounds() if bounds is None else bounds
+    if rect is not None:
+        # A rectangle without a positive extent describes no display, so it is
+        # the same fact as an unreadable probe -- not a rectangle that every
+        # point is outside of. Getting this backwards would refuse everything on
+        # a machine whose geometry merely came back partial.
+        try:
+            usable = int(rect.get("width", 0)) > 0 and int(rect.get("height", 0)) > 0
+        except (TypeError, ValueError):
+            usable = False
+        if not usable:
+            rect = None
+    checked: list[list[int]] = []
+    offenders: list[list[int]] = []
+    for point in points:
+        try:
+            x, y = point
+        except (TypeError, ValueError):
+            continue
+        if isinstance(x, bool) or isinstance(y, bool):
+            continue
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            continue
+        if not math.isfinite(x) or not math.isfinite(y):
+            continue
+        pair = [int(x), int(y)]
+        checked.append(pair)
+        if rect is None:
+            continue
+        left = int(rect.get("left", 0))
+        top = int(rect.get("top", 0))
+        # Exclusive edges: a 1920-wide desktop at x=0 ends at 1919. Comparing
+        # against the width itself is off by one in the direction that lets the
+        # clamp through, which is the whole point of the check.
+        if not (left <= pair[0] < left + int(rect.get("width", 0))):
+            offenders.append(pair)
+        elif not (top <= pair[1] < top + int(rect.get("height", 0))):
+            offenders.append(pair)
+    report: dict[str, Any] = {
+        "bounds": rect,
+        "checked": checked,
+        "enforced": bool(rect is not None and checked),
+    }
+    if offenders:
+        listed = ", ".join(f"({x}, {y})" for x, y in offenders)
+        raise CoordinatesOffScreen(
+            f"{listed} is on no display; nothing was dispatched. The virtual desktop is "
+            f"{int(rect.get('width', 0))}x{int(rect.get('height', 0))} at "
+            f"({int(rect.get('left', 0))}, {int(rect.get('top', 0))}). The OS clamps an "
+            "out-of-range pointer move to the nearest edge and reports success, so this "
+            "would have acted on a screen corner instead of the requested point. Read the "
+            "real geometry from pointer_info or capture_desktop_screenshot."
+        )
+    if rect is None and checked:
+        # Said in full, like the quiet gate's: this is the line that stops a
+        # pass from reading as "the coordinates were checked and are on screen".
+        report["note"] = (
+            "this machine's display geometry could not be read, so the coordinates were "
+            "accepted without being compared against any screen; an out-of-range point "
+            "will be clamped to a screen edge by the OS without reporting an error"
         )
     return report
 

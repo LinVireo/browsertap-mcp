@@ -62,7 +62,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 ## 工具选择优先级（按这个顺序，别一上来就动物理输入）
 
 1. **页面读取/JS/页面 API**：`scan_page`、`execute_js`、`wait_for*`、`scroll_page`、`get_cookies`、`storage_get` —— 不打扰用户、不需要批准。
-2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。`page_click` 的 selector 模式在派发前还会命中判定那个像素：被遮挡返回 `obscured`（带 `occluded_by`），滚动后仍不在视口返回 `outside_viewport`，两者都没点。坐标是**视口**坐标（相对页面区域），不是桌面坐标。
+2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。`page_click` 的 selector 模式在派发前还会命中判定那个像素：被遮挡返回 `obscured`（带 `occluded_by`），滚动后仍不在视口返回 `outside_viewport`，两者都没点。坐标是**视口 CSS 像素**（相对页面区域），既不是桌面物理像素，也不是页面截图返回的设备像素。
 3. **结构化中断**：对话框用 `handle_dialog`（配 `execute_js(dialog_policy="manual")` / `open_url(beforeunload="manual")`）；站点权限用 `set_site_permission` / `reset_site_permissions`（租约 60–600 秒，到期自动恢复）。
 4. **物理输入**（最后手段）：`mouse_move` / `mouse_click` / `mouse_drag` / `type_text` / `hotkey` 这 5 个直接工具 —— 只用于浏览器 chrome、原生文件选择器、扩展弹窗、OS 对话框。`safe` 逐次批准；默认 `lab` 免询问，显式把 `BROWSERTAP_LAB_NO_ELICIT` 设为 false 才恢复会话级批准。`resolve_leave_dialog` 另有一条仅在两次协议处理失败后使用 Enter 的后备路径；`capture_desktop_screenshot` 只读、不需批准。
 
@@ -73,7 +73,8 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 - **必须显式传 `session_id`**：调用期间驱动绑定到该 tab，结束后把共享默认还原。指名死 tab 会被拒绝，不会偷偷换 tab 执行。
 - **`execute_js` 全链路定向**：baseline/diff/transient monitor、无 ACK 安全重试、导航落点读取都继续使用同一个显式 `session_id`，不会在中间步骤掉回共享默认；`timeout` 是覆盖策略设置、执行、重试、monitor 与清理的单一总 deadline，不要再为各阶段额外叠加等待。
 - **Xterm/ttyd 输入**：`page_type(selector=".xterm", ...)`、传 xterm 后代，或在页面只有一个 `.xterm-helper-textarea` 时省略 selector，都会自动聚焦 helper textarea 后派发受信任输入。要清当前 shell 行时先 `page_press("ctrl,u", session_id=...)`，不要把表单语义的 `clear=true` 当作终端清行。
-- **坐标**：`page_click`/`page_drag` 的 `x`/`y` 是**视口**坐标。优先用 `selector`（点元素中心，可加 `offset_x`/`offset_y` 偏移）—— 跨域 iframe 里的 Cloudflare Turnstile 复选框可以点，不需要伸进 iframe 的 DOM。
+- **坐标**：`page_click`/`page_drag` 的 `x`/`y` 是**视口 CSS 像素**（`getBoundingClientRect` 报告的空间）。优先用 `selector`（点元素中心，可加 `offset_x`/`offset_y` 偏移）—— 跨域 iframe 里的 Cloudflare Turnstile 复选框可以点，不需要伸进 iframe 的 DOM。
+- **三种像素单位别混**：视口 = CSS 像素（`page_*` 吃这个）；桌面 = 物理屏幕像素（`mouse_*` 吃这个）；页面截图回来的是**设备像素** = CSS × `devicePixelRatio`，`capture_page_screenshot` 用 `image_width`/`image_height` 和 `pixel_space: "device"` 报出来。125% 缩放下从图上量到的点比 `page_click` 需要的大 25%，直接喂进去会点到页面背景上，而坐标模式没有命中判定、不会告诉你打偏了。桌面截图不缩放（`pixel_space: "physical"`），它的像素就是 `mouse_click` 的坐标。
 - **`page_click` 的命中判定（只在 selector 模式）**：派发前先问页面那个坐标上到底是谁。折叠线以下会先滚进视口（结果带 `scrolled_into_view`）；那个像素属于 cookie 横幅、遮罩层或别的覆盖元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者，滚动后仍在视口外返回 `outside_viewport` —— **这两种情况一个事件都没派发**，先处理遮挡（关横幅 / `scroll_page` / 点别的 locator）再重试，不要当作点过了。命中通过的结果带 `hit_verified: true`。坐标模式不做这项判定：坐标指的是像素，落在谁身上由页面决定。
 - **验证码（Turnstile 等）留在用户的浏览器里**：在同一个已连接 tab 里用 `page_click` 处理，尝试次数有上限（回复带 `challenge_detected` 和 `attempts`）；验证码不再推进时结果是 `challenge_stalled`，**停下来把 tab 交还给用户自己处理**。绝不另起 Playwright / headless 浏览器 / 独立自动化 profile 兜底。
 - **选择器没匹配**：返回 `not_found`，什么都没派发。
@@ -86,7 +87,9 @@ BTAP 默认使用 `lab`（`BROWSERTAP_MODE` 未设也视为 lab），并按 `BRO
 
 拒绝、取消或客户端不支持批准时返回 `requires_user_action` 且不发输入。无论 profile 如何，跨进程锁、安静窗口、目标提前台和 `on_screen` 检查都不能跳过。
 
-批准之后顺序固定：拿跨进程锁（**被占用 → 立即返回 `busy`，不排队**）→ 等安静窗口（用户碰了键鼠 → `input_activity_detected`，不发输入）→ 提前台 → 执行。OS lock 覆盖整个动作，超过元数据 TTL 30 秒仍不可抢占；TTL 只在动作结束或 owner 退出、OS lock 释放后回收 stale 元数据。`busy` 时停下稍后重试，别循环、删锁、杀进程或重启桥。
+批准之后顺序固定：拿跨进程锁（**被占用 → 立即返回 `busy`，不排队**）→ 核对坐标是否落在真实显示器上（不在 → `coordinates_off_screen`，一个事件都没发）→ 等安静窗口（用户碰了键鼠 → `input_activity_detected`，不发输入）→ 提前台 → 执行。OS lock 覆盖整个动作，超过元数据 TTL 30 秒仍不可抢占；TTL 只在动作结束或 owner 退出、OS lock 释放后回收 stale 元数据。`busy` 时停下稍后重试，别循环、删锁、杀进程或重启桥。
+
+**坐标越界会被拒，不会被截断。** `mouse_*` / `type_text(click_x, click_y)` 的坐标是**虚拟桌面物理像素**，原点在主显示器左上角，多显示器时可以是负数。越界的点在 Windows 上会被 `SetCursorPos` 静默夹到边缘并报成功——1920×1080 上传 `(2400, 1300)` 实际点在 `(1919, 1079)`，也就是能把所有窗口最小化的右下热角。所以这一层现在先核对：不在任何显示器上就返回 `coordinates_off_screen`，发生在提前台之前、派发之前。每个物理输入结果都带 `screen_bounds`（矩形 + `source`），读不到几何时是 `enforced: false` 加一条说明，此时通过不等于坐标有效。要坐标先问 `pointer_info`（只读）：它给当前指针位置、主显示器尺寸，和跨全部显示器的 `screen_bounds`。**不要拿主显示器尺寸当边界**，副屏坐标本来就超出它。
 
 **五个直接物理输入工具都接受 `session_id` 和 `activate_session`**。正常浏览器输入应传完整 `session_id`（跟其它工具相同），工具会在安静窗口后激活并核验该标签页；不传则回落到全局共享的默认目标，而那个可能已被别的任务改掉：
 
@@ -147,6 +150,7 @@ hotkey(keys_csv="ctrl,c", session_id=B)
 - 当前模型不支持图片,或工具结果里只显示文件路径/元数据时,不得说"截图显示……""我看到……"。结构化网页先用 `scan_page`;需要页面内部状态时用 `execute_js`。
 - canvas、WebGL、终端模拟器等 DOM 文本很少的页面,优先找页面自身的数据 API。Xterm.js 可从 `window.term.buffer.active` 的 line/cell 读取字符;只有页面没有可读 API 且环境提供 OCR 时才走"截图 + OCR"。
 - 用户只是要求保存截图时,非视觉模型可以报告 `saved_to` 和大小,但不要替截图内容下结论。
+- **`size` 是字节数,不是尺寸。** 尺寸看 `image_width`/`image_height`（从返回的字节里解析），单位由 `pixel_space` 说明：页面截图是 `device`，桌面截图是 `physical`。头解析不出来时两个尺寸为 `null` 并带 `dimensions_note`——此时不要退回去拿 `size` 当宽高。**从图上量到的点要按 `pixel_space` 换算再用**：`device` 得先除以 `devicePixelRatio` 才能给 `page_click`，`physical` 可以直接给 `mouse_click`。宿主还可能在模型看到之前把图缩一遍（长边 1568 以上通常会缩），那一层服务端观测不到，所以能用 `scan_page` 的 selector 就别从图上量坐标。
 
 ## ⚠️ 硬规则：复用已有 tab + 别顶掉别人的 tab
 

@@ -269,11 +269,19 @@ token 不一致，不是扩展坏了**：
 - **xterm 输入不是桥故障**：`page_type` 会把 `.xterm` 容器/后代自动改投 `.xterm-helper-textarea`。
   终端无输入先确认扩展已 Reload 到当前版本，再显式传该页的 `session_id`；清当前 shell 行用
   `page_press("ctrl,u")`，不要因 `clear=true` 不符合终端行编辑语义就重启桥。
+- **`coordinates_off_screen` 不是桥故障**：`mouse_*` / `type_text(click_x, click_y)` 的坐标是**虚拟桌面
+  物理像素**，落在任何显示器之外就在提前台之前、派发之前被拒，一个事件都没发。桥、扩展、pyautogui
+  都是好的，是坐标错了：`pointer_info` 读 `screen_bounds`（跨全部显示器的矩形，**不是**主显示器
+  尺寸，副屏坐标本来就超出它）再重算。不要重启桥，也不要照原坐标重试——旧行为是让
+  `SetCursorPos` 静默夹到边缘并报成功，那就是点在右下热角上把窗口全最小化。结果里
+  `screen_bounds.enforced: false` 表示这台机器读不到显示器几何，此时通过不等于坐标有效。
 - **`obscured` / `outside_viewport` 不是桥故障**：`page_click` 的 selector 模式在派发前会问页面那个
   坐标上是谁，`occluded_by` 里的元素（cookie 横幅、遮罩、sticky 页头）盖住了目标就**一个事件都不派发**，
   滚动后仍在视口外则是 `outside_viewport`。桥、扩展、CDP 都是好的，是页面挡住了：关掉遮挡物、
   `scroll_page`、或换一个 locator 再重试。不要因此重启桥或改走物理输入 —— 旧行为是照点并报成功，
-  那才是真正的静默失败。成功的点击带 `hit_verified: true`；坐标模式不做这项判定。
+  那才是真正的静默失败。成功的点击带 `hit_verified: true`；坐标模式不做这项判定。**页面截图上量到的
+  坐标不能直接当 `page_click` 的 `x`/`y`**：截图是设备像素（`pixel_space: "device"`，CSS ×
+  `devicePixelRatio`），125% 缩放下会偏 25%，而坐标模式不做命中判定、不会报出打偏。
 - **对话框/验证码/权限不是桥故障**：`blocked_by_dialog`/`blocked_by_beforeunload` →
   `handle_dialog`；`challenge_stalled` → 把同一 tab 交还用户；`busy` → 稍后重试，别循环。
   `set_site_permission` 返回 `unsupported` 表示浏览器无法提供可精确恢复的 API（如 clipboard/托管/
@@ -291,7 +299,7 @@ token 不一致，不是扩展坏了**：
 - **桌面物理输入仍可用**：桥断时 `capture_desktop_screenshot`/`mouse_*` 走本机截屏与
   pyautogui，不经 18766，可用来诊断或临时兜底。批准与否取决于 profile：默认 `lab` 免询问，
   `safe` 每次批准；客户端不支持批准时返回 `requires_user_action`，那是客户端能力问题，不是桥问题。
-  两种 profile 下跨进程锁、安静窗口、目标提前台和 `on_screen` 检查都照常生效。
+  两种 profile 下跨进程锁、坐标边界核对、安静窗口、目标提前台和 `on_screen` 检查都照常生效。
 - **不用 MCP 工具直接驱动已登录浏览器**：POST `/link` 时从共享 token 文件构造 Bearer 头；不要
   依赖编辑器 env，也不要打印 token。**只有这几个顶层 cmd 合法**：`get_all_sessions` /
   `diagnose` / `find_session` / `ext_cmd` / `execute_js`。其它一律返回

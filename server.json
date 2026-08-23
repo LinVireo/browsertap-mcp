@@ -3,7 +3,7 @@
   "name": "io.github.LinVireo/browsertap-mcp",
   "title": "BrowserTap MCP",
   "description": "MCP server that drives the real Chrome you already use, through an extension and CDP.",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "repository": {
     "url": "https://github.com/LinVireo/browsertap-mcp",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "browsertap-mcp",
-      "version": "0.4.11",
+      "version": "0.4.12",
       "transport": {
         "type": "stdio"
       },

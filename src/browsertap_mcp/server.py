@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 from urllib.parse import urlsplit
 
 import anyio
@@ -4113,7 +4113,11 @@ def _page_type_target_info(
 @mcp.tool(
     description=(
         "Click a CSS/structured locator or viewport coordinates in a specific real browser tab "
-        "using background CDP input. Ambiguous or unreachable targets dispatch nothing; the tab "
+        "using background CDP input. Coordinates are viewport-relative CSS pixels (the space "
+        "getBoundingClientRect reports), NOT the physical screen pixels mouse_click takes and NOT "
+        "the device pixels capture_page_screenshot returns -- on a scaled display divide a "
+        "screenshot pixel by devicePixelRatio first. Ambiguous or unreachable targets dispatch "
+        "nothing; the tab "
         "is not activated and the desktop cursor does not move. Selector offsets are measured "
         "from the element's top-left corner; an omitted axis uses the element centre. In selector "
         "mode the point is hit-tested before anything is dispatched: an element below the fold is "
@@ -4436,7 +4440,9 @@ def page_press(
 @mcp.tool(
     description=(
         "Drag between viewport coordinates in a specific tab using one background CDP input "
-        "sequence, without activating the tab or moving the desktop cursor."
+        "sequence, without activating the tab or moving the desktop cursor. Both endpoints are "
+        "viewport-relative CSS pixels, like page_click's coordinate mode and unlike mouse_drag's "
+        "physical screen pixels, and neither is hit-tested."
     )
 )
 def page_drag(
@@ -5251,11 +5257,114 @@ def storage_set(
 
 
 # --- Tool: capture_page_screenshot -------------------------------------------
+def _image_dimensions(raw: bytes) -> tuple[int, int] | None:
+    """Read pixel dimensions out of an encoded image header.
+
+    Only the three formats this server will ask CDP for, and deliberately by
+    hand rather than through Pillow: page screenshots have no imaging dependency
+    today, and taking one would make them fail on an install without the
+    optional desktop extra. Reading the bytes already in memory also avoids a
+    second CDP round trip, which would mean a second debugger attach/detach on
+    the tab -- the thing AGENTS.md section 4 measured at 15s instead of 0.16s.
+
+    Returns None rather than raising: a screenshot whose header cannot be parsed
+    is still a screenshot, and the caller reports the gap instead of losing the
+    pixels over it. A truncated header parses to zeroes rather than failing, so
+    the result is validated here instead of at each format's return -- reporting
+    a 0x0 image would be worse than reporting nothing.
+    """
+    parsed = _parse_image_header(raw)
+    if parsed is None:
+        return None
+    width, height = parsed
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _parse_image_header(raw: bytes) -> tuple[int, int] | None:
+    if not isinstance(raw, bytes):
+        return None
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n" and raw[12:16] == b"IHDR":
+            if len(raw) < 24:
+                return None
+            return (
+                int.from_bytes(raw[16:20], "big"),
+                int.from_bytes(raw[20:24], "big"),
+            )
+        if raw[:2] == b"\xff\xd8":
+            # Walk the segment chain to the frame header. Chrome emits baseline
+            # JPEG, but progressive (SOF2) costs nothing to accept.
+            offset = 2
+            while offset + 4 <= len(raw):
+                if raw[offset] != 0xFF:
+                    return None
+                marker = raw[offset + 1]
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                    offset += 2
+                    continue
+                length = int.from_bytes(raw[offset + 2:offset + 4], "big")
+                # SOFn carries the frame size; 0xC4/0xC8/0xCC share the range
+                # but are Huffman/arithmetic tables, not frame headers.
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    if len(raw) < offset + 9:
+                        return None
+                    return (
+                        int.from_bytes(raw[offset + 7:offset + 9], "big"),
+                        int.from_bytes(raw[offset + 5:offset + 7], "big"),
+                    )
+                if length < 2:
+                    return None
+                offset += 2 + length
+            return None
+        if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            chunk = raw[12:16]
+            if chunk == b"VP8X":
+                if len(raw) < 30:
+                    return None
+                # Canvas size is stored minus one, 24 bits little-endian each.
+                return (
+                    int.from_bytes(raw[24:27], "little") + 1,
+                    int.from_bytes(raw[27:30], "little") + 1,
+                )
+            if chunk == b"VP8 ":
+                # Lossy keyframe: 3-byte start code, then 14-bit dimensions with
+                # a 2-bit scale field in the high bits.
+                if len(raw) < 30 or raw[23:26] != b"\x9d\x01\x2a":
+                    return None
+                return (
+                    int.from_bytes(raw[26:28], "little") & 0x3FFF,
+                    int.from_bytes(raw[28:30], "little") & 0x3FFF,
+                )
+            if chunk == b"VP8L":
+                if len(raw) < 25 or raw[20] != 0x2F:
+                    return None
+                bits = int.from_bytes(raw[21:25], "little")
+                return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+            return None
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+_SCREENSHOT_PIXEL_NOTE = (
+    "Pixel dimensions are DEVICE pixels: CSS pixels x the page's devicePixelRatio, so on a "
+    "scaled display they do not match the coordinates page_click and page_drag take. Divide by "
+    "devicePixelRatio (read it with execute_js) before turning a point in this image into a "
+    "page_click coordinate, or avoid the conversion entirely by clicking a selector from "
+    "scan_page, which is hit-tested. Some clients also downscale an attached image before the "
+    "model sees it, so rescale any point read off the picture to image_width x image_height first."
+)
+
+
 @mcp.tool(
     description=(
         "Capture a viewport, full-page, or clipped screenshot of a page/tab via CDP with optional "
         "JPEG/WebP quality. Returns text metadata plus an "
         "attached MCP image even when save_path is set; save_path only controls disk output. "
+        "image_width/image_height are DEVICE pixels (CSS x devicePixelRatio), not the CSS pixels "
+        "page_click takes, and `size` is the byte count. "
         "If the current model cannot consume images, it has not seen the pixels and must use "
         "scan_page, execute_js, a page-specific API, or OCR instead. Base64 is included only "
         "when return_base64=true."
@@ -5351,18 +5460,31 @@ def capture_page_screenshot(
     except (ValueError, base64.binascii.Error) as exc:
         raise RuntimeError("Screenshot failed because the bridge returned invalid base64 image data.") from exc
 
+    dimensions = _image_dimensions(raw)
     out: dict[str, Any] = {
         "status": "success",
         "format": normalized_format,
         "full_page": bool(full_page),
+        "image_width": dimensions[0] if dimensions else None,
+        "image_height": dimensions[1] if dimensions else None,
+        "pixel_space": "device",
         "size": len(raw),
         "image_attached": True,
         "model_note": (
             "Screenshot pixels are attached as MCP image content. If the current model does not "
             "support images, it has not seen those pixels and must not infer page state from this "
-            "result; use scan_page, execute_js, a page-specific API, or OCR."
+            "result; use scan_page, execute_js, a page-specific API, or OCR. "
+            + _SCREENSHOT_PIXEL_NOTE
         ),
     }
+    if dimensions is None:
+        # Reported rather than dropped: without dimensions a caller has no way to
+        # rescale a point read off the picture, and `size` is a byte count that
+        # reads like one if nothing says otherwise.
+        out["dimensions_note"] = (
+            "the image header could not be parsed, so its pixel dimensions are unknown; "
+            "do not treat `size` as a dimension, it is the byte count"
+        )
     if save_path:
         path = Path(save_path).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -5411,7 +5533,7 @@ def _pyautogui():
     return pyautogui
 
 
-@mcp.tool(description="Capture the complete visible virtual desktop across all displays and return text metadata plus MCP image content; this is not a background-tab screenshot, save_path only adds a disk copy, and return_base64 is opt-in.")
+@mcp.tool(description="Capture the complete visible virtual desktop across all displays and return text metadata plus MCP image content; this is not a background-tab screenshot, save_path only adds a disk copy, and return_base64 is opt-in. width/height/left/top are PHYSICAL screen pixels and are exactly the range mouse_click accepts, unscaled.")
 def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False) -> CallToolResult:
     import io
     try:
@@ -5461,13 +5583,18 @@ def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False)
         "top": int(monitor.get("top", 0)),
         "monitor_count": max(0, len(sct.monitors) - 1),
         "virtual_desktop": True,
+        "pixel_space": "physical",
         "size": len(raw),
         "image_attached": True,
         "model_note": (
             "Pixels are attached from the currently visible OS virtual desktop across all displays, "
             "not from a selected or background browser tab. If the current model does not support "
             "images, it has not seen those pixels; use capture_page_screenshot for one browser tab "
-            "or structured page tools when possible."
+            "or structured page tools when possible. "
+            "This image is not resized, so width/height are both its pixel dimensions and the "
+            "physical screen coordinates mouse_click takes -- but some clients downscale an "
+            "attached image before the model sees it, so rescale any point read off the picture "
+            "back to width x height before using it."
         ),
     }
     if save_path:
@@ -5545,6 +5672,7 @@ async def _run_approved_physical_action(
     *,
     session_id: Optional[str] = None,
     activate_session: Optional[str] = None,
+    points: Optional[Sequence[tuple[Any, Any]]] = None,
 ) -> dict[str, Any]:
     if not await _request_physical_approval(ctx, summary):
         return _requires_user_action()
@@ -5559,6 +5687,17 @@ async def _run_approved_physical_action(
             # Activation is itself foreground work and must wait until the
             # lease and quiet-input check have passed.
             action_started = False
+            bounds = None
+            if points:
+                # Deliberately inside the lease rather than in front of the
+                # approval prompt: refusing here still precedes every dispatch,
+                # which is the property that matters, and BTAP touches no
+                # desktop API before the human consents. It is also ahead of
+                # activation on purpose -- display geometry does not depend on
+                # which window is raised, so a request that cannot work should
+                # not foreground someone's tab first. The probe loads no input
+                # backend, so this adds nothing to the ordering below.
+                bounds = physical_input.check_screen_bounds(points)
             activated = None
             if should_activate:
                 activated = _maybe_activate(activate_session, session_id)
@@ -5570,11 +5709,14 @@ async def _run_approved_physical_action(
                             "no physical input was sent."
                         ),
                         "activated": activated,
+                        "screen_bounds": bounds,
                     }
             action_started = True
             result = action()
             if activated:
                 result["activated"] = activated
+            if bounds is not None:
+                result["screen_bounds"] = bounds
             return result
 
         return physical_input.run_physical_action(summary, gated_action)
@@ -5589,6 +5731,11 @@ async def _run_approved_physical_action(
         if action_started:
             raise
         return _physical_error_result("input_activity_detected", str(exc))
+    except physical_input.CoordinatesOffScreen as exc:
+        # Raised above `action_started = True` by construction, so unlike the two
+        # gates before it this one never has to decide whether input already
+        # went out: it did not.
+        return _physical_error_result("coordinates_off_screen", str(exc))
 
 
 _PHYSICAL_INPUT_NOTICE = (
@@ -5601,7 +5748,7 @@ _PHYSICAL_INPUT_NOTICE = (
 
 
 # --- Tools: physical mouse and keyboard --------------------------------------
-@mcp.tool(description="Move the real mouse cursor to screen coordinates." + _PHYSICAL_INPUT_NOTICE)
+@mcp.tool(description="Move the real mouse cursor to absolute virtual-desktop coordinates in PHYSICAL screen pixels (the space pointer_info and capture_desktop_screenshot report, not the CSS pixels page_click takes). A point on no display is refused with coordinates_off_screen rather than clamped to a screen edge." + _PHYSICAL_INPUT_NOTICE)
 async def mouse_move(
     ctx: Context,
     x: int,
@@ -5621,6 +5768,7 @@ async def mouse_move(
         action,
         session_id=session_id,
         activate_session=activate_session,
+        points=[(x, y)],
     )
 
 
@@ -5660,7 +5808,12 @@ def _maybe_activate(activate_session: Optional[str],
 
 @mcp.tool(
     description=(
-        "Click on the real desktop at screen coordinates. Pass session_id — the same one you "
+        "Click on the real desktop at absolute virtual-desktop coordinates in PHYSICAL screen "
+        "pixels — the space pointer_info and capture_desktop_screenshot report, NOT the viewport "
+        "CSS pixels page_click takes; on a scaled display the two differ by devicePixelRatio. "
+        "A point on no display is refused with coordinates_off_screen rather than clamped to a "
+        "screen edge. "
+        "Pass session_id — the same one you "
         "pass every other tool (preferred) — and that tab is raised after the quiet check so "
         "the click lands on it. "
         "Without one the current global target is raised, which another task may have "
@@ -5693,10 +5846,14 @@ async def mouse_click(
         action,
         session_id=session_id,
         activate_session=activate_session,
+        # A click with no coordinates uses wherever the pointer already is, which
+        # the OS put there and cannot be off-screen. Passing it anyway would
+        # probe the display geometry for nothing.
+        points=[(x, y)] if x is not None and y is not None else None,
     )
 
 
-@mcp.tool(description="Drag the real mouse from one point to another." + _PHYSICAL_INPUT_NOTICE)
+@mcp.tool(description="Drag the real mouse from one point to another, both in absolute virtual-desktop PHYSICAL screen pixels (see mouse_click for how that differs from page_drag's CSS pixels). Either endpoint on no display is refused with coordinates_off_screen." + _PHYSICAL_INPUT_NOTICE)
 async def mouse_drag(
     ctx: Context,
     x1: int,
@@ -5720,12 +5877,16 @@ async def mouse_drag(
         action,
         session_id=session_id,
         activate_session=activate_session,
+        points=[(x1, y1), (x2, y2)],
     )
 
 
 @mcp.tool(
     description=(
-        "Type text via the real keyboard, optionally after clicking a field. Pass session_id — "
+        "Type text via the real keyboard, optionally after clicking a field at click_x/click_y in "
+        "absolute virtual-desktop PHYSICAL screen pixels (see mouse_click for how that differs "
+        "from the CSS pixels the page_* tools take); a click point on no display is refused with "
+        "coordinates_off_screen. Pass session_id — "
         "the same one you pass every other tool (preferred) — and that tab is raised after the "
         "quiet check so the keystrokes go to it. Without one the current global target is raised, "
         "which another task may have changed. Approval may foreground the selected browser tab. "
@@ -5755,6 +5916,7 @@ async def type_text(
         action,
         session_id=session_id,
         activate_session=activate_session,
+        points=[(click_x, click_y)] if click_x is not None and click_y is not None else None,
     )
 
 
@@ -5783,13 +5945,24 @@ async def hotkey(
     )
 
 
-@mcp.tool(description="Report the current desktop mouse position and primary screen size.")
+@mcp.tool(description="Report the current desktop mouse position and screen geometry in PHYSICAL pixels. screen_width/screen_height are the PRIMARY display only; screen_bounds is the virtual desktop across every display and is the range mouse_click will accept. These are not the CSS pixels the page_* tools take.")
 def pointer_info() -> dict[str, Any]:
     pyautogui = _pyautogui()
 
     x, y = pyautogui.position()
     w, h = pyautogui.size()
-    return {"x": x, "y": y, "screen_width": w, "screen_height": h}
+    return {
+        "x": x,
+        "y": y,
+        "screen_width": w,
+        "screen_height": h,
+        # The primary size above is what pyautogui knows and is kept for
+        # compatibility, but it is the wrong bound on a multi-monitor desktop --
+        # a legitimate point on a second screen is outside it. This is the
+        # rectangle the physical tools actually validate against, read the same
+        # way, so the two can never disagree.
+        "screen_bounds": physical_input.screen_bounds(),
+    }
 
 
 if __name__ == "__main__":
