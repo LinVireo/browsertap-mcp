@@ -22,9 +22,8 @@ Three steps. Each one is spelled out in full under **Getting started** below,
 with the Windows PowerShell paths and the config for every supported client.
 
 ```bash
-# 1. Install from source. There is no PyPI release yet.
-git clone https://github.com/LinVireo/browsertap-mcp.git && cd browsertap-mcp
-python -m venv .venv && ./.venv/bin/python -m pip install -e ".[desktop]"
+# 1. Install from PyPI into a virtual environment.
+python -m venv .venv && ./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
 ./.venv/bin/browsertap extension-path   # prints the directory step 2 needs
 
 # 3. Point your MCP client at that same executable (Claude Code shown).
@@ -74,20 +73,31 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 
 ### 1. Install
 
-Clone the repository, create a virtual environment, and install the recommended
-desktop feature set:
+Create a virtual environment and install the recommended desktop feature set:
 
 **Windows PowerShell**
 
 ```powershell
-git clone https://github.com/LinVireo/browsertap-mcp.git
-Set-Location browsertap-mcp
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\python.exe -m pip install "browsertap-mcp[desktop]"
 .\.venv\Scripts\browsertap.exe extension-path
 ```
 
 **Linux or macOS**
+
+```bash
+python -m venv .venv
+./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
+./.venv/bin/browsertap extension-path
+```
+
+The core install (`pip install browsertap-mcp`) omits OS-level mouse/keyboard and
+desktop capture dependencies. Use it only when those tools are intentionally
+disabled.
+
+To work on the project rather than only use it, install the checkout as editable
+instead. Same extras; the extension directory and the skills are then read
+straight out of the tree:
 
 ```bash
 git clone https://github.com/LinVireo/browsertap-mcp.git
@@ -96,12 +106,6 @@ python -m venv .venv
 ./.venv/bin/python -m pip install -e ".[desktop]"
 ./.venv/bin/browsertap extension-path
 ```
-
-The core install (`pip install -e .`) omits OS-level mouse/keyboard and desktop
-capture dependencies. Use it only when those tools are intentionally disabled.
-After the first PyPI release, `pip install "browsertap-mcp[desktop]"` will be
-the non-editable install path; until then, the source install above is the
-supported path.
 
 ### 2. Load the Chrome extension
 
@@ -290,8 +294,8 @@ DIR` compares them against the shipped originals and names whichever one drifted
 An upgrade is three steps, not one: the three parts do not become current at the
 same moment, and step 3 fails silently if you skip it.
 
-1. Update the package — `pip install -U browsertap-mcp` once it is on PyPI, or
-   `git pull` in a source checkout. A new MCP session picks this up immediately.
+1. Update the package — `pip install -U "browsertap-mcp[desktop]"`, or `git pull`
+   in a source checkout. A new MCP session picks this up immediately.
 2. `browsertap bridge --restart`. The daemon is long-lived and outlives
    every MCP session, so until it restarts it keeps serving the old code.
 3. Open `chrome://extensions` and press **Reload** on the extension. Its files

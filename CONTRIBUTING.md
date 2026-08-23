@@ -271,9 +271,11 @@ verify.
 
 ## Publishing to PyPI
 
-The package is not on PyPI yet. `pip install browsertap-mcp` therefore does
-not work, and both READMEs say so; that sentence changes only once the upload
-has actually happened.
+The package is published as
+[`browsertap-mcp`](https://pypi.org/project/browsertap-mcp/); 0.4.12 was the
+first upload. Both READMEs now present `pip install "browsertap-mcp[desktop]"`
+as *the* install path, so anything that breaks that command breaks the
+documented entry point, not just a convenience.
 
 `.github/workflows/release.yml` builds, gates, and uploads. It never runs on a
 push: the triggers are a manual run and a published GitHub Release. The reason
@@ -284,9 +286,9 @@ release the next patch.
 Three things have to exist before the workflow can upload, and none of them can
 be created from inside this repository:
 
-1. A PyPI account with the project name `browsertap-mcp` available or already
-   owned. Check <https://pypi.org/project/browsertap-mcp/> first; a name in
-   use by someone else cannot be taken over.
+1. A PyPI account that owns the project name `browsertap-mcp`. This one is
+   already settled: the 0.4.12 upload created the project, and a name in use by
+   someone else could not have been taken over.
 2. A **Trusted Publisher** on PyPI for this repository
    (`LinVireo/browsertap-mcp`), workflow `release.yml`, environment `pypi`.
    Trusted Publishing means the workflow exchanges a short-lived GitHub OIDC

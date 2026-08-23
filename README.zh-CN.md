@@ -24,9 +24,8 @@ profile 对物理输入进行询问；默认 `lab` profile 免询问执行，也
 见下方**快速开始**一节。
 
 ```bash
-# 1. 源码安装。目前还没发到 PyPI。
-git clone https://github.com/LinVireo/browsertap-mcp.git && cd browsertap-mcp
-python -m venv .venv && ./.venv/bin/python -m pip install -e ".[desktop]"
+# 1. 从 PyPI 装进一个虚拟环境。
+python -m venv .venv && ./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
 ./.venv/bin/browsertap extension-path   # 打印第 2 步要用的目录
 
 # 3. 把 MCP 客户端指向同一个可执行文件（以 Claude Code 为例）。
@@ -74,19 +73,29 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 
 ### 1. 安装
 
-克隆仓库、创建虚拟环境，并安装推荐的桌面能力依赖。
+创建虚拟环境，安装推荐的桌面能力依赖。
 
 **Windows PowerShell**
 
 ```powershell
-git clone https://github.com/LinVireo/browsertap-mcp.git
-Set-Location browsertap-mcp
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\python.exe -m pip install "browsertap-mcp[desktop]"
 .\.venv\Scripts\browsertap.exe extension-path
 ```
 
 **Linux 或 macOS**
+
+```bash
+python -m venv .venv
+./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
+./.venv/bin/browsertap extension-path
+```
+
+核心安装 `pip install browsertap-mcp` 不包含操作系统级鼠标、键盘和桌面截图依赖，仅适用于
+明确不使用这些工具的环境。
+
+要改这个项目本身（而不只是用它），改成 editable 安装：extras 一样，扩展目录和 skill
+直接从工作树里读。
 
 ```bash
 git clone https://github.com/LinVireo/browsertap-mcp.git
@@ -95,10 +104,6 @@ python -m venv .venv
 ./.venv/bin/python -m pip install -e ".[desktop]"
 ./.venv/bin/browsertap extension-path
 ```
-
-核心安装 `pip install -e .` 不包含操作系统级鼠标、键盘和桌面截图依赖，仅适用于明确不使用
-这些工具的环境。首次发布到 PyPI 后，可改用
-`pip install "browsertap-mcp[desktop]"`；发布前以以上源码安装方式为准。
 
 ### 2. 加载 Chrome 扩展
 
@@ -278,7 +283,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 
 升级要做三件事，不是一件：三个部分不会同时变成新版，而第 3 步漏掉不会有任何报错。
 
-1. 更新包 —— 发布到 PyPI 后用 `pip install -U browsertap-mcp`，源码安装则 `git pull`。
+1. 更新包 —— `pip install -U "browsertap-mcp[desktop]"`，源码安装则 `git pull`。
    新建的 MCP 会话立即生效。
 2. `browsertap bridge --restart`。守护进程常驻、活得比每个 MCP 会话都长，不重启就
    一直用旧代码。

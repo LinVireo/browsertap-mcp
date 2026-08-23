@@ -38,8 +38,10 @@ MCP 客户端配置中填写可执行文件的绝对路径。Windows 通常为
 若操作系统级输入或桌面截图报告依赖缺失，应安装 desktop extra：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\python.exe -m pip install -U "browsertap-mcp[desktop]"
 ```
+
+源码检出里对应的写法是在该检出目录下跑 `-e ".[desktop]"`。
 
 ### `/link` 返回 HTTP 401
 

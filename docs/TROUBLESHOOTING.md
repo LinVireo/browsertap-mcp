@@ -45,8 +45,10 @@ If OS-level input or desktop capture reports a missing dependency, reinstall
 with the desktop extra, for example:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\python.exe -m pip install -U "browsertap-mcp[desktop]"
 ```
+
+From a source checkout the equivalent is `-e ".[desktop]"` run in that checkout.
 
 ### `/link` returns HTTP 401
 

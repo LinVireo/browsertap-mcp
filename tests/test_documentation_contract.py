@@ -134,7 +134,12 @@ def test_the_readmes_open_with_a_three_step_start():
         block = text.split(heading, 1)[1].split(features, 1)[0]
 
         # All three steps, in the one place a stranger will actually read.
-        assert 'pip install -e ".[desktop]"' in block, name
+        # The literal is the *published* install, not the editable one it used to
+        # be: since 0.4.12 the package is on PyPI, and a first screen that opens
+        # with `git clone` tells a reader who only wants to use the server to do
+        # work they do not need. The editable install still has its own place
+        # under Getting started, for people changing the project.
+        assert 'pip install "browsertap-mcp[desktop]"' in block, name
         assert "browsertap extension-path" in block, name
         assert "claude mcp add browsertap" in block, name
         # The step that cannot be scripted has to be named as manual here; it is

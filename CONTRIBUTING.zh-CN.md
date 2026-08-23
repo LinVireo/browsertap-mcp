@@ -213,8 +213,10 @@ python -m scripts.check_tool_docs --check-installed-skills \
 
 ## 发布到 PyPI
 
-本包尚未发布到 PyPI，因此 `pip install browsertap-mcp` 现在不可用，两份 README 也
-如此写明；那句话只有在真正上传成功之后才改。
+本包已经发布在 PyPI，名字是
+[`browsertap-mcp`](https://pypi.org/project/browsertap-mcp/)，首个上传的版本是
+0.4.12。两份 README 现在都把 `pip install "browsertap-mcp[desktop]"` 当作**正式**
+安装路径，所以弄坏这条命令等于弄坏文档里写明的入口，不只是少了个便利。
 
 `.github/workflows/release.yml` 负责构建、门禁与上传。它**不会**被 push 触发，只能手动
 运行或由已发布的 GitHub Release 触发。原因是上传不可撤销：PyPI 上的文件名永不可复用，
@@ -222,8 +224,8 @@ python -m scripts.check_tool_docs --check-installed-skills \
 
 上传之前必须先具备三样东西，且都无法从本仓库内部创建：
 
-1. 一个 PyPI 账号，且项目名 `browsertap-mcp` 可用或已归属自己。先查
-   <https://pypi.org/project/browsertap-mcp/>；已被他人占用的名字无法接管。
+1. 一个 PyPI 账号，且项目名 `browsertap-mcp` 已归属自己。这一条已经落定：0.4.12 那次
+   上传创建了这个项目，被他人占用的名字本来也接管不了。
 2. PyPI 上为本仓库配置的 **Trusted Publisher**：仓库 `LinVireo/browsertap-mcp`、
    workflow `release.yml`、environment `pypi`。Trusted Publishing 的含义是 workflow 在
    请求时用短期 GitHub OIDC token 换取上传凭据，仓库里不存任何 API token —— 没有可泄露
