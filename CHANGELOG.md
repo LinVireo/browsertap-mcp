@@ -6,6 +6,56 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-08-24
+
+### Added
+
+- `scripts/lint_report.py`: lint is now a scored acceptance gate with sealed
+  evidence behind it. `.github/workflows/test.yml` ran `ruff check src tests
+  scripts` and the release finalizer did not run ruff at all, so a sealed
+  `release_ready: true` and a red CI run on the very same commit could both be
+  correct, and the sealed one was what the release notes quoted. CI and
+  `scripts/finalize_change.py` now call this module, so the target list exists
+  once, and it writes `artifacts/lint.json`, which the evidence manifest binds
+  next to the coverage and junit records -- turning "ruff was run somewhere" into
+  "ruff reported clean over this exact tree".
+- The lint artifact records how many files were scanned, per target, and the gate
+  requires it. `ruff check` over a path that matches nothing exits 0 with an empty
+  diagnostic list, so a narrowed target list would otherwise turn the gate greener
+  the less it checked -- the same shape as an installed-skill check with no
+  directory to compare against.
+- Three reverse checks in `tests/test_documentation_contract.py`. The licence test
+  only asked whether every credited file still exists, which is the question that
+  cannot detect an omission: `popup.html`, `popup.js` and `disable_dialogs.js` are
+  forked from upstream and were missing from `THIRD-PARTY-NOTICES.md` for three
+  releases while passing every gate. The tree is now walked instead, every file
+  under `src/browsertap_mcp/chrome_extension/` must be classified as derived or
+  original, and each measurement in the table must be internally consistent. A
+  third check rejects a published document that repeats a `##` section.
+
+### Changed
+
+- `THIRD-PARTY-NOTICES.md` credits all eight derived files, states the metric and
+  the denominator it measured them with, and gives a percentage on every row.
+  The three newly listed files have a *higher* upstream share than
+  `background.js`, which was credited from the start; size was what made the
+  difference, and size is not what the licence asks about.
+- The notice no longer carries `browser_bridge.py`'s and `background.js`'s current
+  line counts in prose. One of them said 4591 while the file had reached 4600: a
+  number that has to be re-typed on every edit teaches the reader to re-type it,
+  which is how it went stale in the first place. The table's figures are dated and
+  measured instead.
+- The acceptance report computes its own denominator. `Score: {n}/100` was a
+  literal beside a weight table anyone could add a gate to, so the first added
+  gate would have published a score out of the wrong total; both numbers now come
+  from `GATE_WEIGHTS`, and full marks is `105/105`.
+
+### Fixed
+
+- Removed a duplicated `## Listing on the MCP Registry` section from
+  `CONTRIBUTING.md`. The two copies were identical, so a later edit to one of them
+  would have left the file contradicting itself with no diff to show why.
+
 ## [0.4.12] - 2026-08-23
 
 ### Added
@@ -919,7 +969,8 @@ link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.13...HEAD
+[0.4.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...v0.4.11
 [0.4.9]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...v0.4.9

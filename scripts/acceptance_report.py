@@ -37,7 +37,14 @@ GATE_WEIGHTS = {
     "versions": 5,
     "distributions": 5,
     "live_suite": 10,
+    "lint": 5,
 }
+# Derived, never typed twice. This used to be a literal `100` in the rendered
+# line beside a table anyone could edit, so adding a gate here would have shipped
+# a report scoring 105 out of a hardcoded 100 -- a mutable numerator over a
+# frozen denominator, which is the same defect the per-file coverage floor and
+# the licence table each had to be rescued from.
+TOTAL_GATE_WEIGHT = sum(GATE_WEIGHTS.values())
 
 
 def _status(value: bool) -> str:
@@ -201,6 +208,41 @@ def _distribution_status(manifest: dict[str, object] | None) -> tuple[bool, str]
     return True, f"{len(relative_paths)} manifest-bound archive(s) validated"
 
 
+def _lint_status(manifest: dict[str, object] | None) -> tuple[bool, str]:
+    """Read the sealed lint result, and refuse a pass produced by absence.
+
+    `ruff check` over a path that matches nothing exits 0 with an empty
+    diagnostic list, so "zero violations" is only meaningful together with what
+    was scanned. `scripts/lint_report.py` records both and marks a target that
+    matched no files as an error rather than letting it contribute a silent zero;
+    this reads that verdict instead of re-deriving it, so the two cannot drift.
+    """
+    relative = "artifacts/lint.json"
+    if not _recorded(manifest, relative):
+        return False, "lint artifact is not bound by the evidence manifest"
+    try:
+        payload = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+        status = str(payload["status"])
+        violations = int(payload["violation_count"])
+        files_scanned = int(payload["files_scanned"])
+        targets = payload["targets"]
+        tool_version = str(payload["tool_version"])
+        problems = payload["problems"]
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "lint artifact unavailable or malformed"
+    if not isinstance(targets, list) or not targets:
+        return False, "lint artifact records no target paths"
+    if isinstance(problems, list) and problems:
+        return False, "; ".join(str(problem) for problem in problems)
+    if status != "clean" or violations:
+        return False, f"{violations} lint violation(s) from {tool_version}"
+    if files_scanned <= 0:
+        return False, "lint reported no violations because it scanned no files"
+    return True, (
+        f"{tool_version} clean over {files_scanned} file(s) in {', '.join(map(str, targets))}"
+    )
+
+
 def _bind_live_status(
     live: dict[str, object], manifest: dict[str, object] | None
 ) -> tuple[dict[str, object], bool]:
@@ -247,6 +289,7 @@ def build_report_data() -> dict[str, object]:
     docs = build_docs_report()
     versions = docs.get("versions") or {}
     distributions_ok, distribution_summary = _distribution_status(evidence_manifest)
+    lint_ok, lint_summary = _lint_status(evidence_manifest)
 
     registered = int(tool_coverage.get("registered", 0))
     contract_valid = int(tool_coverage.get("contract_valid_tools", 0))
@@ -281,6 +324,7 @@ def build_report_data() -> dict[str, object]:
         ),
         "distributions": evidence_fresh and distributions_ok,
         "live_suite": evidence_fresh and live_passed,
+        "lint": evidence_fresh and lint_ok,
     }
     score = sum(weight for name, weight in GATE_WEIGHTS.items() if gates[name])
     return {
@@ -289,6 +333,7 @@ def build_report_data() -> dict[str, object]:
         "gates": gates,
         "gate_weights": GATE_WEIGHTS,
         "objective_score": score,
+        "objective_score_total": TOTAL_GATE_WEIGHT,
         "release_ready": all(gates.values()),
         "tool_coverage": tool_coverage,
         "tool_coverage_source": tool_coverage_source,
@@ -300,6 +345,7 @@ def build_report_data() -> dict[str, object]:
         "live": live,
         "offline": offline,
         "distribution_summary": distribution_summary,
+        "lint_summary": lint_summary,
         "evidence_fresh": evidence_fresh,
         "evidence_manifest": evidence_manifest,
         "evidence_problems": evidence_problems,
@@ -364,6 +410,7 @@ def render_report(data: dict[str, object]) -> str:
             )
         ),
         f"- Documentation contract: `{_status(bool(gates['documentation']))}`",
+        f"- Python lint: `{_status(bool(gates['lint']))}` ({data['lint_summary']})",
         f"- Unified versions: `{_status(bool(gates['versions']))}` ({data['versions']})",
         (
             f"- Evidence/source binding: `{_status(bool(data['evidence_fresh']))}`"
@@ -395,10 +442,11 @@ def render_report(data: dict[str, object]) -> str:
     assert isinstance(weights, dict)
     for name, weight in weights.items():
         lines.append(f"| `{name}` | {weight} | {_status(bool(gates[name]))} |")
+    total = data.get("objective_score_total", sum(int(weight) for weight in weights.values()))
     lines.extend(
         [
             "",
-            f"**Score: {data['objective_score']}/100**",
+            f"**Score: {data['objective_score']}/{total}**",
             f"**Release ready: {str(data['release_ready']).lower()}**",
             "",
         ]

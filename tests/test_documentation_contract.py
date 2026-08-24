@@ -12,6 +12,35 @@ ROOT = Path(__file__).resolve().parents[1]
 # lookbehind keeps URL schemes (`http://`, `chrome://`) out of the pattern.
 _LOCAL_PATH_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]\S*")
 
+# The extension directory was forked whole from upstream's
+# `assets/tmwd_cdp_bridge/`, and this is that directory's inventory as it stood
+# at the snapshot `THIRD-PARTY-NOTICES.md` was measured against. It is the
+# *upstream* list on purpose: the notice file cannot supply it, and without it
+# there is no way to ask "did a derived file drop out of the table" -- only the
+# forward question "does every credited file still exist", which is what used to
+# be asked and is what let three files ship uncredited for three releases.
+UPSTREAM_EXTENSION_FILES = frozenset(
+    {
+        "background.js",
+        "content.js",
+        "disable_dialogs.js",
+        "manifest.json",
+        "popup.html",
+        "popup.js",
+    }
+)
+
+# Files under `chrome_extension/` that upstream never had. Spelled out rather
+# than inferred, so adding one is a decision recorded here instead of a silent
+# reclassification: anything in that directory which is neither upstream's nor
+# listed here fails the check below and has to be put in one bucket or the other.
+ORIGINAL_EXTENSION_FILES = frozenset(
+    {
+        "_locales/en/messages.json",
+        "_locales/zh_CN/messages.json",
+    }
+)
+
 
 def _shipped_skills() -> list[Path]:
     """The agent skills as the release actually carries them.
@@ -69,7 +98,8 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
 
     assert "declarativeNetRequest" in security
     assert "three business days" in security
-    assert "python -m ruff check src tests scripts" in contributing
+    assert "python -m scripts.lint_report" in contributing
+    assert "python -m scripts.lint_report" in contributing_zh
     assert "--cov-fail-under=85" in contributing
     assert "release/*" in contributing
     assert "[简体中文](CONTRIBUTING.zh-CN.md)" in contributing
@@ -604,3 +634,162 @@ def test_the_upstream_mit_notice_travels_with_every_copy():
         readme = (ROOT / name).read_text(encoding="utf-8")
         assert "THIRD-PARTY-NOTICES.md" in readme, f"{name} no longer points at the notice"
         assert "lsdefine/GenericAgent" in readme, f"{name} dropped the upstream credit"
+
+
+_DERIVED_ROW_RE = re.compile(
+    r"^\|\s*`(?P<ours>src/[^`]+)`\s*\|\s*`(?P<theirs>[^`]+)`\s*\|\s*"
+    r"(?P<identical>\d+) of (?P<total>\d+) \((?P<percent>\d+)%\)"
+)
+
+
+def _credited_derived_files() -> dict[str, dict[str, int | str]]:
+    """Parse the derived-file table in `THIRD-PARTY-NOTICES.md`.
+
+    Shared by both checks below so that a table which stops parsing cannot make
+    either of them vacuous: each asserts the row count it expects rather than
+    trusting whatever the regex happened to match.
+    """
+    rows: dict[str, dict[str, int | str]] = {}
+    for line in (ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8").splitlines():
+        match = _DERIVED_ROW_RE.match(line)
+        if match is None:
+            continue
+        rows[match.group("ours")] = {
+            "upstream": match.group("theirs"),
+            "identical": int(match.group("identical")),
+            "total": int(match.group("total")),
+            "percent": int(match.group("percent")),
+        }
+    return rows
+
+
+def _expected_derived_paths() -> set[str]:
+    """The set the notice table has to cover, computed from the tree.
+
+    Deliberately not a literal: a hardcoded row count is the same kind of frozen
+    derived number that let the notice claim a stale line count for three
+    releases, and it would also fail spuriously the first time a genuinely new
+    upstream file arrived.
+    """
+    extension = ROOT / "src" / "browsertap_mcp" / "chrome_extension"
+    derived = {
+        path.relative_to(ROOT).as_posix()
+        for path in extension.iterdir()
+        if path.is_file() and path.name in UPSTREAM_EXTENSION_FILES
+    }
+    # The two derived Python files live outside that directory and are the
+    # largest borrowings in the distribution.
+    derived.add("src/browsertap_mcp/simphtml.py")
+    derived.add("src/browsertap_mcp/browser_bridge.py")
+    return derived
+
+
+def test_every_derived_extension_file_is_credited():
+    """Fail when a file forked from upstream is *missing* from the notice.
+
+    The check beside this one asks the forward question -- does every credited
+    file still exist -- and that is the question that cannot detect an omission.
+    Three of the six files in the extension directory (`popup.html`, `popup.js`,
+    `disable_dialogs.js`) were left out of the table for three releases while
+    passing every check, and their upstream share is higher than that of
+    `background.js`, which was credited from the start. Nothing was wrong with
+    the files; the check simply had no way to notice they were absent.
+
+    Two limits are worth stating rather than implying. This cannot tell whether
+    a file declared original in `ORIGINAL_EXTENSION_FILES` really is -- that is
+    human judgement, and all this does is force the judgement to be written
+    down. It also cannot re-measure the percentages, because upstream is not
+    vendored here; the notice bounds that claim with the date it was measured.
+    """
+    extension = ROOT / "src" / "browsertap_mcp" / "chrome_extension"
+    assert extension.is_dir(), "the packaged extension directory is gone"
+
+    credited = _credited_derived_files()
+    expected = _expected_derived_paths()
+    # Compared as sets in both directions: a missing key is an uncredited file,
+    # and an extra key is a credit that survived a rename of the file it covers.
+    assert set(credited) == expected, (
+        "THIRD-PARTY-NOTICES.md does not cover the derived files. "
+        f"uncredited: {sorted(expected - set(credited))}; "
+        f"credited but not derived-or-present: {sorted(set(credited) - expected)}"
+    )
+
+    unclassified: list[str] = []
+    for path in sorted(extension.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(extension).as_posix()
+        if relative in ORIGINAL_EXTENSION_FILES or relative in UPSTREAM_EXTENSION_FILES:
+            continue
+        unclassified.append(relative)
+
+    assert not unclassified, (
+        "these extension files are in neither bucket: "
+        f"{unclassified}. Add each to ORIGINAL_EXTENSION_FILES if it is ours, or "
+        "to UPSTREAM_EXTENSION_FILES and the notice table if it came from upstream"
+    )
+
+
+def test_the_derived_file_measurements_are_internally_consistent():
+    """Catch a hand-edited number in the table before it ships.
+
+    Every figure there is derived, and one of them rotted exactly this way: the
+    prose carried `background.js`'s line count, the file kept growing, and the
+    published notice went on stating a count that was nine lines short. The
+    percentage is the one relationship checkable without upstream in the tree,
+    so it is checked; the tolerance is half a point because the stated value is
+    a rounded one and 72.5 may legitimately be written either way.
+
+    Whether the table covers everything is the neighbouring check's question --
+    which is why this one needs no row count of its own to stay honest.
+    """
+    credited = _credited_derived_files()
+    assert credited, "the derived-file table stopped parsing; this check is now vacuous"
+    for shipped, row in credited.items():
+        identical = int(row["identical"])
+        total = int(row["total"])
+        percent = int(row["percent"])
+        assert total > 0, f"{shipped}: upstream line count of zero cannot be measured"
+        assert 0 < identical <= total, (
+            f"{shipped}: {identical} identical lines out of an upstream {total} is impossible"
+        )
+        share = identical / total * 100
+        assert abs(share - percent) <= 0.5, (
+            f"{shipped}: table says {percent}% but {identical}/{total} is {share:.1f}%"
+        )
+
+
+def test_no_published_document_repeats_a_section():
+    """A section pasted twice is invisible to every other check in this file.
+
+    `CONTRIBUTING.md` carried two verbatim copies of "Listing on the MCP
+    Registry" -- 26 lines each -- through several releases. Every fact in it was
+    correct, which is why nothing caught it: the checks here look for text that
+    is missing or stale, never for text that is present twice.
+    """
+    paths = [
+        ROOT / "README.md",
+        ROOT / "README.zh-CN.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "CONTRIBUTING.zh-CN.md",
+        ROOT / "AGENTS.md",
+        ROOT / "SECURITY.md",
+        ROOT / "THIRD-PARTY-NOTICES.md",
+        ROOT / "docs" / "USAGE.md",
+        ROOT / "docs" / "USAGE.zh-CN.md",
+        ROOT / "docs" / "TROUBLESHOOTING.md",
+        ROOT / "docs" / "TROUBLESHOOTING.zh-CN.md",
+    ]
+    checked = 0
+    for path in paths:
+        if not path.is_file():
+            continue
+        checked += 1
+        headings = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("## ")
+        ]
+        repeated = sorted({name for name in headings if headings.count(name) > 1})
+        assert not repeated, f"{path.relative_to(ROOT).as_posix()} repeats section(s) {repeated}"
+    assert checked >= 9, f"only {checked} documents were reachable; this check is going vacuous"

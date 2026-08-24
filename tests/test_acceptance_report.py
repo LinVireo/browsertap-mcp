@@ -42,6 +42,28 @@ def _passing_tool_evidence() -> dict[str, object]:
     }
 
 
+def _passing_lint_report():
+    """A clean ruff run as `scripts/lint_report.py` records it.
+
+    `files_scanned` is part of the verdict, not decoration: ruff over a path that
+    matches nothing exits 0 with an empty diagnostic list, so a fixture with a
+    zero count here would let the gate pass on the shape it exists to reject.
+    """
+    return {
+        "tool": "ruff",
+        "tool_version": "ruff 9.9.9",
+        "targets": ["src", "tests", "scripts"],
+        "files_scanned": 64,
+        "files_per_target": {"src": 10, "tests": 43, "scripts": 11},
+        "exit_code": 0,
+        "status": "clean",
+        "violation_count": 0,
+        "violations": [],
+        "violations_truncated": False,
+        "problems": [],
+    }
+
+
 def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     """Lay out a complete, self-consistent passing evidence set.
 
@@ -76,6 +98,7 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     (artifacts / "live-junit.xml").write_text(passing_xml, encoding="utf-8")
     for name in ("tool-coverage-offline.json", "tool-coverage-live.json"):
         (artifacts / name).write_text(json.dumps(_passing_tool_evidence()), encoding="utf-8")
+    (artifacts / "lint.json").write_text(json.dumps(_passing_lint_report()), encoding="utf-8")
     wheel = dist / "browsertap_mcp-9.9.9-py3-none-any.whl"
     sdist = dist / "browsertap_mcp-9.9.9.tar.gz"
     wheel.write_bytes(b"wheel")
@@ -99,6 +122,7 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
                 artifacts / "live-junit.xml",
                 artifacts / "tool-coverage-offline.json",
                 artifacts / "tool-coverage-live.json",
+                artifacts / "lint.json",
                 wheel,
                 sdist,
             )
@@ -112,11 +136,14 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
 
 
 def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
-    """The 100/100 claim has to come from the scorer, not from a stub.
+    """The full-marks claim has to come from the scorer, not from a stub.
 
     The only other test of the scoring path replaces `build_report_data`
     wholesale, so nothing exercised the gate expressions that produce the
-    published score.
+    published score. The total is computed from the weight table rather than
+    written here: a literal would have to be re-typed for every gate added, and
+    a score compared against a stale literal is the failure this whole file is
+    about.
     """
     _seal_release_evidence(monkeypatch, tmp_path)
 
@@ -125,8 +152,8 @@ def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
     assert data["evidence_problems"] == []
     assert data["evidence_fresh"] is True
     assert data["gates"] == dict.fromkeys(A.GATE_WEIGHTS, True)
-    assert data["objective_score"] == 100
-    assert sum(A.GATE_WEIGHTS.values()) == 100
+    assert data["objective_score"] == sum(A.GATE_WEIGHTS.values())
+    assert data["objective_score_total"] == sum(A.GATE_WEIGHTS.values())
     assert data["release_ready"] is True
     assert data["version"] == "9.9.9"
     assert data["code_coverage"] == 89.12
@@ -224,6 +251,7 @@ def test_dirty_sealed_tree_forfeits_every_evidence_bound_gate(monkeypatch, tmp_p
         "versions": True,
         "distributions": False,
         "live_suite": False,
+        "lint": False,
     }
     assert data["objective_score"] == A.GATE_WEIGHTS["documentation"] + A.GATE_WEIGHTS["versions"]
     assert data["release_ready"] is False
@@ -334,6 +362,7 @@ def test_main_returns_nonzero_when_release_gates_fail(monkeypatch, tmp_path):
             "source": "artifacts/live-junit.xml",
         },
         "distribution_summary": "missing",
+        "lint_summary": "missing",
         "evidence_fresh": False,
         "evidence_problems": ["evidence manifest unavailable"],
     }
@@ -342,6 +371,88 @@ def test_main_returns_nonzero_when_release_gates_fail(monkeypatch, tmp_path):
 
     assert A.main(["--output", str(output)]) == 1
     text = output.read_text(encoding="utf-8")
-    assert "Score: 0/100" in text
+    # Denominator computed here too. A literal on both sides of the comparison
+    # agrees with itself while disagreeing with the weight table, which is the
+    # only thing either of them is meant to describe.
+    assert f"Score: 0/{sum(A.GATE_WEIGHTS.values())}" in text
     assert "Release ready: false" in text
     assert "95-Point" not in text
+
+
+def test_the_rendered_denominator_tracks_the_weight_table(monkeypatch, tmp_path):
+    """A score is a fraction, and its denominator used to be hardcoded.
+
+    `render_report` wrote `/100` as a literal beside a weight table anyone could
+    add a gate to, so the first added gate would have published `105/100`. Both
+    numbers now come from the table; this fails if either goes back to a literal.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+
+    data = A.build_report_data()
+    text = A.render_report(data)
+    total = sum(A.GATE_WEIGHTS.values())
+
+    assert A.TOTAL_GATE_WEIGHT == total
+    assert f"**Score: {total}/{total}**" in text
+    # Every gate in the table is rendered as its own row, so a gate can be added
+    # to the scorer without appearing in the report only if this also fails.
+    for name in A.GATE_WEIGHTS:
+        assert f"| `{name}` |" in text
+
+
+def test_lint_violations_fail_the_gate(monkeypatch, tmp_path):
+    """CI ran ruff, the seal recorded nothing, and both verdicts were correct.
+
+    `release_ready: true` over a tree that `.github/workflows/test.yml` was about
+    to fail is the state this gate exists to make impossible, and the sealed
+    report was the one quoted in release notes.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report.update(
+        status="violations",
+        exit_code=1,
+        violation_count=2,
+        violations=[
+            {"code": "F401", "file": "src/browsertap_mcp/server.py", "line": 3, "message": "unused"},
+            {"code": "E402", "file": "scripts/versioning.py", "line": 9, "message": "import"},
+        ],
+    )
+    (tmp_path / "artifacts" / "lint.json").write_text(json.dumps(report), encoding="utf-8")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert data["release_ready"] is False
+    assert data["objective_score"] == sum(A.GATE_WEIGHTS.values()) - A.GATE_WEIGHTS["lint"]
+    assert "2 lint violation(s) from ruff 9.9.9" in A.render_report(data)
+
+
+def test_a_lint_run_that_scanned_nothing_is_not_a_pass(monkeypatch, tmp_path):
+    """Zero violations over zero files is the vacuous pass, not a clean tree.
+
+    `ruff check` against a path that matches nothing exits 0 with an empty
+    diagnostic list. Narrowing the target list would then turn the gate green
+    while checking less and less, which is the same shape as a skills mirror
+    check with no directory or a quiet-input gate with nothing to compare.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report.update(files_scanned=0, files_per_target={"src": 0, "tests": 0, "scripts": 0})
+    (tmp_path / "artifacts" / "lint.json").write_text(json.dumps(report), encoding="utf-8")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert "scanned no files" in A.render_report(data)
+
+
+def test_an_unbound_lint_artifact_fails_the_gate(monkeypatch, tmp_path):
+    """A lint result the seal does not cover proves nothing about this tree."""
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    manifest["artifacts"].pop("artifacts/lint.json")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert "not bound by the evidence manifest" in data["lint_summary"]

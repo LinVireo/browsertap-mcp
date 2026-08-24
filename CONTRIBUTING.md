@@ -25,7 +25,7 @@ page.
 The normal suite is offline and does not touch a browser:
 
 ```text
-python -m ruff check src tests scripts
+python -m scripts.lint_report
 python -m pytest tests -q
 python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
 python -m scripts.tool_coverage_report --format markdown
@@ -62,10 +62,20 @@ today, so raise it when that module improves rather than lowering it to turn a
 red gate green. A coverage payload with no per-file section fails too, instead
 of passing for want of data.
 
-`ruff check` is the enforced rule set. `ruff format` is not a gate and most of
-the existing sources are not format-clean, so running it across a file you are
-only editing buries the change in unrelated reflows. Match the surrounding style
-instead.
+`ruff check` is the enforced rule set, and `scripts/lint_report.py` is how it is
+run -- by this file, by `scripts/finalize_change.py` and by
+`.github/workflows/test.yml`, so the target list exists once. It writes
+`artifacts/lint.json`, which the evidence manifest binds like every other
+measurement: without it CI could fail lint on the very commit whose sealed report
+said `release_ready: true`, and neither verdict would have been wrong. The
+artifact also records how many files were scanned, because `ruff check` over a
+path that matches nothing exits 0 with an empty diagnostic list -- so the gate
+requires that each target really contributed files. Calling `ruff` directly still
+works for a quick local pass; it just leaves nothing behind to seal.
+
+`ruff format` is not a gate and most of the existing sources are not
+format-clean, so running it across a file you are only editing buries the change
+in unrelated reflows. Match the surrounding style instead.
 
 Live tests are opt-in:
 
@@ -338,33 +348,6 @@ no tag can describe a file that is not in a commit. `release.yml` runs it before
 it installs or builds anything. Run it yourself after tagging and before
 publishing the Release, and confirm the sealed report's `verified_at` commit is
 that same commit.
-
-## Listing on the MCP Registry
-
-`server.json` is the listing. The registry stores metadata only, never archives,
-so it can be submitted only **after** the PyPI upload for that exact version
-exists -- the version in `packages[]` is resolved against the index.
-
-Ownership of a PyPI package is proved by an `mcp-name: <server name>` string in
-the README that becomes the package description on PyPI, which for this project
-is `README.md` (`readme = "README.md"` in `pyproject.toml`). It is line 1, inside
-an HTML comment, and `server.json`'s `name` has to match it exactly;
-`tests/test_documentation_contract.py` checks that pair. The marker must be
-followed by a boundary, so keep it on its own line -- gluing a full stop onto the
-end stops the match. GitHub-based authentication additionally requires the name
-to start with `io.github.<owner>/`.
-
-The registry's own `mcp-publisher` CLI does the submission: `login` (GitHub is
-one of several supported methods), `validate` to check the manifest against the
-published schema without publishing, then `publish` from the repository root.
-Run `validate` first; it is the only place the JSON Schema itself is enforced,
-because this repository gates the fields it can prove locally -- the two version
-copies, the identifier, the registry type and the repository URL -- and does not
-vendor the schema.
-
-The registry is in preview and says data resets are possible before general
-availability, so treat a successful listing as re-doable rather than permanent.
-A new release needs a new submission: bump, release to PyPI, publish again.
 
 ## Listing on the MCP Registry
 

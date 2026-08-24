@@ -10,6 +10,18 @@ import pytest
 from scripts import evidence_manifest as E
 
 
+def _offline_files(artifacts: Path) -> dict[Path, bytes]:
+    """One file per canonical offline artifact, derived from the module's own list.
+
+    Hand-listing them here passed for as long as the two copies happened to
+    agree: adding `lint.json` to `OFFLINE_ARTIFACTS` left three fixtures writing
+    a set the sealer no longer considers complete, and the resulting failures
+    pointed at the sealer rather than at the fixtures. Reading the list means a
+    new artifact is covered by these tests the moment it is required.
+    """
+    return {artifacts / Path(relative).name: relative.encode() for relative in E.OFFLINE_ARTIFACTS}
+
+
 def test_validate_manifest_accepts_matching_source_and_artifacts(monkeypatch, tmp_path):
     monkeypatch.setattr(E, "ROOT", tmp_path)
     monkeypatch.setattr(E, "DEFAULT_OUTPUT", tmp_path / "artifacts" / "evidence-manifest.json")
@@ -22,9 +34,7 @@ def test_validate_manifest_accepts_matching_source_and_artifacts(monkeypatch, tm
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
     files = {
-        artifacts / "coverage.json": b"coverage",
-        artifacts / "offline-junit.xml": b"junit",
-        artifacts / "tool-coverage-offline.json": b"tools",
+        **_offline_files(artifacts),
         dist / "package.whl": b"wheel",
         dist / "package.tar.gz": b"sdist",
     }
@@ -143,9 +153,7 @@ def test_a_live_seal_binds_the_preflight_record_as_well_as_the_junit(monkeypatch
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
     files = {
-        artifacts / "coverage.json": b"coverage",
-        artifacts / "offline-junit.xml": b"junit",
-        artifacts / "tool-coverage-offline.json": b"tools",
+        **_offline_files(artifacts),
         artifacts / "live-junit.xml": b"live junit",
         artifacts / "tool-coverage-live.json": b"live tools",
         dist / "package.whl": b"wheel",
@@ -195,9 +203,7 @@ def test_validate_manifest_rejects_extra_records_and_noncanonical_distribution_s
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
     for relative, content in {
-        "coverage.json": b"coverage",
-        "offline-junit.xml": b"junit",
-        "tool-coverage-offline.json": b"tools",
+        **{Path(name).name: name.encode() for name in E.OFFLINE_ARTIFACTS},
         "extra.txt": b"extra",
         "dist/a.whl": b"wheel",
         "dist/b.tar.gz": b"sdist",

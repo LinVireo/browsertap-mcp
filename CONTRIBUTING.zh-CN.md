@@ -22,7 +22,7 @@ bridge 改动需要重启 bridge；扩展源码改动需要在浏览器扩展管
 常规测试为离线测试，不会操作浏览器：
 
 ```text
-python -m ruff check src tests scripts
+python -m scripts.lint_report
 python -m pytest tests -q
 python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
 python -m scripts.tool_coverage_report --format markdown
@@ -53,8 +53,16 @@ skills、扩展文件。CI 不带这个开关，会真的执行 `browsertap --ve
 调高，不是把它调低把红灯变绿。覆盖率文件里根本没有 per-file 那一段时也算失败，
 不会因为没数据而算通过。
 
-门禁规则集是 `ruff check`。`ruff format` 不是门禁，且现有源码大多不符合它的格式，
-对只做局部修改的文件跑一遍会让无关的重排淹没本次改动。请按周围代码的既有风格书写。
+门禁规则集是 `ruff check`，而执行它的入口是 `scripts/lint_report.py` —— 本文件、
+`scripts/finalize_change.py` 和 `.github/workflows/test.yml` 都调它，所以那份目标清单
+只存在一处。它会写出 `artifacts/lint.json`，并且和其他证据一样被 evidence manifest
+绑定：没有这一步时，CI 完全可以在某个提交上判 lint 失败，而同一个提交的封存报告写着
+`release_ready: true`，两边都没错。产物里还记了扫了多少个文件 —— `ruff check` 对一个
+匹配不到文件的路径同样退出 0、诊断列表为空，所以门禁要求每个目标确实贡献了文件。
+本地想快速过一遍直接调 `ruff` 也行，只是不会留下可封存的东西。
+
+`ruff format` 不是门禁，且现有源码大多不符合它的格式，对只做局部修改的文件跑一遍会让
+无关的重排淹没本次改动。请按周围代码的既有风格书写。
 
 live 测试必须显式运行：
 
