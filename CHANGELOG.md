@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-08-24
+
 ### Added
 
 - `server._TAB_OWNERSHIP.outstanding()` and `.counters()` expose, read-only, which
@@ -1046,9 +1048,16 @@ Only v0.3.12 exists as a tag: 0.2.0 through 0.3.11 were developed before this
 history was published, so there is no commit for any of them and a comparison
 link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
+
+v0.4.13 is a tag with no published artifact. That round was sealed with full
+evidence, but the next round of work landed before it was uploaded, so the
+release that carries it is 0.4.14. The tag exists so that the 0.4.14 compare
+link spans one version rather than two; there is no 0.4.13 on PyPI and no
+GitHub Release for it.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.13...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...HEAD
+[0.4.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...v0.4.11
