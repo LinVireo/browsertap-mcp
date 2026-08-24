@@ -47,6 +47,44 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   the inventory check, and both of those are gone -- leaving the variable would
   have left a knob that no longer does anything, which is worse than no knob.
 
+### Fixed
+
+- `scan_page` no longer injects an `id` into the caller's page. With `cutlist`
+  (the default) it marked the container it had picked so the second roundtrip
+  could find it again, and an injected `id` is visible to
+  `document.getElementById`, to the page's own `#id` CSS rules, to `:target` and
+  to anything that serialises the document. It now reuses the element's existing
+  `id` when it has one -- writing nothing at all -- and otherwise sets a
+  `data-btap-list` counter, which collides with nothing and is idempotent per
+  container, so repeated scans do not accumulate marks. The write that remains is
+  now stated in the tool's own description and in both README tool tables: a tool
+  documented as reading a page had been modifying it.
+- `execute_js` no longer leaves a timer running on the page after it returns. To
+  report `transients` it starts a 450ms interval that walks every text node in
+  the document, and three of its return paths never stopped it: an early return
+  when the tab gave no response, an exhausted deadline, and a failed read. On
+  those paths a full-document `TreeWalker` kept running for as long as the
+  document lived. The script now carries its own expiry and stops itself without
+  needing another roundtrip -- which is the only cleanup that can work, because
+  those are exactly the states in which the page can no longer be reached -- and
+  the no-response path sends an explicit stop while a channel may still exist.
+  The global it parks on is namespaced (`window.__btap_tm`) rather than
+  `window._tm`, and a superseded interval now clears itself instead of the
+  monitor that replaced it.
+
+### Security
+
+- The extension popup no longer copies cookies to the clipboard when it opens.
+  Opening it ran `fetchCookies()` unconditionally, and the tail of that function
+  wrote every cookie of the active tab -- including the `HttpOnly` ones that page
+  JavaScript cannot read -- into the system clipboard as `name=value; ...`. So an
+  access whose visible purpose was to check the page indicator silently replaced
+  the clipboard contents with session credentials. Both halves are now gestures:
+  `Refresh` renders the list, a new `Copy` button copies it, and a clipboard
+  failure is reported on the button instead of overwriting the rendered list.
+  `SECURITY.md` said "refreshed" where the code copied, and now describes what
+  the code does.
+
 ## [0.4.13] - 2026-08-24
 
 ### Added

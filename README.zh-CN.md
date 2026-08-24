@@ -447,7 +447,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 <details>
 <summary><b>页面读取与执行</b></summary>
 
-- **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`
+- **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`;`cutlist`（默认开）会折叠重复的长列表，为让返回的 selector 在简化副本上仍能匹配，会在真实页面上给被折叠的容器写一个 `data-btap-list` 属性——这是本工具对页面的唯一写入
   - `session_id`(string,可选)、`text_only`(boolean,可选):默认 `false`、`cutlist`(boolean,可选):默认 `true`,把重复列表裁成少量样本、`maxchars`(integer,可选):默认 `35000`、`instruction`(string,可选)、`extra_js`(string,可选)、`timeout`(number,可选):默认 `15`
 - **wait_for** —— 等待指定条件成立后返回。与轮询 `scan_page` 相比，该工具避免重复序列化完整 DOM。四个条件必须且只能提供一个；`selector` 接受 CSS 字符串或“后台页面输入”一节所述的结构化 locator
   - `selector`(string/object,可选):CSS 或结构化 locator、`text`(string,可选)、`url_pattern`(string,可选)、`js`(string,可选)、`gone`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`session_id`(string,可选)

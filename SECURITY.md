@@ -97,9 +97,13 @@ physical input.
 - The extension has broad browser permissions because BTAP can inspect and
   modify the real session, including cookies, downloads, tabs, bookmarks,
   extension management, CDP debugger access, and site content on `<all_urls>`.
-  The popup's cookie viewer intentionally exposes cookie values and copies a
-  `name=value` string to the clipboard when refreshed. Extension installation
-  is therefore an explicit trust decision.
+  The popup's cookie viewer intentionally exposes cookie values, including
+  `HttpOnly` ones, when you press Refresh, and its Copy button then writes a
+  `name=value` string for every one of them to the system clipboard. Both are
+  gestures: opening the popup reads nothing and writes nothing, so the clipboard
+  is never replaced by a visit that was only meant to toggle the page indicator.
+  Management of whatever the clipboard then holds is yours. Extension
+  installation is therefore an explicit trust decision.
 - `get_cookies` returns complete cookie values, including `HttpOnly` cookies
   that page JavaScript cannot read, into the MCP client's context. Anything the
   client logs, caches, or forwards therefore carries live session credentials.

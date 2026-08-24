@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import subprocess
+import tempfile
 
 import pytest
 from bs4 import BeautifulSoup
@@ -195,6 +199,68 @@ def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch
     output = caplog.text
     assert "skipped invalid selector" in output
     assert "cutlist found 5 list" in output
+
+
+def test_find_main_list_marks_containers_without_touching_id():
+    """findMainList runs against the user's real DOM, so what it writes matters.
+
+    It used to mint an id (`_ljq<n>`) on any container that lacked one. An
+    injected id is visible to `document.getElementById`, to `#id` rules in the
+    page's own stylesheet, to `:target` and to anything that serialises the
+    document, so the mark is a namespaced data attribute now. The write cannot
+    simply be dropped: the selector this function returns is matched against the
+    snapshot `get_main_block` takes on a *second* round trip, and the pruning
+    clone in `js_optHTML` renumbers siblings on purpose, so an attribute is the
+    only handle that crosses. Reverse gate for the id, forward gate for the mark.
+    """
+    source = S.js_findMainList
+    assert "_ljq" not in source
+    assert "data-btap-list" in source
+    # No assignment to a `.id` property anywhere in the function, however it is
+    # spelled. Reads (`container.id`, `cId`) are fine and still present.
+    assert re.search(r"\.id\s*=(?!=)", source) is None
+    assert "container.id" in source
+
+
+def test_find_main_list_is_syntactically_valid_javascript(tmp_path):
+    """No linter looks at the JavaScript embedded in this module (only ruff runs,
+    and it sees a Python string), so a syntax error here would ship and surface
+    as a runtime failure in the caller's browser. `node --check` is the cheapest
+    gate that would catch it."""
+    script = tmp_path / "find_main_list.js"
+    script.write_text(S.js_findMainList, encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(script)], capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr.strip()
+
+
+def test_get_html_cutlist_matches_a_data_attribute_prefixed_selector(monkeypatch):
+    """The container mark has to survive into the snapshot to be worth writing.
+
+    `optimize_html_for_tokens` strips most attributes; it keeps `data-*` whose
+    value is 20 characters or fewer, which is why the mark is a short counter.
+    This runs the whole cutlist path with the selector shape `describeResult`
+    now produces, so a change to that allowlist fails here rather than silently
+    turning every cutlist selector into a miss.
+    """
+    page = (
+        '<main data-btap-list="1">'
+        + "".join(
+            f'<article class="item">item-{i} {"x" * 800}</article>' for i in range(7)
+        )
+        + "</main>"
+    )
+    selector = '[data-btap-list="1"] > .item'
+    driver = QueueDriver([{"data": [{"selector": selector}]}])
+    monkeypatch.setattr(S, "get_main_block", lambda *_args, **_kwargs: page)
+    html = S.get_html(driver, cutlist=True, maxchars=100_000)
+    soup = BeautifulSoup(html, "html.parser")
+    # The mark itself crossed the pipeline...
+    assert soup.select_one('[data-btap-list="1"]') is not None
+    # ...so the prefixed selector still resolves, and the cut actually happened.
+    assert len(soup.select(selector)) == 3
+    assert "[FAKE ELEMENT] 4 more items hidden" in html
 
 
 def test_get_html_handles_dict_candidate_empty_page_and_parse_cap(monkeypatch):
@@ -430,3 +496,181 @@ def test_execute_js_rich_after_ack_does_not_retry():
     assert len(driver.calls) == 1
     assert "before retrying side effects" in result["suggestion"]
     assert "wait_for" in result["suggestion"]
+
+
+def _run_temp_monitor_harness(body: str) -> dict:
+    """Drive the injected monitor script under node with a fake DOM and clock.
+
+    Real timers would make this slow and flaky, so `setInterval` is replaced by
+    a manual queue and `Date.now` by a settable counter: `advance(ms)` moves the
+    clock and fires one tick, which is all the expiry logic needs.
+    """
+    harness = """
+        let now = 1000000;
+        Date.now = () => now;
+        const timers = new Map();
+        let nextTimerId = 1;
+        globalThis.setInterval = (fn) => { const id = nextTimerId++; timers.set(id, fn); return id; };
+        globalThis.clearInterval = (id) => { timers.delete(id); };
+        function advance(ms) { now += ms; for (const [id, fn] of [...timers]) if (timers.has(id)) fn(); }
+        const textNodes = [{textContent: '  a transient toast message  '}];
+        globalThis.NodeFilter = {SHOW_TEXT: 4};
+        globalThis.document = {
+            body: {},
+            createTreeWalker: () => { let i = 0; return {nextNode: () => (i < textNodes.length ? textNodes[i++] : null)}; },
+        };
+        globalThis.window = globalThis;
+        SCRIPT_UNDER_TEST
+        BODY
+    """
+    # The builder appends its own `startStrMonitor(...)` call; each test drives
+    # the function directly so it can control the lifetime it passes.
+    declaration = S.build_temp_monitor_js(10).replace("startStrMonitor(450, 10000);", "")
+    script = harness.replace("SCRIPT_UNDER_TEST", declaration).replace("BODY", body)
+    handle, path = tempfile.mkstemp(suffix=".js")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(script)
+        completed = subprocess.run(["node", path], capture_output=True, text=True)
+        if completed.returncode:
+            raise AssertionError(f"node harness failed: {completed.stderr.strip()}")
+        return json.loads(completed.stdout)
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def test_temp_monitor_stops_itself_once_its_lifetime_is_up():
+    """The monitor's own expiry is the only cleanup on two of its paths.
+
+    `execute_js_rich` skips the Python-side stop when the deadline is exhausted
+    and when the transient read raises, and both of those are states in which
+    there is no budget left to send anything. Whatever ships here therefore has
+    to stop the 450ms full-document TreeWalker without another roundtrip, or it
+    keeps running on a real page for as long as the document lives.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        const started = {live: !!window.__btap_tm, timers: timers.size};
+        advance(500);
+        const collecting = {live: !!window.__btap_tm, seen: [...window.__btap_tm.all].length};
+        advance(10000);
+        console.log(JSON.stringify({
+            started, collecting,
+            afterExpiry: {live: !!window.__btap_tm, timers: timers.size},
+        }));
+        """
+    )
+    assert report["started"] == {"live": True, "timers": 1}
+    assert report["collecting"]["live"] is True
+    assert report["collecting"]["seen"] == 1
+    # Both halves matter: a cleared interval that leaves the object behind is
+    # still residue on the page, and a deleted object whose interval survives
+    # keeps walking the document forever.
+    assert report["afterExpiry"] == {"live": False, "timers": 0}
+
+
+def test_a_superseded_temp_monitor_clears_itself_and_not_the_newcomer():
+    """A stale interval must never reach through the global at a live monitor.
+
+    The tick reads `window.__btap_tm` back out of the page, so an interval that
+    has been superseded is looking at somebody else's object. Comparing the
+    captured handle against `m.id` is what keeps it from clearing the newcomer
+    and deleting a monitor a later call is about to read. This harness keeps the
+    first tick registered on purpose -- the real `clearInterval` in the
+    replacement path is what a browser would have run, and the point is that the
+    survivor is safe even when it did not.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        const first = window.__btap_tm.id;
+        const firstTick = timers.get(first);
+        startStrMonitor(450, 60000);
+        const second = window.__btap_tm.id;
+        timers.set(first, firstTick);
+        advance(500);
+        console.log(JSON.stringify({
+            distinct: first !== second,
+            firstGone: !timers.has(first),
+            live: !!window.__btap_tm,
+            stillSecond: window.__btap_tm ? window.__btap_tm.id === second : null,
+        }));
+        """
+    )
+    assert report["distinct"] is True
+    # The stale tick removed itself rather than the monitor now on the page.
+    assert report["firstGone"] is True
+    assert report["live"] is True
+    assert report["stillSecond"] is True
+
+
+def test_temp_monitor_script_is_namespaced_and_self_limiting():
+    """Reverse gate for both halves of the fix.
+
+    `window._tm` was a three-character global on a real page; the expiry check
+    is the part with no other enforcement, since no linter reads this module's
+    JavaScript and no offline test can observe a browser leak directly.
+    """
+    source = S.build_temp_monitor_js(12)
+    assert "window._tm" not in source
+    assert source.count("window.__btap_tm") >= 5
+    assert "clearInterval(id)" in source
+    assert "Date.now() > expires" in source
+    assert "startStrMonitor(450, 12000);" in source
+
+
+def test_temp_monitor_js_is_syntactically_valid_javascript(tmp_path):
+    script = tmp_path / "temp_monitor.js"
+    script.write_text(S.build_temp_monitor_js(3), encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(script)], capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr.strip()
+
+
+def test_execute_js_rich_stops_the_monitor_when_nothing_will_read_it(monkeypatch):
+    """A truthy `kind` returns early, and that return used to leak the interval.
+
+    The path has no reader for the transients, so the stop cannot come from
+    `get_temp_texts`; it has to be sent explicitly while a channel may still
+    exist. The script's own expiry covers the tab that is already gone.
+    """
+    stops = []
+    monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: "<p>baseline</p>")
+    monkeypatch.setattr(
+        S, "stop_temp_monitor", lambda *_args, **kwargs: stops.append(kwargs)
+    )
+    monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: ["never read"])
+    monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
+
+    driver = QueueDriver(
+        [{"result": "No response data in 2s (ACK received, script may still be running)"}],
+        sessions={},
+    )
+    result = S.execute_js_rich(
+        "slow()", driver, timeout=4, before_sids=set(), session_id="c:3"
+    )
+
+    assert result["status"] == "no_response"
+    assert "transients" not in result
+    assert len(stops) == 1
+    assert stops[0]["session_id"] == "c:3"
+
+
+def test_execute_js_rich_does_not_stop_a_monitor_it_never_started(monkeypatch):
+    """`no_monitor=True` shares the same early return, and there is nothing to
+    stop there. Sending the stop anyway would spend a roundtrip on every
+    no-monitor call, which is the flag's whole purpose to avoid."""
+    stops = []
+    monkeypatch.setattr(
+        S, "stop_temp_monitor", lambda *_args, **kwargs: stops.append(kwargs)
+    )
+    driver = QueueDriver(
+        [{"result": "No response data in 2s (ACK received, script may still be running)"}]
+    )
+    S.execute_js_rich("slow()", driver, no_monitor=True, timeout=2, before_sids=set())
+    assert stops == []

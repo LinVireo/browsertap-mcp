@@ -422,7 +422,38 @@ js_findMainList = r'''function findMainList(startElement = null) {
         }
 
         function describeResult(container, items, selector, score) {
-            if(container&&!container.id)container.id='_ljq'+(window._lci=(window._lci||0)+1);
+            // The returned selector is matched against the *snapshot* HTML that
+            // get_main_block takes on a second round trip, so the container needs
+            // a handle that survives into it. Positional selectors cannot: the
+            // clone in js_optHTML prunes nodes, splices iframe bodies in as extra
+            // children and flattens shadow roots, so sibling indices deliberately
+            // differ from the live DOM. Attributes are the only thing that crosses.
+            //
+            // Borrow the page's own id when it has one -- then nothing is written
+            // at all. Otherwise mint a mark as a namespaced data attribute rather
+            // than an id: this is the user's real DOM, and an injected id is
+            // visible to document.getElementById, to '#id' rules in the page's own
+            // CSS, to ':target' and to anything that serialises the document,
+            // while data-btap-list collides with nothing. It is idempotent per
+            // container, so re-scanning a page does not accumulate marks. The mark
+            // still outlives the call; removing it needs the two round trips
+            // merged, which is a separate change.
+            let mark = '';
+            if (container) {
+                if (container.id) {
+                    mark = '#' + CSS.escape(container.id);
+                } else {
+                    let n = container.getAttribute('data-btap-list');
+                    if (!n) {
+                        n = String(window.__btapListMark = (window.__btapListMark || 0) + 1);
+                        container.setAttribute('data-btap-list', n);
+                    }
+                    // Short values survive the attribute allowlist in
+                    // optimize_html_for_tokens verbatim; anything over 20
+                    // characters is collapsed to '__data__' there.
+                    mark = '[data-btap-list="' + n + '"]';
+                }
+            }
             const cTag = container ? container.tagName : null;
             const cId = container ? (container.id || '') : '';
             const cClass = container ? (String(container.className || '').trim()) : '';
@@ -430,9 +461,7 @@ js_findMainList = r'''function findMainList(startElement = null) {
                 containerTag: cTag, containerId: cId, containerClass: cClass,
                 itemCount: items.length,
             };
-            let prefix = '';
-            if (cId) prefix = '#' + CSS.escape(cId);
-            if (selector) result.selector = prefix ? (prefix + ' > ' + selector) : selector;
+            if (selector) result.selector = mark ? (mark + ' > ' + selector) : selector;
             if (score !== undefined) result.score = score;
             if (items.length > 0) {
                 result.firstItemPreview = items[0].outerHTML.substring(0, 200);
@@ -687,20 +716,47 @@ def optimize_html_for_tokens(html, link_refs=None, base_url=None):
     return soup
 
 
-temp_monitor_js = """function startStrMonitor(interval) {  
-        if (window._tm && window._tm.id) clearInterval(window._tm.id);  
-        window._tm = {extract: () => {  
-            const texts = new Set(), walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);  
-            let node, t, s; while (node = walker.nextNode())   
-                ((t = node.textContent.trim()) && t.length > 10 && !(s = t.substring(0, 20)).includes('_')) && texts.add(s);  
-            return texts;  
-        }}; 
-        window._tm.init = window._tm.extract();  
-        window._tm.all = new Set();  
-        window._tm.id = setInterval(() => window._tm.extract().forEach(t => window._tm.all.add(t)), interval);  
-    }  
-    startStrMonitor(450);  
-"""  
+# Upper bound on how long the transient-text monitor may keep ticking after
+# the call that started it has given up. The three paths that skip the Python
+# cleanup below -- an early return on a no_response ``kind``, an exhausted
+# deadline, and a failed roundtrip -- are precisely the ones where the page
+# can no longer be reached, so the stop has to be inside the injected script.
+# Without it a 450ms full-document TreeWalker runs on the user's real page for
+# as long as the document lives.
+TEMP_MONITOR_TTL_GRACE = 5.0
+
+
+def build_temp_monitor_js(ttl_seconds, interval_ms=450):
+    """Return the monitor script, wired to stop itself after ``ttl_seconds``.
+
+    The interval captures its own handle rather than reading ``.id`` back off
+    the global: a monitor that has already been replaced by a newer one must
+    clear *itself* and leave the newcomer alone.
+    """
+    ttl_ms = max(0, int(float(ttl_seconds) * 1000))
+    return """function startStrMonitor(interval, lifetimeMs) {
+        if (window.__btap_tm && window.__btap_tm.id) clearInterval(window.__btap_tm.id);
+        const expires = Date.now() + lifetimeMs;
+        window.__btap_tm = {extract: () => {
+            const texts = new Set(), walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node, t, s; while (node = walker.nextNode())
+                ((t = node.textContent.trim()) && t.length > 10 && !(s = t.substring(0, 20)).includes('_')) && texts.add(s);
+            return texts;
+        }};
+        window.__btap_tm.init = window.__btap_tm.extract();
+        window.__btap_tm.all = new Set();
+        const id = setInterval(() => {
+            const m = window.__btap_tm;
+            if (!m || m.id !== id) { clearInterval(id); return; }
+            if (Date.now() > expires) { clearInterval(id); delete window.__btap_tm; return; }
+            m.extract().forEach(t => m.all.add(t));
+        }, interval);
+        window.__btap_tm.id = id;
+    }
+    startStrMonitor(%d, %d);
+""" % (int(interval_ms), ttl_ms)
+
+
 def _execute_in_session(driver, script, timeout, session_id=None, **kwargs):
     call_kwargs = {"timeout": timeout, **kwargs}
     if session_id is not None:
@@ -708,23 +764,43 @@ def _execute_in_session(driver, script, timeout, session_id=None, **kwargs):
     return driver.execute_js(script, **call_kwargs)
 
 
-def start_temp_monitor(driver, timeout=15, session_id=None):
-    try: _execute_in_session(driver, temp_monitor_js, timeout, session_id=session_id)
+def start_temp_monitor(driver, timeout=15, session_id=None, ttl=None):
+    """Start the transient-text monitor, bounded by its own lifetime.
+
+    ``ttl`` defaults to the roundtrip budget plus a grace window, so a monitor
+    whose reader never comes back stops on its own instead of ticking for the
+    life of the page.
+    """
+    if ttl is None: ttl = float(timeout) + TEMP_MONITOR_TTL_GRACE
+    try: _execute_in_session(driver, build_temp_monitor_js(ttl), timeout, session_id=session_id)
     except Exception: pass
+
+
+def stop_temp_monitor(driver, timeout=15, session_id=None):
+    """Clear the monitor without paying for its payload.
+
+    Used by the return paths that have no reader for the transients but did
+    start the monitor; the collected text is discarded, the interval is not.
+    """
+    js = """if (window.__btap_tm) { clearInterval(window.__btap_tm.id); delete window.__btap_tm; }
+        return true;
+    """
+    try: _execute_in_session(driver, js, timeout, session_id=session_id)
+    except Exception as e: logger.debug("Temporary monitor stop failed: %s", e)
 
 def get_temp_texts(driver, timeout=15, session_id=None):
     js = """function stopStrMonitor() {  
-        if (!window._tm) return [];  
-        clearInterval(window._tm.id);  
-        const final = window._tm.extract();  
-        const newlySeen = [...window._tm.all].filter(t => !window._tm.init.has(t));
+        if (!window.__btap_tm) return [];  
+        clearInterval(window.__btap_tm.id);  
+        const final = window.__btap_tm.extract();  
+        const newlySeen = [...window.__btap_tm.all].filter(t => !window.__btap_tm.init.has(t));
         let result;
         if (newlySeen.length < 8) {
             result = newlySeen;
         } else {
             result = newlySeen.filter(t => !final.has(t));
         }
-        delete window._tm;  
+        delete window.__btap_tm;  
         return result;  
         }  
         stopStrMonitor();  
@@ -1081,16 +1157,18 @@ def execute_js_rich(
         remaining = _remaining(deadline, cap)
         return remaining if remaining > 0.001 else 0.0
 
+    monitor_started = False
     if not no_monitor and phase_timeout(MONITOR_TIMEOUT):
         try:
             last_html = get_html(
                 driver,
                 cutlist=False,
-                extra_js=temp_monitor_js,
+                extra_js=build_temp_monitor_js(_remaining(deadline) + TEMP_MONITOR_TTL_GRACE),
                 maxchars=MONITOR_MAXCHARS,
                 timeout=phase_timeout(MONITOR_TIMEOUT),
                 session_id=session_id,
             )
+            monitor_started = True
         except Exception as e:
             logger.debug("Monitor baseline snapshot unavailable: %s", e)
     if before_sids is None:
@@ -1242,7 +1320,14 @@ def execute_js_rich(
             rr['newTabs'] = newTabs
             rr['suggestion'] = "The page refreshed; the listed new tabs connected during execution."
     if error_msg: rr['error'] = error_msg
-    if no_monitor or kind: return rr
+    if no_monitor or kind:
+        # No reader for the transients on this path, but the interval is still
+        # ticking on the user's page. Stop it now while there may still be a
+        # channel; build_temp_monitor_js' own expiry is the fallback when the
+        # tab is already gone (which is what a truthy `kind` usually means).
+        if monitor_started and phase_timeout(MONITOR_TIMEOUT):
+            stop_temp_monitor(driver, timeout=phase_timeout(MONITOR_TIMEOUT), session_id=session_id)
+        return rr
     if not reloaded and phase_timeout(MONITOR_TIMEOUT):
         try:
             rr['transients'] = get_temp_texts(
