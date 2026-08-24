@@ -34,6 +34,11 @@ REQUIRED_WHEEL_SUFFIXES = (
     # command that resolves to an empty directory.
     "/browsertap_mcp/skills/browsertap-default/SKILL.md",
     "/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
+    # The scan_page payload. `simphtml` reads these at import, so a wheel
+    # without them raises `FileNotFoundError` on the first `import`, not at
+    # some later call -- the package would not load at all.
+    "/browsertap_mcp/page_scripts/page_outline.js",
+    "/browsertap_mcp/page_scripts/list_groups.js",
 )
 REQUIRED_SDIST_SUFFIXES = (
     "/.gitignore",
@@ -43,6 +48,10 @@ REQUIRED_SDIST_SUFFIXES = (
     "/src/browsertap_mcp/browser_bridge.py",
     "/src/browsertap_mcp/skills/browsertap-default/SKILL.md",
     "/src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
+    # Same reason as the wheel, plus one the wheel does not have: the sdist
+    # carries `tests/`, and the offline suite imports `simphtml`.
+    "/src/browsertap_mcp/page_scripts/page_outline.js",
+    "/src/browsertap_mcp/page_scripts/list_groups.js",
     "/.github/workflows/live.yml",
     "/.github/workflows/release.yml",
     "/.github/workflows/supply-chain.yml",

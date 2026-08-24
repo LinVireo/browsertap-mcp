@@ -61,6 +61,32 @@ def _passing_lint_report():
         "violations": [],
         "violations_truncated": False,
         "problems": [],
+        "javascript": _passing_js_lint_report(),
+    }
+
+
+def _passing_js_lint_report():
+    """A clean eslint run over the extension, as the same module records it.
+
+    `enforced` carries the distinction the count alone cannot: eslint exits 0
+    both when it checked four files and found nothing and when the config
+    matched no rules at all, and only one of those is a clean tree.
+    """
+    return {
+        "tool": "eslint",
+        "tool_version": "9.9.9",
+        "available": True,
+        "enforced": True,
+        "unavailable_reason": None,
+        "targets": ["src/browsertap_mcp/chrome_extension"],
+        "files_scanned": 4,
+        "rules_applied": 64,
+        "exit_code": 0,
+        "status": "clean",
+        "violation_count": 0,
+        "violations": [],
+        "violations_truncated": False,
+        "problems": [],
     }
 
 
@@ -456,3 +482,95 @@ def test_an_unbound_lint_artifact_fails_the_gate(monkeypatch, tmp_path):
 
     assert data["gates"]["lint"] is False
     assert "not bound by the evidence manifest" in data["lint_summary"]
+
+
+def test_javascript_lint_violations_fail_the_same_gate(monkeypatch, tmp_path):
+    """The extension is ~4.9k lines of the wheel; ruff cannot see one of them."""
+    _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report["javascript"].update(
+        status="violations",
+        violation_count=3,
+        violations=[
+            {
+                "code": "no-unused-vars",
+                "file": "src/browsertap_mcp/chrome_extension/background.js",
+                "line": 56,
+                "message": "'MAX_CDP_TIMEOUT_MS' is assigned a value but never used.",
+            }
+        ],
+    )
+    (tmp_path / "artifacts" / "lint.json").write_text(json.dumps(report), encoding="utf-8")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert data["release_ready"] is False
+    assert "3 JavaScript lint violation(s) from eslint 9.9.9" in A.render_report(data)
+
+
+def test_a_release_may_not_seal_over_a_javascript_lint_that_never_ran(
+    monkeypatch, tmp_path
+):
+    """`unavailable` is honest, and it is still not a pass.
+
+    `scripts.lint_report` exits 0 without node so a contributor keeps the Python
+    half. A release is the one verdict that may not be quiet about half the
+    shipped code, so the refusal lives here and names the fix.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report["javascript"] = {
+        "tool": "eslint",
+        "tool_version": None,
+        "available": False,
+        "enforced": False,
+        "unavailable_reason": "node_modules/eslint/bin/eslint.js is absent; run `npm ci`",
+        "targets": ["src/browsertap_mcp/chrome_extension"],
+        "files_scanned": 0,
+        "status": "unavailable",
+        "violation_count": 0,
+        "violations": [],
+        "violations_truncated": False,
+        "problems": [],
+    }
+    (tmp_path / "artifacts" / "lint.json").write_text(json.dumps(report), encoding="utf-8")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert "was not enforced" in data["lint_summary"]
+    assert "npm ci" in data["lint_summary"]
+
+
+def test_a_javascript_lint_that_enforced_no_rules_is_not_a_pass(monkeypatch, tmp_path):
+    """Zero violations over four files it applied no rules to.
+
+    eslint walks a directory and reports every file clean when the flat config's
+    `files:` pattern no longer matches them -- measured on a real run, a file
+    with an obvious unused variable came back `clean`. So the artifact records
+    what the config would enforce, and a clean verdict without it is refused
+    here for the same reason `own_tabs.enforced` exists.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report["javascript"].update(enforced=False, rules_applied=0)
+    (tmp_path / "artifacts" / "lint.json").write_text(json.dumps(report), encoding="utf-8")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert "without enforcing anything" in data["lint_summary"]
+
+
+def test_a_lint_artifact_with_no_javascript_half_fails_the_gate(monkeypatch, tmp_path):
+    """An artifact predating the JavaScript half proves nothing about it."""
+    _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report.pop("javascript")
+    (tmp_path / "artifacts" / "lint.json").write_text(json.dumps(report), encoding="utf-8")
+
+    data = A.build_report_data()
+
+    assert data["gates"]["lint"] is False
+    assert "records no JavaScript half" in data["lint_summary"]

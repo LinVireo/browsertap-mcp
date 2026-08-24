@@ -34,11 +34,23 @@ jobs:
           cache: pip
       - name: Install package and development dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,desktop]"
+      # The lint gate has a JavaScript half (the Chrome extension is ~4.9k lines
+      # of the wheel). Installed from the lockfile so CI lints with the exact
+      # eslint the seal names, and pinned to the same one job as the lint step.
+      - name: Set up Node
+        if: matrix.python-version == '3.13'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install JavaScript lint dependencies
+        if: matrix.python-version == '3.13'
+        run: npm ci
       # Same module the release finalizer runs, so the target list exists once.
       # It writes `artifacts/lint.json`, which the seal step below binds -- a
       # green tick here that nothing recorded is what let a sealed report and a
       # red run disagree about the same commit.
-      - name: Check Python lint
+      - name: Check lint (Python and extension JavaScript)
         if: matrix.python-version == '3.13'
         run: python -m scripts.lint_report
       - name: Compile Python sources

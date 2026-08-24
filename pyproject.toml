@@ -124,6 +124,15 @@ show_missing = true
 target-version = "py310"
 line-length = 100
 
+[tool.ruff.format]
+# Pinned rather than left on `auto`, which resolves to the platform default:
+# on Windows that rewrites a whole file to CRLF, while `.gitattributes` pins every
+# source type here to LF. The two disagreeing is not cosmetic -- the offline suite
+# drives the extension by slicing `background.js` between two literal blank-line
+# anchors, so a CRLF worktree fails around twenty tests with a misleading
+# "handler not found" instead of anything mentioning line endings.
+line-ending = "lf"
+
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 # Preserve compact legacy control-flow formatting while enforcing correctness,
@@ -160,6 +169,11 @@ browsertap_mcp = [
   # The agent skills ship with the package so `browsertap skill-path`
   # resolves from a plain `pip install`, not only from a repository checkout.
   "skills/*/SKILL.md",
+  # The scan_page payload -- pageOutline/listGroups -- is read from these at
+  # import time (simphtml._load_page_script), so the wheel is broken without
+  # them. They live as real .js files rather than Python string literals so
+  # eslint and `node --check` can see them.
+  "page_scripts/*.js",
 ]
 
 [tool.setuptools.exclude-package-data]

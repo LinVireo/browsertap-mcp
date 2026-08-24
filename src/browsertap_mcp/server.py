@@ -2956,8 +2956,10 @@ def console_capture_stop(
 @mcp.tool(
     description=(
         "Read the current page as simplified HTML/text, preserving login state from the real "
-        "browser. cutlist collapses long repeated lists and marks the container it collapsed "
-        "with a data-btap-list attribute on the live page, the only thing this tool writes. "
+        "browser. cutlist collapses long repeated lists and reports a CSS selector for each "
+        "container it collapsed, derived from that container's own structure. This tool does not "
+        "modify the page -- no attribute, no id, no window global -- so a scan is invisible to "
+        "the page's own scripts. "
         "Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
     )
 )
@@ -3049,7 +3051,7 @@ _OFFSCREEN_RE = re.compile(
 
 
 def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
-    """Pull the optHTML offscreen marker out of the page HTML, if present."""
+    """Pull the pageOutline offscreen marker out of the page HTML, if present."""
     if not isinstance(content, str):
         return None
     m = _OFFSCREEN_RE.search(content)

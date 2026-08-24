@@ -238,8 +238,38 @@ def _lint_status(manifest: dict[str, object] | None) -> tuple[bool, str]:
         return False, f"{violations} lint violation(s) from {tool_version}"
     if files_scanned <= 0:
         return False, "lint reported no violations because it scanned no files"
+
+    # The second half of the same gate. Roughly 4.9k lines of the wheel are the
+    # Chrome extension, so a report that said "lint PASS" while nothing had ever
+    # read that JavaScript was claiming more than it had measured.
+    js = payload.get("javascript")
+    if not isinstance(js, dict):
+        return False, "lint artifact records no JavaScript half"
+    try:
+        js_status = str(js["status"])
+        js_violations = int(js["violation_count"])
+        js_enforced = bool(js["enforced"])
+        js_files = int(js["files_scanned"])
+        js_version = js["tool_version"]
+        js_problems = js["problems"]
+        js_reason = js["unavailable_reason"]
+    except (KeyError, TypeError, ValueError):
+        return False, "lint artifact's JavaScript half is malformed"
+    if js_status == "unavailable":
+        # Deliberately a refusal here and only here. `scripts.lint_report` exits 0
+        # so a contributor without node still gets the Python half; a release is
+        # the one verdict that may not be silent about half the shipped code.
+        return False, f"JavaScript lint was not enforced: {js_reason}"
+    if isinstance(js_problems, list) and js_problems:
+        return False, "; ".join(str(problem) for problem in js_problems)
+    if js_status != "clean" or js_violations:
+        return False, f"{js_violations} JavaScript lint violation(s) from eslint {js_version}"
+    if not js_enforced or js_files <= 0:
+        return False, "eslint reported no violations without enforcing anything"
     return True, (
-        f"{tool_version} clean over {files_scanned} file(s) in {', '.join(map(str, targets))}"
+        f"{tool_version} clean over {files_scanned} file(s) in "
+        f"{', '.join(map(str, targets))}; eslint {js_version} clean over "
+        f"{js_files} extension file(s)"
     )
 
 
@@ -410,7 +440,8 @@ def render_report(data: dict[str, object]) -> str:
             )
         ),
         f"- Documentation contract: `{_status(bool(gates['documentation']))}`",
-        f"- Python lint: `{_status(bool(gates['lint']))}` ({data['lint_summary']})",
+        f"- Lint (Python + extension JS): `{_status(bool(gates['lint']))}` "
+        f"({data['lint_summary']})",
         f"- Unified versions: `{_status(bool(gates['versions']))}` ({data['versions']})",
         (
             f"- Evidence/source binding: `{_status(bool(data['evidence_fresh']))}`"

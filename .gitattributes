@@ -4,3 +4,6 @@
 *.md text eol=lf
 *.html text eol=lf
 *.css text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf

@@ -1609,3 +1609,21 @@ def test_local_diagnose_reports_refused_takeovers():
 
     assert result["rejected_client_takeovers"] == 3
     assert result["last_rejected_takeover"]["client_id"] == "chrome"
+
+
+def test_execute_js_names_an_unsupported_session_type_under_dash_o():
+    """`python -O` strips asserts, and this one guards a dispatch.
+
+    Both the send and the deadline handling below are `if tp in ['ws','ext_ws']
+    ... elif tp == 'http'`, so an unrecognised type dispatches nothing and then
+    reaches the timeout check with no branch to return from: the polling loop
+    spins with a negative sleep interval and never exits. Measured with the
+    guard disabled -- a call made with `timeout=2` had not returned at 60 s,
+    with a core pegged. That is why this may not be an assert: under `python -O`
+    the stripped version does not degrade to a worse error message, it hangs the
+    bridge.
+    """
+    driver = driver_stub()
+    _install_exec_session(driver, session_type="carrier-pigeon", session_id="odd:1")
+    with pytest.raises(ValueError, match="Unsupported session type: carrier-pigeon"):
+        driver.execute_js("return 1", session_id="odd:1")

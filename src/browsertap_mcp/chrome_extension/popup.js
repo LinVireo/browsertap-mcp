@@ -95,7 +95,7 @@ async function copyCookies() {
       renderedCookies.map(c => `${c.name}=${c.value}`).join('; ')
     );
     flashButton(btn, 'copyDone');
-  } catch (e) {
+  } catch (_) {
     // Report on the button, never in #out. A clipboard failure is unrelated to
     // the cookie list, and overwriting it would erase what the user asked for --
     // which is what the old shared try/catch did.

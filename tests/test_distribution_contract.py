@@ -772,3 +772,79 @@ def test_publish_workflow_defaults_to_the_index_that_can_be_undone():
     assert "default: testpypi" in inputs
     assert "repository-url: https://test.pypi.org/legacy/" in workflow
     assert "if: github.event_name == 'release' || inputs.index == 'pypi'" in workflow
+
+
+# Each entry is (why it is needed, the Chrome version that shipped it, a probe
+# that answers "does this tree still use it?"). The probes read the tree rather
+# than restating it, so the floor below is derived, not remembered.
+_CHROME_API_FLOORS = (
+    ("manifest_version 3", 88, lambda m, js: m.get("manifest_version") == 3),
+    ("chrome.scripting", 88, lambda m, js: "chrome.scripting" in js),
+    ("chrome.storage.session", 102, lambda m, js: "chrome.storage.session" in js),
+    (
+        'content_scripts[].world "MAIN"',
+        111,
+        lambda m, js: any(c.get("world") == "MAIN" for c in m["content_scripts"]),
+    ),
+    (
+        "Element.checkVisibility() options contentVisibilityAuto / "
+        "opacityProperty / visibilityProperty",
+        121,
+        lambda m, js: "contentVisibilityAuto" in js,
+    ),
+)
+
+
+def test_manifest_declares_the_chrome_floor_its_own_api_use_forces():
+    """Without this key Chrome installs the extension and then misbehaves.
+
+    An unsupported `world: "MAIN"` content script is not rejected -- it is
+    registered in the isolated world instead, so `disable_dialogs.js` patches a
+    copy of `window` that the page never sees and every dialog it was meant to
+    suppress comes back, with nothing anywhere reporting a problem. Declaring
+    the floor turns that into an install-time refusal naming the browser.
+
+    An option name has the same shape one layer in, which is why the floor is
+    121 rather than 111: unknown members of a WebIDL dictionary are dropped
+    without an error, so `checkVisibility({opacityProperty: true, ...})` on a
+    pre-121 engine returns a verdict computed without the opacity and visibility
+    checks, and hidden text reaches the model.
+
+    The number is not a preference: it is the highest floor any API this tree
+    actually calls demands, so adding a newer API without raising it fails here,
+    and raising it past what the code needs fails here too.
+
+    The **file set** is part of the gate, not scaffolding around it. This probed
+    `chrome_extension/*.js` alone, which was the whole of the browser-side code
+    until the page analysis moved into `page_scripts/` -- and the highest floor in
+    the tree then lived in a directory the gate could not see, so a manifest
+    stating 111 read as verified while the code needed 121. The guard below is
+    what turns losing a directory into a red gate rather than a quieter one.
+    """
+    package = Path(__file__).resolve().parents[1] / "src" / "browsertap_mcp"
+    extension = package / "chrome_extension"
+    manifest = json.loads((extension / "manifest.json").read_text(encoding="utf-8"))
+    sources = sorted(extension.glob("*.js"))
+    sources += sorted((package / "page_scripts").glob("*.js"))
+    directories = {path.parent.name for path in sources}
+    assert directories == {"chrome_extension", "page_scripts"}, (
+        f"the probed file set covers {sorted(directories)}; browser-side code in "
+        "any other directory is invisible to this gate, which is how the floor went "
+        "stale the first time"
+    )
+    js = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+
+    used = [(why, floor) for why, floor, probe in _CHROME_API_FLOORS if probe(manifest, js)]
+    assert used, "no probe matched, so this gate would pass vacuously"
+    binding_why, required = max(used, key=lambda item: item[1])
+
+    declared = manifest.get("minimum_chrome_version")
+    assert declared is not None, (
+        "manifest.json declares no minimum_chrome_version, so an older Chrome "
+        f"installs this extension and then silently drops {binding_why}"
+    )
+    assert declared == str(required), (
+        f"minimum_chrome_version is {declared!r} but this tree's API use forces "
+        f"{required} ({binding_why}); the floor is derived from "
+        "_CHROME_API_FLOORS, so change the code or the table, not just the number"
+    )

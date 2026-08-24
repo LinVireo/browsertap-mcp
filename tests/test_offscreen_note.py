@@ -1,9 +1,9 @@
 """_offscreen_note: report what the viewport clamp dropped.
 
-optHTML excludes anything more than 5000px from the CURRENT scroll offset. That
-content used to vanish with no trace, so "not on this page" and "not scrolled to
-it yet" looked identical to the agent. optHTML now emits a marker comment and
-scan_page turns it into a field plus a hint.
+`pageOutline` excludes anything more than 5000px from the CURRENT scroll offset.
+That content used to vanish with no trace, so "not on this page" and "not
+scrolled to it yet" looked identical to the agent. It now emits a marker comment
+and scan_page turns it into a field plus a hint.
 """
 from browsertap_mcp.server import _offscreen_note
 

@@ -149,8 +149,15 @@ def test_default_screenshot_recovers_a_stale_implicit_session(monkeypatch):
 
 
 def test_empty_documents_are_guarded_before_dom_queries():
-    assert "if (!domCopy)" in S.simphtml.js_optHTML
-    assert "if (!root) return [];" in S.simphtml.js_findMainList
+    """A page mid-parse has no `body`, and both injected scripts run on that page.
+
+    `tests/test_page_scripts.py` covers this by *running* both scripts under node,
+    which is the stronger check and the one to read first. It is also skipped
+    entirely where node is absent, so this stays as the floor: it asserts on the
+    constants `simphtml` actually loaded, and it runs everywhere.
+    """
+    assert "if (!body) {" in S.simphtml.js_page_outline
+    assert "if (!root) return [];" in S.simphtml.js_list_groups
 
 
 def test_desktop_screenshot_captures_virtual_desktop_and_explains_pixels(monkeypatch):

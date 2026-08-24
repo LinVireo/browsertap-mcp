@@ -1188,7 +1188,18 @@ class BrowserBridge:
         extra = {'switched_session': session_id, 'switched_from': switched_from} if switched_from else {}
 
         tp = session.type
-        assert tp in ['ws', 'http', 'ext_ws'], f"Unsupported session type: {tp}"
+        # Not an assert: python -O strips those, and what it guards is not a
+        # tidy fall-through. Every dispatch below is `if tp in ['ws','ext_ws']
+        # ... elif tp == 'http'`, and so is the whole deadline block, so an
+        # unrecognised type sends nothing, then reaches `remaining() <= 0` with
+        # no branch to return from and spins the polling loop forever -- with
+        # `wait_for` negative there is not even a sleep in it. Measured with
+        # this line disabled: a 2-second call had not come back at 60 s, one
+        # core pegged. An unknown type is only ever a bug here (a transport
+        # added to Session and not to this dispatch), so it must raise, and it
+        # must raise under -O.
+        if tp not in ('ws', 'http', 'ext_ws'):
+            raise ValueError(f"Unsupported session type: {tp}")
         exec_id = str(uuid.uuid4())
         payload_dict = {'id': exec_id, 'code': code}
         if tp == 'ext_ws':

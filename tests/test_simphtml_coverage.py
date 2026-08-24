@@ -117,7 +117,7 @@ def test_get_main_block_forwards_options_and_normalizes_text():
     assert result == "alpha beta\ngamma\n\ndelta"
     script, kwargs = driver.calls[0]
     assert "window.prepared = true" in script
-    assert "return optHTML(true)" in script
+    assert "return pageOutline(true)" in script
     assert kwargs == {"timeout": 7, "allow_failover": True, "session_id": "chrome:9"}
 
 
@@ -201,34 +201,52 @@ def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch
     assert "cutlist found 5 list" in output
 
 
-def test_find_main_list_marks_containers_without_touching_id():
-    """findMainList runs against the user's real DOM, so what it writes matters.
+def test_neither_retired_way_of_marking_a_container_came_back():
+    """Two generations of writing to the user's DOM, both reverse-gated here.
 
-    It used to mint an id (`_ljq<n>`) on any container that lacked one. An
-    injected id is visible to `document.getElementById`, to `#id` rules in the
-    page's own stylesheet, to `:target` and to anything that serialises the
-    document, so the mark is a namespaced data attribute now. The write cannot
-    simply be dropped: the selector this function returns is matched against the
-    snapshot `get_main_block` takes on a *second* round trip, and the pruning
-    clone in `js_optHTML` renumbers siblings on purpose, so an attribute is the
-    only handle that crosses. Reverse gate for the id, forward gate for the mark.
+    The cutlist selector has to survive into a *second* roundtrip, and for most
+    of this package's life the way it did that was by marking the live container
+    so the mark would clone. First with a minted id (`_ljq<n>`), which is visible
+    to `document.getElementById`, to `#id` rules in the page's own stylesheet, to
+    `:target` and to anything that serialises the document; then with a
+    `data-btap-list` attribute, which is narrower but still a write. 0.4.15
+    derives the selector from the container's own structure instead, so neither
+    is needed and both are gone.
+
+    This is the narrow half. That the scripts write nothing *at all* is checked
+    statically in `tests/test_documentation_contract.py` and behaviourally under
+    node in `tests/test_page_scripts.py`; those two would catch a third spelling,
+    which is exactly what this one cannot do.
     """
-    source = S.js_findMainList
-    assert "_ljq" not in source
-    assert "data-btap-list" in source
-    # No assignment to a `.id` property anywhere in the function, however it is
-    # spelled. Reads (`container.id`, `cId`) are fine and still present.
-    assert re.search(r"\.id\s*=(?!=)", source) is None
-    assert "container.id" in source
+    for name, source in (
+        ("page_outline", S.js_page_outline),
+        ("list_groups", S.js_list_groups),
+    ):
+        assert "_ljq" not in source, name
+        assert "data-btap-list" not in source, name
+        # No assignment to an `.id` property anywhere, however it is spelled.
+        # Reads are fine: `list_groups` reports `containerId` from one.
+        assert re.search(r"\.id\s*=(?!=)", source) is None, name
+    assert "parent.id" in S.js_list_groups
 
 
-def test_find_main_list_is_syntactically_valid_javascript(tmp_path):
-    """No linter looks at the JavaScript embedded in this module (only ruff runs,
-    and it sees a Python string), so a syntax error here would ship and surface
-    as a runtime failure in the caller's browser. `node --check` is the cheapest
-    gate that would catch it."""
-    script = tmp_path / "find_main_list.js"
-    script.write_text(S.js_findMainList, encoding="utf-8")
+def test_list_groups_is_syntactically_valid_javascript(tmp_path):
+    """The last resort behind the two gates that now cover this file properly.
+
+    This was written when the script was a `r'''...'''` literal in `simphtml.py`
+    that no JavaScript tool could see -- ruff read one Python string, so a syntax
+    error would ship and surface as a runtime failure in the caller's browser.
+    It lives in `page_scripts/list_groups.js` now, so eslint covers it (see
+    `JS_LINT_TARGETS`) and `tests/test_page_scripts.py` runs it under node.
+
+    Kept anyway, because both of those can be absent where this cannot: the lint
+    gate needs `node_modules`, which one CI job out of nine installs, and this
+    asserts on the constant `simphtml` actually loaded rather than on the file
+    eslint read -- so it also covers a `_load_page_script` that returns something
+    unparseable.
+    """
+    script = tmp_path / "list_groups.js"
+    script.write_text(S.js_list_groups, encoding="utf-8")
     completed = subprocess.run(
         ["node", "--check", str(script)], capture_output=True, text=True
     )

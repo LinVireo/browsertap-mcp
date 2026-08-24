@@ -53,7 +53,6 @@ const keepalivePorts = new Map();
 let nextDialogScope = 1;
 let nextManualExecutionGeneration = 1;
 const DEFAULT_CDP_TIMEOUT_MS = 20000;
-const MAX_CDP_TIMEOUT_MS = 120000;
 
 // --- Stable tab lifecycle generations ------------------------------------
 // A native tab id can be reused after close/restart while the Python bridge
@@ -228,7 +227,7 @@ async function loadTabGenerations() {
   // unreadable store says nothing at all. Both used to arrive here as `{}`.
   const attempt = (async () => {
     const area = chrome.storage?.session;
-    let stored = null;
+    let stored;
     if (area) {
       try {
         stored = (await area.get(TAB_GENERATIONS_KEY))[TAB_GENERATIONS_KEY] || {};
@@ -240,7 +239,7 @@ async function loadTabGenerations() {
       // restore, so this worker's map is the only truth there can be.
       stored = {};
     }
-    let tabs = null;
+    let tabs;
     try {
       tabs = await chrome.tabs.query({});
     } catch (_) {
@@ -337,22 +336,18 @@ async function closeTabsWithGenerations(tabIds, expected) {
   const alreadyGone = [];
   for (const tabId of tabIds) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab) {
-      alreadyGone.push(tabId);
-      continue;
-    }
-    if (expected && typeof expected === 'object') {
-      const expectedGeneration = expected[String(tabId)];
-      if (typeof expectedGeneration !== 'string') {
-        throw new Error(`missing expected generation for tab ${tabId}`);
-      }
-      const currentGeneration = await tabGenerationFor(tabId);
-      if (currentGeneration !== expectedGeneration) {
-        throw new Error(`tab ${tabId} lifecycle generation changed; refusing close`);
-      }
-    }
-    liveIds.push(tabId);
+    if (tab) liveIds.push(tabId);
+    else alreadyGone.push(tabId);
   }
+  // Delegate rather than repeat: this used to carry its own copy of the
+  // comparison above, and `validateTabCloseGenerations` -- the copy the offline
+  // suite drives -- was called by nothing at all. Two copies of a refusal, one
+  // shipped and one tested, is the worst arrangement available: editing the live
+  // one leaves the test green. A tab that is already gone is deliberately left
+  // out of the check; there is no generation to compare and closing it is a
+  // no-op the caller already asked for.
+  const refusal = await validateTabCloseGenerations(liveIds, expected);
+  if (refusal) throw new Error(refusal);
   // Validate every live tab before removing any member of the batch.
   if (liveIds.length) await chrome.tabs.remove(liveIds);
   return { closed: liveIds, alreadyGone };
@@ -1482,7 +1477,7 @@ async function resolveDebuggerTargetIdentity(target) {
       tabId: original.tabId || null,
     };
   }
-  let targets = [];
+  let targets;
   try {
     targets = await chrome.debugger.getTargets();
   } catch (_) {
@@ -1614,11 +1609,19 @@ function handleDebuggerDetach(source) {
 }
 
 // --- Debugger attach/detach and pending-command rejection -----------------
+// Declared here rather than with the state maps at the top of the file, and that
+// is not only a readability preference: the offline suite drives this file by
+// slicing it between two function names and eval'ing the slice, so a constant a
+// function body closes over is only defined if it happens to fall inside the same
+// slice. It used to sit 1550 lines up, which made every clamp read `120000`
+// instead -- two literals to keep in step, and the named ceiling read by nothing.
+const MAX_CDP_TIMEOUT_MS = 120000;
+
 function boundedCdpTimeout(value, fallback = 20000, minimum = 100) {
   const requested = Number(value);
   const lowerBound = Math.max(1, Math.floor(Number(minimum) || 100));
   return Number.isFinite(requested) && requested > 0
-    ? Math.max(lowerBound, Math.min(Math.floor(requested), 120000))
+    ? Math.max(lowerBound, Math.min(Math.floor(requested), MAX_CDP_TIMEOUT_MS))
     : fallback;
 }
 
@@ -2432,9 +2435,11 @@ async function navigateWithDialogPolicy(msg) {
       else if (debuggerLease) {
         try { await detachBtapDebugger(debuggerLease); } catch (_) {}
       }
-    } else {
-      debuggerLease = null;
     }
+    // The manual owner keeps the lease on purpose -- releasing it here would
+    // detach the debugger out from under the execution the caller is still
+    // driving. Nothing below reads `debuggerLease`, so there is deliberately
+    // nothing to do in this branch.
   }
 }
 
@@ -2724,7 +2729,7 @@ async function handleExtMessage(msg, sender) {
     const token = `${Date.now()}-${nextDialogScope++}`;
     const requestedTimeout = Number(msg.timeoutMs);
     const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
-      ? Math.min(Math.floor(requestedTimeout), 120000) : 15000;
+      ? Math.min(Math.floor(requestedTimeout), MAX_CDP_TIMEOUT_MS) : 15000;
     const scopes = execDialogPolicies.get(tabId) || new Map();
     scopes.set(token, {
       token,
@@ -3145,7 +3150,7 @@ async function handleCookies(msg, sender) {
     // ("Cannot read properties of null"), which surfaced to the popup user as
     // an internal error instead of an explanation. Kept self-contained (no
     // isScriptable) so this handler stays independently testable.
-    const originMatch = typeof url === 'string' ? url.match(/^https?:\/\/[^\/]+/) : null;
+    const originMatch = typeof url === 'string' ? url.match(/^https?:\/\/[^/]+/) : null;
     if (!originMatch) {
       return {
         ok: false,
@@ -3266,8 +3271,8 @@ async function handleBatch(msg, sender) {
         const needsForce = debuggerLease.attachment?.invalidated;
         await detachBtapDebugger(debuggerLease, needsForce);
       } catch (_) {}
-      debuggerLease = null;
-      attachedTabId = null;
+      // Both locals died with this frame; clearing them here only read as if
+      // some later step depended on it.
     }
   }
 }
@@ -4157,7 +4162,7 @@ async function isServerAlive() {
       setTimeout(() => ctrl2.abort(), 800);
       await fetch(`http://127.0.0.1:${bridgePort}/`, { signal: ctrl2.signal });
       return true; // any response including 426 means port is open
-    } catch (e2) {
+    } catch (_) {
       return false;
     }
   }

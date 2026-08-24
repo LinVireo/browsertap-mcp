@@ -4,6 +4,7 @@
   "version": "0.4.14",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
+  "minimum_chrome_version": "121",
   "permissions": [
     "cookies",
     "tabs",

@@ -22,6 +22,7 @@ bridge 改动需要重启 bridge；扩展源码改动需要在浏览器扩展管
 常规测试为离线测试，不会操作浏览器：
 
 ```text
+npm ci                                                      # 一次即可，装 JS 那半边
 python -m scripts.lint_report
 python -m pytest tests -q
 python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
@@ -60,6 +61,20 @@ skills、扩展文件。CI 不带这个开关，会真的执行 `browsertap --ve
 `release_ready: true`，两边都没错。产物里还记了扫了多少个文件 —— `ruff check` 对一个
 匹配不到文件的路径同样退出 0、诊断列表为空，所以门禁要求每个目标确实贡献了文件。
 本地想快速过一遍直接调 `ruff` 也行，只是不会留下可封存的东西。
+
+**同一道门禁也 lint 扩展的 JavaScript** —— 那是发布物里约三分之一的代码，接进来之前
+一个 linter 都没有。`eslint` 从 `node_modules` 跑，所以需要先 `npm ci` 一次；
+`package.json` 只用于开发，不会进 wheel。它的结果是同一个 `artifacts/lint.json` 里的
+`javascript` 段，**刻意与 ruff 那半边并列而不是合成一个总判定**，所以原来读这个文件的
+每一处都照旧能用。
+
+机器上没有 node 时，JS 那半边报 `status: unavailable` 并附上修复命令，而
+`python -m scripts.lint_report` 仍然**退出 0** —— 为了一个缺失的可选依赖就把 Python
+那半边的门禁也一并收走，代价落在贡献者身上而不是问题上。该收的账在另一头收：
+`acceptance_report.py` 不允许在 lint 门禁没真跑过的情况下封存，所以 `unavailable`
+拿不到 `release_ready: true`。它还记了 `rules_applied`，对应一个 ruff 没有的失效形状：
+flat config 的 `files:` 模式一旦不再匹配，eslint 照样走遍目录、照样退出 0、把每个文件
+都报成干净，而一条规则都没执行。
 
 `ruff format` 不是门禁，且现有源码大多不符合它的格式，对只做局部修改的文件跑一遍会让
 无关的重排淹没本次改动。请按周围代码的既有风格书写。
@@ -174,6 +189,35 @@ python -m scripts.check_tool_docs --check-installed-skills \
 本仓库不记录这些路径；只加开关却不给目录会直接失败，不会静默通过。不加任何开关的默认门禁
 校验四件事：随包发布的 skill、工具注册、文档里的参数与默认值，以及版本一致性 —— 也就是
 没有已安装副本的贡献者能验证的全部内容。
+
+## 署名：改动上游派生文件
+
+本仓库有十个文件派生自 [GenericAgent](https://github.com/lsdefine/GenericAgent)
+（MIT），`THIRD-PARTY-NOTICES.md` 逐行记录了每个上游文件还有多少留在这里。**留着派生
+代码是许可证允许的；让那份声明保持准确才是它要求的**，所以那张表属于交付物本身，不是
+描述交付物的文档。
+
+那些数字只能对着上游 checkout 测出来，而上游不在本树里。所以改动这十个文件中的任何一个
+都是两步，不是一步：
+
+```bash
+git clone https://github.com/lsdefine/GenericAgent /tmp/upstream
+python -m scripts.check_derived_notices --upstream /tmp/upstream --check
+# 按它的输出改表 —— 表格行是生成的，永远不要手打
+python -m scripts.check_derived_notices --upstream /tmp/upstream --write
+```
+
+`--upstream` 故意没有默认值：对着一个恰好不存在的路径做测量，比不测量更糟。
+
+漏掉这两步离线套件仍然抓得到，因为 `--write` 会记下每个派生文件的 sha256，
+`tests/test_documentation_contract.py` 拿它和当前树比。于是「改了派生文件却没重新测量」
+是一道红门，而不是一份悄悄不再成立的声明 —— 后者已经真的发生过三个版本，那段时间唯一
+自动检查的问题是每一行自己的算术对不对得上。
+
+新增派生文件要同时加 `DERIVED_PAIRS` 里的配对；如果它不在
+`src/browsertap_mcp/chrome_extension/` 下面，还要把它所在目录加进
+`_expected_derived_paths()`。十个里现在有三个同源于一个上游文件，所以**它们的行数会重叠、
+不能相加**。
 
 ## 版本与发布卫生
 

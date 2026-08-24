@@ -50,6 +50,36 @@ component is stale, run `browsertap doctor` and read `action`:
 `reload_extension`, `restart_bridge` and `restart_mcp_session` each name the one
 thing that will actually fix it -- the other two will not.
 
+There is a **fourth** kind of code the table above does not cover, and it is the
+one exception to "an edit needs a reload or a restart". The two files in
+`src/browsertap_mcp/page_scripts/` -- `page_outline.js` and `list_groups.js` --
+are **not** part of the extension. `simphtml.py` reads them off disk at import
+(`_load_page_script`) and `get_html` / `get_main_block` inject them through
+`execute_js` on **every call**, so an edit is live the moment the MCP server
+restarts (immediate on an editable install) with **no reload and no bridge
+restart**. That is the whole reason this layer was carved out of the extension:
+it is what decides *what the model sees of a page* (visibility analysis, the main
+content block), and iterating on it used to mean editing a `r'''...'''` literal
+inside `simphtml.py`, which no JavaScript tool could read. Do not move a page
+script into `chrome_extension/` to "keep the JS together"; you would trade a
+zero-friction edit for a manual Reload per iteration and hand it `chrome.*` APIs
+it must never call (a page script runs in the page, not the worker -- eslint's
+second config block gives it `globals.browser` only, so a stray `chrome.` fails
+`no-undef`).
+
+The one rule that must survive an edit to either file: the file ends with a bare
+reference to its entry point (`pageOutline;` / `listGroups;`), **never a call**.
+The call site appends `return pageOutline(...);` to the fragment, so a trailing
+`pageOutline()` would run the entire page analysis **twice per request** and
+discard the first result -- a full-page clone plus visibility pass on every
+`scan_page`, `get_html` and page screenshot. That defect shipped for months
+because the line was the 358th line of a Python string literal; both files are
+pinned now by `tests/test_page_scripts.py`, which counts `document.body` reads
+under node (`..._runs_the_page_analysis_exactly_once` and
+`..._cutlist_payload_also_runs_its_analysis_exactly_once` -- one test could only
+ever vouch for one file). The bare identifier is also what keeps eslint's
+`no-unused-vars` satisfied without an inline disable.
+
 ## 2. Changing a tool signature or a default touches four places
 
 Miss one and some agent keeps calling the tool from outdated instructions:
@@ -411,6 +441,88 @@ the assertion turns flaky.
   fold it into the `dead` flag in `ws.onmessage`: that flag also decides whether
   to send the error reply, and the socket here is still open, so the bridge can
   be answered instead of waiting out its full timeout.
+- **The extension JavaScript is linted now**, which it was not for most of this
+  repository's life -- `npm ci` once, then the ordinary `python -m
+  scripts.lint_report` covers it (the gate itself is CONTRIBUTING.md's section).
+  Two eslint rules are *tuned* rather than obeyed, because the idiom they would
+  flag is load-bearing: `catch (_) {}` around a `chrome.*` call is how the
+  routine `No SW` above gets swallowed, so `allowEmptyCatch` is on and an unused
+  catch binding named exactly `_` is permitted. Write `catch (_)` when you are
+  deliberately ignoring the error and name the binding only when you read it --
+  `catch (e) {}` with `e` unused fails the gate. Do not reach for an inline
+  `eslint-disable` instead; there is not one in the tree, and the first one makes
+  every later reader wonder which rules still mean something.
+- **A rule count sampled from one lint target cannot vouch for another.** eslint
+  has a third vacuous-pass shape that ruff does not: a flat config whose `files:`
+  pattern stops matching still walks the directory, exits 0 and reports every
+  file clean while applying **zero** rules -- `files_scanned` cannot see it, and
+  only `eslint --print-config` can. `_rules_applied` in `scripts/lint_report.py`
+  asks that question **once per target** and reports the **minimum**, so
+  `rules_applied > 0` means every target is covered rather than at least one.
+  Sampling the first target was sound while `JS_LINT_TARGETS` held one entry and
+  became a vacuous pass the moment `page_scripts` was added: the new directory
+  would have inherited the extension's rule count and read as enforced while
+  enforcing nothing. Adding a third target means adding a config block for it in
+  `eslint.config.mjs` in the same change -- the floor is what turns forgetting
+  that into a red gate instead of a silent one.
+
+- **Editing a derived file is a two-step operation now.** Eight files here are
+  derived from GenericAgent, and `THIRD-PARTY-NOTICES.md` states line-for-line how
+  much of each upstream file survives. Those figures can only be measured against
+  an upstream checkout, which is not in this tree, so for three releases the only
+  automated question asked about them was whether `identical / total` matched the
+  stated percent. That is self-consistency, not truth, and it stayed green while
+  the table drifted: `7efc604` edited `simphtml.py` and `popup.js`, nothing
+  re-measured, and the notice shipped claiming `780 of 873` for a file that by
+  then matched 757. Editing one of the eight therefore means:
+
+  ```bash
+  git clone https://github.com/lsdefine/GenericAgent <dir>
+  python -m scripts.check_derived_notices --upstream <dir> --check   # what drifted
+  # correct the table from its output -- the rows are generated, never typed
+  python -m scripts.check_derived_notices --upstream <dir> --write   # record the hashes
+  ```
+
+  `--upstream` is mandatory rather than defaulted, for the same reason
+  `--check-installed-skills` refuses to run without a directory: a measurement
+  against a path that happens not to exist is worse than no measurement. What
+  makes the offline suite able to catch this at all is `MEASURED_AGAINST`, the
+  sha256 of each derived file as of the last measurement -- comparing that to the
+  tree needs nothing but the tree. It hashes `"\n".join(splitlines())`, because
+  `.gitattributes` pins `*.py` and `*.js` to LF but not `manifest.json` or
+  `popup.html`, and a CRLF checkout would otherwise report all eight as edited.
+- **A reverse gate can only ask about the file set it was told about.** The check
+  that every derived file is credited enumerated `chrome_extension/`, which was
+  the whole derived set until the T0 refactor carved two files out of
+  `simphtml.py`'s string literals into `page_scripts/`. Those two held a higher
+  share of upstream's lines than anything except `popup.html` -- 76% and 85% of
+  their own content -- and shipped uncredited for three releases, invisible to the
+  one gate built to catch exactly that, because they arrived by a *refactor*
+  rather than a fork. Both were replaced outright in 0.4.15 and the files there
+  now are original, but the hole they went through was the enumeration, so that is
+  what changed: anything under `page_scripts/` is treated as derived unless it is
+  named in `ORIGINAL_PAGE_SCRIPTS`, which makes the next extraction a red gate
+  instead of a silent one. Adding a derived file outside those two directories
+  still means adding its directory to `_expected_derived_paths()` and its pair to
+  `DERIVED_PAIRS`.
+
+  The same directory caught a **second** gate the same way in the same release,
+  which is why this is stated as a shape and not as one file's history.
+  `test_manifest_declares_the_chrome_floor_its_own_api_use_forces` derives
+  `minimum_chrome_version` from the APIs the browser-side code actually calls, and
+  it read `chrome_extension/*.js` -- the whole of that code until the page analysis
+  moved. So the highest floor in the tree (Chrome 121, for the
+  `Element.checkVisibility()` option names) sat in a directory the gate could not
+  see, and a manifest saying 111 read as verified. Both gates now assert their own
+  file set, so losing a directory is red rather than quiet. When you add
+  browser-side code in a third place, those two asserts are what will tell you.
+
+  One consequence of that replacement is worth knowing before you read the notice:
+  every upstream file has exactly one heir here again, so the table's rows are
+  independent. While three of them shared `simphtml.py` as an ancestor **their
+  numerators overlapped and could not be summed**; `family_total()` walks upstream
+  line *indices* so each counts once, and it is still called because a future
+  split would recreate the overlap.
 
 ## 9. Machine-specific notes
 

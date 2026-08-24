@@ -41,6 +41,22 @@ ORIGINAL_EXTENSION_FILES = frozenset(
     }
 )
 
+# `page_scripts/` exists only because upstream's browser-side JavaScript was
+# carved out of `simphtml.py`'s string literals, so every `.js` there is derived
+# by construction and the check below enumerates the directory rather than
+# listing it. A page script written from scratch would be the first exception and
+# has to be named here -- the same explicit-bucket rule the extension directory
+# uses, for the same reason.
+# Page scripts written here rather than inherited. This set exists because the
+# directory itself is not evidence either way: the two files that used to live
+# here were upstream's page analysis carved out of `simphtml.py`'s string
+# literals, and the two that replaced them in 0.4.15 ask the engine for what it
+# already knows (`Element.checkVisibility()`, structural signatures) instead of
+# re-deriving it from upstream's tuned constants. A new file here is treated as
+# derived until it is listed, so the next extraction cannot slip through the way
+# the first one did.
+ORIGINAL_PAGE_SCRIPTS = frozenset({"page_outline.js", "list_groups.js"})
+
 
 def _shipped_skills() -> list[Path]:
     """The agent skills as the release actually carries them.
@@ -691,6 +707,17 @@ def _expected_derived_paths() -> set[str]:
     # largest borrowings in the distribution.
     derived.add("src/browsertap_mcp/simphtml.py")
     derived.add("src/browsertap_mcp/browser_bridge.py")
+    # And any page script not on the original list. This is the reason the set is
+    # not simply "the extension directory plus two files": a refactor can create
+    # a derived file in a directory no fork ever touched, which is exactly how
+    # the T0 extraction shipped two uncredited files. Default-derived, so
+    # forgetting to classify a new one fails loudly.
+    page_scripts = ROOT / "src" / "browsertap_mcp" / "page_scripts"
+    derived |= {
+        path.relative_to(ROOT).as_posix()
+        for path in page_scripts.glob("*.js")
+        if path.name not in ORIGINAL_PAGE_SCRIPTS
+    }
     return derived
 
 
@@ -769,6 +796,63 @@ def test_the_derived_file_measurements_are_internally_consistent():
         )
 
 
+def test_no_derived_file_changed_since_the_notice_was_measured():
+    """Fail when a derived file was edited and the table was not re-measured.
+
+    This is the half the check above cannot do. That one asks whether
+    `identical / total` matches the stated percentage -- self-consistency, which
+    stays true no matter how far the numbers drift from the files. And drift they
+    did: `7efc604` edited `simphtml.py` and `popup.js`, nothing re-measured the
+    table, and the notice was sealed at `105/105` still claiming `780 of 873` for
+    a file that by then matched 757 and `17 of 24` for one that matched 12. Every
+    gate passed, because no gate was looking at the files.
+
+    Measuring for real needs an upstream checkout, which is not in this tree and
+    cannot be a test dependency. Hashing what was measured *is* possible here, and
+    is enough: a derived file whose content moved is exactly the event that makes
+    the table stale, whether or not this machine can compute the new figure.
+
+    Editing one of these files is therefore two steps, not one:
+
+        git clone https://github.com/lsdefine/GenericAgent <dir>
+        python -m scripts.check_derived_notices --upstream <dir> --check
+        python -m scripts.check_derived_notices --upstream <dir> --write
+
+    `--write` refreshes the recorded hashes and must come after the table is
+    correct, never instead of correcting it.
+    """
+    from scripts.check_derived_notices import (
+        DERIVED_PAIRS,
+        MEASURED_AGAINST,
+        fingerprints,
+    )
+
+    # A recorded set that has drifted out of step with the pair list would make
+    # this vacuous for whichever file fell out of it.
+    assert set(MEASURED_AGAINST) == {ours for ours, _ in DERIVED_PAIRS}, (
+        "MEASURED_AGAINST and DERIVED_PAIRS disagree about which files are derived: "
+        f"only recorded: {sorted(set(MEASURED_AGAINST) - {o for o, _ in DERIVED_PAIRS})}; "
+        f"only paired: {sorted({o for o, _ in DERIVED_PAIRS} - set(MEASURED_AGAINST))}"
+    )
+
+    current = fingerprints(ROOT)
+    changed = sorted(name for name, digest in current.items() if MEASURED_AGAINST[name] != digest)
+    assert not changed, (
+        f"these derived files changed since THIRD-PARTY-NOTICES.md was measured: {changed}. "
+        "The table's line counts are now claims about files that no longer exist in that form. "
+        "Re-measure with `python -m scripts.check_derived_notices --upstream <dir> --check`, "
+        "correct the table, then `--write` to record the new hashes."
+    )
+
+    # The credited set and the measured set are the same question asked of two
+    # files; letting them diverge would leave a derived file hashed but uncredited.
+    assert set(MEASURED_AGAINST) == set(_credited_derived_files()), (
+        "the notice table and MEASURED_AGAINST cover different files: "
+        f"hashed but uncredited: {sorted(set(MEASURED_AGAINST) - set(_credited_derived_files()))}; "
+        f"credited but unhashed: {sorted(set(_credited_derived_files()) - set(MEASURED_AGAINST))}"
+    )
+
+
 def test_no_published_document_repeats_a_section():
     """A section pasted twice is invisible to every other check in this file.
 
@@ -803,3 +887,156 @@ def test_no_published_document_repeats_a_section():
         repeated = sorted({name for name in headings if headings.count(name) > 1})
         assert not repeated, f"{path.relative_to(ROOT).as_posix()} repeats section(s) {repeated}"
     assert checked >= 9, f"only {checked} documents were reachable; this check is going vacuous"
+
+# --- scan_page has to leave the user's page as it found it --------------------
+#
+# Until 0.4.15 it did not. With `cutlist` on -- the default -- an ordinary read of
+# a page the user was looking at wrote a `data-btap-list` attribute onto the
+# container it collapsed and kept two `window.__btap*` counters, because the
+# selector it reported had to survive a second roundtrip. The page analysis now
+# derives that selector from the container's own structure, so there is nothing
+# left to mark and the tool is a read again.
+#
+# "It writes nothing" is a stronger claim than the disclosure it replaces, and a
+# stronger claim needs a check that can falsify it. A single `el.setAttribute()`
+# on a live node reinstates the old behaviour with every other test here still
+# green, and three published documents would go on promising a read-only scan. So
+# the two injected scripts are read on both axes a write can take: a global, and a
+# node.
+
+# `window.x = ...`, `window.x++`, `delete window.x`, and the `globalThis` spelling
+# of each. Reading a global is not writing one, which is why `window.CSS &&
+# CSS.escape` in `list_groups.js` is deliberately not a match.
+_GLOBAL_WRITE_RE = re.compile(
+    r"\b(?:window|globalThis)\.([A-Za-z_$][\w$]*)\s*(?:=[^=]|\+\+|--)"
+    r"|\bdelete\s+(?:window|globalThis)\.([A-Za-z_$][\w$]*)"
+)
+
+# Every way a node can be changed. Removal is in here too: taking something out of
+# the user's page is as much a write as putting something in.
+_DOM_WRITE_RE = re.compile(
+    r"\b([A-Za-z_$][\w$]*)\.(?:setAttribute|setAttributeNS|removeAttribute|"
+    r"classList|insertAdjacentHTML|insertAdjacentElement|appendChild|insertBefore|"
+    r"replaceChild|removeChild|replaceWith|append|prepend|remove)\s*\("
+    r"|\b([A-Za-z_$][\w$]*)\.(?:innerHTML|outerHTML|textContent|innerText|"
+    r"className|id|value|checked|src|href|style)\s*=[^=]"
+)
+
+# What makes a receiver clone-side. The allow-list is not a list of names -- a name
+# is a convention, and conventions are what this file exists to stop trusting. Each
+# receiver has to be *declared* in the same file from something that produces a new
+# node, so `const clone = src.cloneNode(false)` passes while a receiver fetched with
+# `querySelector` has no such declaration and fails.
+_CLONE_DECL_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;]*?"
+    r"(?:cloneNode|createElement|createTextNode|createDocumentFragment|\bcopy\()"
+)
+
+# Writes the docs used to disclose. Naming one now is a promise the code does not
+# keep -- the same failure the disclosure check this replaced was built to catch,
+# pointing the other way.
+_RETIRED_PAGE_WRITES = ("data-btap-list", "__btapListMark", "__btap_offscreen")
+
+
+def test_scan_page_does_not_write_to_the_users_page():
+    """Fail when the page analysis starts modifying the page again.
+
+    This deliberately runs while the `.md` files are being reorganised. A
+    reorganisation that drops the read-only sentence, or that leaves the retired
+    `data-btap-list` disclosure standing, is a published document disagreeing with
+    the code, and neither direction has a reader who would notice.
+    """
+    # The scan_page payload is these two files -- `simphtml._load_page_script`
+    # reads them at import and the call sites append `return pageOutline(...)` /
+    # `return listGroups(...)`.
+    page_scripts = ROOT / "src" / "browsertap_mcp" / "page_scripts"
+    scanned = ("page_outline.js", "list_groups.js")
+    # A third injected script would otherwise be silently out of scope, and what it
+    # writes to the user's page would reach them with nothing in the offline suite
+    # looking at it. Adding one has to be a decision made here.
+    present = sorted(path.name for path in page_scripts.glob("*.js"))
+    assert present == sorted(scanned), (
+        f"page_scripts holds {present}, but this check scans {sorted(scanned)}. "
+        "A new injected script has to be added to this list (and to "
+        "REQUIRED_WHEEL_SUFFIXES in scripts/check_distribution.py) in the same "
+        "change, or what it writes to the user's page goes unchecked"
+    )
+
+    for name in scanned:
+        source = (page_scripts / name).read_text(encoding="utf-8")
+
+        globals_written = {
+            first or second
+            for first, second in _GLOBAL_WRITE_RE.findall(source)
+            if first or second
+        }
+        assert not globals_written, (
+            f"{name} assigns {sorted(globals_written)} on the page's global object. "
+            "scan_page is documented as leaving the page untouched, so a global it "
+            "needs is a design change rather than an implementation detail: either "
+            "carry the value out in the returned payload the way the "
+            "`<!--btap-offscreen:-->` marker does, or change the disclosure in both "
+            "READMEs and the tool description in the same commit"
+        )
+
+        receivers = {
+            first or second
+            for first, second in _DOM_WRITE_RE.findall(source)
+            if first or second
+        }
+        clone_side = set(_CLONE_DECL_RE.findall(source))
+        live = sorted(receivers - clone_side)
+        assert not live, (
+            f"{name} mutates {live}, which that file never declares from "
+            "cloneNode/createElement, so it is a node out of the user's live "
+            f"document. Write to the clone instead ({sorted(clone_side)} are the "
+            "receivers this file established), or change the disclosure in both "
+            "READMEs and the tool description in the same commit"
+        )
+
+    # Not vacuous: the analysis does build a clone and write form state onto it, so
+    # a rewrite that stops matching `_DOM_WRITE_RE` altogether has not shown the
+    # scripts to be read-only -- it has stopped asking.
+    outline = (page_scripts / "page_outline.js").read_text(encoding="utf-8")
+    assert _DOM_WRITE_RE.search(outline), (
+        "no DOM write found anywhere in page_outline.js -- the clone it returns is "
+        "assembled by `setAttribute`/`appendChild`, so this check has lost its grip "
+        "on the file rather than found it clean"
+    )
+
+    # The one page-visible side effect that remains, and the only reason it is
+    # survivable: the console stubs are restored unconditionally. An override with
+    # no restore would outlive the call and change what the page's own scripts see.
+    assert "console.log = console.warn" in outline and "} finally {" in outline, (
+        "page_outline.js silences the console so the analysis cannot pollute an "
+        "active capture; that override has to be restored in a `finally`, or a scan "
+        "leaves the page's console replaced"
+    )
+    assert "console.log = saved.log" in outline, (
+        "page_outline.js no longer restores console.log from the saved original"
+    )
+
+    documents = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        "README.zh-CN.md": (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"),
+        # Adjacent string literals are joined first. The tool description is built by
+        # concatenation, so a phrase in it straddles a `" "` boundary and a literal
+        # search would report the sentence missing after an ordinary reflow.
+        "server.py": re.sub(
+            r'"\s*"',
+            "",
+            (ROOT / "src" / "browsertap_mcp" / "server.py").read_text(encoding="utf-8"),
+        ),
+    }
+    for name, text in documents.items():
+        stale = [write for write in _RETIRED_PAGE_WRITES if write in text]
+        assert not stale, (
+            f"{name} still discloses {stale}, which scan_page no longer writes. A "
+            "disclosure that outlives the behaviour sends the reader looking in "
+            "their own DOM for something that is not there"
+        )
+    assert "does not modify the page" in documents["README.md"]
+    assert "does not modify the page" in documents["server.py"]
+    # The Chinese table says the same thing in Chinese; sharing the English phrase
+    # would only prove that someone pasted one in.
+    assert "不修改页面" in documents["README.zh-CN.md"]

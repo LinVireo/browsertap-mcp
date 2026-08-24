@@ -6,6 +6,63 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+### Changed
+
+- **`scan_page` no longer modifies the page it reads.** With `cutlist` on -- the
+  default -- reading a page used to write a `data-btap-list` attribute onto every
+  container it collapsed and leave two `window.__btap*` counters behind, because
+  the CSS selector it reports had to survive into a second roundtrip. That
+  selector is now derived from the container's own structure, so there is nothing
+  to mark: a scan is invisible to the page's own scripts, to `#id` and
+  attribute rules in its stylesheet, and to anything that serialises the
+  document. The tool description and both README tool tables used to disclose
+  what it wrote; they now state that it writes nothing, and the offline suite
+  fails if either claim outlives the code -- in both directions, so a stale
+  disclosure is a failure too.
+- The two injected page scripts were replaced rather than edited.
+  `page_scripts/opt_html.js` and `find_main_list.js` are now `page_outline.js`
+  and `list_groups.js`, and they decide what the model sees of a page by asking
+  the browser instead of restating the answer: `Element.checkVisibility()` for
+  whether an element renders, and a structural signature (tag plus sorted class
+  list) for which block is a repeated list, in place of a hand-rolled
+  `display`/`visibility`/`opacity` walk and a scored search over tuned constants.
+  Measured against one real page, the simplified copy came out 18% smaller in 27%
+  less time, carrying the same extracted text.
+- The extension declares `minimum_chrome_version: 121`, up from 111, because that
+  is what the visibility call above needs. `Element.checkVisibility()` has existed
+  since Chrome 105, but the three option names passed to it were renamed in 121,
+  and unknown members of a WebIDL dictionary are dropped without an error -- so an
+  older engine would have returned a verdict computed without the opacity and
+  visibility checks, putting hidden text back in front of the model with nothing
+  reporting a problem. An install-time refusal naming the browser is the audible
+  version of that. The gate that derives this floor from the code now reads
+  `page_scripts/` as well as the extension directory, which is what caught the
+  stale 111.
+
+### Fixed
+
+- Hidden text no longer reaches the model. Text under a `display:none` block
+  clones fine, so counting *any* surviving child made the hidden parent look as
+  though it still held content and the whole block was kept. Only a surviving
+  child *element* counts now.
+- The selector `cutlist` reports resolves against the copy it is meant for. The
+  attribute the old marker wrote was itself pruned out of the simplifying clone
+  it had to cross into, so on a real page the reported selector could match
+  nothing at all: measured on one news front page,
+  `[data-btap-list="1"] > tr.athing` selected **zero** rows where the structural
+  selector selects all 30.
+- Five kinds of state the previous pass dropped now survive into the simplified
+  copy: a checked checkbox, a `<select>`'s current value, the links inside a
+  `<nav>`, a form's submit button, and a button in an overlay.
+
+### Removed
+
+- `THIRD-PARTY-NOTICES.md` no longer credits `src/browsertap_mcp/page_scripts/`
+  to GenericAgent, because there is nothing left there to credit -- the 528
+  upstream lines those two files held are not in this distribution. Eight files
+  remain derived, and each now has exactly one upstream ancestor, so the notice's
+  per-file rows can be read on their own rather than sharing a denominator.
+
 ## [0.4.14] - 2026-08-24
 
 ### Added
@@ -1049,11 +1106,11 @@ history was published, so there is no commit for any of them and a comparison
 link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
 
-v0.4.13 is a tag with no published artifact. That round was sealed with full
-evidence, but the next round of work landed before it was uploaded, so the
-release that carries it is 0.4.14. The tag exists so that the 0.4.14 compare
-link spans one version rather than two; there is no 0.4.13 on PyPI and no
-GitHub Release for it.
+v0.4.13 and v0.4.14 are tags with no published artifact. Both rounds were sealed
+with full evidence, and both times the next round of work landed before the
+upload, so their changes reach PyPI inside a later release instead. The tags
+exist so that every compare link spans one version rather than several; there is
+no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
 [Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...HEAD

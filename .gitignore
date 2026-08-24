@@ -118,3 +118,7 @@ pip-audit.*
 gitleaks
 gitleaks.tar.gz
 gitleaks-*.json
+
+# The JavaScript half of the lint gate (`package.json`, `eslint.config.mjs`
+# and `package-lock.json` are tracked; what npm unpacks is not).
+node_modules/

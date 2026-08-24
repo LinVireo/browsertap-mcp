@@ -25,6 +25,7 @@ page.
 The normal suite is offline and does not touch a browser:
 
 ```text
+npm ci                                                      # once, for the JS half
 python -m scripts.lint_report
 python -m pytest tests -q
 python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
@@ -72,6 +73,23 @@ artifact also records how many files were scanned, because `ruff check` over a
 path that matches nothing exits 0 with an empty diagnostic list -- so the gate
 requires that each target really contributed files. Calling `ruff` directly still
 works for a quick local pass; it just leaves nothing behind to seal.
+
+**The same gate lints the extension JavaScript**, which is about a third of the
+shipped code and had no linter at all until it was wired in. `eslint` runs from
+`node_modules`, so it needs `npm ci` once; `package.json` is dev-only and is not
+shipped in the wheel. Its result is a `javascript` section inside the same
+`artifacts/lint.json`, deliberately beside ruff's rather than averaged into it,
+so every existing reader of that file keeps working.
+
+Without node the JavaScript half reports `status: unavailable` with the command
+that fixes it, and `python -m scripts.lint_report` still **exits 0** -- refusing
+would take the Python gate away from a contributor to punish a missing optional
+dependency. What that costs is paid at the other end: `acceptance_report.py`
+will not seal a release over a lint gate that did not run, so `unavailable`
+cannot reach a `release_ready: true`. It also records `rules_applied`, for a
+failure mode ruff does not have: a flat config whose `files:` pattern stops
+matching still walks the directory, still exits 0, and reports every file clean
+having enforced nothing at all.
 
 `ruff format` is not a gate and most of the existing sources are not
 format-clean, so running it across a file you are only editing buries the change
@@ -220,6 +238,39 @@ rather than silently passing. The default gate — no flag — checks the shippe
 copies, tool registration, documented parameters and defaults, and version
 consistency, which is everything a contributor without installed copies can
 verify.
+
+## Attribution: editing a file derived from upstream
+
+Ten files here are derived from [GenericAgent](https://github.com/lsdefine/GenericAgent)
+(MIT), and `THIRD-PARTY-NOTICES.md` states line-for-line how much of each upstream
+file survives. Keeping the derived lines is what the licence permits; keeping the
+notice *accurate* is what it asks for, so the table is part of the deliverable and
+not documentation about it.
+
+The figures can only be measured against an upstream checkout, which is not in
+this tree. So editing any of the ten is two steps, not one:
+
+```bash
+git clone https://github.com/lsdefine/GenericAgent /tmp/upstream
+python -m scripts.check_derived_notices --upstream /tmp/upstream --check
+# correct the table from that output -- the rows are generated, never typed
+python -m scripts.check_derived_notices --upstream /tmp/upstream --write
+```
+
+`--upstream` has no default on purpose: a measurement against a path that happens
+not to exist is worse than no measurement.
+
+The offline suite can still catch a skipped re-measurement, because `--write`
+records the sha256 of every derived file and
+`tests/test_documentation_contract.py` compares those to the tree. Forgetting the
+two steps above is a red gate rather than a notice that quietly stops being true —
+which is what happened for three releases while the only automated question was
+whether each row's own arithmetic added up.
+
+Adding a derived file needs its pair in `DERIVED_PAIRS` and, if it lives outside
+`src/browsertap_mcp/chrome_extension/`, its directory in
+`_expected_derived_paths()`. Three of the ten now descend from a single upstream
+file, so their line counts overlap and must not be added together.
 
 ## Version and release hygiene
 

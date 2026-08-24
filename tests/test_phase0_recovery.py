@@ -2369,12 +2369,17 @@ async function tabGenerationFor(tabId) {{ return generations.get(tabId); }}
 
 def test_extension_owned_close_atomically_reports_missing_and_closes_live_tabs():
     source = BACKGROUND.read_text(encoding="utf-8")
-    start = source.index("async function closeTabsWithGenerations")
+    # Slices from the *validator*, not from `closeTabsWithGenerations`, because the
+    # close path delegates to it rather than carrying its own copy of the
+    # comparison. Starting lower would eval a function whose refusal is an
+    # undefined name, and the mismatch case below is what proves the call is still
+    # there: without it this test passes on a batch that refuses nothing.
+    start = source.index("async function validateTabCloseGenerations")
     end = source.index("\n\n// --- Temporary, origin-scoped", start)
     function_source = source[start:end]
     script = f"""
-const live = new Map([[8, {{id: 8}}]]);
-const generations = new Map([[8, 'generation-live']]);
+const live = new Map([[8, {{id: 8}}], [9, {{id: 9}}]]);
+const generations = new Map([[8, 'generation-live'], [9, 'generation-new']]);
 const removed = [];
 const chrome = {{ tabs: {{
   get: async tabId => live.has(tabId) ? live.get(tabId) : Promise.reject(new Error('No tab')),
@@ -2386,7 +2391,12 @@ async function tabGenerationFor(tabId) {{ return generations.get(tabId); }}
   const result = await closeTabsWithGenerations(
     [7, 8], {{'7': 'generation-gone', '8': 'generation-live'}}
   );
-  process.stdout.write(JSON.stringify({{result, removed}}));
+  // A live tab Chrome has since re-minted must take the whole batch down with
+  // it, and must not have removed the tab that did match.
+  const refused = await closeTabsWithGenerations(
+    [8, 9], {{'8': 'generation-live', '9': 'generation-old'}}
+  ).then(() => null, error => String(error.message));
+  process.stdout.write(JSON.stringify({{result, removed, refused}}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
     completed = subprocess.run(
@@ -2394,6 +2404,8 @@ async function tabGenerationFor(tabId) {{ return generations.get(tabId); }}
     )
     outcome = json.loads(completed.stdout)
     assert outcome["result"] == {"closed": [8], "alreadyGone": [7]}
+    assert "generation changed" in outcome["refused"]
+    # Only the first call's tab, so the refused batch removed nothing at all.
     assert outcome["removed"] == [8]
 
 
