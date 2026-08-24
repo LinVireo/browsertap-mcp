@@ -853,6 +853,86 @@ def test_no_derived_file_changed_since_the_notice_was_measured():
     )
 
 
+def test_the_notice_fingerprint_ignores_only_the_manifest_version_string():
+    """One line is excluded from the fingerprint. Nothing else may be.
+
+    `versioning bump` rewrites `manifest.json`'s version on every release, and
+    that line cannot change how many of upstream's lines survive: upstream
+    declares `"version": "2.0"`, every value this package can hold is a
+    `MAJOR.MINOR.PATCH` triple, so the line fails to match before the bump and
+    fails to match after it. Measured at 0.4.14 and 0.4.15 -- `29 of 40` both
+    times. Without the exclusion the fingerprint went red on every release and
+    demanded a re-measure that needs an upstream clone and could not return a
+    different number, which is how a gate teaches people to bypass it.
+
+    The exclusion is also the one way this gate could be made vacuous, so its
+    reach is asserted rather than described: for every derived file, normalising
+    may change at most the `"version"` line, and only in the manifest.
+    """
+    from scripts.check_derived_notices import (
+        DERIVED_PAIRS,
+        MANIFEST,
+        _lines,
+        _normalised,
+    )
+
+    for ours, _ in DERIVED_PAIRS:
+        raw = _lines(ROOT / ours)
+        seen = _normalised(ours, raw)
+        assert len(seen) == len(raw), f"normalising {ours} changed its line count"
+        differing = [(a, b) for a, b in zip(raw, seen) if a != b]
+        if ours != MANIFEST:
+            assert not differing, (
+                f"normalising {ours} rewrote {len(differing)} line(s); only the "
+                f"manifest's version string may be excluded, and {ours} is not it. "
+                "A fingerprint blind to any line that could move a measured count "
+                "is the self-consistent pass this whole gate exists to end."
+            )
+            continue
+        assert len(differing) == 1, (
+            f"normalising the manifest rewrote {len(differing)} lines, expected "
+            f"exactly the version string: {differing}"
+        )
+        before, after = differing[0]
+        assert '"version"' in before, f"the excluded line is not the version: {before!r}"
+        assert '"<version>"' in after, f"the version was not replaced: {after!r}"
+
+
+def test_a_version_bump_alone_does_not_invalidate_the_notice_fingerprint(tmp_path):
+    """Bumping the version must not trip the gate; any other edit must.
+
+    The pair matters more than either half. A digest that ignored the version
+    would be worth nothing if it also ignored a real edit, and this is the only
+    place the two are checked against each other.
+    """
+    from scripts.check_derived_notices import MANIFEST, file_digest
+
+    source = (ROOT / MANIFEST).read_text(encoding="utf-8")
+    assert '"version": "' in source
+
+    bumped = tmp_path / "bumped.json"
+    bumped.write_text(
+        re.sub(r'("version"\s*:\s*)"[^"]*"', r'\g<1>"99.99.99"', source, count=1),
+        encoding="utf-8",
+    )
+    assert bumped.read_text(encoding="utf-8") != source, "the bump did not apply"
+    assert file_digest(bumped, MANIFEST) == file_digest(ROOT / MANIFEST, MANIFEST), (
+        "a version bump changed the fingerprint, so every release will demand a "
+        "re-measure it cannot possibly answer differently"
+    )
+
+    edited = tmp_path / "edited.json"
+    edited.write_text(
+        source.replace('"minimum_chrome_version": "121"', '"minimum_chrome_version": "1"'),
+        encoding="utf-8",
+    )
+    assert edited.read_text(encoding="utf-8") != source, "the edit did not apply"
+    assert file_digest(edited, MANIFEST) != file_digest(ROOT / MANIFEST, MANIFEST), (
+        "a real edit to the manifest left the fingerprint unchanged, so the gate "
+        "would stay green while the notice table described a file that is gone"
+    )
+
+
 def test_no_published_document_repeats_a_section():
     """A section pasted twice is invisible to every other check in this file.
 

@@ -68,7 +68,7 @@ MEASURED_AGAINST: dict[str, str] = {
     "src/browsertap_mcp/chrome_extension/background.js": "6a76936176acbc9ceb6c8484db1bc35f158b81000a719ae976a0adc9ff8a3050",
     "src/browsertap_mcp/chrome_extension/content.js": "942d5df35bedba224c13db6930f2d07bccf554f7713c28885fd5f5b51f8a644d",
     "src/browsertap_mcp/chrome_extension/disable_dialogs.js": "1edc19d8a6a5bf0850cc0e8f2123fe799d80fb5b7afa578fa014586d7181970a",
-    "src/browsertap_mcp/chrome_extension/manifest.json": "7a48f3208badd3f90c33f2e56ff90ce0afde94959fad2489fc90b83ced7b3564",
+    "src/browsertap_mcp/chrome_extension/manifest.json": "a7394272189f6b0acd168dfbbc0196a624df8395c802df3e1cde8611df3d8758",
     "src/browsertap_mcp/chrome_extension/popup.html": "6957d4ee2b058edafd3e704ee496c1e6c232919d447ff5dcff32c76b8ca6ae2a",
     "src/browsertap_mcp/chrome_extension/popup.js": "b8295038ad083c13529ce3668bded40b8047cdf143f70986201d470944d42cce",
     "src/browsertap_mcp/simphtml.py": "f27253df366691a755f7d81adae0db74faf2b1705815933393698659715d6019",
@@ -84,19 +84,53 @@ def _lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
-def file_digest(path: Path) -> str:
+MANIFEST = f"{EXT}/manifest.json"
+
+_MANIFEST_VERSION_RE = re.compile(r'^(\s*"version"\s*:\s*)"[^"]*"(.*)$')
+
+
+def _normalised(relative: str, lines: list[str]) -> list[str]:
+    """Blank out the one thing that provably cannot move a measured line count.
+
+    `versioning bump` rewrites `manifest.json`'s own version string on every
+    release, so a byte-faithful fingerprint went red on every release and asked
+    for a re-measure that could not possibly return a different number. Upstream
+    declares `"version": "2.0"` and every value this package can hold is a
+    `MAJOR.MINOR.PATCH` triple, so the line is not identical to upstream's before
+    the bump and not identical after it: `identical` is invariant. Measured at
+    0.4.14 and again at 0.4.15 -- `29 of 40 (72%)` both times.
+
+    Nothing else is excluded, and that restraint is the point. A fingerprint
+    blind to a line that *could* move the count is exactly the self-consistent
+    vacuous pass this file was written to end, so
+    `tests/test_documentation_contract.py` pins the blindness to this one file
+    and this one line rather than trusting the comment.
+    """
+    if relative != MANIFEST:
+        return lines
+    return [_MANIFEST_VERSION_RE.sub(r'\1"<version>"\2', line) for line in lines]
+
+
+def file_digest(path: Path, relative: str = "") -> str:
     """Hash the file's *lines*, so a checkout's line endings do not change it.
 
-    `.gitattributes` pins `*.py` and `*.js` to LF, but `manifest.json` and
-    `popup.html` are not covered by it, and a CRLF checkout would otherwise
-    report every derived file as edited.
+    `.gitattributes` pins all nine of these extensions to LF, so a clone is LF
+    -- but a tree that arrives another way is not. An export without the
+    attributes file, an editor configured for CRLF, or a script that round-trips
+    a file through Python's text mode on Windows all produce CRLF, and the last
+    one happened to 21 tracked files in this repository. Hashing bytes would
+    report all ten derived files as edited on such a tree and say the notice
+    table needs re-measuring, which is a false alarm with a real cost: the
+    re-measure needs an upstream checkout that is not in the tree.
     """
-    return hashlib.sha256("\n".join(_lines(path)).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        "\n".join(_normalised(relative, _lines(path))).encode("utf-8")
+    ).hexdigest()
 
 
 def fingerprints(root: Path = ROOT) -> dict[str, str]:
     """Current hash of every derived file, keyed by repo-relative path."""
-    return {ours: file_digest(root / ours) for ours, _ in DERIVED_PAIRS}
+    return {ours: file_digest(root / ours, ours) for ours, _ in DERIVED_PAIRS}
 
 
 def measure(upstream: Path, root: Path = ROOT) -> list[dict[str, object]]:
@@ -213,7 +247,12 @@ def _rewrite_fingerprints(root: Path = ROOT) -> int:
     )
     if count != 1:
         raise SystemExit("could not find MEASURED_AGAINST to rewrite")
-    source.write_text(new, encoding="utf-8")
+    # newline="\n" is not cosmetic. Python's text mode translates on Windows, so
+    # this rewrite used to hand its own source back with CRLF, and
+    # `evidence_manifest._sha256` hashes raw working-tree bytes -- meaning the one
+    # command a maintainer runs to make the notice table honest silently made the
+    # release fingerprint unreproducible from a clone of the commit it describes.
+    source.write_text(new, encoding="utf-8", newline="\n")
     return len(fingerprints(root))
 
 

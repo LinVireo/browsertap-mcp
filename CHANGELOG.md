@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-08-25
+
 ### Changed
 
 - **`scan_page` no longer modifies the page it reads.** With `cutlist` on -- the
@@ -38,6 +40,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   version of that. The gate that derives this floor from the code now reads
   `page_scripts/` as well as the extension directory, which is what caught the
   stale 111.
+- The fingerprint that tells a maintainer the notice table needs re-measuring is
+  blind to `manifest.json`'s own version string, which every release rewrites and
+  which cannot change how many upstream lines survive -- measured at both 0.4.14
+  and 0.4.15 as `29 of 40`. Without that, cutting any release turned the gate red
+  and demanded a re-measure that needs an upstream clone and could not answer
+  differently. Nothing else is excluded, and two tests fail if that ever widens.
 
 ### Fixed
 
@@ -1113,7 +1121,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.15...HEAD
+[0.4.15]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...v0.4.15
 [0.4.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...v0.4.12

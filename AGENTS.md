@@ -488,9 +488,25 @@ the assertion turns flaky.
   against a path that happens not to exist is worse than no measurement. What
   makes the offline suite able to catch this at all is `MEASURED_AGAINST`, the
   sha256 of each derived file as of the last measurement -- comparing that to the
-  tree needs nothing but the tree. It hashes `"\n".join(splitlines())`, because
-  `.gitattributes` pins `*.py` and `*.js` to LF but not `manifest.json` or
-  `popup.html`, and a CRLF checkout would otherwise report all eight as edited.
+  tree needs nothing but the tree.
+
+  Two things about that hash are load-bearing, and both exist to stop the gate
+  from crying wolf, because a gate that goes red on noise is one people learn to
+  route around. It hashes `"\n".join(splitlines())` rather than bytes: every one
+  of these extensions is pinned to LF by `.gitattributes`, so a clone is LF, but a
+  tree that arrives another way is not -- and a script that round-trips a file
+  through Python's text mode on Windows produces CRLF, which is how 21 tracked
+  files in this repository came to hold it at once. And it is **blind to
+  `manifest.json`'s own version string**, the one line `versioning bump` rewrites
+  on every release. That line cannot move a count: upstream declares
+  `"version": "2.0"`, every value this package can hold is a `MAJOR.MINOR.PATCH`
+  triple, so it fails to match before the bump and after it -- measured at 0.4.14
+  and 0.4.15, `29 of 40` both times. Without the exemption every release demanded
+  a re-measure that needs an upstream clone and could not answer differently.
+  Nothing else may be excluded, and that is asserted rather than trusted:
+  `test_the_notice_fingerprint_ignores_only_the_manifest_version_string` fails if
+  normalising touches any other line of any derived file, and its partner fails if
+  a real edit to the manifest leaves the hash alone.
 - **A reverse gate can only ask about the file set it was told about.** The check
   that every derived file is credited enumerated `chrome_extension/`, which was
   the whole derived set until the T0 refactor carved two files out of
