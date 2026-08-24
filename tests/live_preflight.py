@@ -107,6 +107,73 @@ def _pair_reidentified(
     return pairs, opened_left, remaining
 
 
+def resolve_remembered_tab(
+    remembered: Mapping[str, Any] | None,
+    tabs: Iterable[Mapping[str, Any]] | None,
+) -> Any | None:
+    """Answer "which tab is that one now" for a tab sampled earlier in the run.
+
+    Several live tests note the user's foreground tab so they can hand it back
+    afterwards, and `AGENTS.md` section 3 is titled "Tab ids are not stable --
+    never remember one". The product code obeys that rule; the tests were the
+    half that did not, so the same memory-saver discard described in
+    `_pair_reidentified` made them fail -- and fail while naming the tool they
+    happened to be exercising rather than the retired id.
+
+    Returned is the tab's id **as the browser reports it now**, raw rather than
+    normalised, because the callers feed it back to `tabs.switch` and build
+    session ids out of it. `None` means the tab is genuinely gone; a caller
+    restoring focus should then do nothing, and the end-of-run inventory check
+    is what reports it, since the claim is about the browser and not about the
+    test that happened to be running.
+
+    Resolution is the pairing rule of `_pair_reidentified` narrowed to one tab:
+    the successor sits at the same URL, so an empty URL never resolves and an
+    ambiguous match resolves to nothing at all. Substituting the wrong tab is
+    the failure this whole module exists to avoid, and it is worse than
+    reporting none -- exactly the asymmetry `BrowserBridge` applies to a named
+    session that died.
+    """
+    if not isinstance(remembered, Mapping):
+        return None
+    was = remembered.get("id")
+    if was is None:
+        return None
+    current = [
+        tab for tab in tabs or ()
+        if isinstance(tab, Mapping) and tab.get("id") is not None
+    ]
+    # Ids are compared as text for the reason `inventory` keys them that way.
+    still_there = next((tab for tab in current if str(tab.get("id")) == str(was)), None)
+    if still_there is not None:
+        return still_there.get("id")
+
+    url = str(remembered.get("url") or "")
+    if not url:
+        return None
+    candidates = [tab for tab in current if str(tab.get("url") or "") == url]
+    # Accepts both shapes a caller may have kept: a raw `list_all_tabs` entry
+    # (`windowId`) or an `inventory` one (`window`).
+    window = str(remembered.get("windowId") or remembered.get("window") or "")
+    if window:
+        scoped = [
+            tab for tab in candidates
+            if str(tab.get("windowId") or tab.get("window") or "") == window
+        ]
+        # Only narrows. A window that went away too leaves the URL as the best
+        # evidence there is, and discarding it would refuse a real successor.
+        if scoped:
+            candidates = scoped
+    if len(candidates) > 1:
+        title = str(remembered.get("title") or "")
+        titled = [tab for tab in candidates if str(tab.get("title") or "") == title]
+        if len(titled) == 1:
+            candidates = titled
+    if len(candidates) != 1:
+        return None
+    return candidates[0].get("id")
+
+
 def compare(
     before: Mapping[str, Mapping[str, Any]],
     after: Mapping[str, Mapping[str, Any]],

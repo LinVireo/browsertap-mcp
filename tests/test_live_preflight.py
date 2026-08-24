@@ -542,3 +542,108 @@ def test_an_unreadable_component_status_is_a_note_rather_than_a_failure():
     assert "except Exception as exc:" in reader
     assert reader.count("return None") == 2
     assert 'record["notes"].append' in reader
+
+
+LIVE_SUITE = (ROOT / "tests" / "test_live_browser.py").read_text(encoding="utf-8")
+
+
+def test_a_tab_that_never_moved_resolves_to_the_id_it_already_had():
+    """The common case has to stay byte-identical to remembering the id."""
+    tabs = _tabs((7, "https://example.com/", True), (8, "https://b.example/", False))
+
+    assert P.resolve_remembered_tab(tabs[0], tabs) == 7
+    # Raw, not normalised: callers feed this back to `tabs.switch` and build
+    # session ids out of it, and the extension speaks native ints.
+    assert isinstance(P.resolve_remembered_tab(tabs[0], tabs), int)
+
+
+def test_a_discarded_tab_resolves_to_the_id_chrome_gave_it_back():
+    """The failure this exists for: same URL, same window, new id.
+
+    Measured on a real browser during a seal run -- `1935857437` came back as
+    `1935857441` with `damaged: false` and the tab count unchanged, and four
+    places in the live suite then handed the retired id back to `tabs.switch`.
+    """
+    remembered = _tabs((1935857437, "https://gl.example.net/keys?groupId=2", True))[0]
+    after = _tabs(
+        (1935857441, "https://gl.example.net/keys?groupId=2", True),
+        (12, "https://other.example/", False),
+    )
+
+    assert P.resolve_remembered_tab(remembered, after) == 1935857441
+
+
+def test_a_tab_the_browser_retired_resolves_to_nothing():
+    """Not an error and not a substitute. The caller does nothing, and the
+    end-of-run inventory check is what reports the tab as gone."""
+    remembered = _tabs((5, "https://gone.example/", True))[0]
+
+    assert P.resolve_remembered_tab(remembered, _tabs((6, "https://other.example/", True))) is None
+    assert P.resolve_remembered_tab(remembered, []) is None
+    assert P.resolve_remembered_tab(remembered, None) is None
+
+
+def test_two_tabs_at_one_url_resolve_to_nothing_rather_than_a_guess():
+    """Substituting the wrong tab is the failure the whole module exists to
+    avoid, so an ambiguous match is worth less than no match -- the same
+    asymmetry `BrowserBridge` applies to a named session that died."""
+    remembered = {"id": 5, "url": "https://dup.example/", "title": "tab 5", "windowId": 1}
+    duplicates = _tabs((6, "https://dup.example/", True), (7, "https://dup.example/", False))
+
+    assert P.resolve_remembered_tab(remembered, duplicates) is None
+    # Unless the title breaks the tie, which is the one thing left to go on.
+    duplicates[0]["title"] = "tab 5"
+    assert P.resolve_remembered_tab(remembered, duplicates) == 6
+
+
+def test_an_unknown_url_never_resolves():
+    """Same rule as `_pair_reidentified`: an unknown location is not evidence
+    that two tabs are the same tab."""
+    remembered = {"id": 5, "url": "", "title": "", "windowId": 1}
+
+    assert P.resolve_remembered_tab(remembered, _tabs((6, "", True))) is None
+
+
+def test_resolution_prefers_the_window_the_tab_was_in_but_survives_losing_it():
+    remembered = {"id": 5, "url": "https://dup.example/", "title": "x", "windowId": 2}
+    two_windows = [
+        {"id": 6, "url": "https://dup.example/", "title": "a", "windowId": 1, "active": True},
+        {"id": 7, "url": "https://dup.example/", "title": "b", "windowId": 2, "active": False},
+    ]
+
+    assert P.resolve_remembered_tab(remembered, two_windows) == 7
+    # The window went away as well: the URL is the best evidence there is, and
+    # refusing it here would refuse a real successor.
+    moved = [{"id": 8, "url": "https://dup.example/", "title": "b", "windowId": 9, "active": True}]
+    assert P.resolve_remembered_tab(remembered, moved) == 8
+
+
+def test_unreadable_input_resolves_to_nothing_instead_of_raising():
+    """This runs in cleanup, where an exception replaces the test's own result."""
+    assert P.resolve_remembered_tab(None, _tabs((1, "https://a.example/", True))) is None
+    assert P.resolve_remembered_tab("nonsense", []) is None
+    assert P.resolve_remembered_tab({"url": "https://a.example/"}, []) is None
+    assert P.resolve_remembered_tab({"id": 1}, ["nonsense", None, {"url": "x"}]) is None
+
+
+def test_the_live_suite_never_hands_a_remembered_tab_id_back_to_the_browser():
+    """The reverse gate. `AGENTS.md` section 3 is titled "never remember one",
+    and the product code obeys it; these four cleanup paths did not, which cost
+    a seal run two failures that named `open_url` instead of the retired id.
+
+    Pinned as source text because the defect is invisible offline: the tests it
+    lives in only run against a real browser, and only when Chrome happens to
+    discard a tab mid-run.
+    """
+    assert "def restore_foreground(" in LIVE_SUITE
+    assert "P.resolve_remembered_tab(remembered, tabs)" in LIVE_SUITE
+    # Nothing may reach `tabs.switch` without having been resolved first. The
+    # id sits on the same line, so only the text right after the marker counts.
+    switches = LIVE_SUITE.split('"method": "switch"')[1:]
+    assert len(switches) == 2, "a new tabs.switch call site needs the same rule"
+    for block in switches:
+        assert block[:40].strip().startswith(', "tabId": '), block[:40]
+        assert '"tabId": tab_id' in block[:40] or '"tabId": restored' in block[:40], block[:40]
+    # And no assertion may compare against the sampled id either.
+    assert 'original_active["id"]' not in LIVE_SUITE
+    assert "original['id']" not in LIVE_SUITE
