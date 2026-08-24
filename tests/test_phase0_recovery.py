@@ -1290,6 +1290,96 @@ def test_open_new_tab_registers_generation_bound_agent_ownership(monkeypatch):
     }
 
 
+def test_outstanding_owned_tabs_are_readable_without_exposing_the_capability():
+    """The live suite's only honest claim about a browser, and its one hazard.
+
+    A diff of the browser at two moments cannot say who opened a tab, so the
+    registry is where "the task leaked one of its own" is answered. That read is
+    published -- `artifacts/live-preflight.json` goes into CI artifacts and into
+    external reviews -- so the owner_id must not travel with it: it is the
+    capability that closes the tab, and one that is never handed out cannot leak.
+    """
+    registry = S._TabOwnershipRegistry()
+    record = registry.register("chrome:profile:9", "generation-agent")
+
+    outstanding = registry.outstanding()
+
+    assert outstanding == [
+        {
+            "session_id": "chrome:profile:9",
+            "tab_id": 9,
+            "generation": "generation-agent",
+            "opener": "agent",
+        }
+    ]
+    assert "owner_id" not in outstanding[0]
+    assert record["owner_id"] not in repr(outstanding)
+
+
+def test_counters_tell_nothing_leaked_apart_from_nothing_opened():
+    """`outstanding() == []` has two meanings and they are not interchangeable.
+
+    One is "every tab was cleaned up", the other is "this process never opened a
+    tab, so the check measured nothing". Same shape as `ruff` over a path that
+    matches no files: exit 0, empty diagnostics. The counters are what a reader
+    compares against, which is why they are lifetime totals and never decrement.
+    """
+    registry = S._TabOwnershipRegistry()
+
+    assert registry.counters() == {"registered": 0, "released": 0, "outstanding": 0}
+
+    first = registry.register("chrome:profile:9", "generation-agent")
+    registry.register("chrome:profile:10", "generation-agent", owner_id=first["owner_id"])
+    registry.release(["chrome:profile:9"], owner_id=first["owner_id"])
+
+    assert registry.counters() == {"registered": 2, "released": 1, "outstanding": 1}
+    assert [rec["tab_id"] for rec in registry.outstanding()] == [10]
+
+    registry.release(["chrome:profile:10"], owner_id="somebody-else")
+
+    # A release that matched nothing did not settle a debt, so it is not counted.
+    assert registry.counters() == {"registered": 2, "released": 1, "outstanding": 1}
+
+
+def test_a_close_refused_over_a_generation_change_stays_outstanding(monkeypatch):
+    """The half of a leak that is not a forgotten close.
+
+    Chrome discarded the task's own background tab and restored it under a new
+    id, `close_tabs` correctly refused to close a tab that is no longer the one
+    that was claimed, and nothing was closed -- so the debt is still owed. The
+    live suite's teardown reports both causes because they need different fixes.
+    """
+    driver = _Driver()
+    sessions = [
+        {
+            "id": "chrome:profile:9",
+            "url": "https://replacement.test/",
+            "browser": "chrome",
+            "generation": "generation-new",
+        }
+    ]
+    _install(monkeypatch, driver, sessions)
+    registry = _fresh_tab_ownership(monkeypatch)
+    registry.register("chrome:profile:9", "generation-old", owner_id="agent-owner")
+
+    with pytest.raises(PermissionError, match="lifecycle generation changed"):
+        S.close_tabs("chrome:profile:9", owner_id="agent-owner")
+
+    assert [rec["session_id"] for rec in registry.outstanding()] == ["chrome:profile:9"]
+    assert registry.counters()["released"] == 0
+
+
+def test_reading_outstanding_tabs_never_raises_on_a_malformed_key():
+    """It runs in teardown, where an exception replaces the suite's own verdict."""
+    registry = S._TabOwnershipRegistry()
+    registry.register("not-a-composite-id", "generation-agent")
+
+    outstanding = registry.outstanding()
+
+    assert outstanding[0]["session_id"] == "not-a-composite-id"
+    assert outstanding[0]["tab_id"] is None
+
+
 def test_close_tabs_default_refuses_preexisting_user_tab(monkeypatch):
     driver = _Driver()
     sessions = [
@@ -2718,17 +2808,26 @@ def test_content_script_has_no_page_dom_privileged_command_channel():
         assert f"cmd === {privileged}" not in source
 
 
-def test_extension_popup_keeps_cookie_viewer_and_clipboard_copy():
+def test_extension_popup_binds_the_cookie_read_and_the_clipboard_copy_to_gestures():
     popup = (BACKGROUND.parent / "popup.html").read_text(encoding="utf-8")
     script = (BACKGROUND.parent / "popup.js").read_text(encoding="utf-8")
 
     assert 'data-i18n="extensionName"' in popup
     assert 'data-i18n="cookieViewerTitle"' in popup
     assert 'id="indicator-visible"' in popup
+    assert 'id="copy"' in popup
     assert "cmd: 'cookies'" in script
     assert "btap_indicator_visible" in script
     assert "chrome.i18n.getMessage" in script
     assert "navigator.clipboard.writeText" in script
+    assert "copyCookies" in script
+    # Reverse gate for the leak this popup shipped with: DOMContentLoaded called
+    # fetchCookies(), whose tail wrote every cookie of the active tab to the
+    # clipboard -- so opening the popup to toggle the indicator checkbox replaced
+    # the clipboard with session credentials, HttpOnly ones included. Nothing may
+    # call fetchCookies without a gesture; the behaviour itself is pinned by
+    # test_extension_popup_rejects_non_http_pages_and_handles_malformed_cookie_data.
+    assert "fetchCookies();" not in script
     # The bridge port stays owned by the Python side (BROWSERTAP_BRIDGE_PORT).
     # Exposing it in a popup any user can open is a second source of truth that
     # silently breaks the bridge profile-wide and outlives a package reinstall,
@@ -2744,15 +2843,21 @@ def test_extension_popup_rejects_non_http_pages_and_handles_malformed_cookie_dat
 const fs = require('fs');
 const source = fs.readFileSync(__POPUP__, 'utf8');
 const out = { textContent: '' };
+const copyBtn = { textContent: '' };
 const document = {
   addEventListener() {},
-  getElementById(id) { return id === 'out' ? out : null; },
+  getElementById(id) {
+    if (id === 'out') return out;
+    if (id === 'copy') return copyBtn;
+    return null;
+  },
   documentElement: {},
   querySelectorAll() { return []; },
 };
 let activeUrl = 'chrome://extensions';
 let response = { ok: true, data: [] };
 let sendMessageCalls = 0;
+let clipboardShouldFail = false;
 const clipboardWrites = [];
 const chrome = {
   i18n: {
@@ -2768,10 +2873,14 @@ const chrome = {
 };
 const navigator = {
   clipboard: {
-    writeText(value) { clipboardWrites.push(value); return Promise.resolve(); },
+    writeText(value) {
+      if (clipboardShouldFail) return Promise.reject(new Error('denied'));
+      clipboardWrites.push(value);
+      return Promise.resolve();
+    },
   },
 };
-eval(source + '\\n;globalThis.__fetchCookies = fetchCookies;');
+eval(source + '\\n;globalThis.__fetchCookies = fetchCookies; globalThis.__copyCookies = copyCookies;');
 
 (async () => {
   await globalThis.__fetchCookies();
@@ -2786,12 +2895,30 @@ eval(source + '\\n;globalThis.__fetchCookies = fetchCookies;');
     clipboardWrites: [...clipboardWrites],
   };
 
+  await globalThis.__copyCookies();
+  const copied = {
+    clipboardWrites: [...clipboardWrites],
+    button: copyBtn.textContent,
+    listStillRendered: out.textContent,
+  };
+
+  clipboardShouldFail = true;
+  await globalThis.__copyCookies();
+  const refused = {
+    clipboardWrites: [...clipboardWrites],
+    button: copyBtn.textContent,
+    listStillRendered: out.textContent,
+  };
+  clipboardShouldFail = false;
+
   response = { ok: true, data: null };
   let malformedThrew = false;
   try { await globalThis.__fetchCookies(); } catch (_) { malformedThrew = true; }
   process.stdout.write(JSON.stringify({
     unsupported,
     valid,
+    copied,
+    refused,
     malformed: { text: out.textContent, malformedThrew, sendMessageCalls },
   }));
 })().catch(error => { console.error(error); process.exit(1); });
@@ -2803,10 +2930,27 @@ eval(source + '\\n;globalThis.__fetchCookies = fetchCookies;');
         "text": "cookiesUnavailable",
         "sendMessageCalls": 0,
     }
+    # Rendering the list must not touch the clipboard. This assertion is the
+    # regression: it used to read ["sid=abc"] here, because the copy ran at the
+    # tail of fetchCookies and the popup called that on open.
     assert result["valid"] == {
         "text": "sid=abc [S]",
         "sendMessageCalls": 1,
+        "clipboardWrites": [],
+    }
+    # Only the Copy button writes, and it copies what is on screen.
+    assert result["copied"] == {
         "clipboardWrites": ["sid=abc"],
+        "button": "copyDone",
+        "listStillRendered": "sid=abc [S]",
+    }
+    # A refused clipboard reports on the button and leaves the rendered list
+    # alone. The old code shared one try/catch with the render, so a clipboard
+    # error replaced the cookies the user had just asked for with "Error: ...".
+    assert result["refused"] == {
+        "clipboardWrites": ["sid=abc"],
+        "button": "copyFailed",
+        "listStillRendered": "sid=abc [S]",
     }
     assert result["malformed"] == {
         "text": "errorPrefixunknownError",

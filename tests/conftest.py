@@ -248,6 +248,24 @@ def _setup_status(record: dict) -> dict | None:
     return status
 
 
+def _owned_tabs(record: dict) -> tuple[list[dict], dict[str, int]] | None:
+    """Which tabs this process opened and still owes a close, or None.
+
+    Read from the product's own registry rather than derived from a diff of the
+    browser: only the registry knows who opened a tab, and that is the whole
+    difference between "the suite leaked one" and "someone was using their
+    browser". Same rule as its neighbours -- unreadable is a recorded note, not
+    a failure, because being unable to ask is not evidence of a leak.
+    """
+    from browsertap_mcp import server as S
+
+    try:
+        return S._TAB_OWNERSHIP.outstanding(), S._TAB_OWNERSHIP.counters()
+    except Exception as exc:
+        record["notes"].append(f"tab ownership unreadable: {type(exc).__name__}: {exc}")
+        return None
+
+
 @pytest.fixture(scope="session")
 def driver():
     """A BrowserBridge talking to an already-running bridge, or skip.
@@ -255,14 +273,13 @@ def driver():
     Every live test reaches this fixture, directly or through
     `scratch_session`, which makes it the only place that sees the browser
     before the first live test and after the last one. So it is also where the
-    live layer's two written preconditions are enforced: nobody may be using
-    the browser while the suite runs, and the tab inventory has to come out the
-    way it went in. `tests/live_preflight.py` holds the reasoning; the sampling,
-    the waiting and the verdict live here.
+    live layer's preconditions are enforced. Exactly one of them fails a run:
+    the suite must not leave behind a tab it opened. The browser being in use
+    and the user's own tabs coming and going are recorded and fail nothing --
+    they are the user's to change. `tests/live_preflight.py` holds the
+    reasoning; the sampling, the waiting and the verdict live here.
     """
-    import os
     import time
-    import warnings
 
     from browsertap_mcp.browser_bridge import BrowserBridge
     from tests import live_preflight as P
@@ -275,8 +292,7 @@ def driver():
     if not sessions:
         pytest.skip("bridge is up but no tab is connected")
 
-    override = os.environ.get(P.OVERRIDE_ENV, "").strip().lower() not in ("", "0", "false", "off")
-    record: dict = {"override": override, "notes": []}
+    record: dict = {"notes": []}
 
     # Before measuring anything about the browser: is this the code under test?
     # Neither of the two long-lived processes is restarted by running pytest, so
@@ -288,45 +304,58 @@ def driver():
     if stale:
         record["notes"].append(stale.splitlines()[0])
         _write_live_preflight(record)
-        # Deliberately a failure and not a skip, and deliberately outside
-        # P.OVERRIDE_ENV. A skip is the honest signal for a condition that was
-        # absent -- the browser being in use -- and the release chain would
-        # eventually reject one anyway, but only after running everything else
-        # and while naming the wrong problem. See stale_component_reason.
+        # Deliberately a failure and not a skip. A skip is the honest signal for
+        # a condition that was absent, and the release chain would eventually
+        # reject one anyway -- but only after running everything else, and while
+        # naming the wrong problem. See stale_component_reason.
         pytest.fail(stale, pytrace=False)
 
     # Two samples, not one: an inventory on its own cannot tell an idle browser
-    # from a busy one, and "busy" is the state that invalidates the whole run.
+    # from a busy one. What that answer is used for is a note -- it makes the
+    # timing-sensitive cases noisier, which is worth knowing next to a failure,
+    # and is not grounds to withhold the live layer from a browser in use.
     first = _tab_inventory(record)
     time.sleep(P.IDLE_WINDOW_SECONDS)
     baseline = _tab_inventory(record)
     if first is not None and baseline is not None:
         idle = P.compare(first, baseline)
         record["idle_check"] = idle
-        reason = P.busy_browser_reason(idle)
-        if reason:
-            record["notes"].append(reason.splitlines()[0])
-            if not override:
-                _write_live_preflight(record)
-                pytest.skip(reason)
+        record["browser_idle"] = not idle.get("changed")
+        note = P.busy_browser_note(idle)
+        if note:
+            record["notes"].append(note.splitlines()[0])
 
     try:
         yield d
     finally:
-        final = _tab_inventory(record) if baseline is not None else None
-        problem = None
+        owned = _owned_tabs(record)
+        final = _tab_inventory(record)
+        # The user's own tabs, recorded and never judged. Kept because it is the
+        # context a reader wants beside a leak -- Chrome discarding one of the
+        # suite's tabs shows up here as a re-identification, and that is the
+        # difference between a forgotten close_tabs and a refused one.
         if baseline is not None and final is not None:
-            drift = P.compare(baseline, final)
-            record["drift_check"] = drift
-            problem = P.drift_problem(drift)
+            record["tab_activity"] = P.compare(baseline, final)
+        problem = None
+        if owned is not None:
+            outstanding, counters = owned
+            record["own_tabs"] = {
+                "outstanding": outstanding,
+                "counters": counters,
+                # False means the check had nothing to measure: this process
+                # opened no tabs, so "none leaked" is vacuous. Never read a pass
+                # here as proof of cleanup without this field.
+                "enforced": counters.get("registered", 0) > 0,
+            }
+            problem = P.leaked_tab_problem(
+                outstanding,
+                final.values() if final is not None else None,
+            )
         _write_live_preflight(record)
         if problem:
             # Teardown, so this cannot be attributed to one test -- which is
             # right: the claim is about the suite, not about any single case.
-            if override:
-                warnings.warn(problem, stacklevel=1)
-            else:
-                raise AssertionError(problem)
+            raise AssertionError(problem)
 
 
 @pytest.fixture(scope="session")

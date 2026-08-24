@@ -1,18 +1,35 @@
 """The live layer's preconditions, as code instead of prose.
 
-The live suite drives the user's real browser, so it came with two written
-rules: nobody may be using that browser while it runs, and the tab inventory it
-started with has to be the inventory it leaves behind. Both were maintainer
-notes, which is the same as not having them -- a violated precondition showed up
-as a mystery failure, and the "did the suite close one of my tabs" question was
-answered by hand, after the fact, from memory.
+The live suite drives the user's real browser, so it came with written rules
+that lived only in maintainer notes -- which is the same as not having them. A
+violated precondition showed up as a mystery failure, and "did the suite close
+one of my tabs" was answered by hand, after the fact, from memory.
+
+One of those rules was that the tab inventory the suite started with had to be
+the inventory it left behind, and that rule was wrong: it made a claim about
+tabs the suite never touched. Somebody opening or closing a tab of their own
+during a five-minute run is not a defect, yet it failed the run in exactly the
+same words as the suite leaking a tab of its own -- three scenarios, one
+verdict, so the verdict identified nothing. What the suite is answerable for is
+narrower, and it is bookkeeping the product already keeps: the tabs the suite
+opened itself (`server._TAB_OWNERSHIP.outstanding()`). That is now the only
+thing that can fail. Everything about the user's tabs is recorded as context.
+
+The idle check kept its window for a different reason. A browser somebody is
+using makes the timing-sensitive cases noisier, which is worth having written
+down next to a failure -- but it is a note, not a gate. Refusing to run against
+a busy browser would take the live layer away from anyone whose browser is
+never idle, which is the same trade the quiet-input gate makes with `enforced`
+and physical input makes with `on_screen`: report what could be observed
+instead of withholding the capability.
 
 A third precondition came from the same notes and was the last one still being
 checked by hand. The live suite exercises three programs at once and only one of
 them is the code pytest imported: the bridge daemon and the Chrome extension are
 long-lived and keep running whatever build they started with. So a green live run
 can certify code that is not in the tree, and nothing downstream noticed --
-neither a gate nor a sealed artifact recorded which build answered.
+neither a gate nor a sealed artifact recorded which build answered. That one is
+refused rather than noted, for the reasons in `stale_component_reason`.
 
 Two neighbouring rules from the same notes are already mechanised elsewhere and
 deliberately not repeated here: the failover flake became
@@ -32,14 +49,9 @@ from typing import Any
 # How long to watch before calling a browser idle. Two samples this far apart
 # catch a tab being opened, closed, navigated or focused; a shorter window
 # regularly misses a page load committing, which is the exact event that used to
-# break the run.
+# break the run. What the answer is used for is a note on the report, not a
+# refusal -- see `busy_browser_note`.
 IDLE_WINDOW_SECONDS = 1.5
-
-# Set to proceed against a browser someone is using, and to downgrade the
-# end-of-run inventory check to a warning. It exists because "my browser is
-# never idle" must not turn into "I stopped running the live layer", and every
-# use of it is recorded in the report so the evidence is not silently weaker.
-OVERRIDE_ENV = "BTAP_LIVE_ALLOW_BUSY_BROWSER"
 
 
 def inventory(tabs: Iterable[Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
@@ -82,11 +94,17 @@ def _pair_reidentified(
     Chrome's memory saver discards an idle background tab and restores it under
     a *new* tab id at the same URL, so the extension unregisters one session and
     registers another. Nothing was gained, lost or navigated -- but it is
-    byte-for-byte the signature of the suite closing someone's tab and leaving
-    its own behind, which is what this module exists to catch. Measured in a
-    seal run against a browser nobody was touching: three background tabs
-    (chrome://extensions, a PyPI page, the Web Store) came back with new ids and
-    failed the end-of-run check, while the tab count was identical.
+    byte-for-byte the signature of a tab being closed and a different one being
+    left behind. Measured in a seal run against a browser nobody was touching:
+    three background tabs (chrome://extensions, a PyPI page, the Web Store) came
+    back with new ids while the tab count was identical, and the end-of-run check
+    of the day failed the run over it.
+
+    It still matters after that check stopped judging the user's tabs, for a
+    narrower reason: when one of the *suite's own* tabs is discarded this way,
+    `close_tabs` refuses it with `lifecycle generation changed` and the ownership
+    record stays outstanding. Pairing it here is what lets
+    `leaked_tab_problem` tell that apart from a forgotten close.
 
     Matching is one-to-one and by URL, so two closes against one open still
     leave a close reported, and an empty URL never pairs -- an unknown location
@@ -122,10 +140,10 @@ def resolve_remembered_tab(
 
     Returned is the tab's id **as the browser reports it now**, raw rather than
     normalised, because the callers feed it back to `tabs.switch` and build
-    session ids out of it. `None` means the tab is genuinely gone; a caller
-    restoring focus should then do nothing, and the end-of-run inventory check
-    is what reports it, since the claim is about the browser and not about the
-    test that happened to be running.
+    session ids out of it. `None` means the tab is genuinely gone, and a caller
+    restoring focus should then do nothing. Nothing fails over that: the tab was
+    the user's, closing it is theirs to do, and the end-of-run record carries it
+    as context under `tab_activity`.
 
     Resolution is the pairing rule of `_pair_reidentified` narrowed to one tab:
     the successor sits at the same URL, so an empty URL never resolves and an
@@ -178,19 +196,24 @@ def compare(
     before: Mapping[str, Mapping[str, Any]],
     after: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Diff two inventories.
+    """Diff two inventories of the whole browser, as description only.
 
-    Two verdicts come out of this, and they are deliberately not the same one.
-    `disturbed` answers "did anything at all move", which is what the idle check
-    wants: during a 1.5s window even the browser reorganising itself means the
-    run is about to be measured against a moving target. `damaged` answers "is
-    any of it the suite's fault", which is what the end-of-run check wants: over
-    a five-minute run Chrome discarding a background tab is expected, and
-    calling it a fixture leak would train the reader to ignore the check.
+    Nothing here attributes anything. This used to also answer "is any of it the
+    suite's fault" via a `damaged` flag, and it could not: a user opening a tab,
+    a user closing a tab and the suite leaking its own scratch tab all set it.
+    Who opened a tab is not visible in a diff of the browser at two moments --
+    it is in `server._TAB_OWNERSHIP`, so `leaked_tab_problem` answers that from
+    there and this function stopped guessing.
 
-    Focus moving is reported separately again: it is proof that a human is
-    present when nothing else moved, but the suite raises tabs itself, so on its
-    own it is not damage.
+    `disturbed` is still computed because one reader still wants it: the idle
+    window, where "did anything at all move" means the run is about to be
+    measured against a browser somebody is using. Focus is reported separately
+    from that, because the suite raises tabs itself.
+
+    `reidentified` pairs up a tab that only changed its id (see
+    `_pair_reidentified`). It stays in the output for the same reason as the
+    rest: over a five-minute run Chrome discarding a background tab is expected,
+    and a reader looking at a leak wants to know it happened.
     """
     opened = [dict(tab) for key, tab in sorted(after.items()) if key not in before]
     closed = [dict(tab) for key, tab in sorted(before.items()) if key not in after]
@@ -212,14 +235,16 @@ def compare(
     )
     disturbed = bool(opened or closed or navigated)
     reidentified, opened_left, closed_left = _pair_reidentified(opened, closed)
-    damage = {"opened": opened_left, "closed": closed_left, "navigated": navigated}
     return {
         "opened": opened,
         "closed": closed,
         "navigated": navigated,
         "reidentified": reidentified,
-        "damage": damage,
-        "damaged": bool(opened_left or closed_left or navigated),
+        # What did not pair off as a re-identified tab. Context for a reader, and
+        # deliberately not a verdict: an unpaired close is as likely to be the
+        # user closing their own tab as anything else.
+        "unpaired_opened": opened_left,
+        "unpaired_closed": closed_left,
         "focus_moved": focus_moved,
         "disturbed": disturbed,
         "changed": disturbed or focus_moved is not None,
@@ -256,51 +281,88 @@ def describe(diff: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def busy_browser_reason(diff: Mapping[str, Any]) -> str | None:
-    """Why the live layer must not start, or None when the browser is idle.
+def busy_browser_note(diff: Mapping[str, Any]) -> str | None:
+    """What the browser did during the idle window, or None when it sat still.
 
-    A browser that changes on its own during the idle window has a human in it,
-    and the live suite both drives that browser and asserts on what it finds
-    there. Running anyway produces a result that describes neither the product
-    nor the human.
+    This used to be `busy_browser_reason` and it skipped the whole live layer.
+    Two things were wrong with that. It read the user's tabs to decide whether
+    the suite may run, when the suite is only answerable for its own; and a
+    browser that is never idle then means the live layer never runs at all,
+    which is a worse outcome than a noisier one. The observation is still worth
+    keeping -- a human in the browser makes the timing-sensitive cases flakier
+    and is the first thing to check next to an odd failure -- so it is attached
+    to the report and to the failure text instead of gating anything.
+
+    Same idiom as `run_physical_action`'s `input_quiet` and `on_screen`: say what
+    could be observed, do not withhold the capability.
     """
     if not diff.get("changed"):
         return None
     return "\n".join(
         [
-            "the browser is in use: its tabs changed while the live layer was "
-            f"waiting {IDLE_WINDOW_SECONDS}s for it to settle.",
+            "the browser was in use: its tabs changed while the live layer "
+            f"watched for {IDLE_WINDOW_SECONDS}s.",
             *(f"  {line}" for line in describe(diff)),
-            "Leave the browser alone and re-run, or set "
-            f"{OVERRIDE_ENV}=1 to accept the weaker result.",
+            "That is allowed -- these are the user's tabs. It is recorded "
+            "because it makes the timing-sensitive cases noisier.",
         ]
     )
 
 
-def drift_problem(diff: Mapping[str, Any]) -> str | None:
-    """Why the browser did not come out the way it went in, or None.
+def leaked_tab_problem(
+    outstanding: Iterable[Mapping[str, Any]] | None,
+    tabs: Iterable[Mapping[str, Any]] | None = None,
+) -> str | None:
+    """Which tabs the suite opened and never closed, or None.
 
-    The suite is allowed to raise tabs; it is not allowed to leave one behind,
-    close one it did not create, or navigate a page the user was reading. A tab
-    that came back under a new id is none of those (see `_pair_reidentified`),
-    so it is reported as context and does not fail the run.
+    This is the one claim the live layer is answerable for, and the only one it
+    can make honestly. `server._TabOwnershipRegistry.release` runs after a close
+    actually succeeded, so a record still present at teardown means a tab this
+    process opened is still owed a close. No inventory diff can produce that
+    fact: it needs to know who opened the tab, which only the registry knows.
+
+    Both causes are named because they need different fixes and the message is
+    the only place a reader finds out which one to look for. A forgotten close is
+    a test-side bug. A `lifecycle generation changed` refusal is not: Chrome
+    discarded the suite's own background tab and restored it under a new id, so
+    `close_tabs` correctly refused to close a tab that is no longer the one that
+    was claimed -- and correctly left the record outstanding, since nothing was
+    closed. The second one is visible in the browser and the first is not, which
+    is why the current tabs are cross-checked when they are available.
     """
-    if not diff.get("damaged"):
+    records = [rec for rec in outstanding or () if isinstance(rec, Mapping)]
+    if not records:
         return None
-    damage = diff.get("damage") or {}
-    context = list(diff.get("reidentified") or ())
+    live_ids = {
+        str(tab.get("id"))
+        for tab in tabs or ()
+        if isinstance(tab, Mapping) and tab.get("id") is not None
+    }
+    lines: list[str] = []
+    for record in sorted(records, key=lambda rec: str(rec.get("session_id"))):
+        sid = record.get("session_id")
+        tab_id = record.get("tab_id")
+        # An absent `tabs` argument is "not checked", not "not in the browser":
+        # saying a tab is gone on the strength of a sample nobody took is the
+        # same vacuous-pass shape this module exists to avoid.
+        if not live_ids:
+            state = "still in the browser?  not checked"
+        elif str(tab_id) in live_ids:
+            state = "still open in the browser"
+        else:
+            state = (
+                "no longer in the browser -- close_tabs likely refused it with "
+                "'lifecycle generation changed' after Chrome discarded and "
+                "restored it"
+            )
+        lines.append(f"  {sid} (generation {record.get('generation')}): {state}")
     return "\n".join(
         [
-            "the live layer did not leave the browser as it found it "
-            f"({diff.get('tabs_before')} tabs before, {diff.get('tabs_after')} after):",
-            *(f"  {line}" for line in describe({**damage, "focus_moved": None})),
-            *(
-                [f"  ({len(context)} more tab(s) only changed id, not counted)"]
-                if context
-                else []
-            ),
-            "A fixture leak and a human using the browser look identical here; "
-            "check which one it was before believing either.",
+            f"the live layer left {len(records)} tab(s) it opened behind:",
+            *lines,
+            "Every open_new_tab in the live suite must be closed with the "
+            "owner_id it returned. Nothing here is about the user's own tabs; "
+            "those are theirs to open and close.",
         ]
     )
 

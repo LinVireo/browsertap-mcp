@@ -310,10 +310,15 @@ wastes the whole run:
   stale component with its one fix. There is no override for this one, and it is
   a failure rather than a skip on purpose:
   `tests/live_preflight.stale_component_reason` says why.
-- **Leave the browser alone.** With someone opening and closing tabs, failover
-  can pick a tab that is still loading and the CDP fallback loses its debugger
-  mid-command. Measured: browser in use → 8 minutes and one failure; idle
-  browser → 4 m 15 s, 54 passed.
+- **Leave the browser alone if you can.** With someone opening and closing tabs,
+  failover can pick a tab that is still loading and the CDP fallback loses its
+  debugger mid-command. Measured: browser in use → 8 minutes and one failure;
+  idle browser → 4 m 15 s, 54 passed. This is advice about noise, not a
+  precondition: the preflight records what the browser did and never refuses or
+  skips over it, because the user's tabs are the user's. A busy browser used to
+  skip the whole live layer, which read someone else's tabs to decide whether the
+  suite may run and left machines whose browser is never idle with no live layer
+  at all.
 - **Do not work on the machine during the coverage round.** Instrumentation
   roughly doubles the wall clock. The tests that used to fail as a group there
   now assert the budget the code hands downstream instead of the elapsed time,
@@ -328,9 +333,32 @@ you start and put it back afterwards:
 [t for t in S.list_all_tabs()["data"] if t["active"]]
 ```
 
+Do not remember the id you get back -- resolve it again with
+`tests/live_preflight.resolve_remembered_tab`, for the reason in section 3. It
+returning `None` means the human closed that tab, which is theirs to do and fails
+nothing.
+
 The `scratch_session` fixture opens one temporary tab that every live test
 shares and closes it at the end. Do not change it to one tab per test; that
 makes a mess of a real person's browser.
+
+**The one thing the live layer fails a run over is a tab it opened and did not
+close.** That verdict comes from `server._TAB_OWNERSHIP.outstanding()`, not from
+a diff of the browser, and the difference is the whole point: a diff cannot say
+who opened a tab, so the check it replaced fired identically for a human opening
+a tab, a human closing one, and the suite leaking its own scratch tab. Three
+things must survive an edit here:
+
+- **Never widen it back to the whole browser.** The user may open, close and
+  navigate their own tabs mid-run; that is recorded as `tab_activity` and judged
+  not at all.
+- **`own_tabs.enforced` is computed from the ownership counters**, so "nothing
+  leaked" can be told apart from "this process opened no tabs, so nothing was
+  measured" -- the same field the quiet-input gate needed for the same reason.
+- **Both causes stay in the message.** A forgotten `close_tabs(..., owner_id=)`
+  and a close refused with `lifecycle generation changed` (Chrome discarded the
+  suite's own tab and `close_tabs` correctly would not close its replacement)
+  leave identical registry records and need different fixes.
 
 To assert that a tab really came to the front, use the `active` field from
 `list_all_tabs()`. Do **not** use `document.visibilityState`: it also reports

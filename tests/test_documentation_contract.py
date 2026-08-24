@@ -131,12 +131,22 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
         assert "gitleaks git . --no-banner --redact" in text
         assert "gitleaks dir . --no-banner --redact" in text
         # The live preconditions are enforced by a fixture now, so both guides
-        # have to name the override and stop telling readers to check the tab
+        # have to name the artifact and stop telling readers to check the tab
         # inventory by hand -- a guide that still asks for the manual step is a
         # guide that says the automated one does not exist.
-        assert "BTAP_LIVE_ALLOW_BUSY_BROWSER=1" in text
         assert "tests/live_preflight.py" in text
         assert "artifacts/live-preflight.json" in text
+        # And both have to say which claim the fixture actually makes. It fails a
+        # run only over a tab the suite opened itself; the user's tabs are theirs
+        # to open and close mid-run. A guide still promising "the inventory comes
+        # out the way it went in" sends the reader to blame the wrong thing, and
+        # the env var that used to downgrade that check no longer exists.
+        assert "BTAP_LIVE_ALLOW_BUSY_BROWSER" not in text
+        assert "_TAB_OWNERSHIP.outstanding()" in text
+        assert "lifecycle generation changed" in text
+        # `enforced` is the field that separates "nothing leaked" from "nothing
+        # was opened, so nothing was measured".
+        assert "own_tabs.enforced" in text
         # The third precondition is the one a reader cannot infer: two of the
         # three processes are long-lived, so a live pass can be a pass for code
         # that is not in the tree. A guide that omits it leaves the reader with

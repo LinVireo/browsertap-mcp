@@ -135,6 +135,11 @@ class _TabOwnershipRegistry:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._records: dict[str, dict[str, str]] = {}
+        # Lifetime totals, never decremented. `outstanding()` alone cannot tell
+        # "nothing was leaked" from "nothing was ever opened", and those two
+        # readings are not interchangeable for anybody auditing a run.
+        self._registered = 0
+        self._released = 0
 
     @staticmethod
     def _new_owner_id() -> str:
@@ -160,6 +165,7 @@ class _TabOwnershipRegistry:
         }
         with self._lock:
             self._records[sid] = record
+            self._registered += 1
         return dict(record)
 
     def validate(
@@ -209,6 +215,54 @@ class _TabOwnershipRegistry:
                 record = self._records.get(sid)
                 if record and record["owner_id"] == owner_id:
                     self._records.pop(sid, None)
+                    self._released += 1
+
+    def outstanding(self) -> list[dict[str, Any]]:
+        """Tabs this process opened and has not closed, without the capability.
+
+        `release` runs only after a close actually succeeded, so whatever is
+        left here is precisely "opened by this task, never cleaned up" -- the
+        one claim about a browser that can be made without inspecting anybody
+        else's tabs.  The owner_id is deliberately withheld: this is a read for
+        reporting, and a capability that is never handed out cannot leak into a
+        report or a published artifact.
+        """
+        with self._lock:
+            records = [dict(record) for record in self._records.values()]
+        out: list[dict[str, Any]] = []
+        for record in records:
+            try:
+                tab_id: Optional[int] = _split_session_target(record["session_id"])[1]
+            except ValueError:
+                # A reporting path must not raise on a malformed key; naming the
+                # session is already enough for the reader to act on.
+                tab_id = None
+            out.append(
+                {
+                    "session_id": record["session_id"],
+                    "tab_id": tab_id,
+                    "generation": record["generation"],
+                    "opener": record.get("opener", "agent"),
+                }
+            )
+        out.sort(key=lambda item: str(item["session_id"]))
+        return out
+
+    def counters(self) -> dict[str, int]:
+        """How much ownership this process has handled, for reports.
+
+        `outstanding()` returning nothing is the same shape as never having
+        opened a tab at all, and a check that cannot distinguish those two says
+        nothing when it measured nothing -- the failure mode `enforced` exists
+        for on the quiet-input gate and `files_scanned` on the lint gate. These
+        counters are what a reader compares against.
+        """
+        with self._lock:
+            return {
+                "registered": self._registered,
+                "released": self._released,
+                "outstanding": len(self._records),
+            }
 
 
 _TAB_OWNERSHIP = _TabOwnershipRegistry()
@@ -2902,7 +2956,9 @@ def console_capture_stop(
 @mcp.tool(
     description=(
         "Read the current page as simplified HTML/text, preserving login state from the real "
-        "browser. Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
+        "browser. cutlist collapses long repeated lists and marks the container it collapsed "
+        "with a data-btap-list attribute on the live page, the only thing this tool writes. "
+        "Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
     )
 )
 def scan_page(

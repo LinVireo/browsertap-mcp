@@ -2,8 +2,9 @@
 
 The checks themselves need a browser; their reasoning does not, which is why it
 lives in a pure module. What is pinned here is the part that used to be a
-maintainer's judgement: what counts as a browser someone is using, what counts as
-the suite having disturbed it, and that the two verdicts are not the same one.
+maintainer's judgement: which claims the live layer is allowed to make about a
+browser it shares with a person, and that the only one it fails a run over is
+about tabs it opened itself.
 """
 
 from __future__ import annotations
@@ -14,6 +15,20 @@ from tests import live_preflight as P
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFTEST = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+
+
+def _helper_source(name: str) -> str:
+    """One top-level definition from conftest, bounded by the next one.
+
+    Slicing to a *named* later anchor widens silently the moment something is
+    inserted in between, and it does not fail -- it quietly starts asserting
+    about more code. That happened here: adding `_owned_tabs` between
+    `_setup_status` and the `driver` fixture grew `_setup_status`'s slice and
+    broke a count that was still correct about the function it named. Ending at
+    the next top-level `def` or decorator is what the assertions actually mean.
+    """
+    body = CONFTEST.split(f"\ndef {name}(", 1)[1]
+    return body.split("\ndef ", 1)[0].split("\n@", 1)[0]
 
 
 def _tabs(*specs: tuple[int, str, bool]) -> list[dict[str, object]]:
@@ -76,8 +91,7 @@ def test_an_untouched_browser_produces_no_difference():
     assert diff["opened"] == [] and diff["closed"] == [] and diff["navigated"] == []
     assert diff["focus_moved"] is None
     assert (diff["tabs_before"], diff["tabs_after"]) == (2, 2)
-    assert P.busy_browser_reason(diff) is None
-    assert P.drift_problem(diff) is None
+    assert P.busy_browser_note(diff) is None
 
 
 def test_each_kind_of_change_is_reported_as_itself():
@@ -133,10 +147,10 @@ def test_a_blank_url_is_still_named_in_the_description():
 
 
 def test_focus_moving_on_its_own_means_a_human_is_there():
-    """Nothing was damaged, so it is not drift -- but it is not an idle browser.
+    """Proof a person is present when the tab set did not move at all.
 
-    The suite raises tabs itself, which is why the two verdicts differ on
-    exactly this case.
+    Reported apart from the tab set because the suite raises tabs itself, so
+    focus moving is not on its own evidence that anybody did anything.
     """
     before = P.inventory(_tabs((1, "https://a.example/", True), (2, "https://b.example/", False)))
     after = P.inventory(_tabs((1, "https://a.example/", False), (2, "https://b.example/", True)))
@@ -145,44 +159,125 @@ def test_focus_moving_on_its_own_means_a_human_is_there():
 
     assert diff["changed"] is True
     assert diff["disturbed"] is False
-    assert P.busy_browser_reason(diff) is not None
-    assert P.drift_problem(diff) is None
+    assert P.busy_browser_note(diff) is not None
 
 
-def test_the_busy_message_says_what_moved_and_how_to_proceed_anyway():
+def test_the_busy_note_says_what_moved_and_that_it_is_allowed():
+    """It used to end with an env var to set. There is nothing to set now: a
+    browser in use is not a reason to withhold the live layer from it."""
     diff = P.compare({}, P.inventory(_tabs((1, "https://new.example/", True))))
 
-    reason = P.busy_browser_reason(diff)
+    note = P.busy_browser_note(diff)
 
-    assert "the browser is in use" in reason
-    assert "opened: 1 (https://new.example/)" in reason
-    assert str(P.IDLE_WINDOW_SECONDS) in reason
-    assert P.OVERRIDE_ENV in reason
-
-
-def test_the_drift_message_carries_both_counts_and_the_ambiguity():
-    before = P.inventory(_tabs((1, "https://a.example/", True), (2, "https://b.example/", False)))
-    after = P.inventory(_tabs((1, "https://a.example/", True)))
-
-    problem = P.drift_problem(P.compare(before, after))
-
-    assert "did not leave the browser as it found it" in problem
-    assert "(2 tabs before, 1 after)" in problem
-    assert "closed: 2 (https://b.example/)" in problem
-    # The maintainer notes say it themselves: rule out a human before believing
-    # the fixtures leaked.
-    assert "A fixture leak and a human using the browser look identical" in problem
+    assert "the browser was in use" in note
+    assert "opened: 1 (https://new.example/)" in note
+    assert str(P.IDLE_WINDOW_SECONDS) in note
+    assert "That is allowed -- these are the user's tabs." in note
+    assert "noisier" in note
 
 
-def test_a_tab_that_came_back_under_a_new_id_is_not_a_leak():
+def test_the_users_own_tabs_cannot_fail_the_run_and_the_suites_own_tab_can():
+    """The whole point of the rescope, as one comparison.
+
+    Before this, three scenarios produced one identical verdict: a person opening
+    a tab of their own, a person closing a tab of their own, and the suite leaking
+    its own scratch tab. A check that cannot separate those attributes nothing --
+    the reader is told the browser changed, which they already knew, and not who
+    changed it. Who opened a tab is not in a diff of the browser; it is in the
+    ownership registry, so that is where the verdict comes from now.
+    """
+    baseline = P.inventory(_tabs((1, "https://mine.example/", True), (2, "https://also.example/", False)))
+
+    user_opened = P.inventory(
+        _tabs((1, "https://mine.example/", True), (2, "https://also.example/", False),
+              (3, "https://theirs.example/", False))
+    )
+    user_closed = P.inventory(_tabs((1, "https://mine.example/", True)))
+    user_navigated = P.inventory(
+        _tabs((1, "https://elsewhere.example/", True), (2, "https://also.example/", False))
+    )
+
+    for after in (user_opened, user_closed, user_navigated):
+        # Recorded in full, so a reader still sees it beside any failure...
+        assert P.compare(baseline, after)["disturbed"] is True
+        # ...and judged not at all, because the suite owns none of these tabs.
+        assert P.leaked_tab_problem([], after.values()) is None
+
+    # The one shape that does fail is not visible in any of those diffs: an
+    # unclosed tab this task opened. Note that the browser here is *identical*
+    # to the baseline -- the tab is still sitting in it, counted as unchanged.
+    leaked = [{"session_id": "chrome:profile:2", "tab_id": 2, "generation": "gen-a"}]
+    problem = P.leaked_tab_problem(leaked, baseline.values())
+
+    assert problem is not None
+    assert "left 1 tab(s) it opened behind" in problem
+
+
+def test_a_leaked_tab_still_in_the_browser_is_named_with_its_session():
+    outstanding = [
+        {"session_id": "chrome:profile:9", "tab_id": 9, "generation": "gen-a"},
+        {"session_id": "chrome:profile:10", "tab_id": 10, "generation": "gen-b"},
+    ]
+    tabs = _tabs((9, "https://left.example/", False), (10, "https://also-left.example/", False))
+
+    problem = P.leaked_tab_problem(outstanding, tabs)
+
+    assert "left 2 tab(s) it opened behind" in problem
+    assert "chrome:profile:9 (generation gen-a): still open in the browser" in problem
+    assert "chrome:profile:10 (generation gen-b): still open in the browser" in problem
+    assert "must be closed with the owner_id it returned" in problem
+    assert "Nothing here is about the user's own tabs" in problem
+
+
+def test_a_leaked_tab_that_left_the_browser_names_the_refused_close():
+    """The cause that is not a forgotten close, and needs a different fix.
+
+    Chrome discarded the suite's own tab and restored it under a new id, so
+    `close_tabs` refused it with `lifecycle generation changed` and released
+    nothing. The record is outstanding and the tab id is not in the browser any
+    more -- which is exactly what distinguishes this from a missing close_tabs.
+    """
+    outstanding = [{"session_id": "chrome:profile:9", "tab_id": 9, "generation": "gen-old"}]
+
+    problem = P.leaked_tab_problem(outstanding, _tabs((11, "https://restored.example/", True)))
+
+    assert "no longer in the browser" in problem
+    assert "lifecycle generation changed" in problem
+
+
+def test_a_leak_verdict_with_no_inventory_says_so_rather_than_guessing():
+    """An unread sample is "not checked", never "not in the browser".
+
+    The inventory read can fail on its own (the fixture records that and carries
+    on), and reporting a tab as gone on the strength of a sample nobody took is
+    the same vacuous shape this module exists to avoid. The leak is still
+    reported: the registry alone is enough to know a close is owed.
+    """
+    outstanding = [{"session_id": "chrome:profile:9", "tab_id": 9, "generation": "gen-a"}]
+
+    problem = P.leaked_tab_problem(outstanding, None)
+
+    assert "left 1 tab(s) it opened behind" in problem
+    assert "not checked" in problem
+    assert "lifecycle generation changed" not in problem
+
+
+def test_no_outstanding_tabs_is_no_problem_even_with_unreadable_input():
+    """Runs in teardown, where raising would replace the suite's own result."""
+    assert P.leaked_tab_problem([], _tabs((1, "https://a.example/", True))) is None
+    assert P.leaked_tab_problem(None, None) is None
+    assert P.leaked_tab_problem(["nonsense", None], None) is None
+
+
+def test_a_tab_that_came_back_under_a_new_id_is_reported_as_the_same_tab():
     """Chrome discarding a background tab used to fail the end-of-run check.
 
     Memory saver restores the page under a new tab id, so the inventory shows one
-    close and one open at the same URL with the tab count unchanged -- identical
-    in shape to the suite closing someone's tab and leaving its own behind.
-    Measured in a seal run: three tabs nobody had touched failed the check this
-    way. The idle check must still trip on it, because a browser reorganising
-    itself is a moving target; the damage verdict must not.
+    close and one open at the same URL with the tab count unchanged. Measured in
+    a seal run: three tabs nobody had touched failed the check this way. Nothing
+    fails over it now, and the pairing is still computed -- it is what tells a
+    refused close apart from a forgotten one when the discarded tab was the
+    suite's own.
     """
     before = P.inventory(_tabs((1, "https://kept.example/", True), (2, "https://saved.example/", False)))
     after = P.inventory(_tabs((1, "https://kept.example/", True), (7, "https://saved.example/", False)))
@@ -192,28 +287,15 @@ def test_a_tab_that_came_back_under_a_new_id_is_not_a_leak():
     assert diff["reidentified"] == [
         {"url": "https://saved.example/", "was": "2", "now": "7", "title": "tab 7"}
     ]
-    assert diff["damaged"] is False
-    assert P.drift_problem(diff) is None
-    # ...and the idle check keeps its stricter reading of the same two samples.
+    assert diff["unpaired_opened"] == [] and diff["unpaired_closed"] == []
+    # The idle window keeps its stricter reading of the same two samples: a
+    # browser reorganising itself is still a moving target to measure against.
     assert diff["disturbed"] is True and diff["changed"] is True
-    assert P.busy_browser_reason(diff) is not None
-
-
-def test_a_re_identified_tab_does_not_cover_for_a_real_leak():
-    before = P.inventory(_tabs((1, "https://saved.example/", True)))
-    after = P.inventory(
-        _tabs((8, "https://saved.example/", True), (9, "https://leaked.example/", False))
-    )
-
-    problem = P.drift_problem(P.compare(before, after))
-
-    assert "opened: 9 (https://leaked.example/)" in problem
-    assert "saved.example" not in problem  # the pair is context, not damage
-    assert "(1 more tab(s) only changed id, not counted)" in problem
+    assert P.busy_browser_note(diff) is not None
 
 
 def test_pairing_a_re_identified_tab_is_one_to_one():
-    """Two tabs closed at one URL and one opened there is still a lost tab."""
+    """Two tabs closed at one URL and one opened there leaves a close over."""
     before = P.inventory(
         _tabs((1, "https://twice.example/", True), (2, "https://twice.example/", False))
     )
@@ -222,8 +304,8 @@ def test_pairing_a_re_identified_tab_is_one_to_one():
     diff = P.compare(before, after)
 
     assert len(diff["reidentified"]) == 1
-    assert [tab["id"] for tab in diff["damage"]["closed"]] == ["2"]
-    assert diff["damaged"] is True
+    assert [tab["id"] for tab in diff["unpaired_closed"]] == ["2"]
+    assert diff["unpaired_opened"] == []
 
 
 def test_an_unknown_url_is_not_evidence_that_two_tabs_are_one():
@@ -231,7 +313,29 @@ def test_an_unknown_url_is_not_evidence_that_two_tabs_are_one():
     diff = P.compare(P.inventory([{"id": 5}]), P.inventory([{"id": 6}]))
 
     assert diff["reidentified"] == []
-    assert diff["damaged"] is True
+    assert [tab["id"] for tab in diff["unpaired_closed"]] == ["5"]
+    assert [tab["id"] for tab in diff["unpaired_opened"]] == ["6"]
+
+
+def test_the_diff_no_longer_offers_a_verdict_to_read_by_mistake():
+    """A reverse gate on the rescope itself.
+
+    `damaged` was the flag that failed a run over the user's tabs. Leaving it in
+    the payload -- even unread by the fixture -- is an invitation for the next
+    reader to reach for it, and `artifacts/live-preflight.json` publishes every
+    key here as if it meant something.
+    """
+    diff = P.compare(
+        P.inventory(_tabs((1, "https://a.example/", True))),
+        P.inventory(_tabs((2, "https://b.example/", True))),
+    )
+
+    assert "damaged" not in diff
+    assert "damage" not in diff
+    assert not hasattr(P, "drift_problem")
+    assert not hasattr(P, "busy_browser_reason")
+    # And nothing may reintroduce a skip over a browser somebody else is using.
+    assert "OVERRIDE_ENV" not in dir(P)
 
 
 def test_the_fields_read_here_are_the_fields_the_extension_sends():
@@ -250,38 +354,68 @@ def test_the_fields_read_here_are_the_fields_the_extension_sends():
     )
 
 
-def test_the_live_fixture_samples_twice_and_acts_on_both_verdicts():
+def test_the_live_fixture_samples_twice_and_acts_on_the_one_verdict_it_owns():
     """A preflight nothing calls is prose with extra steps."""
     fixture = CONFTEST.split("def driver()", 1)[1]
 
     assert "time.sleep(P.IDLE_WINDOW_SECONDS)" in fixture
     assert fixture.count("_tab_inventory(record)") == 3  # first, baseline, final
-    assert "P.busy_browser_reason(idle)" in fixture
-    assert "pytest.skip(reason)" in fixture
-    assert "P.drift_problem(drift)" in fixture
+    assert "P.busy_browser_note(idle)" in fixture
+    assert "P.leaked_tab_problem(" in fixture
     assert "raise AssertionError(problem)" in fixture
     # The verdict is reached in teardown, so it must be reached even when a live
-    # test failed: a suite that closed a user tab has to say so either way.
+    # test failed: a suite that leaked one of its own tabs has to say so either way.
     assert "finally:" in fixture.split("yield d", 1)[1]
+
+
+def test_the_fixture_reads_ownership_from_the_product_not_from_a_diff():
+    """One implementation of "who opened this tab", and it is the product's.
+
+    Deriving it a second time in the test layer is how the previous version got
+    it wrong: an inventory diff was the only source, and it does not contain the
+    answer at all.
+    """
+    fixture = CONFTEST.split("def driver()", 1)[1]
+
+    assert "_TAB_OWNERSHIP.outstanding()" in CONFTEST
+    assert "_TAB_OWNERSHIP.counters()" in CONFTEST
+    assert "_owned_tabs(record)" in fixture
+    # The counters are part of the verdict, not decoration: without them
+    # "nothing outstanding" cannot be told from "nothing was ever opened".
+    assert '"enforced": counters.get("registered", 0) > 0' in fixture
+
+
+def test_the_users_tabs_are_recorded_and_nothing_gates_on_them():
+    """The rescope, pinned against the fixture that has to keep honouring it.
+
+    A skip here would be the previous behaviour returning: it read the user's
+    tabs to decide whether the suite may run at all.
+    """
+    fixture = CONFTEST.split("def driver()", 1)[1]
+
+    assert '"tab_activity"' in fixture
+    assert '"browser_idle"' in fixture
+    assert "pytest.skip" not in fixture.split("_setup_status(record)", 1)[1]
+    assert "warnings" not in fixture
+    assert "live-preflight.json" in CONFTEST
 
 
 def test_an_unreadable_inventory_does_not_fail_the_live_layer():
     """The manual step this replaces could not fail a run either."""
-    reader = CONFTEST.split("def _tab_inventory", 1)[1].split("def _write_live_preflight", 1)[0]
+    reader = _helper_source("_tab_inventory")
 
     assert "except Exception as exc:" in reader
     assert reader.count("return None") == 2
     assert 'record["notes"].append' in reader
 
 
-def test_the_override_is_recorded_rather_than_silent():
-    """Evidence produced against a browser in use has to say that it was."""
-    fixture = CONFTEST.split("def driver()", 1)[1]
+def test_an_unreadable_ownership_registry_does_not_fail_the_live_layer():
+    """Being unable to ask is not evidence of a leak."""
+    reader = _helper_source("_owned_tabs")
 
-    assert "P.OVERRIDE_ENV" in fixture
-    assert '"override": override' in fixture
-    assert "warnings.warn(problem" in fixture
-    assert "live-preflight.json" in CONFTEST
+    assert "except Exception as exc:" in reader
+    assert "return None" in reader
+    assert 'record["notes"].append' in reader
 
 
 # One `get_setup_status()` answer with nothing wrong with it, copied and spoiled
@@ -537,7 +671,7 @@ def test_the_live_fixture_refuses_a_stale_build_instead_of_skipping_it():
 
 def test_an_unreadable_component_status_is_a_note_rather_than_a_failure():
     """The reader follows `_tab_inventory`, including how it gives up."""
-    reader = CONFTEST.split("def _setup_status", 1)[1].split("@pytest.fixture", 1)[0]
+    reader = _helper_source("_setup_status")
 
     assert "except Exception as exc:" in reader
     assert reader.count("return None") == 2
@@ -647,3 +781,28 @@ def test_the_live_suite_never_hands_a_remembered_tab_id_back_to_the_browser():
     # And no assertion may compare against the sampled id either.
     assert 'original_active["id"]' not in LIVE_SUITE
     assert "original['id']" not in LIVE_SUITE
+
+
+def test_the_live_suite_only_ever_closes_tabs_it_opened():
+    """The other half of "the user's tabs are theirs", pinned at the source.
+
+    The teardown verdict is now built entirely from the ownership registry, and
+    that only means anything while every close in the live suite goes through
+    ownership. `only_if_agent_owned=False` is the documented operator escape
+    hatch in `close_tabs`; a live test reaching for it would close a real
+    person's tab, and no offline test can see that happen.
+
+    Pinned as source text for the same reason as its neighbour above: these
+    tests only run against a real browser.
+    """
+    assert "only_if_agent_owned" not in LIVE_SUITE
+    # Every close names the capability the matching open_new_tab handed back, so
+    # a close can never outnumber the opens that authorised one.
+    opens = LIVE_SUITE.count("S.open_new_tab(")
+    closes = LIVE_SUITE.count("S.close_tabs(")
+    assert opens > 0, "the reverse gate measured nothing"
+    assert closes == LIVE_SUITE.count('owner_id=created.get("owner_id")')
+    assert closes == opens, (opens, closes)
+    # The shared scratch tab is the one open that lives in the fixture instead.
+    assert CONFTEST.count("S.open_new_tab(") == 1
+    assert "S.close_tabs(sid, session_id=sid, owner_id=owner_id)" in CONFTEST

@@ -105,22 +105,31 @@ reasoning):
   restarting the bridge is a single command.
 - Before the first live test it samples the tab list twice, 1.5s apart. If a tab
   was opened, closed, navigated or focused in between, someone is using that
-  browser and the whole live layer is skipped rather than run against a moving
-  target. A skip is not a pass -- `scripts/acceptance_report.py` fails the live
-  gate on any skipped case.
-- After the last one it compares the inventory against that baseline. A tab the
-  suite left behind, closed, or navigated fails the run in teardown. The
-  foreground moving does not: the suite raises tabs on purpose.
-- Every verdict, the build each of the three processes was running, and whether
-  the browser was idle at all, are written to `artifacts/live-preflight.json`,
-  which `live.yml` uploads with the junit and the evidence manifest hashes
-  alongside it. That binding is what stops a seal pairing a passing suite with
-  a preflight record left over from an older run: a live seal with no such file
-  fails naming it rather than sealing the half that happens to exist.
-
-Set `BTAP_LIVE_ALLOW_BUSY_BROWSER=1` to run anyway on a machine that is never
-idle; the end-of-run check drops to a warning and the report records that the
-evidence was produced against a browser in use.
+  browser -- which is recorded and changes nothing else. It used to skip the
+  whole live layer, and that was wrong twice over: it read the user's tabs to
+  decide whether the suite may run at all, and on a machine whose browser is
+  never idle it meant the live layer never ran. The observation is kept because
+  a browser in use makes the timing-sensitive cases noisier, which is the first
+  thing to check beside an odd failure.
+- After the last one, the only thing that fails the run is a tab **the suite
+  itself opened and never closed**, read from the product's own ownership
+  registry (`server._TAB_OWNERSHIP.outstanding()`). The user's tabs are theirs:
+  opening, closing and navigating them during a run is expected and is recorded
+  as context under `tab_activity`. An inventory diff cannot tell those apart --
+  a person opening a tab, a person closing one, and the suite leaking its own
+  scratch tab all produced the identical verdict before this, so the verdict
+  attributed nothing. Both causes of a real leak are named in the failure: a
+  forgotten `close_tabs(..., owner_id=...)`, or a close that was refused with
+  `lifecycle generation changed` after Chrome discarded the suite's own tab.
+- Every verdict, the build each of the three processes was running, whether the
+  browser was idle at all, and `own_tabs.counters` are written to
+  `artifacts/live-preflight.json`, which `live.yml` uploads with the junit and
+  the evidence manifest hashes alongside it. Read `own_tabs.enforced` before
+  reading the leak check as a pass: it is False when this process opened no tabs
+  at all, which is not the same fact as nothing having leaked. That binding is
+  what stops a seal pairing a passing suite with a preflight record left over
+  from an older run: a live seal with no such file fails naming it rather than
+  sealing the half that happens to exist.
 
 The public `test.yml` workflow runs only offline gates on GitHub-hosted runners.
 `live.yml` is manual-only and targets a prepared self-hosted Windows runner. Set

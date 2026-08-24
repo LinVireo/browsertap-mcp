@@ -6,6 +6,47 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+### Added
+
+- `server._TAB_OWNERSHIP.outstanding()` and `.counters()` expose, read-only, which
+  tabs this process opened and has not closed. `release` runs only after a close
+  actually succeeded, so what is left is exactly "opened by this task, never
+  cleaned up" -- the one claim about a browser that can be made without inspecting
+  anybody else's tabs. `outstanding()` deliberately withholds the `owner_id`: it
+  feeds a report, and a capability that is never handed out cannot leak into a
+  published artifact.
+- The counters are lifetime totals that are never decremented, and
+  `artifacts/live-preflight.json` publishes them next to `own_tabs.enforced`.
+  `outstanding()` alone cannot tell "nothing was leaked" from "nothing was ever
+  opened", and those two readings are not interchangeable for anybody auditing a
+  run -- the same trade already made by `input_quiet.enforced` and `on_screen`.
+
+### Changed
+
+- The live preflight now fails a run over one thing only: a tab the suite opened
+  and did not close, read from that registry. The previous rule required the tab
+  inventory to come out the way it went in, which made a claim about tabs the
+  suite never touched. A user opening a tab, a user closing one, and the suite
+  leaking its own scratch tab all produced the *same* verdict, so the verdict
+  attributed nothing -- and the two people it accused were mostly the browser's
+  owner. What the browser did during a run is still recorded, as `tab_activity`,
+  as context.
+- A leak message names both causes, because they need different fixes: a missing
+  `close_tabs(..., owner_id=...)`, or Chrome discarding and restoring the suite's
+  own tab so that the close was refused with `lifecycle generation changed`.
+- The busy-browser sample is a note rather than a gate. It used to skip the whole
+  live layer, which is wrong twice over: it let the user's tabs decide whether the
+  suite may run at all, and on a machine whose browser is never idle it meant the
+  live layer stopped running. It is kept because a browser in use makes
+  timing-sensitive cases flakier, so it is the first thing to read when one fails
+  oddly.
+
+### Removed
+
+- `BTAP_LIVE_ALLOW_BUSY_BROWSER`. It existed to bypass the busy-browser skip and
+  the inventory check, and both of those are gone -- leaving the variable would
+  have left a knob that no longer does anything, which is worse than no knob.
+
 ## [0.4.13] - 2026-08-24
 
 ### Added
