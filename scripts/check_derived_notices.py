@@ -114,7 +114,7 @@ def _normalised(relative: str, lines: list[str]) -> list[str]:
 def file_digest(path: Path, relative: str = "") -> str:
     """Hash the file's *lines*, so a checkout's line endings do not change it.
 
-    `.gitattributes` pins all nine of these extensions to LF, so a clone is LF
+    `.gitattributes` pins every tracked path to LF, so a clone is LF
     -- but a tree that arrives another way is not. An export without the
     attributes file, an editor configured for CRLF, or a script that round-trips
     a file through Python's text mode on Windows all produce CRLF, and the last

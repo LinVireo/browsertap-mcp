@@ -466,6 +466,26 @@ the assertion turns flaky.
   `eslint.config.mjs` in the same change -- the floor is what turns forgetting
   that into a red gate instead of a silent one.
 
+- **Line endings are a correctness property here, not a formatting one.** The
+  release seal hashes the *raw bytes* of every tracked file
+  (`evidence_manifest.source_identity`), so a CRLF working copy gives
+  `content_sha256` a value nobody else can reproduce -- not even from a clone
+  of the commit it names -- and nothing in the sealed record mentions line
+  endings, so the first reader to notice is a third party who cannot verify
+  it. Two tests in `tests/test_evidence_manifest.py` hold that down, and they
+  are not the same check. One asks **git** whether an `eol` attribute governs
+  every tracked path: `.gitattributes` is a single `* text=auto eol=lf` rule
+  because the suffix list it replaced had lost three times (`*.mjs`, `*.yml`
+  and `*.toml` appended late, `.yaml` never covered) and no suffix can cover
+  `LICENSE` or `.gitignore` at all -- measured at 0.4.15, five tracked paths
+  were ungoverned and a fresh clone of the sealed commit differed from the
+  worktree in three of them. The other fails if any tracked text file in the
+  worktree holds CRLF, because the attribute governs a *checkout* while a
+  local tool can undo it afterwards: `Path.write_text` translates on Windows,
+  which is how `check_derived_notices.py --write` did it to its own source and
+  how a `ruff format` with `line-ending = auto` did it to 21 files at once.
+  Neither test can be satisfied by the other, so do not fold them together.
+
 - **Editing a derived file is a two-step operation now.** Eight files here are
   derived from GenericAgent, and `THIRD-PARTY-NOTICES.md` states line-for-line how
   much of each upstream file survives. Those figures can only be measured against
@@ -492,9 +512,10 @@ the assertion turns flaky.
 
   Two things about that hash are load-bearing, and both exist to stop the gate
   from crying wolf, because a gate that goes red on noise is one people learn to
-  route around. It hashes `"\n".join(splitlines())` rather than bytes: every one
-  of these extensions is pinned to LF by `.gitattributes`, so a clone is LF, but a
-  tree that arrives another way is not -- and a script that round-trips a file
+  route around. It hashes `"\n".join(splitlines())` rather than bytes: every tracked
+  path is pinned to LF by `.gitattributes` -- one `* text=auto eol=lf` rule, since
+  the suffix list it replaced could not cover an extensionless file -- so a clone is
+  LF on any host, but a tree that arrives another way is not -- and a script that round-trips a file
   through Python's text mode on Windows produces CRLF, which is how 21 tracked
   files in this repository came to hold it at once. And it is **blind to
   `manifest.json`'s own version string**, the one line `versioning bump` rewrites
