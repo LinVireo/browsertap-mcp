@@ -121,6 +121,18 @@ def test_get_main_block_forwards_options_and_normalizes_text():
     assert kwargs == {"timeout": 7, "allow_failover": True, "session_id": "chrome:9"}
 
 
+def test_text_normalisation_covers_the_whitespace_a_page_actually_carries():
+    """Tabs and trailing spaces, which a space-run pass leaves exactly in place.
+
+    Text lifted off a real page is full of both -- a tab between two table cells,
+    a trailing space after a heading -- and they cost the same tokens as any other
+    character while carrying nothing. This is the half that separates asking
+    `str.split` what the words are from matching runs of one specific character.
+    """
+    driver = QueueDriver([{"data": "one\t\ttwo   \n\tthree \t\n\n\n\n four\t"}])
+    assert S.get_main_block(driver, text_only=True) == "one two\nthree\n\nfour"
+
+
 @pytest.mark.parametrize(
     "response, message",
     [
@@ -516,12 +528,16 @@ def test_execute_js_rich_after_ack_does_not_retry():
     assert "wait_for" in result["suggestion"]
 
 
-def _run_temp_monitor_harness(body: str) -> dict:
+def _run_temp_monitor_harness(body: str, extra_scripts: str = "") -> dict:
     """Drive the injected monitor script under node with a fake DOM and clock.
 
     Real timers would make this slow and flaky, so `setInterval` is replaced by
     a manual queue and `Date.now` by a settable counter: `advance(ms)` moves the
     clock and fires one tick, which is all the expiry logic needs.
+
+    `textNodes` is the page's text, and the body may push to it and pop from it
+    between ticks -- which is the only way to make text appear and then vanish,
+    and so the only way to test what the monitor is *for*.
     """
     harness = """
         let now = 1000000;
@@ -539,12 +555,18 @@ def _run_temp_monitor_harness(body: str) -> dict:
         };
         globalThis.window = globalThis;
         SCRIPT_UNDER_TEST
+        EXTRA_SCRIPTS
         BODY
     """
     # The builder appends its own `startStrMonitor(...)` call; each test drives
     # the function directly so it can control the lifetime it passes.
     declaration = S.build_temp_monitor_js(10).replace("startStrMonitor(450, 10000);", "")
-    script = harness.replace("SCRIPT_UNDER_TEST", declaration).replace("BODY", body)
+    script = (
+        harness
+        .replace("SCRIPT_UNDER_TEST", declaration)
+        .replace("EXTRA_SCRIPTS", extra_scripts)
+        .replace("BODY", body)
+    )
     handle, path = tempfile.mkstemp(suffix=".js")
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
@@ -646,6 +668,82 @@ def test_temp_monitor_js_is_syntactically_valid_javascript(tmp_path):
     script.write_text(S.build_temp_monitor_js(3), encoding="utf-8")
     completed = subprocess.run(
         ["node", "--check", str(script)], capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr.strip()
+
+
+def test_the_transient_read_returns_what_came_and_went_and_nothing_else():
+    """The read is the only reason the monitor is allowed to walk a real page.
+
+    A 450ms full-document TreeWalker on somebody's page is an expensive, invasive
+    thing, and it earns that only by catching text a snapshot cannot: text that
+    appeared and is gone again. So all three other categories have to be absent
+    from the answer, and each of them is a distinct way of getting this wrong --
+    text that was already there is not news, text still on the page is in the
+    HTML the caller gets beside this list, and reporting a still-visible message
+    as transient tells an agent the opposite of the truth about it.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        textNodes.push({textContent: 'saving your changes please wait'});
+        advance(500);
+        textNodes.pop();
+        textNodes.push({textContent: 'email is required and stays'});
+        advance(500);
+        const transients = readStrMonitor();
+        console.log(JSON.stringify({
+            transients,
+            live: !!window.__btap_tm,
+            timers: timers.size,
+            secondRead: readStrMonitor(),
+        }));
+        """,
+        extra_scripts=S._MONITOR_READ_JS.replace("readStrMonitor();", ""),
+    )
+    # Only the one that vanished. `extract` keys on the first 20 characters.
+    assert report["transients"] == ["saving your changes "]
+    # The read is also the stop: nothing left ticking, nothing left on the page.
+    assert report["live"] is False
+    assert report["timers"] == 0
+    # And a second read cannot resurrect it or throw.
+    assert report["secondRead"] == []
+
+
+def test_discarding_the_monitor_reports_whether_there_was_one():
+    """The discard path has no reader for its answer, which is why it is checked.
+
+    `stop_temp_monitor` throws the value away, so nothing in production notices
+    if this stops clearing the interval -- and the paths that call it are exactly
+    the ones with no budget left for a second roundtrip.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        const stopped = discardStrMonitor();
+        console.log(JSON.stringify({
+            stopped,
+            live: !!window.__btap_tm,
+            timers: timers.size,
+            again: discardStrMonitor(),
+        }));
+        """,
+        extra_scripts=S._MONITOR_DISCARD_JS.replace("discardStrMonitor();", ""),
+    )
+    assert report["stopped"] is True
+    assert report["live"] is False
+    assert report["timers"] == 0
+    assert report["again"] is False
+
+
+@pytest.mark.parametrize(
+    "script", ["_MONITOR_READ_JS", "_MONITOR_DISCARD_JS"], ids=["read", "discard"]
+)
+def test_both_monitor_scripts_are_syntactically_valid_javascript(script, tmp_path):
+    path = tmp_path / f"{script}.js"
+    path.write_text(getattr(S, script), encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(path)], capture_output=True, text=True
     )
     assert completed.returncode == 0, completed.stderr.strip()
 

@@ -195,6 +195,123 @@ def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
     assert data["distribution_summary"] == "2 manifest-bound archive(s) validated"
 
 
+def test_every_weighted_gate_names_what_it_measured(monkeypatch, tmp_path):
+    """A verdict with no measurement is the shape four of these gates shipped as.
+
+    ruff over a path that matched nothing, eslint whose `files:` pattern had
+    stopped matching, a coverage payload with no per-file section, a distribution
+    check with no archives bound -- each reported zero problems and each was
+    measuring nothing. The fixes were local, so the tenth gate would have started
+    out unprotected all over again. This asserts the structural half: every gate
+    in the weight table produces a non-empty description of what it read, and the
+    report publishes it next to the verdict so it has a reader.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+
+    data = A.build_report_data()
+    measurements = data["gate_measurements"]
+
+    assert data["gate_structure_problems"] == []
+    # Keyed off the weight table, not a list typed here: a gate added to the
+    # table without a measurement has to fail this rather than be forgotten.
+    assert set(measurements) == set(A.GATE_WEIGHTS)
+    for name in A.GATE_WEIGHTS:
+        assert measurements[name].strip(), name
+        assert measurements[name] not in {"nothing measured", "gate not evaluated"}, name
+
+    text = A.render_report(data)
+    for name in A.GATE_WEIGHTS:
+        assert f"| `{name}` | {A.GATE_WEIGHTS[name]} | PASS | {measurements[name]} |" in text
+
+
+def test_a_gate_that_passes_without_naming_a_measurement_is_scored_fail():
+    """The guard itself, driven directly, because the real gates all comply.
+
+    Only a mutation can prove this one fires, and mutating a real gate would
+    prove it for that gate alone. Calling the guard with a blank measurement is
+    the whole point: `True` is not enough, and the reason has to be published
+    rather than swallowed.
+    """
+    passing = {name: (True, f"read {name}") for name in A.GATE_WEIGHTS}
+    victim = next(iter(A.GATE_WEIGHTS))
+
+    gates, measurements, problems = A._finalize_gates({**passing, victim: (True, "   ")})
+
+    assert gates[victim] is False
+    assert measurements[victim] == "nothing measured"
+    assert any(victim in problem and "without naming" in problem for problem in problems)
+    # Every other gate is untouched, so the guard is not a blanket refusal.
+    assert all(gates[name] for name in A.GATE_WEIGHTS if name != victim)
+
+
+def test_a_weighted_gate_nobody_evaluated_is_a_hole_not_a_pass():
+    """A gate absent from the results used to be a KeyError or a silent skip.
+
+    Neither is right: the weight is still in the denominator, so the score has
+    to lose those points and say why.
+    """
+    victim = next(iter(A.GATE_WEIGHTS))
+    partial = {name: (True, f"read {name}") for name in A.GATE_WEIGHTS if name != victim}
+
+    gates, measurements, problems = A._finalize_gates(partial)
+
+    assert set(gates) == set(A.GATE_WEIGHTS)
+    assert gates[victim] is False
+    assert measurements[victim] == "gate not evaluated"
+    assert any(victim in problem and "never evaluated" in problem for problem in problems)
+
+
+def test_a_gate_with_no_weight_is_reported_as_having_no_reader():
+    """The other direction, and the one this repository has met four times.
+
+    A check that runs, reports, and carries no weight leaves the score identical
+    whether it passed or failed -- so the weight table is the authority on what
+    exists, and an extra result is a defect in the wiring rather than a bonus.
+    """
+    passing = {name: (True, f"read {name}") for name in A.GATE_WEIGHTS}
+
+    gates, measurements, problems = A._finalize_gates(
+        {**passing, "supply_chain": (True, "audited 41 dependencies")}
+    )
+
+    assert set(gates) == set(A.GATE_WEIGHTS)
+    assert "supply_chain" not in measurements
+    assert any("supply_chain" in problem and "no weight" in problem for problem in problems)
+
+
+def test_a_structural_problem_forfeits_the_release_even_with_every_gate_green(
+    monkeypatch, tmp_path
+):
+    """`release_ready` cannot be true over a table that cannot vouch for itself.
+
+    Scoring the points and refusing the release are different questions: a gate
+    whose measurement is missing may still have passed, so the honest answer is
+    that the report does not know -- and the reason belongs in the rendered
+    document, not only in the JSON nobody opens.
+    """
+    _seal_release_evidence(monkeypatch, tmp_path)
+    real = A._finalize_gates
+    monkeypatch.setattr(
+        A,
+        "_finalize_gates",
+        lambda measured: (
+            real(measured)[0],
+            real(measured)[1],
+            ["gate `supply_chain` was evaluated but carries no weight, so nothing reads it"],
+        ),
+    )
+
+    data = A.build_report_data()
+    text = A.render_report(data)
+
+    assert data["gates"] == dict.fromkeys(A.GATE_WEIGHTS, True)
+    assert data["objective_score"] == sum(A.GATE_WEIGHTS.values())
+    assert data["release_ready"] is False
+    assert "cannot vouch for itself" in text
+    assert "supply_chain" in text
+    assert "Release ready: false" in text
+
+
 def test_a_module_rotting_away_fails_the_coverage_gate(monkeypatch, tmp_path):
     """The 85% gate is an average, and an average hides a dead module.
 

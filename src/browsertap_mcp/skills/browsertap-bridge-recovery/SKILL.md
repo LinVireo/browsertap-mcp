@@ -30,8 +30,17 @@ netstat → /link curl → list_tabs（MCP 层验通）
 ## 组件与要求
 
 - 扩展 **BrowserTap Bridge**，源在仓库 `src/browsertap_mcp/chrome_extension`
-  （端口在 `config.js`）。扩展版本与包版本统一，`chrome://extensions` 上看到的号应与
-  `get_setup_status.package_version` 一致；不一致就是没 Reload。
+  （端口在 `config.js`）。扩展版本与包版本统一，`chrome://extensions` 上看到的号通常与
+  `get_setup_status.package_version` 一致——但**版本相等不证明 worker 跑的是当前代码**：
+  号是 Chrome 在加载时解析 manifest 得到的，`background.js` 不跟着它走。两个方向都实测过：
+  版本相等仍需 Reload，版本不等而代码是新的。
+  **判定看 `get_setup_status.extension_build_verdict`**（`background.js` 里编译进去的源码
+  哈希，由正在运行的 worker 报回来，与当前目录的新鲜哈希对比）：
+  `stale_worker` = 确实要人去 Reload；`matches_tree` = worker 就是这份代码，别再叫人刷；
+  `stamp_not_regenerated` = 有人改了扩展文件没跑 `python -m scripts.extension_stamp --write`，
+  此时**新 worker 也会报旧字面量**，所以这个比较两个方向都不成立，先修 stamp；
+  `unverifiable` = 扩展早于该机制或目录读不出来。`extension_build_enforced=false` 表示
+  这次比较没发生，按未知处理，不要当成通过。
 - 桥接端口：ws **18765** / http **18766**。
 - 桥守护进程：`browsertap bridge`（等价于 `python -m browsertap_mcp.bridge`，**前台常驻**）。
   管理用 `--restart` / `--stop`，别用裸 `bridge` 去"顺手起一下"。

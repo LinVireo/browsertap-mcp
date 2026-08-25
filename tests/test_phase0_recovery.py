@@ -3434,9 +3434,15 @@ def test_extension_reports_the_build_it_is_actually_running():
     manifest, which is also the only value a reload can change.
     """
     source = BACKGROUND.read_text(encoding="utf-8")
+    # Counted over code rather than the whole file. The header comment explains why
+    # the build stamp exists and names this API to do it, and a claim about call
+    # sites must not be breakable by a sentence about call sites.
+    code = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("//")
+    )
 
     assert "pass2-final" not in source
-    assert source.count("chrome.runtime.getManifest().version") == 2
+    assert code.count("chrome.runtime.getManifest().version") == 2
     # The unknown_cmd reply is what a version skew actually produces, so it is
     # the worst place of the two for a frozen string. `extensionVersion` is
     # scoped to the bridge_status branch, hence the second manifest read.

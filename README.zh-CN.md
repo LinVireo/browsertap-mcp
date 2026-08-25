@@ -423,11 +423,11 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 <details>
 <summary><b>标签页与导航</b></summary>
 
-- **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `browsertap bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。无参数
+- **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `browsertap bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。`extension_build_stamp` 是更强的信号，回答四个版本字段回答不了的问题：它是编译进 `background.js` 的扩展源码哈希，由**正在运行的** worker 报告，所以把它和 `expected_extension_build_stamp`（当前目录的新鲜哈希）相比，在两个方向上都是决定性的——而版本相等已经两次被实测判错。结论看 `extension_build_verdict`：`matches_tree`（worker 跑的就是这份代码）、`stale_worker`（不是，去 Reload）、`stamp_not_regenerated`（改了扩展文件但没跑 `python -m scripts.extension_stamp --write`，此时比较在两个方向上都不成立）、`unverifiable`（扩展早于该机制，或目录读不出来——见 `extension_build_error`）。`extension_build_enforced=false` 表示这次比较根本没发生，应当按未知处理，不要当成通过。另一个工具正在运行时它照样应答——这正是通常要问它的时候；此时 `default_session_settled=false` 表示 `default_session_id` 可能是那次调用的临时值而不是你的。无参数
 - **get_automation_profile** —— 查看当前 MCP 进程使用 `lab` 还是 `safe` profile
 - **set_automation_profile** —— 切换当前 MCP 进程的 `lab|safe` profile;覆盖值不会持久化或重载扩展
   - `mode`(string):`lab` 或 `safe`
-- **list_tabs** —— 列出已连接的标签页,每项带 `browser` 字段。无参数
+- **list_tabs** —— 列出已连接的标签页,每项带 `browser` 字段。另一个工具正在运行时它照样应答;`default_session_settled=false` 表示那次调用在此期间占着默认目标,`default_session_id` 可能是它的临时值而不是你的,此时应显式指定 session。无参数
 - **list_all_tabs** —— *(零标签页可用)* 列出全部标签页,含 `list_tabs` 隐藏的 `chrome-extension://` 页面。这类页面永远不会成为会话,所以没有 session id,要用 `cdp_command(tab_id=...)` 操作
   - `session_id`(string,可选):问哪个浏览器
 - **switch_tab** —— 指定后续调用的**目标**标签页。`url_pattern` 必须只匹配一个标签页；若匹配多个，需传入目标的完整 `session_id`。默认 `activate=false`，不会激活标签页或聚焦浏览器。仅在确需改变前台状态时传入 `activate=true`，或调用 `activate_tab`

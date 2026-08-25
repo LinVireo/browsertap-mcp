@@ -1,4 +1,11 @@
 // background.js - Cookie + CDP Bridge
+// The build this worker was LOADED with. `chrome.runtime.getManifest().version`
+// cannot answer that: Chrome parses the manifest at load time and refreshes it on
+// its own schedule, and this file does not follow it -- measured twice here, once
+// reporting the pre-bump version and once reporting a matching version while a
+// reload was still needed. A literal has no such layer. GENERATED: run
+// `python -m scripts.extension_stamp --write` after editing any extension file.
+const BTAP_BUILD = '47cd89474839bb22';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -3083,6 +3090,11 @@ async function handleExtMessage(msg, sender) {
       version: extensionVersion,
       extension_version: extensionVersion,
       manifest_version: extensionVersion,
+      // The three above all come from the manifest, which Chrome parsed when it
+      // loaded the extension and refreshes on its own schedule -- so they answer
+      // "which manifest", never "which code". This one is a literal in this file,
+      // so it is the code, and the server recomputes it from the directory on disk.
+      build_stamp: BTAP_BUILD,
       protocol_version: 3,
       capabilities: {
         structured_locator: true,
@@ -3111,6 +3123,7 @@ async function handleExtMessage(msg, sender) {
     // frozen string here is the most misleading place for one. `extensionVersion`
     // is scoped to the bridge_status branch above, hence the second read.
     version: chrome.runtime.getManifest().version,
+    build_stamp: BTAP_BUILD,
     knownCommands,
     hint: 'The extension command router is alive; compare knownCommands and reload the unpacked extension if this server expects a newer build.',
   };
@@ -3346,24 +3359,90 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
   const execSourceUrl = typeof sourceUrl === 'string' && sourceUrl
     ? sourceUrl.replace(/[\r\n]/g, '') : null;
   return `(async () => {
-    function smartProcessResult(result) {
-      if (result === null || result === undefined || typeof result !== 'object') return result;
-      try { if (result.window === result && result.document) return '[Window: ' + (result.location?.href || 'about:blank') + ']'; } catch(_){}
-      if (typeof jQuery !== 'undefined' && result instanceof jQuery) {
-        const elements = []; for (let i = 0; i < result.length; i++) { if (result[i] && result[i].nodeType === 1) elements.push(result[i].outerHTML); } return elements;
+    // Turning a page value into something the extension boundary can carry.
+    //
+    // This asks the engine two questions rather than naming the types that
+    // answer them: \`Object.prototype.toString\` for what a value IS -- the
+    // internal class it already tracks, and the only classification that
+    // survives a value arriving from an iframe's realm, where \`instanceof\`
+    // does not -- and the iteration protocol for whether it is a collection.
+    //
+    // Naming jQuery, NodeList and HTMLCollection one branch each, as this did,
+    // decided the answer for exactly three types and silently mangled every
+    // other: a \`Set\` or \`Map\` of elements, a generator's output, a \`$\` bound
+    // in noConflict mode and any non-jQuery wrapper all reached JSON.stringify
+    // and arrived as \`{}\`, with nothing anywhere reporting the loss. Four
+    // branches collapse into one gate because the engine already has a single
+    // answer to "is this a collection".
+    //
+    // Four more defects the shape carried, each of them silent:
+    //  - The cap sat on the wrong branch. Only the array-like path stopped at
+    //    100 while the NodeList and jQuery paths were unbounded, so
+    //    \`querySelectorAll('div')\` on a large page serialised every element's
+    //    outerHTML -- the cap was on the branch least likely to be large.
+    //  - Array-like conversion required \`result[0]\` to be an element, so a
+    //    collection whose first slot was empty fell through to JSON.
+    //  - A node without \`outerHTML\` (a text node, a comment, a document)
+    //    became \`{}\`, and \`window\`/\`document\` nested inside a result became
+    //    the string '[Object]', which a real object can also produce.
+    //  - A cycle threw inside JSON.stringify and discarded the *entire* result
+    //    for one bad edge. Cycles are marked now and the rest survives.
+    const BTAP_MAX_ITEMS = 200;
+    const BTAP_MAX_DEPTH = 6;
+    function smartProcessResult(result, depth, seen) {
+      if (typeof result === 'bigint') return String(result);
+      if (typeof result === 'function') return '[Function: ' + (result.name || 'anonymous') + ']';
+      if (result === null || typeof result !== 'object') return result;
+      depth = depth || 0;
+      seen = seen || new WeakSet();
+      const kind = Object.prototype.toString.call(result).slice(8, -1);
+      if (kind === 'Window') {
+        // Reading any further can throw on a cross-origin frame, so the class
+        // name is the part that is always available.
+        let href = 'cross-origin';
+        try { href = result.location.href; } catch (_) {}
+        return '[Window: ' + href + ']';
       }
-      if (result instanceof NodeList || result instanceof HTMLCollection) {
-        const elements = []; for (let i = 0; i < result.length; i++) { if (result[i] && result[i].nodeType === 1) elements.push(result[i].outerHTML); } return elements;
+      if (kind === 'Error') return '[' + (result.name || 'Error') + ': ' + result.message + ']';
+      if (typeof result.outerHTML === 'string') return result.outerHTML;
+      if (typeof result.nodeType === 'number') {
+        return '[' + kind + (result.nodeValue ? ': ' + result.nodeValue : '') + ']';
       }
-      if (result.nodeType === 1) return result.outerHTML;
-      if (!Array.isArray(result) && typeof result === 'object' && 'length' in result && typeof result.length === 'number') {
-        const firstElement = result[0];
-        if (firstElement && firstElement.nodeType === 1) {
-          const elements = []; const length = Math.min(result.length, 100);
-          for (let i = 0; i < length; i++) { const elem = result[i]; if (elem && elem.nodeType === 1) elements.push(elem.outerHTML); } return elements;
+      // \`toJSON\` is the engine's own opt-in serialisation hook, which is how a
+      // Date keeps arriving as an ISO string without Date being named here.
+      if (typeof result.toJSON === 'function') {
+        try { return result.toJSON(); } catch (_) {}
+      }
+      if (seen.has(result)) return '[Circular]';
+      if (depth >= BTAP_MAX_DEPTH) return '[' + kind + ': depth limit]';
+      seen.add(result);
+      try {
+        // Iterable covers NodeList, Set, Map, arguments, typed arrays, jQuery 3
+        // and anything a page defines. The array-like fallback is gated on the
+        // class not being a plain object, so \`{length: 2}\` keeps its keys
+        // instead of becoming a two-element array of undefined.
+        const iterable = typeof result[Symbol.iterator] === 'function';
+        if (iterable || (kind !== 'Object' && typeof result.length === 'number')) {
+          const all = Array.from(result);
+          const out = all.slice(0, BTAP_MAX_ITEMS).map(v => smartProcessResult(v, depth + 1, seen));
+          if (all.length > BTAP_MAX_ITEMS) {
+            out.push('[' + (all.length - BTAP_MAX_ITEMS) + ' more of ' + all.length + ']');
+          }
+          return out;
         }
+        const out = {};
+        for (const key of Object.keys(result)) {
+          try {
+            out[key] = smartProcessResult(result[key], depth + 1, seen);
+          } catch (e) {
+            // A throwing getter loses its own value, not the whole object.
+            out[key] = '[unreadable: ' + e.message + ']';
+          }
+        }
+        return out;
+      } finally {
+        seen.delete(result);
       }
-      try { return JSON.parse(JSON.stringify(result, function(key, value) { if (typeof value === 'object' && value !== null) { if (value.nodeType === 1) return value.outerHTML; if (value === window || value === document) return '[Object]'; try { if (value.window === value && value.document) return '[Window]'; } catch(_){} } return value; })); } catch (e) { return '[无法序列化: ' + e.message + ']'; }
     }
     // Dialog suppression is scoped to this command: disable_dialogs.js defers
     // to the native alert/confirm/prompt unless this deadline is in the future,

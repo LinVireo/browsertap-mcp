@@ -41,6 +41,13 @@ EXT = f"{PKG}/chrome_extension"
 PAGE_SCRIPTS = f"{PKG}/page_scripts"
 NOTICES_NAME = "THIRD-PARTY-NOTICES.md"
 
+sys.path.insert(0, str(ROOT / "src"))
+
+from browsertap_mcp.extension_build import (  # noqa: E402
+    STAMP_LINE_RE,
+    STAMP_PLACEHOLDER,
+)
+
 # Ours -> upstream. The two `page_scripts/*.js` files were replaced outright
 # in 0.4.15 (the page analysis now asks the engine instead of re-deriving it),
 # so upstream's `simphtml.py` has exactly one heir here again. `family_total()`
@@ -64,14 +71,14 @@ FAMILY_UPSTREAM = "simphtml.py"
 # with `--write`; never hand-edit an entry to silence the check, because the whole
 # point is that a changed derived file and a stale table are the same event.
 MEASURED_AGAINST: dict[str, str] = {
-    "src/browsertap_mcp/browser_bridge.py": "5b9ee46e38bb3e3a4df0551ae096fdb52ba570523569ce0c4e7d9e7e14940e0b",
-    "src/browsertap_mcp/chrome_extension/background.js": "6a76936176acbc9ceb6c8484db1bc35f158b81000a719ae976a0adc9ff8a3050",
+    "src/browsertap_mcp/browser_bridge.py": "7b808980c10df6d45bc3def7d9dd8fd38f9157fc49ed2d7955276a134695aa5a",
+    "src/browsertap_mcp/chrome_extension/background.js": "8feac3f4e092ce6018983e63346ef03afa26059ae0354426ea797c06179d2933",
     "src/browsertap_mcp/chrome_extension/content.js": "942d5df35bedba224c13db6930f2d07bccf554f7713c28885fd5f5b51f8a644d",
     "src/browsertap_mcp/chrome_extension/disable_dialogs.js": "1edc19d8a6a5bf0850cc0e8f2123fe799d80fb5b7afa578fa014586d7181970a",
     "src/browsertap_mcp/chrome_extension/manifest.json": "a7394272189f6b0acd168dfbbc0196a624df8395c802df3e1cde8611df3d8758",
-    "src/browsertap_mcp/chrome_extension/popup.html": "6957d4ee2b058edafd3e704ee496c1e6c232919d447ff5dcff32c76b8ca6ae2a",
+    "src/browsertap_mcp/chrome_extension/popup.html": "5fd4ea0d2351bd244d95c1ef9fc592864e4b839f8d7a70bc914ddf7bb71c95af",
     "src/browsertap_mcp/chrome_extension/popup.js": "b8295038ad083c13529ce3668bded40b8047cdf143f70986201d470944d42cce",
-    "src/browsertap_mcp/simphtml.py": "f27253df366691a755f7d81adae0db74faf2b1705815933393698659715d6019",
+    "src/browsertap_mcp/simphtml.py": "d07c2281961077ad3b5dd8896d335074939d8e6f8c4354069621312c6588eab8",
 }
 
 _ROW_RE = re.compile(
@@ -85,12 +92,28 @@ def _lines(path: Path) -> list[str]:
 
 
 MANIFEST = f"{EXT}/manifest.json"
+BACKGROUND = f"{EXT}/background.js"
 
 _MANIFEST_VERSION_RE = re.compile(r'^(\s*"version"\s*:\s*)"[^"]*"(.*)$')
 
+# Every line this fingerprint is deliberately blind to, and the only ones. An
+# entry has to satisfy two things at once: the line is *generated* by a script
+# in this repository, and it cannot change how many of upstream's lines survive
+# -- which both of these settle the same way, by not existing upstream at all.
+#
+# The values are `re.sub` templates, so the manifest's can keep the rest of the
+# line via backreferences while the stamp's replaces the whole of it.
+# `tests/test_documentation_contract.py` asserts this table is exactly these two
+# entries and that each rewrites exactly one line of its own file, because
+# widening it is the one way this gate could be made vacuous again.
+GENERATED_LINES: dict[str, tuple[re.Pattern[str], str]] = {
+    MANIFEST: (_MANIFEST_VERSION_RE, r'\1"<version>"\2'),
+    BACKGROUND: (STAMP_LINE_RE, STAMP_PLACEHOLDER),
+}
+
 
 def _normalised(relative: str, lines: list[str]) -> list[str]:
-    """Blank out the one thing that provably cannot move a measured line count.
+    """Blank the two generated lines that provably cannot move a measured count.
 
     `versioning bump` rewrites `manifest.json`'s own version string on every
     release, so a byte-faithful fingerprint went red on every release and asked
@@ -100,15 +123,23 @@ def _normalised(relative: str, lines: list[str]) -> list[str]:
     the bump and not identical after it: `identical` is invariant. Measured at
     0.4.14 and again at 0.4.15 -- `29 of 40 (72%)` both times.
 
+    `background.js`'s `BTAP_BUILD` stamp is the same argument one step further.
+    It is rewritten whenever *any* extension file changes, so without the
+    exclusion an edit to `content.js` would demand a re-measure of `background.js`
+    as well -- a file nobody touched -- and upstream has no such line for it to be
+    identical to.
+
     Nothing else is excluded, and that restraint is the point. A fingerprint
     blind to a line that *could* move the count is exactly the self-consistent
     vacuous pass this file was written to end, so
-    `tests/test_documentation_contract.py` pins the blindness to this one file
-    and this one line rather than trusting the comment.
+    `tests/test_documentation_contract.py` pins the blindness to these two lines
+    rather than trusting the comment.
     """
-    if relative != MANIFEST:
+    generated = GENERATED_LINES.get(relative)
+    if generated is None:
         return lines
-    return [_MANIFEST_VERSION_RE.sub(r'\1"<version>"\2', line) for line in lines]
+    pattern, placeholder = generated
+    return [pattern.sub(placeholder, line) for line in lines]
 
 
 def file_digest(path: Path, relative: str = "") -> str:

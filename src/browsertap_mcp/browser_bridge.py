@@ -402,24 +402,38 @@ def check_link_token(headers, want: str) -> None:
             status=401, body='unauthorized: missing or bad bridge token')
 
 
+def drain_request_body() -> None:
+    """Consume whatever the current request still has unread.
+
+    Bottle reads a body only for the content types it parses, so a request this
+    server declines to act on can leave its bytes in the socket -- and wsgiref on
+    Windows then resets the connection instead of delivering the response, which
+    reads to the caller as a dead bridge rather than as the error it actually
+    was. Measured on this server: a small refused POST aborts a few percent of
+    the time, one larger than the socket buffer aborts every time. Reading past
+    MEMFILE_MAX covers a body big enough that bottle spilled it to disk.
+
+    Every route that can answer without parsing the body needs this, which is why
+    it is one function and not an idiom repeated per route -- a refusal that
+    forgets it does not fail, it turns into a transport error somewhere else.
+    """
+    try:
+        request.body.read(request.MEMFILE_MAX + 1)
+    except Exception:
+        pass
+
+
 def check_link_token_drained(headers, want: str) -> None:
     """check_link_token，但被拒的请求不会把自己的 body 留在 socket 里。
 
-    wsgiref on Windows resets the connection when a rejected request leaves its
-    Content-Length bytes unread, so the caller sees WSAECONNABORTED instead of
-    the 401 — indistinguishable from a crashed bridge. Measured on this server:
-    a small rejected POST aborts a few percent of the time, one larger than the
-    socket buffer aborts every time. Touching request.body consumes the stream;
-    read past MEMFILE_MAX so nothing is left even for a body bottle spills to
-    disk. The response object is preserved, and the route body never runs.
+    The 401 has to survive the body it just refused to read; see
+    `drain_request_body`. The response object is preserved, and the route body
+    never runs.
     """
     try:
         check_link_token(headers, want)
     except bottle.HTTPResponse:
-        try:
-            request.body.read(request.MEMFILE_MAX + 1)
-        except Exception:
-            pass
+        drain_request_body()
         raise
 
 
@@ -429,31 +443,113 @@ def require_link_token(headers) -> None:
     check_link_token(headers, bridge_token())
 
 
+def json_object_body():
+    """The request's JSON object, or None if the client did not send one.
+
+    Draining is the whole point, and it is the same trap
+    ``check_link_token_drained`` exists for one step later. ``request.json`` is
+    None for a body bottle will not parse and raises for one that is malformed,
+    so reading a field off it raised ``AttributeError``, bottle turned that into
+    a 500, and the request's bytes were still unread in the socket -- where
+    wsgiref on Windows answers by resetting the connection. The caller then sees
+    a dropped connection and cannot tell a malformed request from a dead bridge.
+    Read past ``MEMFILE_MAX`` so nothing is left even for a body bottle spilled
+    to disk.
+
+    Returning None rather than raising leaves the answer to the route: these
+    three speak different protocols to different clients, and a shared error
+    shape would be wrong for at least two of them.
+    """
+    try:
+        data = request.json
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        return data
+    try:
+        request.body.read(request.MEMFILE_MAX + 1)
+    except Exception:
+        pass
+    return None
+
+
+# How long an HTTP session may go without long-polling before it counts as gone.
+# That transport has no close event -- a WebSocket does -- so silence is the only
+# signal there is, and every answered poll refreshes `connect_at`.
+HTTP_SESSION_IDLE_SECONDS = 60
+
+# How long one poll waits for a command before answering "ask again". It has to
+# stay well under the idle timeout above: the clock the timeout measures only
+# advances when a poll returns, so a window as long as the timeout would let a
+# client that polls without pause still be counted as silent.
+HTTP_POLL_SECONDS = 5
+
+# The transports a client may register as: `ws` is a page's content script,
+# `ext_ws` the extension's own service worker, `http` a long-poll client that has
+# no socket at all.
+_SOCKET_TYPES = frozenset({'ws', 'ext_ws'})
+_QUEUE_TYPE = 'http'
+
+
 class Session:
+    """One connected tab, and the single channel that reaches it.
+
+    The channel is stored once. Two mutually exclusive slots -- a socket and a
+    queue -- meant the "exactly one is set" invariant was maintained by hand in
+    the constructor and again in `reconnect`, where a transport matching neither
+    branch left the *previous* one's handle in place: a client registering as
+    something this bridge does not serve inherited whatever socket or queue was
+    there before it. Deriving both names from one slot makes that unrepresentable
+    rather than merely fixed, and it is what lets `reconnect` *be* the
+    constructor's body instead of a second copy of it that can drift.
+
+    `type` is derived from `info` for the same reason. Copying it out at
+    construction meant the paths that refresh `info` alone left a session whose
+    declared transport and whose actual routing disagreed.
+    """
+
     def __init__(self, session_id, info, client=None):
         self.id = session_id
-        self.info = info
-        self.connect_at = time.time()
-        self.disconnect_at = None
-        self.type = info.get('type', 'ws')
-        self.ws_client = client if self.type in ('ws', 'ext_ws') else None
-        self.http_queue = client if self.type == 'http' else None
-    @property
-    def url(self): return self.info.get('url', '')
-    def is_active(self):
-        if self.type == 'http' and time.time() - self.connect_at > 60: self.mark_disconnected()
-        return self.disconnect_at is None
+        self.reconnect(client, info)
+
     def reconnect(self, client, info):
+        """Rebind to a new channel; connecting for the first time is the same act."""
         self.info = info
-        self.type = info.get('type', 'ws')
-        if self.type in ('ws', 'ext_ws'):
-            self.ws_client = client
-            self.http_queue = None
-        elif self.type == 'http':
-            self.ws_client = None
-            self.http_queue = client
+        self.client = client
         self.connect_at = time.time()
         self.disconnect_at = None
+
+    @property
+    def type(self):
+        return self.info.get('type', 'ws')
+
+    @property
+    def url(self):
+        return self.info.get('url', '')
+
+    @property
+    def ws_client(self):
+        """The socket, or None when this session is not reached over one."""
+        return self.client if self.type in _SOCKET_TYPES else None
+
+    @property
+    def http_queue(self):
+        """The long-poll queue, or None when this session is not reached over one."""
+        return self.client if self.type == _QUEUE_TYPE else None
+
+    def is_active(self):
+        """Whether this session can still be reached.
+
+        The expiry check *records* the transition rather than merely reporting it,
+        which is deliberate: `clean_sessions` reaps on `disconnect_at`, so an HTTP
+        session that timed out without ever being stamped would sit in the table
+        for the life of a daemon that outlives every MCP session.
+        """
+        if (self.type == _QUEUE_TYPE
+                and time.time() - self.connect_at > HTTP_SESSION_IDLE_SECONDS):
+            self.mark_disconnected()
+        return self.disconnect_at is None
+
     def mark_disconnected(self):
         # Records the transition, not the state: callers re-run this over the
         # whole table on every extension snapshot, so a tab that is already
@@ -564,39 +660,92 @@ class BrowserBridge:
             # 显式关闭鉴权时保持旧版 userscript 轮询客户端兼容。被拒时按
             # check_link_token_drained 排空 body，401 才不会退化成连接中断。
             check_link_token_drained(request.headers, self.link_token)
-            data = request.json
-            session_id = data.get('sessionId')
-            session_info = {'url': data.get('url'), 'title': data.get('title', ''), 'type': 'http'}
-            if session_id not in self.sessions:
-                session = Session(session_id, session_info, queue.Queue())
-                logger.info("Browser HTTP connected: %s (session=%s)", redact_url(session.url), session_id)
-                self.sessions[session_id] = session
-            session = self.sessions[session_id]
-            if session.disconnect_at is not None and session.type != 'http': session.reconnect(queue.Queue(), session_info)
-            session.disconnect_at = None
-            if session.type == 'http': msgQ = session.http_queue
-            else: return json.dumps({"id": "", "ret": "use ws"})
-            session.connect_at = start_time = time.time()
-            while time.time() - start_time < 5:
-                try:
-                    msg = msgQ.get(timeout=0.2)
-                    try:
-                        self.acks[json.loads(msg).get('id', '')] = time.time()
-                    except Exception:
-                        logger.exception("Failed to record long-poll acknowledgement")
-                    return msg
-                except queue.Empty: continue
-            return json.dumps({"id": "", "ret": "next long-poll"})
+            data = json_object_body()
+            session_id = (data or {}).get('sessionId')
+            if not session_id:
+                # Either a body this route could not read, or one naming no
+                # session. Both are unanswerable rather than merely empty, and
+                # both have the same fix: a session with no id cannot be named by
+                # `execute_js`, so it could never be handed a command and would
+                # poll forever while occupying a row in the table. `ret` is free
+                # text to this route's clients -- they compare against the two
+                # values below and poll again on anything else -- so an
+                # unfamiliar value is the in-protocol way to say this.
+                return json.dumps({"id": "", "ret": "invalid request"})
+            session_info = {'url': data.get('url'), 'title': data.get('title', ''),
+                            'type': _QUEUE_TYPE}
+            session = self.sessions.get(session_id)
+            if session is None:
+                session = self.sessions[session_id] = Session(
+                    session_id, session_info, queue.Queue())
+                logger.info("Browser HTTP connected: %s (session=%s)",
+                            redact_url(session.url), session_id)
+            elif session.type == _QUEUE_TYPE:
+                # The same client polling again, so rebind it to the queue it
+                # already has rather than a fresh one: a command handed over
+                # while it was between polls is sitting in there, and swapping
+                # the queue would drop it with nothing anywhere reporting a loss.
+                # Going through `reconnect` is also what refreshes `info` -- the
+                # three field writes this replaces left a resurrected session
+                # describing whichever URL the tab had on its first ever poll.
+                session.reconnect(session.client, session_info)
+            elif session.is_active():
+                # A live socket already reaches this tab. Refusing is what keeps
+                # a command from being handed to the weaker of two channels.
+                return json.dumps({"id": "", "ret": "use ws"})
+            else:
+                # The socket is gone and this client speaks for the tab now.
+                session.reconnect(queue.Queue(), session_info)
+            try:
+                msg = session.http_queue.get(timeout=HTTP_POLL_SECONDS)
+            except queue.Empty:
+                return json.dumps({"id": "", "ret": "next long-poll"})
+            # Handing the payload over is the acknowledgement: this transport has
+            # no ack frame the way the socket does, so the moment the command
+            # leaves is the only evidence there is that it was delivered.
+            try:
+                exec_id = json.loads(msg).get('id')
+            except Exception:
+                # Everything on this queue was serialised by `_send_to_session`,
+                # so a payload that will not parse is this bridge's own bug, not
+                # a client's. Hand it over anyway -- refusing would strand a
+                # caller already waiting on its result -- but say so.
+                logger.exception("unparseable long-poll payload for session=%s", session_id)
+            else:
+                # An id-less payload acknowledges nothing. Recording it under the
+                # empty string, as this did, put a key in `acks` that no waiter
+                # ever looks up -- `exec_id` is a uuid4 -- so it sat there until
+                # the 600-second sweep collected it.
+                if exec_id:
+                    self.acks[exec_id] = time.time()
+            return msg
 
         @app.route('/api/result', method=['GET','POST'])
         def result():
             # 与 /api/longpoll 同理：token 已配置时伪造结果注入同样需要鉴权。
             check_link_token_drained(request.headers, self.link_token)
-            data = request.json
-            if data.get('type') == 'result':
-                self.results[data.get('id')] = {'success': True, 'data': data.get('result'), 'newTabs': data.get('newTabs', []), 'tabId': data.get('tabId'), 'ts': time.time()}
-            elif data.get('type') == 'error':
-                self.results[data.get('id')] = {'success': False, 'data': data.get('error'), 'newTabs': data.get('newTabs', []), 'tabId': data.get('tabId'), 'ts': time.time()}
+            data = json_object_body()
+            if data is None:
+                # Same unread-body trap as the poll route, and the same reason it
+                # cannot just let the exception out: this answers a client that is
+                # posting a result, so a 500 plus a reset connection would make it
+                # retry a delivery that was never wrong about anything but its
+                # framing.
+                return 'ok'
+            kind = data.get('type')
+            if kind not in ('result', 'error'):
+                return 'ok'
+            # One record either way. Split in two, the two branches differed only
+            # in `success` and in which field the payload was read from, so every
+            # later addition to the shape had to be made twice -- `newTabs`,
+            # `tabId` and `ts` are all there because they were.
+            self.results[data.get('id')] = {
+                'success': kind == 'result',
+                'data': data.get('result' if kind == 'result' else 'error'),
+                'newTabs': data.get('newTabs', []),
+                'tabId': data.get('tabId'),
+                'ts': time.time(),
+            }
             return 'ok'
 
         @app.route('/link', method=['GET','POST'])
@@ -605,13 +754,8 @@ class BrowserBridge:
             # 由 check_link_token_drained 排空 body，否则 Windows 上 401 会退化成
             # 连接重置。
             check_link_token_drained(request.headers, self.link_token)
-            data = request.json
-            if not isinstance(data, dict):
-                # Bottle only consumes the body for application/json.  A
-                # client that omits Content-Type would otherwise leave bytes
-                # unread; wsgiref can reset the socket on Windows before the
-                # structured error reaches the caller.
-                request.body.read(request.MEMFILE_MAX + 1)
+            data = json_object_body()
+            if data is None:
                 return json.dumps({'r': {
                     'error': 'body must be a JSON object containing cmd',
                     'error_code': 'invalid_request',
@@ -932,20 +1076,26 @@ class BrowserBridge:
                 self.sessions.pop(session_id, None)
                 sess = None
             if sess and sess.is_active():
+                # Both together, and in this order: `type` is read out of `info`,
+                # so refreshing one without the other is what used to leave a
+                # session routing over a transport it no longer claimed.
                 sess.info = session_info
-                sess.ws_client = client
+                sess.client = client
             else:
                 self._register_client(session_id, client, session_info)
 
     def _register_client(self, session_id: str, client: WebSocket, session_info) -> None:
-        is_new_session = session_id not in self.sessions
-
-        if is_new_session:
-            session = Session(session_id, session_info, client)
-            self.sessions[session_id] = session
+        # One lookup, and the two branches now differ only in what they say:
+        # binding a channel is the same act whether or not there was one before it
+        # (`Session.__init__` is `reconnect`), so the only thing left that is
+        # genuinely conditional is whether the table gains a row. The log line is
+        # read after the bind either way, which is what makes it report the URL the
+        # tab has now rather than the one it registered with.
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = self.sessions[session_id] = Session(session_id, session_info, client)
             logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
         else:
-            session = self.sessions[session_id]
             session.reconnect(client, session_info)
             logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
 
@@ -1562,6 +1712,11 @@ class BrowserBridge:
             )
             result["protocol_version"] = extension_status.get("protocol_version")
             result["extension_capabilities"] = extension_status.get("capabilities", {})
+            # A literal in the worker's own source, so unlike the three versions
+            # above it says which *code* answered. Forwarded rather than left to the
+            # server's fallback probe because that probe only fires when a version
+            # is missing, and a bridge old enough to omit this still reports those.
+            result["extension_build_stamp"] = extension_status.get("build_stamp")
         if extension_status_error:
             result["extension_status_error"] = extension_status_error
         if self.last_rejected_takeover:

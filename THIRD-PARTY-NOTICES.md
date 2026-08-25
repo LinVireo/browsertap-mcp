@@ -22,12 +22,12 @@ denominator is upstream's line count and the percentage is that share:
 
 | In this distribution | Upstream file | Identical lines |
 |---|---|---|
-| `src/browsertap_mcp/simphtml.py` | `simphtml.py` | 207 of 873 (24%) |
-| `src/browsertap_mcp/browser_bridge.py` | `TMWebDriver.py` | 132 of 289 (46%) |
-| `src/browsertap_mcp/chrome_extension/background.js` | `assets/tmwd_cdp_bridge/background.js` | 248 of 422 (59%) |
+| `src/browsertap_mcp/simphtml.py` | `simphtml.py` | 55 of 873 (6%) |
+| `src/browsertap_mcp/browser_bridge.py` | `TMWebDriver.py` | 96 of 289 (33%) |
+| `src/browsertap_mcp/chrome_extension/background.js` | `assets/tmwd_cdp_bridge/background.js` | 234 of 422 (55%) |
 | `src/browsertap_mcp/chrome_extension/manifest.json` | `assets/tmwd_cdp_bridge/manifest.json` | 29 of 40 (72%) |
 | `src/browsertap_mcp/chrome_extension/content.js` | `assets/tmwd_cdp_bridge/content.js` | 7 of 19 (37%) |
-| `src/browsertap_mcp/chrome_extension/popup.html` | `assets/tmwd_cdp_bridge/popup.html` | 15 of 19 (79%) |
+| `src/browsertap_mcp/chrome_extension/popup.html` | `assets/tmwd_cdp_bridge/popup.html` | 11 of 19 (58%) |
 | `src/browsertap_mcp/chrome_extension/popup.js` | `assets/tmwd_cdp_bridge/popup.js` | 12 of 24 (50%) |
 | `src/browsertap_mcp/chrome_extension/disable_dialogs.js` | `assets/tmwd_cdp_bridge/disable_dialogs.js` | 18 of 25 (72%) |
 
@@ -36,30 +36,46 @@ one heir here, so the rows are independent and can be read on their own; that wa
 not true in 0.4.14, where three of them shared `simphtml.py` as an ancestor and
 adding them up counted the same upstream lines more than once.
 
-The `simphtml.py` row fell from 84% to 24% in 0.4.15, and the distinction that
-makes that figure meaningful is that the code was **replaced, not moved**.
-Upstream's browser-side page analysis had been carved out of a Python string
-literal into two files under `page_scripts/`, which relocated it without reducing
-it. What replaced it asks the engine for what it already computes --
-`Element.checkVisibility()` for whether an element renders, and structural
-signatures for which block is a repeated list -- in place of upstream's hand-rolled
-`display`/`visibility`/`opacity` walk and its scored search over tuned constants.
-Different mechanism, different code, and the 528 upstream lines those two files
-held are no longer in this distribution. Splitting a file, by contrast, cannot
-reduce what is borrowed, and this notice would have been misleading if the 24%
-had been reached that way.
+The `simphtml.py` row fell from 84% to 6% across 0.4.15 and 0.4.16, and the
+distinction that makes those figures meaningful is that the code was **replaced,
+not moved**. Upstream's browser-side page analysis had been carved out of a
+Python string literal into two files under `page_scripts/`, which relocated it
+without reducing it. What replaced it asks the engine for what it already
+computes -- `Element.checkVisibility()` for whether an element renders,
+`getComputedStyle` and `elementFromPoint` for what is actually on top, and
+structural signatures for which block is a repeated list -- in place of
+upstream's hand-rolled `display`/`visibility`/`opacity` walk and its scored
+search over tuned constants. Different mechanism, different code, and the 528
+upstream lines those two files held are no longer in this distribution.
+Splitting a file, by contrast, cannot reduce what is borrowed, and this notice
+would have been misleading if either figure had been reached that way.
 
-`browser_bridge.py` and `background.js` have each grown several times over, and
-most of what they still share with upstream is the wire protocol both ends have
-to keep agreeing on.
+The same applies to the two rows that moved in 0.4.16. `popup.html` lost the
+palette it had copied: the popup now opts into `color-scheme: light dark` and
+takes its colours from CSS system keywords, which is the browser's own answer to
+"what theme did the user pick" and the only version that follows a theme switch.
+`background.js` lost the value converter `execute_js` runs in the page, which had
+one branch each for jQuery, `NodeList` and `HTMLCollection`; it asks
+`Object.prototype.toString` and the iteration protocol instead -- one question
+the engine already answers for every collection, including the `Set`s, `Map`s and
+generators the enumerated version silently turned into `{}`.
+
+What is left differs in kind between the two largest remaining rows, and the
+block structure is the honest way to say so. Of `browser_bridge.py`'s 96 lines,
+88 sit in runs of one to three lines and the longest run is four -- most of that
+is Python's own shape, the `except Exception as e:` and `return` lines any two
+programs sharing a task will write identically. `background.js`'s 234 include 113
+in runs of four or more, the longest twelve: sequences of `chrome.*` calls and
+the message-dispatch chain, which is still upstream's expression of the problem
+and is credited as such.
 
 **Every file in `src/browsertap_mcp/chrome_extension/` is derived** -- the whole
 directory was forked from upstream's `assets/tmwd_cdp_bridge/`, and the only
 files there upstream never had are the `_locales/` message catalogues. Three of
 the six spent their first three releases missing from this table
-(`popup.html`, `popup.js`, `disable_dialogs.js`), and their upstream share is
-*higher* than that of `background.js`, which was credited from the start. Size
-is what made the difference, and size is not what the licence asks about.
+(`popup.html`, `popup.js`, `disable_dialogs.js`), and two of them still hold a
+*higher* upstream share than `background.js`, which was credited from the start.
+Size is what made the difference, and size is not what the licence asks about.
 
 `src/browsertap_mcp/page_scripts/` is where the same trap caught this notice a
 second time, and the shape is worth stating because a directory is not evidence

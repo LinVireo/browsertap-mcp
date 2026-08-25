@@ -6,6 +6,30 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+### Fixed
+
+- **`execute_js` no longer loses a collection it was not told about by name.** The
+  converter that turns a script's return value into something the extension
+  boundary can carry had one branch each for jQuery, `NodeList` and
+  `HTMLCollection`, so a `Set` of elements, a `Map`, a generator's output or any
+  other wrapper fell through to `JSON.stringify` and arrived as `{}` with nothing
+  reporting the loss. It asks `Object.prototype.toString` and the iteration
+  protocol instead -- one question the engine already answers for every
+  collection. Five more silent losses go with it: the 100-item cap sat only on
+  the branch least likely to be large, so `querySelectorAll('div')` on a big page
+  serialised every element (the cap is now 200 across every collection, and says
+  how many it dropped rather than truncating quietly); a collection whose first
+  slot was empty was not recognised as one; a text node, comment or document
+  became `{}` and a nested `window` became the string `[Object]`, which a real
+  object can also produce; one cycle anywhere in the value discarded the *entire*
+  result; and a `BigInt`, a function, an `Error` or a throwing getter each took
+  more with it than itself.
+- **The extension popup follows the browser's theme.** It had a dark palette
+  written into it, which rendered a dark popup for anyone reading everything else
+  in light and could not follow a theme switch at all. It now opts into
+  `color-scheme: light dark` and takes its colours from CSS system keywords,
+  which is the browser's own answer to the question.
+
 ## [0.4.15] - 2026-08-25
 
 ### Changed

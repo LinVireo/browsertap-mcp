@@ -1,10 +1,11 @@
+import difflib
 import json
 import logging
 import re
 import time
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,83 @@ js_page_outline = _load_page_script("page_outline.js")
 js_list_groups = _load_page_script("list_groups.js")
 
 
+# Which attributes survive the strip below, grouped by the reason each group
+# is worth its tokens. Four unrelated questions decide an attribute's fate --
+# is it a script hook, is it framework bookkeeping, can a caller act on it, and
+# is its value long enough to be worth shortening -- and they are asked
+# separately, because two of them are namespace rules that need no list at all.
+#
+# Keeping the whole `aria-*` namespace is the one deliberate widening: naming
+# individual members means `aria-checked`, `aria-disabled` and `aria-selected`
+# are dropped, and those are exactly the state a caller has to read before
+# deciding whether to click. A namespace covers them without growing.
+_SELECTOR_ATTRS = frozenset({'id', 'class', 'name', 'type', 'for'})
+_CONTENT_ATTRS = frozenset({'src', 'href', 'alt', 'value', 'title', 'placeholder'})
+_STATE_ATTRS = frozenset({
+    'disabled', 'checked', 'selected', 'readonly', 'required', 'multiple',
+    'contenteditable',
+})
+_SUBMIT_ATTRS = frozenset({'action', 'method', 'target'})
+_TABLE_ATTRS = frozenset({'colspan', 'rowspan'})
+_KEPT_ATTRS = (
+    _SELECTOR_ATTRS | _CONTENT_ATTRS | _STATE_ATTRS | _SUBMIT_ATTRS | _TABLE_ATTRS
+)
+
+# Two caps, because the right way to shorten a value depends on whether a
+# prefix of it is usable. No prefix of a URL is -- a caller cannot navigate to
+# half of one -- so a long URL is replaced outright and the tokens go to zero.
+# Human-readable text is the opposite: the opening is the informative part, so
+# it is kept and the cut is marked.
+_URL_CAP = 30
+_URL_ATTRS = frozenset({'src', 'action'})
+_TEXT_CAP = 100
+_TEXT_KEEP = 50
+_ELIDED = ' ...'
+# `data-*` is kept because a page's own hooks are often the only stable
+# selector a caller has, but only while the value stays short enough to read.
+_DATA_CAP = 20
+
+
+def _keeps_attribute(name):
+    """Whether an attribute survives, decided by rule rather than by a list."""
+    if name.startswith('on'):
+        return False  # a script hook; there is no reader for it here
+    if name.startswith('data-v'):
+        return False  # scoped-style bookkeeping, one per element, no meaning
+    if name.startswith('data-'):
+        return True  # capped by length in `_shortened`
+    return name == 'role' or name.startswith('aria-') or name in _KEPT_ATTRS
+
+
+def _shortened(name, value):
+    """The value trimmed to its cap, or unchanged when it is already small."""
+    if name in _URL_ATTRS and len(value) > _URL_CAP:
+        return '__url__'
+    if name in _CONTENT_ATTRS and len(value) > _TEXT_CAP:
+        return value[:_TEXT_KEEP] + _ELIDED
+    if name.startswith('data-') and len(value) > _DATA_CAP:
+        return '__data__'
+    return value
+
+
+def _href_ref(url, link_refs, base_url):
+    """A long href as a short '#r7' ref, recording the real URL out of band."""
+    if link_refs is None:
+        return '__link__'
+    if base_url:
+        # Store absolute URLs: a ref of '/en-US/docs/x' is not something
+        # open_url can navigate to.
+        try:
+            url = urljoin(base_url, url)
+        except Exception:
+            pass
+    ref = link_refs.get(url)
+    if ref is None:
+        ref = f"r{len(link_refs) + 1}"
+        link_refs[url] = ref
+    return f"#{ref}"
+
+
 def optimize_html_for_tokens(html, link_refs=None, base_url=None):
     """Shrink HTML for token budget.
 
@@ -43,42 +121,30 @@ def optimize_html_for_tokens(html, link_refs=None, base_url=None):
     them. Now each long href becomes a short '#r7'-style ref and the real URL
     is handed back out of band, so the text stays small AND addressable.
     """
-    if type(html) is str: soup = BeautifulSoup(html, 'html.parser')
-    else: soup = html
+    soup = BeautifulSoup(html, 'html.parser') if isinstance(html, str) else html
     for svg in soup.find_all('svg'):
-        svg.clear(); svg.attrs = {}
-    [tag.attrs.pop('style', None) for tag in soup.find_all(True)]
+        # An inline icon's path data is pure noise to a reader, and there can be
+        # hundreds of them. The tag stays so the layout still reads.
+        svg.clear()
+        svg.attrs = {}
     for tag in soup.find_all(True):
-        if tag.has_attr('src'):
-            if tag['src'].startswith('data:'): tag['src'] = '__img__'
-            elif len(tag['src']) > 30: tag['src'] = '__url__'
-        if tag.has_attr('href') and len(tag['href']) > 30:
-            if link_refs is None:
-                tag['href'] = '__link__'
-            else:
-                url = tag['href']
-                if base_url:
-                    # Store absolute URLs: a ref of '/en-US/docs/x' is not
-                    # something open_url can navigate to.
-                    try: url = urljoin(base_url, url)
-                    except Exception: pass
-                ref = link_refs.get(url)
-                if ref is None:
-                    ref = f"r{len(link_refs) + 1}"
-                    link_refs[url] = ref
-                tag['href'] = f"#{ref}"
-        if tag.has_attr('action') and len(tag['action']) > 30: tag['action'] = '__url__'
-        for a in ('value', 'title', 'alt'):
-            if tag.has_attr(a) and isinstance(tag[a], str) and len(tag[a]) > 100: tag[a] = tag[a][:50] + ' ...'
-        for attr in list(tag.attrs.keys()):  
-            if attr not in ['id', 'class', 'name', 'src', 'href', 'alt', 'value', 'type', 'placeholder',
-                          'disabled', 'checked', 'selected', 'readonly', 'required', 'multiple',
-                          'role', 'aria-label', 'aria-expanded', 'aria-hidden', 'contenteditable',
-                          'title', 'for', 'action', 'method', 'target', 'colspan', 'rowspan']:  
-                if attr.startswith('data-v'): tag.attrs.pop(attr, None)
-                elif attr.startswith('data-') and isinstance(tag[attr], str) and len(tag[attr]) > 20:  
-                    tag[attr] = '__data__'  
-                elif not attr.startswith('data-'): tag.attrs.pop(attr, None)  
+        for name in [name for name in tag.attrs if not _keeps_attribute(name)]:
+            del tag.attrs[name]
+        src = tag.get('src')
+        if isinstance(src, str) and src.startswith('data:'):
+            # Length is the wrong question for these: a short data: URL is
+            # still an image nobody can read, and a long one is megabytes.
+            tag['src'] = '__img__'
+        href = tag.get('href')
+        if isinstance(href, str) and len(href) > _URL_CAP:
+            # Handled before the loop below and then skipped by it: an href is
+            # the one long value a caller still has to be able to reach, so it
+            # becomes a ref rather than being trimmed or blanked.
+            tag['href'] = _href_ref(href, link_refs, base_url)
+        for name, value in list(tag.attrs.items()):
+            # `class` arrives as a list, and no cap here applies to one.
+            if name != 'href' and isinstance(value, str):
+                tag[name] = _shortened(name, value)
     return soup
 
 
@@ -142,37 +208,59 @@ def start_temp_monitor(driver, timeout=15, session_id=None, ttl=None):
     except Exception: pass
 
 
+# Stopping the monitor and reading what it collected are two different needs: the
+# paths with no reader still have to stop the ticking, and the path that reads it
+# must not leave the monitor behind. Both drop the global *before* touching the
+# DOM, so a throw inside the walk cannot leave a page whose global says a monitor
+# is running while its interval is already gone. A tick that fires in between
+# clears itself, because the interval callback compares its own captured handle
+# against the global (`build_temp_monitor_js`).
+_MONITOR_DISCARD_JS = """function discardStrMonitor() {
+    const monitor = window.__btap_tm;
+    if (!monitor) return false;
+    delete window.__btap_tm;
+    clearInterval(monitor.id);
+    return true;
+}
+discardStrMonitor();
+"""
+
+# What a transient *is*: text the page showed at some point inside the window and
+# is no longer showing. Both halves of the filter follow from that -- text in the
+# opening snapshot was never new, and text still on the page is not transient and
+# not lost either, since it is in the HTML and in the diff the caller gets beside
+# this list. Reporting it here instead would be actively misleading: an agent
+# reading `transients: ["Email is required"]` cannot tell whether the message is
+# still on screen, which is the one thing it needs to know.
+_MONITOR_READ_JS = """function readStrMonitor() {
+    const monitor = window.__btap_tm;
+    if (!monitor) return [];
+    delete window.__btap_tm;
+    clearInterval(monitor.id);
+    const present = monitor.extract();
+    return [...monitor.all].filter(t => !monitor.init.has(t) && !present.has(t));
+}
+readStrMonitor();
+"""
+
+
 def stop_temp_monitor(driver, timeout=15, session_id=None):
     """Clear the monitor without paying for its payload.
 
     Used by the return paths that have no reader for the transients but did
     start the monitor; the collected text is discarded, the interval is not.
     """
-    js = """if (window.__btap_tm) { clearInterval(window.__btap_tm.id); delete window.__btap_tm; }
-        return true;
-    """
-    try: _execute_in_session(driver, js, timeout, session_id=session_id)
+    try: _execute_in_session(driver, _MONITOR_DISCARD_JS, timeout, session_id=session_id)
     except Exception as e: logger.debug("Temporary monitor stop failed: %s", e)
 
 def get_temp_texts(driver, timeout=15, session_id=None):
-    js = """function stopStrMonitor() {  
-        if (!window.__btap_tm) return [];  
-        clearInterval(window.__btap_tm.id);  
-        const final = window.__btap_tm.extract();  
-        const newlySeen = [...window.__btap_tm.all].filter(t => !window.__btap_tm.init.has(t));
-        let result;
-        if (newlySeen.length < 8) {
-            result = newlySeen;
-        } else {
-            result = newlySeen.filter(t => !final.has(t));
-        }
-        delete window.__btap_tm;  
-        return result;  
-        }  
-        stopStrMonitor();  
-    """  
-    try: return list(set(_execute_in_session(
-        driver, js, timeout, session_id=session_id).get('data', [])))
+    """Stop the monitor and return the text that came and went while it ran."""
+    try:
+        # `dict.fromkeys` rather than `set`: the page walks its text nodes in
+        # document order and that order is worth keeping, where a set would hand
+        # the agent the same toasts in an order that changes between runs.
+        return list(dict.fromkeys(_execute_in_session(
+            driver, _MONITOR_READ_JS, timeout, session_id=session_id).get('data', [])))
     except Exception as e:
         logger.debug("Temporary monitor read failed: %s", e)
         return []
@@ -188,6 +276,25 @@ class PageUnavailable(RuntimeError):
     agent believe the page was blank, throwing away the bridge's own
     diagnosis of WHY it didn't answer.
     """
+
+def _collapsed_text(page):
+    """One space between words, at most one blank line between blocks.
+
+    Done line by line rather than by pattern, because ``str.split`` already
+    answers "what are the words on this line" for every kind of whitespace. A
+    pass tuned to runs of the space character leaves a tab between two table
+    cells and a trailing space after a heading exactly where they were, and text
+    lifted off a real page is full of both.
+    """
+    kept = []
+    for line in page.split('\n'):
+        text = ' '.join(line.split())
+        # A blank line survives only if the last kept line was not blank: the
+        # break between two blocks is information, the size of the gap is not.
+        if text or (kept and kept[-1]):
+            kept.append(text)
+    return '\n'.join(kept).strip()
+
 
 def get_main_block(driver, extra_js="", text_only=False, timeout=15,
                    allow_failover=False, session_id=None):
@@ -211,44 +318,153 @@ def get_main_block(driver, extra_js="", text_only=False, timeout=15,
         raise PageUnavailable(
             "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
     if text_only:
-        page = re.sub(r' {2,}', ' ', page)           # 连续空格→单空格
-        page = re.sub(r'^ +', '', page, flags=re.M)   # 去行首空格
-        page = re.sub(r'(\n\s*){3,}', '\n\n', page)   # 3+空行→1空行
-        return page.strip()
+        return _collapsed_text(page)
     return page
 
+TOP_CHANGE_MAXCHARS = 2000
+
+
+def _element_signature(element):
+    """One line standing for an element's own identity, children excluded.
+
+    Attributes are sorted so the line does not depend on the order the parser
+    happened to see them in, and only the element's *direct* text is included --
+    a descendant's text belongs to that descendant's own line, and counting it
+    here would make every ancestor of a changed node look changed too.
+    """
+    own_text = ' '.join(
+        stripped
+        for node in element.children
+        if isinstance(node, NavigableString) and (stripped := str(node).strip())
+    )
+    return f"{element.name}\x00{sorted(element.attrs.items())}\x00{own_text}"
+
+
 def find_changed_elements(before_html, after_html):
-    before_soup = BeautifulSoup(before_html, 'html.parser')
-    after_soup = BeautifulSoup(after_html, 'html.parser')
-    def direct_text(el):
-        return ''.join(t.strip() for t in el.find_all(string=True, recursive=False)).strip()
-    def get_sig(el):
-        attrs = {k:v for k,v in el.attrs.items() if k != 'data-track-id'}
-        return f"{el.name}:{attrs}:{direct_text(el)}"
-    def build_sigs(soup):
-        result = {}
-        for el in soup.find_all(True):
-            sig = get_sig(el)
-            result.setdefault(sig, []).append(el)
-        return result
-    before_sigs, after_sigs = build_sigs(before_soup), build_sigs(after_soup)
-    changed = []
-    for sig, els in after_sigs.items():
-        if sig not in before_sigs: changed.extend(els)
-        elif len(els) > len(before_sigs[sig]): changed.extend(els[:len(els) - len(before_sigs[sig])])
-    if len(changed) == 0 and str(before_soup) != str(after_soup):
-        before_els, after_els = before_soup.find_all(True), after_soup.find_all(True)
-        for i in range(min(len(before_els), len(after_els))):
-            if get_sig(before_els[i]) != get_sig(after_els[i]): changed.append(after_els[i])
-    # 变化边界: parent不在changed中的元素
-    cids = set(id(el) for el in changed)
-    boundaries = [el for el in changed if el.parent is None or id(el.parent) not in cids]
-    top = max(boundaries, key=lambda el: len(str(el))) if boundaries else None
-    result = {"changed": len(changed)}
-    if top:
-        h = str(top)
-        result["top_change"] = h if len(h) <= 2000 else h[:2000] + '...[TRUNCATED]'
-    return result
+    """Summarise what the page gained or lost between two HTML snapshots.
+
+    The alignment is `difflib`'s. Each element becomes one signature line, the
+    two streams are aligned once, and every opcode that is not `equal` is a
+    change -- so an insertion, a deletion and a reorder all fall out of the same
+    walk. Tallying how many copies of each signature the `after` side holds
+    cannot do that: it sees additions only, needs a second positional pass for
+    the reorder case, and still reports a pure deletion as zero changes.
+
+    `top_change` is the longest changed element, and nothing has to filter for
+    the outermost one first: an element's serialisation contains its children's,
+    so a changed element that sits inside another changed element is strictly
+    shorter than it and can never be the maximum.
+    """
+    before = BeautifulSoup(before_html, 'html.parser').find_all(True)
+    after = BeautifulSoup(after_html, 'html.parser').find_all(True)
+    # autojunk would treat a signature shared by 1% of a long page as noise and
+    # stop matching it, which on a list page is most of the document.
+    matcher = difflib.SequenceMatcher(
+        None,
+        [_element_signature(element) for element in before],
+        [_element_signature(element) for element in after],
+        autojunk=False,
+    )
+    appeared, vanished = [], 0
+    for opcode, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if opcode == 'equal':
+            continue
+        appeared.extend(after[new_start:new_end])
+        vanished += old_end - old_start
+
+    summary = {"changed": len(appeared) + vanished}
+    if appeared:
+        rendered = str(max(appeared, key=lambda element: len(str(element))))
+        summary["top_change"] = (
+            rendered
+            if len(rendered) <= TOP_CHANGE_MAXCHARS
+            else rendered[:TOP_CHANGE_MAXCHARS] + '...[TRUNCATED]'
+        )
+    return summary
+
+# The mark that tells the truncator a node is the page's own account of what was
+# removed rather than page content, so that it survives being cut (`_is_hint`).
+_HINT_MARK = '[FAKE ELEMENT]'
+
+# A collapsed list keeps its first few items -- or every item the caller's
+# instruction names, and more of those, because they are what was asked for.
+_CUTLIST_KEEP = 3
+_CUTLIST_HIT_KEEP = 6
+
+# How much of each hidden item is quoted back, so the agent can tell what kind of
+# thing it is not being shown.
+_CUTLIST_SAMPLES = 5
+_CUTLIST_SAMPLE_CHARS = 40
+
+# The hint costs tokens too, so a collapse has to buy back several times what it
+# spends. Measuring the hint that was actually built is what makes one number
+# enough here: it already accounts for how long the selector turned out to be and
+# how much sample text there was, neither of which an absolute character count
+# can see. Measured on the shapes this has to separate, the ratio is not near
+# either edge -- a ten-link nav bar comes out at 1.3 and a list of
+# paragraph-sized cards at 9.8, so the cut falls between them rather than just
+# inside one of them.
+_CUTLIST_MIN_GAIN = 4
+
+
+def _cutlist_hint(soup, selector, removed):
+    """The note that stands in for the items a collapse is about to hide."""
+    samples = [
+        text
+        for element in removed[:_CUTLIST_SAMPLES]
+        if (text := element.get_text(" ", strip=True)[:_CUTLIST_SAMPLE_CHARS])
+    ]
+    parts = [f'{_HINT_MARK} {len(removed)} more items hidden, selector: "{selector}"']
+    if samples:
+        parts.append('Hidden items: ' + ','.join(f'"{text}"' for text in samples))
+    hint = soup.new_tag('div')
+    hint.string = ' '.join(parts)
+    return hint
+
+
+def _collapse_list(soup, selector, instruction):
+    """Hide the repetitive tail of one list in place; report whether it happened.
+
+    Whether to collapse is decided against the hint's own measured length, so the
+    price of the exchange is known before it is made rather than after: a list
+    whose items are shorter than the note describing them is one where hiding
+    them makes the page *bigger*, and no absolute item-size threshold can rule
+    that out, because it cannot see the note.
+    """
+    try:
+        items = soup.select(selector)
+    except Exception:
+        logger.debug("cutlist skipped invalid selector: %s", selector)
+        return False
+    wanted = instruction.strip() if instruction else ''
+    asked_for = [
+        item for item in items
+        if wanted and wanted in item.get_text(" ", strip=True)
+    ]
+    keep = asked_for[:_CUTLIST_HIT_KEEP] if asked_for else items[:_CUTLIST_KEEP]
+    # By identity, not by `in`: two list items that happen to serialise the same
+    # -- a repeated "More" link, an empty cell -- compare equal as tags, so a
+    # membership test would read a duplicate of a kept item as kept and leave it
+    # behind while the hint counted it as hidden.
+    kept = {id(item) for item in keep}
+    removed = [item for item in items if id(item) not in kept]
+    if not removed:
+        return False
+    hint = _cutlist_hint(soup, selector, removed)
+    saved, cost = sum(len(str(item)) for item in removed), len(str(hint))
+    logger.debug(
+        "cutlist selector=%s items=%d hidden=%d saves=%d hint=%d",
+        selector, len(items), len(removed), saved, cost,
+    )
+    if saved < cost * _CUTLIST_MIN_GAIN:
+        return False
+    # `keep` is empty only when `items` is, and `removed` is then empty too, so
+    # by here there is always an anchor to put the hint after.
+    keep[-1].insert_after(hint)
+    for item in removed:
+        item.decompose()
+    return True
+
 
 def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
              text_only=False, timeout=15, link_refs=None, session_id=None):
@@ -281,149 +497,137 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
             page = page.replace(m.group(0), '', 1)
     soup = optimize_html_for_tokens(page, link_refs=link_refs, base_url=base_url)
     for div in soup.select('div[data-tag="iframe"]'):
-        div.name = 'iframe'; del div['data-tag']
+        div.name = 'iframe'
+        del div['data-tag']
     html = str(soup)
-    if not cutlist: return html
-    lists = rr if isinstance(rr, list) else ([rr] if isinstance(rr, dict) and rr.get('selector') else [])
-    if lists:
+    if not cutlist:
+        return html
+    # `listGroups` answers with one entry per repeated block, but a single dict
+    # and a non-answer are both shapes this has had to read, so the reply is
+    # normalised before anything looks for a selector inside it.
+    candidates = rr if isinstance(rr, list) else [rr]
+    selectors = [
+        entry['selector'] for entry in candidates
+        if isinstance(entry, dict) and entry.get('selector')
+    ]
+    if candidates:
+        logger.debug("cutlist found %d list(s): %s", len(candidates), selectors)
+    # Deliberately not `any(...)`: it short-circuits on the first collapse, and
+    # every list the page offered has to be given its own chance to be cut.
+    collapsed = [sel for sel in selectors if _collapse_list(soup, sel, instruction)]
+    if collapsed:
+        # A collapse happened, so the page had content and `html` is not empty --
+        # which is what the ratio below needs, and the only reason the old
+        # unconditional version of it needed an "empty page" branch at all.
+        cut = str(soup)
         logger.debug(
-            "cutlist found %d list(s): %s",
-            len(lists),
-            [e.get('selector', '?') if isinstance(e, dict) else '?' for e in lists],
+            "get_html cutlist collapsed %d list(s): %d -> %d chars (%d%% saved)",
+            len(collapsed), len(html), len(cut), 100 - len(cut) * 100 // len(html),
         )
-    for entry in lists:
-        sel = entry.get('selector') if isinstance(entry, dict) else None
-        if not sel: continue
-        try:
-            items = soup.select(sel)
-        except Exception:
-            logger.debug("cutlist skipped invalid selector: %s", sel)
-            continue
-        if len(items) < 5: continue
-        total_len = sum(len(str(it)) for it in items)
-        avg_len = total_len / len(items)
-        logger.debug(
-            "cutlist selector=%s items=%d avg_chars=%.0f total_chars=%d estimated_saved=%.0f",
-            sel,
-            len(items),
-            avg_len,
-            total_len,
-            total_len - 3 * avg_len,
-        )
-        if avg_len < 200 or (avg_len < 700 and total_len < 2500): continue
-        hit = [it for it in items if instruction and instruction.strip() and instruction in it.get_text(" ",strip=True)]
-        keep = hit[:6] if hit else items[:3]
-        removed = [it for it in items if it not in keep]
-        sample_texts = []
-        for rm in removed[:5]:
-            txt = rm.get_text(" ", strip=True)[:40]
-            if txt: sample_texts.append(txt)
-        hint_parts = [f'[FAKE ELEMENT] {len(removed)} more items hidden, selector: "{sel}"']
-        if sample_texts: hint_parts.append('Hidden items: ' + ','.join(f'"{t}"' for t in sample_texts))
-        hint_tag = soup.new_tag("div")
-        hint_tag.string = ' '.join(hint_parts)
-        if keep: keep[-1].insert_after(hint_tag)
-        for it in removed: it.decompose()
-    ss = str(optimize_html_for_tokens(soup, link_refs=link_refs, base_url=base_url)) if lists else html
-    saved = f"{100 - len(ss) * 100 // len(html)}% saved" if html else "empty page"
-    logger.debug("get_html cutlist result: %d -> %d chars (%s)", len(html), len(ss), saved)
-    if len(ss) > maxchars: ss = str(smart_truncate(soup, maxchars))
-    return ss
+        html = cut
+    if len(html) > maxchars:
+        html = str(smart_truncate(soup, maxchars))
+    return html
+
+# A child bigger than this keeps its own structure: it is subdivided by another
+# round of allocation rather than having its serialised text sliced, so the
+# agent still sees where in the tree the content sat.
+SUBDIVIDE_ABOVE = 8000
+
+
+def _is_hint(node):
+    return bool(node.string) and _HINT_MARK in node.string
+
+
+def _clip_markup(element, keep):
+    """Cut one element down to ``keep`` characters, hints kept, marker appended."""
+    hints = [node.extract() for node in element.find_all(_is_hint)]
+    over = len(str(element)) - keep
+    if over > 0:
+        marker = f' [TRUNCATED {over // 1000}k chars]'
+        inner = element.decode_contents()
+        room = max(keep - (len(str(element)) - len(inner)) - len(marker), 0)
+        element.clear()
+        if room:
+            element.append(BeautifulSoup(inner[:room], 'html.parser'))
+        element.append(NavigableString(marker))
+    for hint in hints:
+        element.append(hint)
+
+
+def _allocate(sizes, budget):
+    """Largest-remainder allocation of ``budget`` over ``sizes``, biggest first.
+
+    Every child is given what it asks for while the budget covers it; the first
+    one that does not fit takes whatever is left and the rest get zero. So the
+    result is exact (the shares sum to at most the budget, never over it) and
+    total: no child is exempt from being cut, which a fixed top-N rule cannot
+    promise -- upstream's spread the overflow across the three biggest children
+    and left the fourth untouched no matter how far over budget the page was,
+    then needed a separate tail-deletion branch for the case where three were
+    not enough. One rule covers both here.
+
+    Ordering by size descending is what makes the outcome useful rather than
+    merely exact: the big blocks are the content, so they are served first and
+    the boilerplate is what runs out of budget.
+    """
+    order = sorted(range(len(sizes)), key=lambda index: -sizes[index])
+    shares = [0] * len(sizes)
+    left = max(budget, 0)
+    for index in order:
+        shares[index] = min(sizes[index], left)
+        left -= shares[index]
+    return shares
+
 
 def smart_truncate(soup, budget, _depth=0):
-    """原地截断 soup 使其接近 budget 字符。
-    策略：穿透单子元素找分叉点；top3 能扛住 over 则按比例分担，否则从尾部删子元素。"""
-    CUT_THRESHOLD = 8000  # 小于此值直接去尾，大于则继续递归找分叉点
-    indent = '  ' * _depth
-    def cut(ele, keep):
-        from bs4 import NavigableString
-        s = str(ele)
-        over = len(s) - keep
-        if over <= 0: return
-        # 保护 FAKE ELEMENT 提示标签
-        protected = [c.extract() for c in ele.find_all(lambda tag: tag.string and '[FAKE ELEMENT]' in tag.string)]
-        s = str(ele)
-        over = len(s) - keep
-        if over <= 0:
-            for p in protected: ele.append(p)
-            return
-        marker = f' [TRUNCATED {over//1000}k chars]'
-        inner = ele.decode_contents()
-        tag_overhead = len(s) - len(inner)
-        inner_keep = max(keep - tag_overhead - len(marker), 0)
-        ele.clear()
-        if inner_keep > 0:
-            ele.append(BeautifulSoup(inner[:inner_keep], 'html.parser'))
-        ele.append(NavigableString(marker))
-        for p in protected: ele.append(p)
+    """Trim ``soup`` in place until it serialises to about ``budget`` chars.
+
+    Each level spends its budget on its children by `_allocate`, then either
+    subdivides a child that is still large (so its structure survives) or clips
+    its markup. A lone child is passed straight through, which is what lets a
+    deeply wrapped page reach its real content instead of spending the whole
+    budget on `<div><div><div>`.
+    """
     total = len(str(soup))
-    if total <= budget: return soup
-    kids = [(c, len(str(c))) for c in soup.children if c.name and not (c.string and '[FAKE ELEMENT]' in c.string)]
-    if not kids: return soup
-    selflen = total - sum(l for _, l in kids)
-    remaining_budget = max(budget - selflen, 0)
-    tag = getattr(soup, 'name', '?')
+    if total <= budget:
+        return soup
+    children = [node for node in soup.children if node.name and not _is_hint(node)]
+    if not children:
+        return soup
+
+    sizes = [len(str(node)) for node in children]
+    # What the element costs on its own: its tags, and any text sitting directly
+    # between the children. The children have to fit in what is left of it.
+    inner_budget = max(budget - (total - sum(sizes)), 0)
     logger.debug(
-        "%ssmart_truncate tag=%s total=%d budget=%d selflen=%d children=%d",
-        indent,
-        tag,
+        "%ssmart_truncate tag=%s total=%d budget=%d children=%d",
+        '  ' * _depth,
+        getattr(soup, 'name', '?'),
         total,
         budget,
-        selflen,
-        len(kids),
+        len(children),
     )
-    # === 1 kid: 穿透 ===
-    if len(kids) == 1:
-        logger.debug("%ssmart_truncate recursing into single child tag=%s", indent, kids[0][0].name)
-        smart_truncate(kids[0][0], remaining_budget, _depth)
+    if len(children) == 1:
+        smart_truncate(children[0], inner_budget, _depth)
         return soup
-    over = sum(l for _, l in kids) - remaining_budget
-    if over <= 0: return soup
-    # 看 top 3 能否承担 over
-    ranked = sorted(range(len(kids)), key=lambda i: kids[i][1], reverse=True)
-    tops = list(ranked[:min(3, len(ranked))])
-    top_total = sum(kids[i][1] for i in tops)
-    if top_total < over:
-        # === top 3 扛不住，从尾部删子元素 ===
-        removed = 0
-        removed_count = 0
-        while kids and removed < over:
-            c, l = kids.pop(); c.decompose()
-            removed += l; removed_count += 1
+
+    for node, size, keep in zip(children, sizes, _allocate(sizes, inner_budget)):
+        if keep >= size:
+            continue
         logger.debug(
-            "%ssmart_truncate tail cut removed_children=%d removed_chars=%d",
-            indent,
-            removed_count,
-            removed,
+            "%ssmart_truncate child=%s chars=%d keep=%d",
+            '  ' * _depth,
+            node.name,
+            size,
+            keep,
         )
-        return soup
-    # === top 2-3 按比例分担 ===
-    # 过滤掉太小的 kid（不到最大的 10%），让大的全扛
-    max_size = kids[ranked[0]][1]
-    filtered = [i for i in tops if kids[i][1] >= max_size * 0.1]
-    filtered_total = sum(kids[i][1] for i in filtered)
-    if filtered_total >= over:
-        tops, top_total = filtered, filtered_total
-    # 先打印所有分配计划
-    actions = []
-    for i in tops:
-        c, l = kids[i]
-        share = int(over * l / top_total)
-        new_keep = l - share
-        logger.debug(
-            "%ssmart_truncate child=%s chars=%d keep=%d share=%d",
-            indent,
-            c.name,
-            l,
-            new_keep,
-            share,
-        )
-        actions.append((c, l, new_keep))
-    # 再统一执行
-    for c, l, new_keep in actions:
-        if new_keep <= 0: c.decompose()
-        elif new_keep > CUT_THRESHOLD: smart_truncate(c, new_keep, _depth + 1)
-        else: cut(c, new_keep)
+        if not keep:
+            node.decompose()
+        elif keep > SUBDIVIDE_ABOVE:
+            smart_truncate(node, keep, _depth + 1)
+        else:
+            _clip_markup(node, keep)
     return soup
 
 # The monitor snapshots/diff around execute_js are best-effort context, not the
@@ -497,6 +701,35 @@ def undelivered_retry_split(left):
     if first <= 0.001:
         return left, 0.0
     return first, reserve
+
+
+# Fields of a structured browser error that cost tokens and tell an agent nothing
+# it can act on. `stack` is the reason this exists at all: a browser stack trace
+# is routinely longer than the whole rest of the reply.
+_ERROR_NOISE = frozenset({'stack', 'stackTrace'})
+
+
+def _error_text(exc):
+    """Flatten whatever the driver raised into one line an agent can read.
+
+    The bridge raises with a structured dict when the page itself reported the
+    failure and with a plain string otherwise. Two things follow, and neither is
+    served by `str()` on the dict: its repr is Python's -- single quotes, `True`
+    rather than `true` -- inside a reply that is otherwise JSON, and a dict whose
+    only remaining content is a message reads better as that message. A copy is
+    built rather than keys dropped in place, because the dict belongs to the
+    exception the driver raised and may still be read after this.
+    """
+    detail = exc.args[0] if exc.args else str(exc)
+    if not isinstance(detail, dict):
+        return str(detail)
+    useful = {
+        key: value for key, value in detail.items()
+        if key not in _ERROR_NOISE and value not in (None, '')
+    }
+    if set(useful) == {'message'}:
+        return str(useful['message'])
+    return json.dumps(useful, ensure_ascii=False, default=str)
 
 
 def execute_js_rich(
@@ -593,9 +826,7 @@ def execute_js_rich(
         if not blocked_dialog and not no_response_kind(response):
             time.sleep(min(1.0, _remaining(deadline)))
     except Exception as e:
-        error = e.args[0] if e.args else str(e)
-        if isinstance(error, dict): error.pop('stack', None)
-        error_msg = str(error)
+        error_msg = _error_text(e)
         logger.warning("Browser script execution failed: %s", error_msg)
 
     etab = response.get('executed_tab_id')
@@ -703,26 +934,32 @@ def execute_js_rich(
             )
         except Exception:
             rr['transients'] = []
-    if not reloaded and not error_msg and len(newTabs) == 0 and phase_timeout(MONITOR_TIMEOUT):
+    if not reloaded and not error_msg and not newTabs and phase_timeout(MONITOR_TIMEOUT):
         try:
-            current_html = get_html(
+            # Checked before the roundtrip, not after it: with no baseline there
+            # is nothing a second full-page fetch could be compared against, and
+            # the old order paid for one anyway on every call whose opening
+            # snapshot had failed. Reported as unavailable rather than as zero
+            # changes, which an agent would read as "the script did nothing".
+            if last_html is None:
+                raise PageUnavailable("no baseline snapshot to compare against")
+            diff = find_changed_elements(last_html, get_html(
                 driver,
                 cutlist=False,
                 maxchars=MONITOR_MAXCHARS,
                 timeout=phase_timeout(MONITOR_TIMEOUT),
                 session_id=session_id,
-            )
-            if last_html is None: raise Exception("no baseline")
-            diff_data = find_changed_elements(last_html, current_html)
-            change_count = diff_data.get('changed', 0)
-            top_change = diff_data.get('top_change', '')
-            diff_summary = f"DOM changes: {change_count}"
-            if top_change: diff_summary += f"\nMost significant change:\n{top_change}"
-            transients = rr.get('transients', [])
-            if change_count == 0 and not transients and len(newTabs) == 0:
-                diff_summary += " (no page changes)"
-                rr['suggestion'] = "No visible page changes were detected."
+            ))
         except Exception:
-            diff_summary = "Page-change monitoring is unavailable."
-        rr['diff'] = diff_summary
+            rr['diff'] = "Page-change monitoring is unavailable."
+        else:
+            # `changed` is always present and `top_change` only when something
+            # appeared, because the producer is this module -- no default needed.
+            summary = f"DOM changes: {diff['changed']}"
+            if diff.get('top_change'):
+                summary += f"\nMost significant change:\n{diff['top_change']}"
+            if not diff['changed'] and not rr.get('transients'):
+                summary += " (no page changes)"
+                rr['suggestion'] = "No visible page changes were detected."
+            rr['diff'] = summary
     return rr

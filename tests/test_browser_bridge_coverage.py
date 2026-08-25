@@ -192,13 +192,31 @@ def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, caplog):
     assert "Tab disconnected" in caplog.text
 
 
-def test_http_session_reconnect_and_unknown_type():
-    session = T.Session("h:1", {"url": "http://x", "type": "http"}, queue.Queue())
+def test_reconnecting_as_an_unserved_transport_keeps_no_handle_from_the_old_one():
+    """A transport this bridge does not route must not inherit the last one's channel.
+
+    This used to assert the opposite -- that `http_queue` was still set -- which
+    read as "the session survived" and was really the old queue showing through:
+    the two mutually exclusive slots were assigned branch by branch, so a type
+    matching no branch left the previous transport's handle in place while the
+    client that had just registered was dropped on the floor. Sends then went to
+    a queue nobody was polling and reported success.
+    """
+    first = queue.Queue()
+    session = T.Session("h:1", {"url": "http://x", "type": "http"}, first)
+    assert session.http_queue is first
     session.disconnect_at = time.time()
-    session.reconnect(queue.Queue(), {"url": "x", "type": "other"})
+    replacement = queue.Queue()
+    session.reconnect(replacement, {"url": "x", "type": "other"})
     assert session.type == "other"
     assert session.disconnect_at is None
-    assert session.http_queue is not None
+    # The new client is what is held -- the stale one is unreachable, by
+    # construction rather than by having been cleared.
+    assert session.client is replacement
+    # ...and neither routing name hands it out, because neither transport is the
+    # one it registered as.
+    assert session.ws_client is None
+    assert session.http_queue is None
 
 
 def test_driver_registration_reconnect_and_unregister(caplog):

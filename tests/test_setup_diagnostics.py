@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from browsertap_mcp import __version__
 from browsertap_mcp import server as S
+from browsertap_mcp.extension_build import STAMP_LENGTH, stamp_line, write_extension_stamp
 
 
 class _Driver:
@@ -367,3 +368,282 @@ def test_setup_status_stays_quiet_when_the_bridge_predates_the_report(monkeypatc
     assert "state_paths_disagreement" not in result
     assert result["state_paths"] == _LOCAL_PATHS
     assert result["status"] == "healthy"
+
+
+# --- The build stamp: the one question version equality cannot answer ---------
+#
+# Every test below holds all three version fields equal and every required
+# capability present, which is the state the old logic called `healthy`. That is
+# deliberate: the stamp exists because that state was measured twice here to be
+# wrong in both directions, so a verdict that only fired when a version already
+# disagreed would add nothing.
+
+
+def _extension_tree(tmp_path, name, extra=None):
+    """A minimal extension directory whose recorded stamp matches its sources.
+
+    Returns `(directory, stamp)`. Built with the real writer rather than a
+    hardcoded hash, so these tests keep meaning if the digest ever changes shape.
+    """
+    directory = tmp_path / name
+    directory.mkdir(parents=True)
+    (directory / "background.js").write_text(
+        "// worker code\n" + stamp_line("0" * STAMP_LENGTH) + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+    (directory / "manifest.json").write_text(
+        '{\n  "version": "9.9.9"\n}\n', encoding="utf-8", newline=""
+    )
+    for relative, body in (extra or {}).items():
+        (directory / relative).write_text(body, encoding="utf-8", newline="")
+    stamp, _ = write_extension_stamp(directory)
+    return directory, stamp
+
+
+def _healthy_diagnosis(**overrides):
+    base = {
+        "cause": "healthy",
+        "ok": True,
+        "bridge_version": __version__,
+        "extension_version": __version__,
+        "protocol_version": 3,
+        "extension_capabilities": {"content_command_channel_removed": True},
+    }
+    base.update(overrides)
+    return base
+
+
+def _build_status(monkeypatch, directory, diagnosis, runtime=None):
+    monkeypatch.setattr(S, "chrome_extension_dir", lambda: directory)
+    return _status(monkeypatch, diagnosis, runtime)
+
+
+def test_a_worker_running_the_tree_is_reported_as_measured_and_matching(monkeypatch, tmp_path):
+    """The healthy case, and the only one that may claim the worker was checked."""
+    directory, stamp = _extension_tree(tmp_path, "matching")
+
+    result = _build_status(
+        monkeypatch, directory, _healthy_diagnosis(extension_build_stamp=stamp)
+    )
+
+    assert result["extension_build_verdict"] == "matches_tree"
+    assert result["extension_build_enforced"] is True
+    assert result["extension_build_stamp"] == stamp
+    assert result["expected_extension_build_stamp"] == stamp
+    assert result["reload_extension_required"] is False
+    assert result["status"] == "healthy"
+    assert result["action"] == "none"
+
+
+def test_a_worker_on_other_code_is_caught_though_every_version_agrees(monkeypatch, tmp_path):
+    """The whole reason the stamp exists.
+
+    Measured on this project: the versions agreed, every advertised capability was
+    present, and a reload was still needed. Nothing else in `get_setup_status`
+    could see it, so the verdict here has to be the thing that names the fix.
+    """
+    directory, stamp = _extension_tree(tmp_path, "stale-worker")
+    other = "f" * STAMP_LENGTH
+    assert other != stamp
+
+    result = _build_status(
+        monkeypatch, directory, _healthy_diagnosis(extension_build_stamp=other)
+    )
+
+    assert result["extension_build_verdict"] == "stale_worker"
+    assert result["extension_build_enforced"] is True
+    assert result["extension_build_stamp"] == other
+    assert result["expected_extension_build_stamp"] == stamp
+    assert result["reload_extension_required"] is True
+    assert result["status"] == "stale_extension"
+    assert result["action"] == "reload_extension"
+
+
+def test_a_worker_ahead_of_this_process_is_not_told_to_reload(monkeypatch, tmp_path):
+    """Direction matters, and the stamp comparison cannot establish it.
+
+    A worker whose version is newer than this process is compared against *this
+    process's* copy of the tree, so a mismatching stamp means the server is behind,
+    not the browser. Reloading the extension cannot fix that, so the verdict stays
+    honest about what it saw while the action names the only thing that can.
+    """
+    directory, stamp = _extension_tree(tmp_path, "newer-worker")
+    other = "f" * STAMP_LENGTH
+    assert other != stamp
+
+    result = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(extension_version="99.0.0", extension_build_stamp=other),
+    )
+
+    assert result["extension_build_verdict"] == "stale_worker"
+    assert result["extension_build_enforced"] is True
+    assert result["reload_extension_required"] is False
+    assert result["status"] == "stale_package"
+    assert result["action"] == "restart_mcp_session"
+
+
+def test_a_stamp_nobody_regenerated_refuses_to_judge_the_worker(monkeypatch, tmp_path):
+    """A stale stamp makes a *fresh* worker report the old literal too.
+
+    So the comparison proves nothing in either direction, and saying `stale_worker`
+    here would name a browser reload as the fix for a problem a reload cannot
+    touch. `enforced` is what keeps that from reading as a check that ran.
+    """
+    directory, stamp = _extension_tree(tmp_path, "unregenerated")
+    # An edit to a file that is not the stamp's own: the sources now hash to
+    # something else while background.js still carries the old value.
+    (directory / "content.js").write_text(
+        "// added later\n", encoding="utf-8", newline=""
+    )
+
+    result = _build_status(
+        monkeypatch, directory, _healthy_diagnosis(extension_build_stamp=stamp)
+    )
+
+    assert result["extension_build_verdict"] == "stamp_not_regenerated"
+    assert result["extension_build_enforced"] is False
+    # Not driven by the stamp at all: the three version fields agree, so nothing
+    # else asks for a reload either.
+    assert result["reload_extension_required"] is False
+    assert result["status"] == "healthy"
+    note = result["notes"][0]
+    assert "scripts.extension_stamp --write" in note
+    # Both numbers, because the developer's next move is to see which is which.
+    assert stamp in note and result["expected_extension_build_stamp"] in note
+    assert result["expected_extension_build_stamp"] != stamp
+
+
+def test_a_worker_that_reports_no_stamp_says_so_instead_of_guessing(monkeypatch, tmp_path):
+    """An extension built before the stamp existed. Absence is not a mismatch.
+
+    Treating a missing value as unequal would report every pre-stamp install as a
+    stale worker -- a gate crying wolf at exactly the people upgrading.
+    """
+    directory, stamp = _extension_tree(tmp_path, "no-stamp")
+
+    result = _build_status(
+        monkeypatch, directory, _healthy_diagnosis(), runtime={"protocol_version": 3}
+    )
+
+    assert result["extension_build_verdict"] == "unverifiable"
+    assert result["extension_build_enforced"] is False
+    assert result["extension_build_stamp"] is None
+    # Still reported, so a reader can see what the comparison would have been.
+    assert result["expected_extension_build_stamp"] == stamp
+    assert result["reload_extension_required"] is False
+    assert result["status"] == "healthy"
+    # `healthy` is correct and is also the problem: this is the exact shape measured
+    # live on this project -- every version equal, protocol matched, every capability
+    # present, `action: none` -- with the browser running code from before the stamp.
+    # Without the note the skipped check is invisible to anyone not reading
+    # `enforced`, so the disclosure is what stops `healthy` from speaking for it.
+    assert result["action"] == "none"
+    note = result["notes"][0]
+    assert "extension_build_enforced is false" in note
+    # Both causes, because they need different fixes and leave identical evidence.
+    assert "Reload the unpacked extension" in note
+    assert "browsertap bridge --restart" in note
+
+
+def test_the_fallback_probe_fills_a_stamp_an_older_bridge_did_not_forward(monkeypatch, tmp_path):
+    """The stamp joins the probe condition, or it is missing exactly where it helps.
+
+    A bridge that predates the stamp still forwards both versions, so a probe
+    keyed only on those would never run on the installs whose stamp is absent.
+    """
+    directory, stamp = _extension_tree(tmp_path, "probed")
+
+    result = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(),
+        runtime={
+            "extension_version": __version__,
+            "protocol_version": 3,
+            "capabilities": {"content_command_channel_removed": True},
+            "build_stamp": stamp,
+        },
+    )
+
+    assert result["extension_build_stamp"] == stamp
+    assert result["extension_build_verdict"] == "matches_tree"
+    assert result["status"] == "healthy"
+
+
+def test_the_probe_fills_gaps_without_discarding_what_the_bridge_sent(monkeypatch, tmp_path):
+    """Widening the probe's condition made an old assignment dangerous.
+
+    It used to run only when a version was already None, so overwriting could not
+    lose anything. It now fires with all three version fields in hand, and a
+    `bridge_status` reply that omits `capabilities` would empty a populated set --
+    demanding a reload of an extension that was fine, which is the cry-wolf shape
+    this repository has already had to undo twice.
+    """
+    directory, stamp = _extension_tree(tmp_path, "partial-probe")
+
+    result = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(),
+        # A truthful but partial answer: the stamp only, which is what the probe
+        # was reached for.
+        runtime={"build_stamp": stamp},
+    )
+
+    assert result["extension_build_stamp"] == stamp
+    assert result["extension_version"] == __version__
+    assert result["protocol_version"] == 3
+    assert result["missing_extension_capabilities"] == []
+    assert result["reload_extension_required"] is False
+    assert result["status"] == "healthy"
+
+
+def test_an_unreadable_recorded_stamp_is_disclosed_without_losing_the_verdict(
+    monkeypatch, tmp_path
+):
+    """Two questions, and only one of them is unanswerable here.
+
+    An install whose `background.js` carries no stamp line is what a partial
+    checkout or a hand-edited file produces. That breaks the *developer's*
+    question -- did someone edit an extension file without regenerating the stamp
+    -- because there is no recorded value to compare the sources against, and it
+    is surfaced as `extension_build_error` naming the command that fixes it.
+
+    It does not break the *worker's* question. Code with no stamp constant cannot
+    report a stamp, so a worker that reports one is provably running something
+    else, and the tree hash is still a real measurement to say so against. Hence
+    `stale_worker` with `enforced: True`: the comparison happened. Downgrading it
+    to `unverifiable` would throw away the one answer still available and leave a
+    genuinely stale worker looking unexamined.
+    """
+    directory = tmp_path / "broken"
+    directory.mkdir()
+    (directory / "background.js").write_text(
+        "// no stamp line\n", encoding="utf-8", newline=""
+    )
+
+    result = _build_status(
+        monkeypatch, directory, _healthy_diagnosis(extension_build_stamp="a" * STAMP_LENGTH)
+    )
+
+    assert "extension_build_error" in result
+    assert "extension_stamp --write" in result["extension_build_error"]
+    assert result["extension_build_verdict"] == "stale_worker"
+    assert result["extension_build_enforced"] is True
+    assert result["reload_extension_required"] is True
+    # And with no stamp reported either, there is nothing left to measure, so the
+    # verdict stops claiming one.
+    quiet = _build_status(monkeypatch, directory, _healthy_diagnosis())
+    assert quiet["extension_build_verdict"] == "unverifiable"
+    assert quiet["extension_build_enforced"] is False
+    assert "extension_build_error" in quiet
+    # And it does *not* also get the note about a worker reporting no stamp. That
+    # note tells the reader a verifiable tree went unverified, which would be a
+    # false claim here: this tree has no recorded stamp to verify against, and the
+    # error already names the command that fixes it. Two messages for one fact is
+    # how a gate starts getting skimmed.
+    assert not any("reported none" in n for n in quiet["notes"])
+

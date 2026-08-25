@@ -1935,35 +1935,115 @@ async def test_registered_async_tool_shares_lock_and_offloads_blocking_io(monkey
     monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "lab")
     monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
     monkeypatch.setattr(S, "require_driver", lambda: Driver())
-    monkeypatch.setattr(S, "switch_session", lambda session_id=None: session_id or "chrome:7")
-    monkeypatch.setattr(
-        S,
-        "chrome_extension_dir",
-        lambda: order.append("extension_path") or S.Path("extension"),
-    )
+    monkeypatch.setattr(S, "switch_session", lambda **kwargs: "chrome:7")
+    # switch_tab, deliberately not one of the read-only diagnostics: those run
+    # unserialized now, so driving one here would assert the opposite invariant
+    # and this test would pass for the wrong reason. Their side is
+    # `test_read_only_diagnostics_answer_while_the_serial_gate_is_held`.
+    monkeypatch.setattr(S, "compact_tabs", lambda **kwargs: order.append("switch_tab") or [])
     permission_fn = S.mcp._tool_manager.get_tool("set_site_permission").fn
-    extension_path_fn = S.mcp._tool_manager.get_tool("extension_path").fn
+    switch_tab_fn = S.mcp._tool_manager.get_tool("switch_tab").fn
 
     async def permission_call():
         await permission_fn(
             SimpleNamespace(), "camera", "block", "https://example.test", 300, "chrome:7"
         )
 
-    async def extension_path_call():
-        await extension_path_fn()
+    async def switch_tab_call():
+        await switch_tab_fn(session_id="chrome:7")
 
     async with anyio.create_task_group() as tasks:
         tasks.start_soon(permission_call)
         assert await anyio.to_thread.run_sync(entered.wait, 2)
-        tasks.start_soon(extension_path_call)
+        tasks.start_soon(switch_tab_call)
         # The event loop remains responsive while ext_cmd blocks in a worker,
         # but the second registered tool cannot enter the shared serial gate.
         await anyio.sleep(0.05)
-        assert "extension_path" not in order
+        assert "switch_tab" not in order
         release.set()
 
-    assert order == ["permission_start", "permission_end", "extension_path"]
+    assert order == ["permission_start", "permission_end", "switch_tab"]
 
+
+@pytest.mark.anyio
+async def test_read_only_diagnostics_answer_while_the_serial_gate_is_held(monkeypatch):
+    """A wedged tool must not take the diagnostics down with it.
+
+    The gate is held for the whole of a serialized call, so a 120-second
+    scan_page used to make `get_setup_status`, `list_tabs` and `pointer_info`
+    unavailable for 120 seconds -- the one question worth asking became the one
+    that could not be asked. `browsertap doctor` reaches the bridge over HTTP
+    and kept answering, which is exactly what hid this: the documented
+    workaround bypassed the defect instead of surfacing it.
+
+    The other side of
+    `test_registered_async_tool_shares_lock_and_offloads_blocking_io` above,
+    which asserts the opposite for a tool that really is serialized. Neither
+    test can be satisfied by the other. Mutation-checked: dropping
+    `serialize=False` from either tool driven here makes the `"diagnostics" in
+    order` assertion fail.
+    """
+    from types import SimpleNamespace
+
+    order = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Driver:
+        default_session_id = "chrome:7"
+
+        def ext_cmd(self, payload, **kwargs):
+            order.append("holder_start")
+            entered.set()
+            assert release.wait(5)
+            order.append("holder_end")
+            return {"data": {"ok": True}}
+
+    driver = Driver()
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "lab")
+    monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "switch_session", lambda **kwargs: "chrome:7")
+    monkeypatch.setattr(S, "compact_tabs", lambda **kwargs: [{"id": "chrome:7"}])
+    monkeypatch.setattr(S, "chrome_extension_dir", lambda: S.Path("extension"))
+
+    holder_fn = S.mcp._tool_manager.get_tool("set_site_permission").fn
+    path_fn = S.mcp._tool_manager.get_tool("extension_path").fn
+    tabs_fn = S.mcp._tool_manager.get_tool("list_tabs").fn
+
+    observed = {}
+
+    async def holder():
+        await holder_fn(
+            SimpleNamespace(), "camera", "block", "https://example.test", 300, "chrome:7"
+        )
+
+    async def diagnostics():
+        observed["path"] = await path_fn()
+        observed["tabs"] = await tabs_fn()
+        order.append("diagnostics")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(holder)
+        assert await anyio.to_thread.run_sync(entered.wait, 5)
+        tasks.start_soon(diagnostics)
+        for _ in range(60):
+            if "diagnostics" in order:
+                break
+            await anyio.sleep(0.05)
+        assert "diagnostics" in order, "a read-only diagnostic queued behind the serial gate"
+        release.set()
+
+    assert order == ["holder_start", "diagnostics", "holder_end"]
+    assert observed["path"]["extension_path"].endswith("extension")
+    assert observed["tabs"]["default_session_id"] == "chrome:7"
+    # The bounded read could not settle while another tool held the gate, and it
+    # says so rather than passing a possible mid-call transient off as the
+    # caller's own default.
+    assert observed["tabs"]["default_session_settled"] is False
+
+    # And that field is computed, not a constant: with the gate free it settles.
+    assert (await tabs_fn())["default_session_settled"] is True
 
 @pytest.mark.anyio
 async def test_cancelled_tool_never_walks_away_holding_the_tool_lock(monkeypatch):

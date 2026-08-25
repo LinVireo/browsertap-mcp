@@ -50,6 +50,43 @@ component is stale, run `browsertap doctor` and read `action`:
 `reload_extension`, `restart_bridge` and `restart_mcp_session` each name the one
 thing that will actually fix it -- the other two will not.
 
+**Do not answer "is the extension stale?" from a version number.**
+`chrome.runtime.getManifest().version` is parsed by Chrome at load time and
+refreshed on its own schedule; `background.js` does not follow it. Measured here
+in both directions: once the running worker reported 0.4.14 after a bump to
+0.4.15 while every advertised capability was present and a Reload was genuinely
+needed, and once the versions agreed and a Reload was *still* needed. So equality
+does not prove fresh and inequality does not prove stale, and neither does the
+capability list.
+
+What does is `extension_build_stamp`: a hash of the extension sources compiled
+into `background.js` as a literal, so the value the worker reports came out of
+the JavaScript it is actually running -- there is no layer in between. Compare it
+to a fresh hash of the directory and the answer is decisive. `get_setup_status`
+and `browsertap doctor` do that and publish `extension_build_verdict`:
+
+| verdict | what it means | whose move |
+|---|---|---|
+| `matches_tree` | the worker is running this tree | nobody's; stop asking for a Reload |
+| `stale_worker` | it is not | the human's -- press Reload |
+| `stamp_not_regenerated` | an extension file was edited and the stamp was not | yours -- see below |
+| `unverifiable` | the extension predates the stamp, or the directory is unreadable | nobody's; it is unknown, not a pass |
+
+`stamp_not_regenerated` is the one that catches *you*, and it is why the verdict
+cannot simply compare and report: a stale stamp makes a **fresh** worker report
+the old literal too, so the comparison is meaningless in both directions rather
+than merely wrong. Editing anything under `chrome_extension/` therefore ends with
+
+```bash
+python -m scripts.extension_stamp --write
+```
+
+and `tests/test_extension_build.py` fails the offline suite if you forget --
+which is the whole point, because the alternative is a stamp that confidently
+describes a build nobody has. `extension_build_enforced` is the usual
+`on_screen` / `input_quiet.enforced` shape: false means no comparison happened,
+so a caller must treat the answer as unknown and not as a pass.
+
 There is a **fourth** kind of code the table above does not cover, and it is the
 one exception to "an edit needs a reload or a restart". The two files in
 `src/browsertap_mcp/page_scripts/` -- `page_outline.js` and `list_groups.js` --
@@ -512,22 +549,42 @@ the assertion turns flaky.
 
   Two things about that hash are load-bearing, and both exist to stop the gate
   from crying wolf, because a gate that goes red on noise is one people learn to
-  route around. It hashes `"\n".join(splitlines())` rather than bytes: every tracked
-  path is pinned to LF by `.gitattributes` -- one `* text=auto eol=lf` rule, since
-  the suffix list it replaced could not cover an extensionless file -- so a clone is
-  LF on any host, but a tree that arrives another way is not -- and a script that round-trips a file
-  through Python's text mode on Windows produces CRLF, which is how 21 tracked
-  files in this repository came to hold it at once. And it is **blind to
-  `manifest.json`'s own version string**, the one line `versioning bump` rewrites
-  on every release. That line cannot move a count: upstream declares
-  `"version": "2.0"`, every value this package can hold is a `MAJOR.MINOR.PATCH`
-  triple, so it fails to match before the bump and after it -- measured at 0.4.14
-  and 0.4.15, `29 of 40` both times. Without the exemption every release demanded
-  a re-measure that needs an upstream clone and could not answer differently.
-  Nothing else may be excluded, and that is asserted rather than trusted:
-  `test_the_notice_fingerprint_ignores_only_the_manifest_version_string` fails if
-  normalising touches any other line of any derived file, and its partner fails if
-  a real edit to the manifest leaves the hash alone.
+  route around. It works on lines rather than bytes, so line endings cannot move
+  it: every tracked path is pinned to LF by `.gitattributes` -- one
+  `* text=auto eol=lf` rule, since the suffix list it replaced could not cover an
+  extensionless file -- but a tree that arrives another way is not, and a script
+  that round-trips a file through Python's text mode on Windows produces CRLF,
+  which is how 21 tracked files in this repository came to hold it at once. Note
+  which half does that work before simplifying either: reading in text mode
+  already collapses CRLF on the way in, and `splitlines()` drops it too, so the
+  property survives losing one of them and **no single-line change here can make
+  the CRLF test go red**. Measured with the same pair in
+  `tests/test_extension_build.py`.
+
+  The second is that it is **blind to exactly two generated lines**, and to no
+  others. `GENERATED_LINES` is that list, and both entries earn their place the
+  same way -- the line is written by a script here, and it does not exist upstream
+  at all, so it cannot be part of an `identical` count in either direction:
+
+  * `manifest.json`'s version string, which `versioning bump` rewrites on every
+    release. Upstream declares `"version": "2.0"` and every value this package can
+    hold is a `MAJOR.MINOR.PATCH` triple, so the line fails to match before the
+    bump and after it -- measured at 0.4.14 and 0.4.15, `29 of 40` both times.
+  * `background.js`'s `BTAP_BUILD` stamp, which `scripts.extension_stamp --write`
+    regenerates whenever *any* extension file changes. Without it, editing
+    `content.js` would demand a re-measure of `background.js` as well -- a file
+    nobody touched. The pattern is imported from
+    `browsertap_mcp.extension_build` rather than copied, because two copies would
+    drift and the symptom would be this gate going red on every regeneration.
+
+  Either exemption missing meant a release demanded a re-measure that needs an
+  upstream clone and could only return the same number. Nothing else may be
+  excluded, and that is asserted rather than trusted:
+  `test_the_notice_fingerprint_ignores_only_the_two_generated_lines` fails if
+  normalising touches any other line of any derived file, and it reads the set from
+  `GENERATED_LINES` rather than a list typed in the test, so adding a third
+  exemption is red rather than quiet. Each entry also has a partner test that fails
+  if a *real* edit to that same file leaves the hash alone.
 - **A reverse gate can only ask about the file set it was told about.** The check
   that every derived file is credited enumerated `chrome_extension/`, which was
   the whole derived set until the T0 refactor carved two files out of

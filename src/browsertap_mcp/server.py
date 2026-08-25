@@ -55,6 +55,11 @@ from .browser_bridge import (  # noqa: E402
     BrowserBridge,
     state_paths_report,
 )
+from .extension_build import (  # noqa: E402
+    ExtensionStampError,
+    compute_extension_stamp,
+    read_extension_stamp,
+)
 from .page_input import (  # noqa: E402
     ChallengeAttemptTracker,
     InputValidationError,
@@ -357,6 +362,41 @@ async def _acquire_tool_lock() -> None:
         if acquired:
             _TOOL_LOCK.release()
         raise
+
+
+# A read-only diagnostic that queues behind the tool lock is the one call you
+# cannot make when you most need it: the reason to ask is that something is
+# wedged, and a serialized tool holds the gate for its whole duration -- a
+# 120-second scan_page makes `get_setup_status` unavailable for 120 seconds. The
+# diagnostics below therefore run unserialized. `browsertap doctor` talks to the
+# bridge directly and so was never affected, which is exactly what hid this: the
+# documented workaround bypassed the defect instead of showing it.
+#
+# The two that report the mutable default target still have to read it somehow,
+# and taking the lock would put the wait straight back, because the lock is held
+# for the whole of the serialized call rather than only around its own
+# save/restore. A bounded acquire is the only shape that both respects the
+# invariant and answers while the gate is held.
+_DEFAULT_TARGET_SNAPSHOT_TIMEOUT = 0.25
+
+
+def _default_target_snapshot(driver: Any) -> tuple[Any, bool]:
+    """Read the mutable default target, bounded, and say whether it was settled.
+
+    `settled` is False when another serialized tool held the lock for the whole
+    window, which means the value may be that tool's temporary save/restore
+    rather than the caller's own default. Reporting it beats both alternatives:
+    blocking makes the diagnostic unavailable exactly when it is wanted, and
+    omitting it lets a transient read as settled -- the vacuous-pass shape this
+    repository has had to correct in the quiet-input gate, the own-tabs check
+    and the lint rule count.
+    """
+    acquired = _TOOL_LOCK.acquire(timeout=_DEFAULT_TARGET_SNAPSHOT_TIMEOUT)
+    try:
+        return driver.default_session_id, acquired
+    finally:
+        if acquired:
+            _TOOL_LOCK.release()
 
 
 def _threaded_tool(*d_args: Any, **d_kwargs: Any):
@@ -940,7 +980,8 @@ def _component_is_newer(component: Any) -> bool:
         "Return the active safe/lab automation profile. Lab is the default and skips elicitation "
         "unless BROWSERTAP_LAB_NO_ELICIT is explicitly disabled; safe requires approval for "
         "every physical action and permission allow."
-    )
+    ),
+    serialize=False,
 )
 def get_automation_profile() -> dict[str, Any]:
     return _automation_profile()
@@ -964,9 +1005,22 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
 
 
 # --- Tool: get_setup_status (what browsertap doctor reads) -------------------
-@mcp.tool(description="Return component versions, stale-build actions, extension path, bridge ports, and connection status for setup/diagnostics.")
+@mcp.tool(
+    description=(
+        "Return component versions, stale-build actions, extension path, bridge ports, and "
+        "connection status for setup/diagnostics. extension_build_verdict answers whether "
+        "the browser worker is running this code (matches_tree / stale_worker), or says why "
+        "it cannot tell (stamp_not_regenerated / unverifiable); it is decisive where "
+        "version equality is not. extension_build_enforced=false means no comparison "
+        "happened, so treat it as unknown rather than as a pass. Answers while another tool "
+        "is still running, which is when it is usually wanted; default_session_settled=false "
+        "then means default_session_id may be that call's temporary value rather than yours."
+    ),
+    serialize=False,
+)
 def get_setup_status() -> dict[str, Any]:
     driver = get_driver()
+    default_session_id, default_session_settled = _default_target_snapshot(driver)
     bridge_error = None
     diagnosis: dict[str, Any] = {}
     try:
@@ -990,22 +1044,66 @@ def get_setup_status() -> dict[str, Any]:
     protocol_version = diagnosis.get("protocol_version")
     extension_capabilities = diagnosis.get("extension_capabilities") or {}
     extension_status_error = diagnosis.get("extension_status_error")
+    reported_build_stamp = diagnosis.get("extension_build_stamp")
 
     # An older bridge may not forward extension build data yet, while still
     # supporting the generic ext_cmd route. Probe it directly before deciding
-    # that Chrome needs a manual extension reload.
-    if extension_version is None or protocol_version is None:
+    # that Chrome needs a manual extension reload. The build stamp joins the
+    # condition rather than getting its own probe: a bridge that predates it
+    # still reports both versions, so without this the stamp would be missing on
+    # exactly the installs where the fallback exists to fill gaps in.
+    if extension_version is None or protocol_version is None or reported_build_stamp is None:
         try:
             runtime = _extension_data(
                 driver.ext_cmd({"cmd": "bridge_status"}, timeout=_STATUS_TIMEOUT)
             )
-            extension_version = (
-                runtime.get("extension_version") or runtime.get("manifest_version")
-            )
-            protocol_version = runtime.get("protocol_version")
-            extension_capabilities = runtime.get("capabilities") or {}
+            # Gap-filling, never overwriting. Every field keeps the bridge's answer
+            # when it has one, because this branch now fires with all three version
+            # fields present -- the stamp alone is enough to trigger it. A
+            # `bridge_status` reply that omitted `capabilities` would otherwise empty
+            # a populated set and demand a reload of an extension that was fine.
+            if extension_version is None:
+                extension_version = (
+                    runtime.get("extension_version") or runtime.get("manifest_version")
+                )
+            if protocol_version is None:
+                protocol_version = runtime.get("protocol_version")
+            extension_capabilities = extension_capabilities or runtime.get("capabilities") or {}
+            reported_build_stamp = reported_build_stamp or runtime.get("build_stamp")
         except Exception as e:
             extension_status_error = extension_status_error or str(e)
+
+    # The one question the three version fields cannot answer: is the worker
+    # running the code in this tree? `reported_build_stamp` is a literal read out of
+    # the JavaScript the worker actually loaded, so comparing it to a fresh hash of
+    # the directory is decisive in both directions -- which version equality never
+    # was. Measured twice here: once the versions differed while the code matched,
+    # once they agreed and every advertised capability was present and a reload was
+    # still needed.
+    tree_build_stamp: str | None = None
+    recorded_build_stamp: str | None = None
+    build_stamp_error = ""
+    try:
+        extension_directory = chrome_extension_dir()
+        tree_build_stamp = compute_extension_stamp(extension_directory)
+        recorded_build_stamp = read_extension_stamp(extension_directory)
+    except (ExtensionStampError, OSError) as e:
+        build_stamp_error = str(e)
+    if recorded_build_stamp is not None and recorded_build_stamp != tree_build_stamp:
+        # Someone edited an extension file without regenerating the stamp, so the
+        # worker's value proves nothing either way: a *fresh* worker also reports the
+        # old literal. Naming the developer's fix beats guessing at the browser's.
+        extension_build_verdict = "stamp_not_regenerated"
+    elif not isinstance(reported_build_stamp, str) or tree_build_stamp is None:
+        extension_build_verdict = "unverifiable"
+    elif reported_build_stamp == tree_build_stamp:
+        extension_build_verdict = "matches_tree"
+    else:
+        extension_build_verdict = "stale_worker"
+    # Reported rather than assumed, for the reason `on_screen`, `input_quiet.enforced`
+    # and the lint rule floor are: a check that silently could not run must not read
+    # as one that ran and passed.
+    extension_build_enforced = extension_build_verdict in {"matches_tree", "stale_worker"}
 
     # Direction matters. A component that is *newer* than this process cannot be
     # repaired by restarting or reloading it, so those two flags stay false and
@@ -1032,6 +1130,11 @@ def get_setup_status() -> dict[str, Any]:
         # requires is also a stale-package problem: reloading cannot add back
         # something the newer extension deliberately dropped.
         or (bool(missing_extension_capabilities) and not extension_is_newer)
+        # The strongest evidence of the three, and the only one that has ever been
+        # right when the others were wrong. Same `extension_is_newer` guard: a
+        # worker ahead of this process is compared against this process's own copy
+        # of the tree, so the difference is the stale server, not the worker.
+        or (extension_build_verdict == "stale_worker" and not extension_is_newer)
     )
     # The 401 this catches has no other symptom: the rejection body names no
     # path, so "which token file did each side read?" is unanswerable from the
@@ -1082,6 +1185,10 @@ def get_setup_status() -> dict[str, Any]:
         "expected_protocol_version": _EXTENSION_PROTOCOL_VERSION,
         "extension_capabilities": extension_capabilities,
         "missing_extension_capabilities": missing_extension_capabilities,
+        "extension_build_stamp": reported_build_stamp,
+        "expected_extension_build_stamp": tree_build_stamp,
+        "extension_build_verdict": extension_build_verdict,
+        "extension_build_enforced": extension_build_enforced,
         "restart_bridge_required": restart_bridge_required,
         "reload_extension_required": reload_extension_required,
         "restart_mcp_session_required": package_is_stale,
@@ -1096,7 +1203,8 @@ def get_setup_status() -> dict[str, Any]:
         "state_paths": local_state_paths,
         "remote_mode": driver.is_remote,
         "connected_tabs": len(sessions),
-        "default_session_id": driver.default_session_id,
+        "default_session_id": default_session_id,
+        "default_session_settled": default_session_settled,
         "tabs": sessions,
         "diagnosis": diagnosis,
         "notes": [
@@ -1105,15 +1213,48 @@ def get_setup_status() -> dict[str, Any]:
             "The bridge runs as a detached daemon; this MCP server auto-starts it when missing.",
         ],
     }
+    if extension_build_verdict == "unverifiable" and recorded_build_stamp is not None:
+        # This tree can be verified -- it carries a stamp the sources agree with --
+        # and the worker still reported none, so the strongest of the four checks was
+        # skipped while the other three passed. Measured here: versions equal,
+        # protocol matched, every capability present, `action: none`, and the browser
+        # running code from before the stamp existed. `status` stays `healthy` on
+        # purpose, because an unknown is not a failure and a reload demanded on one
+        # would fire at every pre-stamp install; this note is the disclosure half of
+        # `enforced: false`. It names both causes because they need different fixes
+        # and leave identical evidence -- absence cannot be narrowed to the worker
+        # without trusting the bridge's version number, which is the inference the
+        # stamp exists to replace.
+        status["notes"].insert(
+            0,
+            "This tree carries a build stamp but the extension reported none, so "
+            "extension_build_verdict could not check whether the browser is running "
+            "this code: extension_build_enforced is false, which means unknown rather "
+            "than a pass. A worker loaded before the stamp existed reads this way, and "
+            "so does a bridge daemon too old to forward the field. Reload the unpacked "
+            "extension once, and `browsertap bridge --restart` covers the other half.",
+        )
     if package_is_stale:
         # Lead with the only action that can clear this, because the two flags a
-        # reader reaches for first are both false here.
+        # reader reaches for first are both false here. Inserted after the note
+        # above so a genuinely stale package still leads.
         status["notes"].insert(
             0,
             "A component reports a newer version than this MCP server process. "
             "Restart the MCP session or client so it loads the installed build; "
             "restarting the bridge or reloading the extension cannot clear it.",
         )
+    if extension_build_verdict == "stamp_not_regenerated":
+        status["notes"].insert(
+            0,
+            "An extension file was edited without regenerating the build stamp "
+            f"(background.js says {recorded_build_stamp}, the sources hash to "
+            f"{tree_build_stamp}), so extension_build_verdict cannot tell a stale "
+            "worker from a fresh one. Run `python -m scripts.extension_stamp --write`, "
+            "then reload the unpacked extension.",
+        )
+    elif build_stamp_error:
+        status["extension_build_error"] = build_stamp_error
     if bridge_error:
         status["bridge_error"] = bridge_error
     if extension_status_error:
@@ -1125,18 +1266,30 @@ def get_setup_status() -> dict[str, Any]:
 
 
 # --- Tools: tab inventory and closing ----------------------------------------
-@mcp.tool(description="List connected tabs across all connected browsers; each tab has a browser field (chrome/edge/opera) and a session id to pass verbatim.")
+@mcp.tool(
+    description=(
+        "List connected tabs across all connected browsers; each tab has a browser field "
+        "(chrome/edge/opera) and a session id to pass verbatim. Answers while another tool is "
+        "still running. default_session_settled=false means another tool held the target "
+        "while this ran, so default_session_id may be that call's temporary value rather "
+        "than yours -- name a session explicitly instead of trusting it."
+    ),
+    serialize=False,
+)
 def list_tabs() -> dict[str, Any]:
+    default_session_id, settled = _default_target_snapshot(require_driver())
     try:
         sessions = compact_tabs(timeout=_STATUS_TIMEOUT, fresh=True)
     except Exception as e:
         return {
-            "default_session_id": require_driver().default_session_id,
+            "default_session_id": default_session_id,
+            "default_session_settled": settled,
             "tabs": [],
             "bridge_error": str(e),
         }
     return {
-        "default_session_id": require_driver().default_session_id,
+        "default_session_id": default_session_id,
+        "default_session_settled": settled,
         "tabs": sessions,
     }
 
@@ -1146,7 +1299,8 @@ def list_tabs() -> dict[str, Any]:
         "List every open tab, including chrome-extension:// pages that list_tabs hides. "
         "Those never become sessions (content scripts can't run there), so they have no "
         "session id — drive them with cdp_command(tab_id=...) instead. Works with no tabs open."
-    )
+    ),
+    serialize=False,
 )
 def list_all_tabs(session_id: Optional[str] = None) -> dict[str, Any]:
     driver = require_driver()
@@ -2321,12 +2475,18 @@ def open_new_tab(
 
 
 # --- Tools: extension inventory and enable/disable ---------------------------
-@mcp.tool(description="Get absolute path to the unpacked Chrome extension directory for manual installation.")
+@mcp.tool(
+    description="Get absolute path to the unpacked Chrome extension directory for manual installation.",
+    serialize=False,
+)
 def extension_path() -> dict[str, Any]:
     return {"extension_path": str(chrome_extension_dir())}
 
 
-@mcp.tool(description="List installed browser extensions (id, name, enabled, type, version). Works with no tabs open.")
+@mcp.tool(
+    description="List installed browser extensions (id, name, enabled, type, version). Works with no tabs open.",
+    serialize=False,
+)
 def list_extensions(session_id: Optional[str] = None) -> dict[str, Any]:
     # Addressed to the extension itself, so this answers even with zero tabs;
     # session_id only picks which browser when several are connected.
@@ -3839,7 +3999,8 @@ def save_pdf(
     description=(
         "List every CDP-attachable target, including service workers and extension "
         "background pages that list_tabs never shows. Works with no tabs open."
-    )
+    ),
+    serialize=False,
 )
 def debugger_targets(session_id: Optional[str] = None) -> dict[str, Any]:
     driver = require_driver()
@@ -6003,7 +6164,10 @@ async def hotkey(
     )
 
 
-@mcp.tool(description="Report the current desktop mouse position and screen geometry in PHYSICAL pixels. screen_width/screen_height are the PRIMARY display only; screen_bounds is the virtual desktop across every display and is the range mouse_click will accept. These are not the CSS pixels the page_* tools take.")
+@mcp.tool(
+    description="Report the current desktop mouse position and screen geometry in PHYSICAL pixels. screen_width/screen_height are the PRIMARY display only; screen_bounds is the virtual desktop across every display and is the range mouse_click will accept. These are not the CSS pixels the page_* tools take.",
+    serialize=False,
+)
 def pointer_info() -> dict[str, Any]:
     pyautogui = _pyautogui()
 

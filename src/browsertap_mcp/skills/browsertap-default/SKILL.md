@@ -244,10 +244,10 @@ hotkey(keys_csv="ctrl,c", session_id=B)
 ## 出问题了怎么办
 
 - 工具挂住 / `list_tabs` 拿不到 tab / `get_setup_status` 转圈 / 报连不上桥 —— **不是本 skill 的事，转 [[browsertap-bridge-recovery]]** 分层排错（一条 `browsertap doctor` 直接判定是哪种故障 + 怎么修）。别在这里反复重试。
-- **升级后先看版本诊断**：`get_setup_status` 返回 package/bridge/extension/protocol 版本。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍占端口的旧 bridge 必须执行 `browsertap bridge --restart`。只有 `reload_extension_required=true` 才需要用户在扩展页手动 Reload unpacked extension。若拿到 `status: stale_package` / `action: restart_mcp_session`（某个组件比运行中的服务**更新**），过期的是 MCP 进程自己：让用户重启 MCP 会话，**别叫他重启 bridge 或重载扩展**，那两步只会再报同一个不匹配。
+- **升级后先看版本诊断**：`get_setup_status` 返回 package/bridge/extension/protocol 版本，以及**比版本更强的 `extension_build_verdict`**——它比对 worker 报回来的源码哈希与当前目录的新鲜哈希，所以 `stale_worker` 才是真要人去 Reload，`matches_tree` 就别再叫人刷；`stamp_not_regenerated` / `unverifiable` 或 `extension_build_enforced=false` 表示这次没测出来，按未知处理而不是通过。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍占端口的旧 bridge 必须执行 `browsertap bridge --restart`。只有 `reload_extension_required=true` 才需要用户在扩展页手动 Reload unpacked extension。若拿到 `status: stale_package` / `action: restart_mcp_session`（某个组件比运行中的服务**更新**），过期的是 MCP 进程自己：让用户重启 MCP 会话，**别叫他重启 bridge 或重载扩展**，那两步只会再报同一个不匹配。
 - **报 401 / unauthorized**：bridge 与 MCP 没有读到同一个持久 token。默认唯一真源是 `~/.browsertap/bridge-token`，各编辑器无需配置；文件已存在时残留的 `BROWSERTAP_BRIDGE_TOKEN` 也不能覆盖它。先按 [[browsertap-bridge-recovery]] 的「成因 6」确认 token 文件路径；默认路径一致时重启升级前的旧 bridge 一次，不要逐个适配或重启编辑器。
 - **tab 卡住，每次调用都返回 `blocked_by_dialog` / `busy`**：`manual` 对话框策略留下了一个开着的原生对话框 + 后面暂停的执行。在那个 `session_id` 上调 `handle_dialog(action="accept")` 或 `"dismiss"` 释放。期间其它 tab 正常工作。
 - **物理输入返回 `requires_user_action` 且从不弹批准**：客户端不支持 elicitation。优先改用 `page_*`；私有 lab 明确接受风险时可设置 `BROWSERTAP_LAB_NO_ELICIT=1` 并重启 MCP 进程。
 - **验证码 `challenge_stalled`**：BTAP 已停止尝试，把那个 tab 交给用户手动过盾；过完在同一 tab 继续。别另起浏览器。
 - **客户端没有 `download_file`**：MCP 工具 schema 还是旧的，重启 MCP 会话/客户端。
-- **`download_file` 返回 `Unknown command: downloads`**：MCP 已更新但目标浏览器仍加载旧扩展。先看 `get_setup_status.reload_extension_required`；为 true 时去该浏览器的 `chrome://extensions` / `edge://extensions` 手动 Reload BrowserTap Bridge（版本应与 `get_setup_status.package_version` 一致）。不要据此重启浏览器，也不要退回页面 fetch。
+- **`download_file` 返回 `Unknown command: downloads`**：MCP 已更新但目标浏览器仍加载旧扩展。先看 `get_setup_status.reload_extension_required`；为 true 时去该浏览器的 `chrome://extensions` / `edge://extensions` 手动 Reload BrowserTap Bridge（版本通常与 `get_setup_status.package_version` 一致，但**能证明刷新已落地的是 `extension_build_verdict` 转成 `matches_tree`**，不是版本号相等）。不要据此重启浏览器，也不要退回页面 fetch。

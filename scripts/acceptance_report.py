@@ -297,6 +297,74 @@ def _sealed_source(manifest: dict[str, object] | None) -> dict[str, object]:
     return source if isinstance(source, dict) else {}
 
 
+def _per_file_summary(per_file: dict[str, object]) -> str:
+    """One line for the per-file coverage result, read by the gate and the report.
+
+    Both need it, and deriving it in two places is how the two come to disagree
+    about the same artifact.
+    """
+    below = per_file.get("below") or []
+    weakest = per_file.get("weakest")
+    if below:
+        return "below the per-file floor: " + ", ".join(
+            f"{row['file']} {float(row['percent']):.2f}%" for row in below
+        )
+    if per_file.get("status") == "ok" and isinstance(weakest, dict):
+        return (
+            f"{per_file['measured']} files measured, weakest "
+            f"{weakest['file']} {float(weakest['percent']):.2f}%"
+        )
+    return f"per-file coverage {per_file.get('status')}"
+
+
+def _finalize_gates(
+    measured: dict[str, tuple[bool, str]],
+) -> tuple[dict[str, bool], dict[str, str], list[str]]:
+    """Pair every gate with what it read, and refuse a verdict that names nothing.
+
+    Four of the nine gates here have already had to be rescued from a pass
+    produced by absence: ruff over a path that matched nothing, eslint with a
+    `files:` pattern that had stopped matching, a coverage payload with no
+    per-file section, a distribution check with no archives bound. Each fix was
+    local to the gate that had already failed, which leaves the *next* gate
+    starting out unprotected -- so the shape has to be structural or it simply
+    recurs. A gate that cannot say what it looked at is scored FAIL and the
+    reason recorded, rather than believed because it happens to be written True.
+
+    The weight table stays the authority on what exists, in both directions. A
+    weighted gate nobody evaluated is a hole in the score; an evaluated gate with
+    no weight is a gate with no reader -- it runs, it reports, and the score is
+    identical whether it passed or failed, which is the other failure this
+    repository keeps meeting.
+    """
+    problems: list[str] = []
+    gates: dict[str, bool] = {}
+    measurements: dict[str, str] = {}
+    for name in GATE_WEIGHTS:
+        if name not in measured:
+            gates[name] = False
+            measurements[name] = "gate not evaluated"
+            problems.append(f"gate `{name}` carries weight but was never evaluated")
+            continue
+        verdict, description = measured[name]
+        summary = str(description).strip()
+        if not summary:
+            gates[name] = False
+            measurements[name] = "nothing measured"
+            problems.append(
+                f"gate `{name}` reported {_status(bool(verdict))} without naming what it measured"
+            )
+            continue
+        gates[name] = bool(verdict)
+        measurements[name] = summary
+    for name in measured:
+        if name not in GATE_WEIGHTS:
+            problems.append(
+                f"gate `{name}` was evaluated but carries no weight, so nothing reads it"
+            )
+    return gates, measurements, problems
+
+
 def build_report_data() -> dict[str, object]:
     evidence_manifest, evidence_problems = validate_manifest(require_live=False)
     offline = _offline_junit(evidence_manifest)
@@ -326,45 +394,90 @@ def build_report_data() -> dict[str, object]:
     offline_execution = tool_coverage.get("offline_execution") or {}
     if not isinstance(offline_execution, dict):
         offline_execution = {}
-    gates = {
-        "tool_contract": evidence_fresh and registered == 55 and contract_valid == registered,
+    per_file_summary = _per_file_summary(per_file_coverage)
+    coverage_text = (
+        f"{code_coverage:.2f}% total from `{code_coverage_source}` (gate 85.00%); "
+        f"per-file floor {PER_FILE_COVERAGE_FLOOR:.2f}%, {per_file_summary}"
+        if code_coverage is not None
+        else f"no total coverage: {code_coverage_source}; {per_file_summary}"
+    )
+    tool_contract_ok = evidence_fresh and registered == 55 and contract_valid == registered
+    offline_evidence_ok = (
+        evidence_fresh
+        and offline.get("status") == "pass"
+        and offline_execution.get("exit_code") == 0
+        and not tool_coverage.get("failed_evidence")
+        and not tool_coverage.get("unclassified_evidence")
+    )
+    live_evidence_ok = (
+        evidence_fresh
+        and live_passed
+        and tool_coverage.get("all_evidence_executed") is True
+        and tool_coverage.get("fully_verified_tools") == registered == 55
+    )
+    code_coverage_ok = (
+        evidence_fresh
+        and code_coverage is not None
+        and code_coverage >= 85.0
+        and per_file_coverage["status"] == "ok"
+        and not per_file_coverage["below"]
+    )
+    versions_ok = (
+        not docs.get("version_error") and bool(versions) and len(set(versions.values())) == 1
+    )
+    # (verdict, what was actually read). The second half is not decoration: a
+    # verdict whose measurement is empty is refused by `_finalize_gates`, because
+    # a check over nothing and a check over everything both report zero problems.
+    measured: dict[str, tuple[bool, str]] = {
+        "tool_contract": (
+            tool_contract_ok,
+            f"{contract_valid}/{registered} tools structurally valid from `{tool_coverage_source}`",
+        ),
         "offline_evidence": (
-            evidence_fresh
-            and offline.get("status") == "pass"
-            and offline_execution.get("exit_code") == 0
-            and not tool_coverage.get("failed_evidence")
-            and not tool_coverage.get("unclassified_evidence")
+            offline_evidence_ok,
+            f"{offline.get('summary')} from `{offline.get('source')}`; evidence run exit "
+            f"{offline_execution.get('exit_code')}, "
+            f"{len(tool_coverage.get('failed_evidence') or [])} failed / "
+            f"{len(tool_coverage.get('unclassified_evidence') or [])} unclassified",
         ),
         "live_evidence": (
-            evidence_fresh
-            and live_passed
-            and tool_coverage.get("all_evidence_executed") is True
-            and tool_coverage.get("fully_verified_tools") == registered == 55
+            live_evidence_ok,
+            f"{tool_coverage.get('fully_verified_tools', 0)}/{registered} tools fully "
+            f"verified from `{tool_coverage_source}`; all_evidence_executed="
+            f"{tool_coverage.get('all_evidence_executed')}",
         ),
-        "code_coverage": (
-            evidence_fresh
-            and code_coverage is not None
-            and code_coverage >= 85.0
-            and per_file_coverage["status"] == "ok"
-            and not per_file_coverage["below"]
+        "code_coverage": (code_coverage_ok, coverage_text),
+        "documentation": (
+            docs_ok(docs),
+            f"{docs.get('registered')} registered tools vs "
+            f"{docs.get('coverage_manifest')} in the coverage manifest, both README "
+            f"tables, and {len(docs.get('skill_hashes') or {})} shipped skill file(s)",
         ),
-        "documentation": docs_ok(docs),
         "versions": (
-            not docs.get("version_error") and bool(versions) and len(set(versions.values())) == 1
+            versions_ok,
+            f"{len(versions)} version source(s): "
+            f"{sorted(set(versions.values())) or 'none found'}"
+            + (f"; {docs.get('version_error')}" if docs.get("version_error") else ""),
         ),
-        "distributions": evidence_fresh and distributions_ok,
-        "live_suite": evidence_fresh and live_passed,
-        "lint": evidence_fresh and lint_ok,
+        "distributions": (evidence_fresh and distributions_ok, distribution_summary),
+        "live_suite": (
+            evidence_fresh and live_passed,
+            f"{live.get('summary')} from `{live.get('source')}`",
+        ),
+        "lint": (evidence_fresh and lint_ok, lint_summary),
     }
+    gates, gate_measurements, gate_structure_problems = _finalize_gates(measured)
     score = sum(weight for name, weight in GATE_WEIGHTS.items() if gates[name])
     return {
         "generated": datetime.now(timezone.utc).isoformat(),
         "version": versions.get("source", "unknown"),
         "gates": gates,
+        "gate_measurements": gate_measurements,
+        "gate_structure_problems": gate_structure_problems,
         "gate_weights": GATE_WEIGHTS,
         "objective_score": score,
         "objective_score_total": TOTAL_GATE_WEIGHT,
-        "release_ready": all(gates.values()),
+        "release_ready": all(gates.values()) and not gate_structure_problems,
         "tool_coverage": tool_coverage,
         "tool_coverage_source": tool_coverage_source,
         "code_coverage": code_coverage,
@@ -395,19 +508,7 @@ def render_report(data: dict[str, object]) -> str:
     code_coverage = data["code_coverage"]
     per_file = data["per_file_coverage"]
     assert isinstance(per_file, dict)
-    below = per_file.get("below") or []
-    weakest = per_file.get("weakest")
-    if below:
-        per_file_summary = "below the per-file floor: " + ", ".join(
-            f"{row['file']} {float(row['percent']):.2f}%" for row in below
-        )
-    elif per_file.get("status") == "ok" and isinstance(weakest, dict):
-        per_file_summary = (
-            f"{per_file['measured']} files measured, weakest "
-            f"{weakest['file']} {float(weakest['percent']):.2f}%"
-        )
-    else:
-        per_file_summary = f"per-file coverage {per_file.get('status')}"
+    per_file_summary = _per_file_summary(per_file)
     registered = int(tool_coverage.get("registered", 0))
     contract_valid = int(tool_coverage.get("contract_valid_tools", 0))
     lines = [
@@ -466,13 +567,19 @@ def render_report(data: dict[str, object]) -> str:
         "",
         "## Objective Gate Score",
         "",
-        "| Gate | Weight | Result |",
-        "|---|---:|---|",
+        "| Gate | Weight | Result | Measured |",
+        "|---|---:|---|---|",
     ]
     weights = data["gate_weights"]
     assert isinstance(weights, dict)
+    # The measurement column is what keeps the verdict from being the whole
+    # story: `PASS` beside an empty cell is the shape four of these gates
+    # shipped as, and it reads identically to a real one.
+    measurements = data.get("gate_measurements") or {}
+    assert isinstance(measurements, dict)
     for name, weight in weights.items():
-        lines.append(f"| `{name}` | {weight} | {_status(bool(gates[name]))} |")
+        cell = str(measurements.get(name, "nothing measured")).replace("|", "\\|")
+        lines.append(f"| `{name}` | {weight} | {_status(bool(gates[name]))} | {cell} |")
     total = data.get("objective_score_total", sum(int(weight) for weight in weights.values()))
     lines.extend(
         [
@@ -482,6 +589,17 @@ def render_report(data: dict[str, object]) -> str:
             "",
         ]
     )
+    structure_problems = data.get("gate_structure_problems") or []
+    if structure_problems:
+        lines.extend(
+            [
+                "> **The gate table cannot vouch for itself.** A gate that does not name",
+                "> what it measured is scored FAIL, because a check over nothing and a",
+                "> check over everything both report zero problems:",
+                *(f"> - {problem}" for problem in structure_problems),
+                "",
+            ]
+        )
     lines.extend(_render_scored_source(data))
     return "\n".join(lines)
 

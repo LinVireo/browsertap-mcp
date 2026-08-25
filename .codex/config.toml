@@ -1,0 +1,4 @@
+[mcp_servers]
+  [mcp_servers.carbon]
+    args = ['serve', '--actor', 'agent:codex', '--home', 'D:\carbon\Carbon-1.1.0-windows-portable', '--project-session', '--compat-layer', 'v2']
+    command = 'D:\carbon\Carbon-1.1.0-windows-portable\carbon.exe'
