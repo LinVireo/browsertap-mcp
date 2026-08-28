@@ -42,6 +42,11 @@ use, and the last three lines belong together: the build writes the archives tha
 `check_distribution` reads and `check_install` installs, so running either on its
 own reports `no wheel found` rather than a pass.
 
+Build into an empty output directory. `check_distribution` requires exactly one
+wheel/source archive pair and compares their installable package-file sets. Extra
+archives from an older build are rejected, as is a wheel polluted by retired files
+left in a stale `build/` tree.
+
 `check_distribution` and `check_install` answer different questions.
 `check_distribution` reads what is *inside* the archive; `check_install` puts the
 wheel into a throwaway virtual environment with no repository on the path and

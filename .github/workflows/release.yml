@@ -55,6 +55,18 @@ jobs:
         run: python -m scripts.check_release_tag
       - name: Install package and development dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,desktop]"
+      # Keep the release path on the same JavaScript lint gate as offline CI;
+      # otherwise a publish could pass Python tests while shipping an invalid
+      # extension worker or page script.
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install JavaScript lint dependencies
+        run: npm ci
+      - name: Check lint (Python and extension JavaScript)
+        run: python -m scripts.lint_report
       # A release must not ship a tree that fails its own gates. This is the
       # offline suite only: the live-Chrome gates need a real browser and are a
       # separate, self-hosted workflow.

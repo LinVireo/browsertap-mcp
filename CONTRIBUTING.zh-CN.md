@@ -38,6 +38,10 @@ python -m scripts.check_install artifacts/dist --no-deps
 必须连在一起执行：build 写出的归档正是 `check_distribution` 读取、`check_install` 安装的
 那批，单独运行任一条只会报 `no wheel found`，不是通过。
 
+请构建到空的输出目录。`check_distribution` 要求目录中恰好只有一对 wheel/source archive，
+并比较两者可安装包文件的集合。旧构建遗留的额外归档会被拒绝；陈旧 `build/` 目录把已经退役
+的文件混进 wheel 时也会失败。
+
 `check_distribution` 与 `check_install` 回答的不是同一个问题。前者读归档**内部**有什么；
 后者把 wheel 装进一个全新虚拟环境（路径上没有本仓库）并在那里真的用起来 —— 这是让
 "陌生人 `pip install browsertap-mcp` 之后手里的东西能不能跑"从猜测变成结论的唯一办法。

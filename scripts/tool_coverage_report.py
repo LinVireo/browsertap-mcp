@@ -148,6 +148,28 @@ def _run_evidence(node_ids: Iterable[str], *, timeout: int) -> dict[str, Any]:
         }
 
 
+def _offline_verified_tool_names(
+    evidence_by_tool: dict[str, tuple[str, ...]],
+    offline_collected: set[str],
+    passed_evidence: set[str],
+) -> list[str]:
+    """Return tools with at least one executed offline evidence node that passed.
+
+    A set inclusion check over an empty intersection is true.  Without the
+    explicit non-empty guard, a tool whose evidence is entirely live would be
+    reported as offline-verified before any test had run (especially with
+    ``--no-execute``), which is a fast but misleading result.  Keep the helper
+    separate so the vacuous-pass rule is easy to test and cannot get lost in the
+    larger report assembly.
+    """
+    verified: list[str] = []
+    for name, evidence in evidence_by_tool.items():
+        offline_evidence = set(evidence) & offline_collected
+        if offline_evidence and offline_evidence <= passed_evidence:
+            verified.append(name)
+    return sorted(verified)
+
+
 def build_report(*, run_live: bool = False, execute: bool = True) -> dict[str, Any]:
     registered = registered_tools()
     collected = collected_node_ids()
@@ -258,9 +280,8 @@ def build_report(*, run_live: bool = False, execute: bool = True) -> dict[str, A
         name for name, evidence in evidence_by_tool.items()
         if name in contract_valid_names and set(evidence) <= passed_evidence
     )
-    offline_verified_tools = sorted(
-        name for name, evidence in evidence_by_tool.items()
-        if set(evidence) & offline_collected <= passed_evidence
+    offline_verified_tools = _offline_verified_tool_names(
+        evidence_by_tool, offline_collected, passed_evidence
     )
 
     return {

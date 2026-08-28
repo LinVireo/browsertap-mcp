@@ -400,6 +400,14 @@ def test_the_users_tabs_are_recorded_and_nothing_gates_on_them():
     assert "live-preflight.json" in CONFTEST
 
 
+def test_live_workflow_does_not_claim_user_activity_skips_the_suite():
+    workflow = (ROOT / ".github" / "workflows" / "live.yml").read_text(encoding="utf-8")
+    assert "skips the" not in workflow
+    assert "override" not in workflow
+    assert "records browser" in workflow
+    assert "tab the suite opened and failed to close" in workflow
+
+
 def test_an_unreadable_inventory_does_not_fail_the_live_layer():
     """The manual step this replaces could not fail a run either."""
     reader = _helper_source("_tab_inventory")

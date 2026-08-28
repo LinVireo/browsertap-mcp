@@ -175,3 +175,18 @@ def test_publish_workflow_checks_the_tag_before_it_installs_or_builds():
     assert "python -m scripts.check_release_tag --allow-missing-tag" in build_stage
     strict = build_stage.split("python -m scripts.check_release_tag --allow-missing-tag", 1)[1]
     assert "if: github.event_name == 'release' || inputs.index == 'pypi'" in strict
+
+
+def test_publish_workflow_runs_the_shared_lint_gate_before_building():
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    build_stage = workflow.split("publish:", 1)[0]
+
+    assert "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020" in build_stage
+    assert "npm ci" in build_stage
+    assert "python -m scripts.lint_report" in build_stage
+    assert build_stage.index("python -m scripts.lint_report") < build_stage.index(
+        "python -m pytest tests -q"
+    )
+    assert build_stage.index("python -m scripts.lint_report") < build_stage.index(
+        "python -m build --wheel --sdist"
+    )

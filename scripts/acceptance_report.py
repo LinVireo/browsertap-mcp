@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from scripts.check_distribution import validate_archive
+from scripts.check_distribution import runtime_package_mismatch, validate_archive
 from scripts.check_tool_docs import build_report as build_docs_report
 from scripts.check_tool_docs import report_ok as docs_ok
 from scripts.evidence_manifest import validate_manifest
@@ -202,6 +202,30 @@ def _distribution_status(manifest: dict[str, object] | None) -> tuple[bool, str]
             issues = [str(exc)]
         if issues:
             failures[relative] = issues
+    wheels = [relative for relative in relative_paths if relative.endswith(".whl")]
+    sdists = [
+        relative
+        for relative in relative_paths
+        if relative.endswith((".tar.gz", ".tgz"))
+    ]
+    # ``validate_archive`` is intentionally per-file.  The release contract
+    # also requires the one wheel and one sdist to carry the same installable
+    # package set; otherwise a stale build directory can make each archive look
+    # valid while the pair is irreproducible.  The manifest already enforces the
+    # one-of-each shape, but keep the guard explicit so a malformed/legacy
+    # manifest cannot turn a missing pair into a vacuous pass.
+    if len(wheels) == 1 and len(sdists) == 1:
+        wheel, sdist = (ROOT / wheels[0], ROOT / sdists[0])
+        try:
+            issues = runtime_package_mismatch(wheel, sdist)
+        except (OSError, ValueError, tarfile.TarError, zipfile.BadZipFile) as exc:
+            issues = [f"cross-archive comparison failed: {type(exc).__name__}: {exc}"]
+        if issues:
+            failures.setdefault(wheels[0], []).extend(issues)
+    else:
+        failures["distribution-pair"] = [
+            "manifest-bound distributions must contain exactly one wheel and one source archive"
+        ]
     if failures:
         issue_count = sum(len(issues) for issues in failures.values())
         return False, f"{issue_count} archive contract violation(s)"

@@ -60,13 +60,23 @@ def _core_metadata(version: str, *, drop: str = "", replace: tuple[str, str] | N
     return "\n".join(lines) + "\n\nlong description body\n"
 
 
-def _write_sdist(path: Path, *names: str, version: str = "0.3.4", metadata: str | None = None) -> None:
+def _write_sdist(
+    path: Path,
+    *names: str,
+    version: str = "0.3.4",
+    metadata: str | None = None,
+    directories: tuple[str, ...] = (),
+) -> None:
     prefix = f"browsertap_mcp-{version}"
     members = list(names)
     pkg_info = f"{prefix}/PKG-INFO"
     text = metadata if metadata is not None else _core_metadata(version)
     contents = {pkg_info: text.encode("utf-8")}
     with tarfile.open(path, "w:gz") as archive:
+        for name in directories:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
         for name in (*members, pkg_info):
             data = contents.get(name, b"test")
             info = tarfile.TarInfo(name)
@@ -84,36 +94,165 @@ def _write_wheel(path: Path, names, *, version: str = "0.3.4", metadata: str | N
         )
 
 
-def _wheel_names() -> list[str]:
+def _wheel_names(*, version: str = "0.3.4") -> list[str]:
     # The licence members are generated into `dist-info` rather than copied out
     # of the package tree, so they carry that prefix instead of a bare package
     # path. The gate matches on suffix, so the version in it is immaterial.
-    prefix = "browsertap_mcp-0.3.4.dist-info"
+    prefix = f"browsertap_mcp-{version}.dist-info"
     return [
         *(suffix.lstrip("/") for suffix in REQUIRED_WHEEL_SUFFIXES),
         *(f"{prefix}{suffix}" for suffix in REQUIRED_WHEEL_METADATA_SUFFIXES),
     ]
 
 
-def _sdist_names() -> list[str]:
-    prefix = "browsertap_mcp-0.3.4"
+def _sdist_names(*, version: str = "0.3.4") -> list[str]:
+    prefix = f"browsertap_mcp-{version}"
     return [f"{prefix}{suffix}" for suffix in REQUIRED_SDIST_SUFFIXES]
+
+
+def _sdist_package_names_for_wheel(
+    wheel_names: list[str], *, version: str = "0.3.4"
+) -> list[str]:
+    """Mirror installable wheel members into the source-tree layout.
+
+    ``validate_dist_dir`` intentionally compares package members only: a wheel
+    contains the installable ``browsertap_mcp/...`` path while an sdist carries
+    the same file below ``<name>-<version>/src/``.  Keep the synthetic archives
+    honest by deriving the sdist package set from the wheel fixture instead of
+    maintaining a second hand-written list that can drift.
+    """
+    prefix = f"browsertap_mcp-{version}/src/"
+    return [
+        f"{prefix}{name}"
+        for name in wheel_names
+        if name.startswith("browsertap_mcp/") and not name.endswith("/")
+    ]
 
 
 def test_distribution_contract_accepts_clean_wheel_and_sdist(tmp_path):
     wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
-    _write_wheel(wheel, ["browsertap_mcp/server.py", *_wheel_names()])
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    _write_wheel(wheel, wheel_members)
     sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
     _write_sdist(
         sdist,
-        "browsertap_mcp-0.3.4/src/browsertap_mcp/server.py",
+        *_sdist_package_names_for_wheel(wheel_members),
         *_sdist_names(),
+        # Real sdists carry directory records without a trailing slash. They
+        # are archive structure, not installable package members.
+        directories=("browsertap_mcp-0.3.4/src/browsertap_mcp/page_scripts",),
     )
 
     archives, failures = validate_dist_dir(tmp_path)
 
     assert set(archives) == {wheel, sdist}
     assert failures == {}
+
+
+def test_distribution_contract_rejects_multiple_wheels(tmp_path):
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, wheel_members)
+    extra_wheel = tmp_path / "browsertap_mcp-0.3.5-py3-none-any.whl"
+    _write_wheel(
+        extra_wheel,
+        ["browsertap_mcp/server.py", *_wheel_names(version="0.3.5")],
+        version="0.3.5",
+    )
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(wheel_members),
+        *_sdist_names(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_dist_dir(tmp_path)
+
+    message = str(exc_info.value)
+    assert "expected exactly one wheel and one source distribution" in message
+    assert "found 2 wheel(s)" in message
+    assert wheel.name in message
+    assert extra_wheel.name in message
+
+
+def test_distribution_contract_rejects_multiple_source_distributions(tmp_path):
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, wheel_members)
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(wheel_members),
+        *_sdist_names(),
+    )
+    # The archive helpers accept both conventional sdist suffixes. Counting
+    # only ``*.tar.gz`` would let this second source archive bypass the pair
+    # contract even though ``validate_archive`` treats it as an sdist.
+    extra_sdist = tmp_path / "browsertap_mcp-0.3.5.tgz"
+    _write_sdist(
+        extra_sdist,
+        *_sdist_package_names_for_wheel(wheel_members, version="0.3.5"),
+        *_sdist_names(version="0.3.5"),
+        version="0.3.5",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_dist_dir(tmp_path)
+
+    message = str(exc_info.value)
+    assert "expected exactly one wheel and one source distribution" in message
+    assert "2 source distribution(s)" in message
+    assert sdist.name in message
+    assert extra_sdist.name in message
+
+
+def test_distribution_contract_rejects_wheel_files_left_by_a_stale_build_tree(tmp_path):
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    wheel_members = [
+        "browsertap_mcp/server.py",
+        "browsertap_mcp/page_scripts/retired.js",
+        *_wheel_names(),
+    ]
+    _write_wheel(
+        wheel,
+        wheel_members,
+    )
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(
+            [name for name in wheel_members if name != "browsertap_mcp/page_scripts/retired.js"]
+        ),
+        *_sdist_names(),
+    )
+
+    _, failures = validate_dist_dir(tmp_path)
+
+    assert failures[wheel] == [
+        "wheel contains package files absent from sdist: "
+        "browsertap_mcp/page_scripts/retired.js"
+    ]
+
+
+def test_distribution_contract_rejects_wheel_missing_a_source_package_file(tmp_path):
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    _write_wheel(wheel, wheel_members)
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(wheel_members),
+        "browsertap_mcp-0.3.4/src/browsertap_mcp/new_runtime.py",
+        *_sdist_names(),
+    )
+
+    _, failures = validate_dist_dir(tmp_path)
+
+    assert failures[wheel] == [
+        "sdist contains package files absent from wheel: "
+        "browsertap_mcp/new_runtime.py"
+    ]
 
 
 def test_distribution_contract_rejects_generated_extension_config(tmp_path):

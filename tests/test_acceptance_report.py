@@ -158,6 +158,7 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     monkeypatch.setattr(A, "validate_manifest", lambda **_kwargs: (manifest, []))
     monkeypatch.setattr(A, "build_docs_report", _passing_docs_report)
     monkeypatch.setattr(A, "validate_archive", lambda _path: [])
+    monkeypatch.setattr(A, "runtime_package_mismatch", lambda _wheel, _sdist: [])
     return manifest
 
 
@@ -193,6 +194,24 @@ def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
     assert data["tool_coverage_source"] == "artifacts/tool-coverage-live.json"
     assert data["live"]["status"] == "pass"
     assert data["distribution_summary"] == "2 manifest-bound archive(s) validated"
+
+
+def test_distribution_gate_checks_the_manifest_bound_pair(monkeypatch, tmp_path):
+    """Per-archive success must not hide a wheel/sdist package-set mismatch."""
+    _seal_release_evidence(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        A,
+        "runtime_package_mismatch",
+        lambda _wheel, _sdist: [
+            "wheel contains package files absent from sdist: browsertap_mcp/retired.py"
+        ],
+    )
+
+    data = A.build_report_data()
+
+    assert data["gates"]["distributions"] is False
+    assert data["release_ready"] is False
+    assert "archive contract violation" in data["distribution_summary"]
 
 
 def test_every_weighted_gate_names_what_it_measured(monkeypatch, tmp_path):
