@@ -390,6 +390,33 @@ def test_wait_for_retry_sleep_and_bridge_budget_stay_inside_total_deadline(monke
     assert clock.now == pytest.approx(1.0)
 
 
+def test_wait_for_caps_a_lost_page_chunk_and_retries_within_the_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    scripts = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(S.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
+
+    def exec_js(script, **kwargs):
+        scripts.append(script)
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            clock.now += kwargs["timeout"]
+            raise RuntimeError("page unloaded after ACK")
+        return {"data": {"met": True, "url": "https://example.test/"}}
+
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for(text="ready", timeout=30)
+
+    assert result["status"] == "success"
+    assert calls == [pytest.approx(6.0), pytest.approx(6.0)]
+    assert "start + 4000.0" in scripts[0]
+    assert clock.now == pytest.approx(6.3)
+
+
 def test_wait_for_url_rejects_empty_pattern():
     with pytest.raises(ValueError, match="url_pattern"):
         S.wait_for_url("")
@@ -467,6 +494,39 @@ def test_wait_for_url_retries_page_unload_on_the_explicit_session(monkeypatch):
     assert result["status"] == "success"
     assert sessions == ["client:1", "client:1"]
     assert driver.default_session_id == "client:old"
+
+
+def test_wait_for_url_caps_a_lost_page_chunk_and_retries_within_the_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    scripts = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(S.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
+
+    def exec_js(script, **kwargs):
+        scripts.append(script)
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            clock.now += kwargs["timeout"]
+            raise RuntimeError("page unloaded after ACK")
+        return {
+            "data": {
+                "met": True,
+                "url": "https://example.test/done",
+                "ready": "complete",
+            }
+        }
+
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for_url("example.test/done", timeout=30)
+
+    assert result["status"] == "success"
+    assert calls == [pytest.approx(6.0), pytest.approx(6.0)]
+    assert "Date.now() + 4000.0" in scripts[0]
+    assert clock.now == pytest.approx(6.3)
 
 
 @pytest.mark.parametrize(

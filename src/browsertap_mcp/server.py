@@ -3246,6 +3246,25 @@ def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
 
 
 # --- Tools: wait_for, wait_for_url, scroll_page ------------------------------
+_WAIT_PAGE_CHUNK_SECONDS = 4.0
+_WAIT_CALL_SLACK_SECONDS = 2.0
+_WAIT_RESULT_MARGIN_SECONDS = 0.5
+
+
+def _wait_attempt_windows(remaining: float) -> tuple[float, float]:
+    """Return the in-page chunk and bridge budget for one wait attempt."""
+    call_timeout = min(
+        max(0.0, remaining),
+        _WAIT_PAGE_CHUNK_SECONDS + _WAIT_CALL_SLACK_SECONDS,
+    )
+    first_budget, _reserved = simphtml.undelivered_retry_split(call_timeout)
+    page_chunk = min(
+        _WAIT_PAGE_CHUNK_SECONDS,
+        max(0.0, first_budget - _WAIT_RESULT_MARGIN_SECONDS),
+    )
+    return page_chunk, call_timeout
+
+
 @mcp.tool(
     description=(
         "Wait until a condition holds on the page, then return. Use this instead of "
@@ -3299,7 +3318,6 @@ def wait_for(
     # outlives its page dies with it: injected while the tab is still navigating,
     # it never resolves and the bridge reports ACK-but-no-result. Chunking means
     # an unload costs one chunk, and the next chunk lands on the new document.
-    CHUNK = 4.0
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     info: dict[str, Any] = {}
@@ -3309,7 +3327,7 @@ def wait_for(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            chunk = min(CHUNK, remaining)
+            chunk, call_timeout = _wait_attempt_windows(remaining)
             structured_check = ""
             detail_fields = ""
             if structured_probe is not None:
@@ -3341,12 +3359,12 @@ def wait_for(
             }})
             """
             try:
-                # The bridge may need its whole remaining budget when a page
-                # unloads after ACK.  Giving it ``chunk + 8`` used to turn a
-                # public one-second wait into a nine-second call.  The page's
-                # own promise still resolves at ``chunk``; the transport simply
-                # cannot outlive the caller's one total deadline now.
-                resp = exec_js(script, session_id=target_session, timeout=remaining)
+                # A navigation can discard an acknowledged page promise. Cap
+                # that loss to one chunk while keeping the call inside the
+                # caller's total deadline. The page chunk is derived from the
+                # first-dispatch budget so exec_js's safe undelivered reserve
+                # never makes the promise longer than the transport window.
+                resp = exec_js(script, session_id=target_session, timeout=call_timeout)
                 raw = resp.get("data")
                 info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception as e:
@@ -3430,7 +3448,6 @@ def wait_for_url(
     )
     if wait_ready:
         probe = f"({probe} && document.readyState === 'complete')"
-    CHUNK = 4.0
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     info: dict[str, Any] = {}
@@ -3440,7 +3457,7 @@ def wait_for_url(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            chunk = min(CHUNK, remaining)
+            chunk, call_timeout = _wait_attempt_windows(remaining)
             script = f"""
             return new Promise(resolve => {{
               const deadline = Date.now() + {chunk * 1000};
@@ -3461,7 +3478,7 @@ def wait_for_url(
             }})
             """
             try:
-                resp = exec_js(script, session_id=target_session, timeout=remaining)
+                resp = exec_js(script, session_id=target_session, timeout=call_timeout)
                 raw = resp.get("data")
                 info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception as e:

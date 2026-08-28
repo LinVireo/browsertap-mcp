@@ -72,7 +72,7 @@ FAMILY_UPSTREAM = "simphtml.py"
 # point is that a changed derived file and a stale table are the same event.
 MEASURED_AGAINST: dict[str, str] = {
     "src/browsertap_mcp/browser_bridge.py": "9e3427f2afcbdfa121a20d501f5cb5fb01e4955636bfa1cd9ff0bea6aa3722cd",
-    "src/browsertap_mcp/chrome_extension/background.js": "3599e8529e1e168cf63c7ba750f20049533da9eef10d553260fbb3564f84ab79",
+    "src/browsertap_mcp/chrome_extension/background.js": "d98793bc567649594c9a32f8dad06e31a6d516a2e7a6cc58693138987a583e74",
     "src/browsertap_mcp/chrome_extension/content.js": "942d5df35bedba224c13db6930f2d07bccf554f7713c28885fd5f5b51f8a644d",
     "src/browsertap_mcp/chrome_extension/disable_dialogs.js": "1edc19d8a6a5bf0850cc0e8f2123fe799d80fb5b7afa578fa014586d7181970a",
     "src/browsertap_mcp/chrome_extension/manifest.json": "a7394272189f6b0acd168dfbbc0196a624df8395c802df3e1cde8611df3d8758",

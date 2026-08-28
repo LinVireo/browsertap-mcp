@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '6b1e0241493a153a';
+const BTAP_BUILD = 'c754d746c94c827c';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -4530,7 +4530,34 @@ async function handleWsExec(data) {
           // null/false/0/empty-string values across the scripting boundary.
           func: async (s, sub) => {
             if (window.top === window) {
-              return { __btap_top_frame_result: true, value: await eval(s) };
+              try {
+                return { __btap_top_frame_result: true, value: await eval(s) };
+              } catch (e) {
+                // A page CSP can reject eval before buildPageScript's own
+                // try/catch starts, which used to erase the marker altogether.
+                // At that point no caller code ran, so a verified EvalError is
+                // safe to route through the existing CSP retry/CDP fallback.
+                const message = e?.message || String(e);
+                const csp = typeof EvalError === 'function' && e instanceof EvalError &&
+                  /refused to evaluate|unsafe-eval|content security policy/i.test(message);
+                return {
+                  __btap_top_frame_result: true,
+                  value: {
+                    ok: false,
+                    error: {
+                      name: e?.name || 'Error',
+                      message,
+                      stack: e?.stack || '',
+                      dispatched: false,
+                      may_have_executed: false,
+                      retryable: csp,
+                    },
+                    csp,
+                    dispatched: false,
+                    may_have_executed: false,
+                  },
+                };
+              }
             }
             return eval(sub);
           },

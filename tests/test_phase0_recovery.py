@@ -3290,6 +3290,63 @@ const chrome = {{
     assert outcome["replies"][-1]["result"] == "marked-top-result"
 
 
+def test_execute_script_preserves_top_marker_when_page_csp_rejects_eval():
+    source = _ws_exec_source()
+    script = f"""
+const replies = [];
+let cdpCalls = 0;
+const console = {{ log() {{}}, error() {{}} }};
+const WebSocket = {{ OPEN: 1 }};
+const ws = {{
+  readyState: WebSocket.OPEN,
+  send(payload) {{ replies.push(JSON.parse(payload)); }},
+}};
+globalThis.window = globalThis;
+window.top = window;
+function currentExecDialogPolicy() {{ return null; }}
+function claimManualExecDialogPolicy() {{ return null; }}
+async function executeManualScript() {{ throw new Error('manual path not expected'); }}
+function buildPageScript() {{
+  return "throw new EvalError('Refused to evaluate because unsafe-eval violates Content Security Policy')";
+}}
+function buildSubframeScopeScript() {{ return 'scope'; }}
+function buildCdpScript() {{ return 'cdp-wrapped'; }}
+async function withCspOff(_tabId, fn) {{ return await fn(); }}
+async function runCdpExecFallback() {{
+  cdpCalls += 1;
+  return {{ ok: true, data: 'cdp-result' }};
+}}
+async function tabGenerationFor() {{ return 'generation'; }}
+const listeners = new Set();
+const chrome = {{
+  scripting: {{
+    async executeScript(options) {{
+      return [{{ frameId: 37, result: await options.func(...options.args) }}];
+    }},
+  }},
+  tabs: {{
+    onCreated: {{
+      addListener(listener) {{ listeners.add(listener); }},
+      removeListener(listener) {{ listeners.delete(listener); }},
+    }},
+    get: async id => ({{ id, url: 'https://example.test/', title: 'Example' }}),
+  }},
+}};
+{source}
+(async () => {{
+  await handleWsExec({{ id: 'exec-csp-marker', tabId: 9, code: 'return 1' }});
+  process.stdout.write(JSON.stringify({{ replies, cdpCalls, listenerCount: listeners.size }}));
+}})().catch(error => {{ process.stderr.write(String(error)); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["cdpCalls"] == 1
+    assert outcome["listenerCount"] == 0
+    assert outcome["replies"][0] == {"type": "ack", "id": "exec-csp-marker"}
+    assert outcome["replies"][-1]["type"] == "result"
+    assert outcome["replies"][-1]["result"] == "cdp-result"
+
+
 def test_content_script_has_no_page_dom_privileged_command_channel():
     source = (BACKGROUND.parent / "content.js").read_text(encoding="utf-8")
 
