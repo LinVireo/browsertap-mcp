@@ -3228,6 +3228,68 @@ const chrome = {{
     assert error_reply["error"]["retryable"] is False
 
 
+def test_execute_script_selects_the_marked_top_document_without_assuming_frame_zero():
+    source = _ws_exec_source()
+    script = f"""
+const replies = [];
+let cdpCalls = 0;
+const console = {{ log() {{}}, error() {{}} }};
+const WebSocket = {{ OPEN: 1 }};
+const ws = {{
+  readyState: WebSocket.OPEN,
+  send(payload) {{ replies.push(JSON.parse(payload)); }},
+}};
+function currentExecDialogPolicy() {{ return null; }}
+function claimManualExecDialogPolicy() {{ return null; }}
+async function executeManualScript() {{ throw new Error('manual path not expected'); }}
+function buildPageScript() {{ return 'wrapped'; }}
+function buildSubframeScopeScript() {{ return 'scope'; }}
+function buildCdpScript() {{ return 'cdp-wrapped'; }}
+async function withCspOff(_tabId, fn) {{ return await fn(); }}
+async function runCdpExecFallback() {{
+  cdpCalls += 1;
+  return {{ ok: true, data: 'cdp-result' }};
+}}
+async function tabGenerationFor() {{ return 'generation'; }}
+const listeners = new Set();
+const chrome = {{
+  scripting: {{
+    async executeScript() {{
+      return [
+        {{ frameId: 0, result: undefined }},
+        {{
+          frameId: 37,
+          result: {{
+            __btap_top_frame_result: true,
+            value: {{ ok: true, data: 'marked-top-result' }},
+          }},
+        }},
+      ];
+    }},
+  }},
+  tabs: {{
+    onCreated: {{
+      addListener(listener) {{ listeners.add(listener); }},
+      removeListener(listener) {{ listeners.delete(listener); }},
+    }},
+    get: async id => ({{ id, url: 'https://example.test/', title: 'Example' }}),
+  }},
+}};
+{source}
+(async () => {{
+  await handleWsExec({{ id: 'exec-marker', tabId: 9, code: 'return 1' }});
+  process.stdout.write(JSON.stringify({{ replies, cdpCalls, listenerCount: listeners.size }}));
+}})().catch(error => {{ process.stderr.write(String(error)); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["cdpCalls"] == 0
+    assert outcome["listenerCount"] == 0
+    assert outcome["replies"][0] == {"type": "ack", "id": "exec-marker"}
+    assert outcome["replies"][-1]["type"] == "result"
+    assert outcome["replies"][-1]["result"] == "marked-top-result"
+
+
 def test_content_script_has_no_page_dom_privileged_command_channel():
     source = (BACKGROUND.parent / "content.js").read_text(encoding="utf-8")
 

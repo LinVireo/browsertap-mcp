@@ -860,12 +860,12 @@ def test_exec_injection_reaches_every_frame_but_returns_the_top_one():
     ]
     assert "target: { tabId, allFrames: true }" in inject
     assert "buildSubframeScopeScript(dialogScope)" in inject
-    # The caller's code must still run in the top frame only, and the result must
-    # be selected by frame id rather than by position.
+    # The caller's code must still run in the top frame only, and its marker must
+    # select that result without trusting array position or a fixed frame id.
     assert "if (window.top === window) {" in inject
     assert "__btap_top_frame_result: true, value: await eval(s)" in inject
     assert "return eval(sub);" in inject
-    assert "entry?.frameId === 0" in inject
+    assert "entry?.result?.__btap_top_frame_result === true" in inject
 
 
 def test_extension_scope_records_expire_with_their_command():

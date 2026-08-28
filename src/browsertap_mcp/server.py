@@ -3276,8 +3276,9 @@ def wait_for(
     driver = require_driver()
     ensure_sessions()
     prev_default = driver.default_session_id
+    target_session = None
     if session_id is not None:
-        switch_session(session_id=session_id)
+        target_session = switch_session(session_id=session_id)
     # The condition is evaluated in-page on a 100ms interval, so a 30s wait is
     # still one roundtrip. Deadline is enforced on both sides: the page resolves
     # with timedOut, and the bridge call gets a few seconds of slack on top.
@@ -3345,7 +3346,7 @@ def wait_for(
                 # public one-second wait into a nine-second call.  The page's
                 # own promise still resolves at ``chunk``; the transport simply
                 # cannot outlive the caller's one total deadline now.
-                resp = exec_js(script, session_id=None, timeout=remaining)
+                resp = exec_js(script, session_id=target_session, timeout=remaining)
                 raw = resp.get("data")
                 info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception as e:
@@ -3413,8 +3414,9 @@ def wait_for_url(
     driver = require_driver()
     ensure_sessions()
     prev_default = driver.default_session_id
+    target_session = None
     if session_id is not None:
-        switch_session(session_id=session_id)
+        target_session = switch_session(session_id=session_id)
     # 与 wait_for 同样的分块策略：一个 promise 活不过它所在的 document，导航中注入的
     # 等待会随页面卸载一起死掉、永不 resolve。分块后卸载只损失一块，下一块落在新
     # 文档里 —— 这对"等导航落定"尤其重要，因为这里本来就预期页面会换。
@@ -3459,7 +3461,7 @@ def wait_for_url(
             }})
             """
             try:
-                resp = exec_js(script, session_id=None, timeout=remaining)
+                resp = exec_js(script, session_id=target_session, timeout=remaining)
                 raw = resp.get("data")
                 info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception as e:

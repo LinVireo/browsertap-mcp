@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '9ff6d73e3580e545';
+const BTAP_BUILD = '6b1e0241493a153a';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -4539,11 +4539,13 @@ async function handleWsExec(data) {
             buildSubframeScopeScript(dialogScope),
           ]
         });
-        // Pick the top frame by id, not by position: with allFrames the order of
-        // the results array is not specified. One entry means a single-frame page,
-        // where there is nothing to disambiguate.
-        const top = result.find(entry => entry?.frameId === 0)
-          || (result.length === 1 ? result[0] : undefined);
+        // Pick the top frame by the marker produced by the injected function,
+        // not by frameId or array position. Chrome can return a top-level
+        // document under a non-zero frame id (observed after navigation on MDN),
+        // while allFrames also returns ordinary sub-frame entries.
+        const top = result.find(
+          entry => entry?.result?.__btap_top_frame_result === true,
+        );
         const wrapped = top?.result;
         if (!wrapped || wrapped.__btap_top_frame_result !== true) {
           // The call reached Chrome, but no trustworthy top-frame result came

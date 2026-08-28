@@ -279,7 +279,7 @@ def test_wait_for_condition_success_paths(monkeypatch, condition, gone, needle):
     assert result["status"] == "success"
     assert result["condition"].endswith(" gone") is gone
     assert needle in scripts[0][0]
-    assert scripts[0][1]["session_id"] is None
+    assert scripts[0][1]["session_id"] == "client:1"
     assert driver.default_session_id == "client:old"
 
 
@@ -319,12 +319,14 @@ def test_wait_for_structured_locator_preserves_timeout_details(monkeypatch):
 
 
 def test_wait_for_retries_page_unload_then_succeeds(monkeypatch):
-    _install_page_driver(monkeypatch)
+    driver = _install_page_driver(monkeypatch)
     _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3, 0.3])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     responses = iter([RuntimeError("page unloaded"), {"data": {"met": True, "url": "u"}}])
+    sessions = []
 
-    def exec_js(*_args, **_kwargs):
+    def exec_js(*_args, **kwargs):
+        sessions.append(kwargs["session_id"])
         value = next(responses)
         if isinstance(value, Exception):
             raise value
@@ -332,7 +334,9 @@ def test_wait_for_retries_page_unload_then_succeeds(monkeypatch):
 
     monkeypatch.setattr(S, "exec_js", exec_js)
 
-    assert S.wait_for(text="ready", timeout=1)["status"] == "success"
+    assert S.wait_for(text="ready", timeout=1, session_id="client:1")["status"] == "success"
+    assert sessions == ["client:1", "client:1"]
+    assert driver.default_session_id == "client:old"
 
 
 def test_wait_for_timeout_reports_repeated_page_failure(monkeypatch):
@@ -418,8 +422,8 @@ def test_wait_for_url_success_and_ready_policy(monkeypatch, wait_ready):
     _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.1])
     scripts = []
 
-    def exec_js(script, **_kwargs):
-        scripts.append(script)
+    def exec_js(script, **kwargs):
+        scripts.append((script, kwargs))
         return {
             "data": json.dumps(
                 {"met": True, "url": "https://example.test/done", "title": "Done", "ready": "complete"}
@@ -432,7 +436,36 @@ def test_wait_for_url_success_and_ready_policy(monkeypatch, wait_ready):
 
     assert result["status"] == "success"
     assert result["waited_for_ready"] is wait_ready
-    assert ("document.readyState === 'complete'" in scripts[0]) is wait_ready
+    assert ("document.readyState === 'complete'" in scripts[0][0]) is wait_ready
+    assert scripts[0][1]["session_id"] == "client:1"
+    assert driver.default_session_id == "client:old"
+
+
+def test_wait_for_url_retries_page_unload_on_the_explicit_session(monkeypatch):
+    driver = _install_page_driver(monkeypatch)
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3, 0.3])
+    monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
+    responses = iter(
+        [
+            RuntimeError("page unloaded"),
+            {"data": {"met": True, "url": "https://example.test/done", "ready": "complete"}},
+        ]
+    )
+    sessions = []
+
+    def exec_js(*_args, **kwargs):
+        sessions.append(kwargs["session_id"])
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for_url("example.test/done", timeout=1, session_id="client:1")
+
+    assert result["status"] == "success"
+    assert sessions == ["client:1", "client:1"]
     assert driver.default_session_id == "client:old"
 
 
