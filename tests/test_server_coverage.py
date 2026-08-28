@@ -320,7 +320,7 @@ def test_wait_for_structured_locator_preserves_timeout_details(monkeypatch):
 
 def test_wait_for_retries_page_unload_then_succeeds(monkeypatch):
     _install_page_driver(monkeypatch)
-    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3])
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3, 0.3])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     responses = iter([RuntimeError("page unloaded"), {"data": {"met": True, "url": "u"}}])
 
@@ -337,7 +337,7 @@ def test_wait_for_retries_page_unload_then_succeeds(monkeypatch):
 
 def test_wait_for_timeout_reports_repeated_page_failure(monkeypatch):
     _install_page_driver(monkeypatch)
-    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0])
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         S,
@@ -350,6 +350,40 @@ def test_wait_for_timeout_reports_repeated_page_failure(monkeypatch):
     assert result["status"] == "timeout"
     assert "page unavailable" in result["error"]
     assert "hint" in result
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_wait_for_rejects_non_positive_or_non_finite_timeout(timeout):
+    with pytest.raises(ValueError, match="finite.*greater than zero"):
+        S.wait_for(text="ready", timeout=timeout)
+
+
+def test_wait_for_retry_sleep_and_bridge_budget_stay_inside_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    sleeps = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    def exec_js(_script, **kwargs):
+        calls.append(kwargs["timeout"])
+        clock.now += 0.8
+        raise RuntimeError("page unavailable")
+
+    monkeypatch.setattr(S.time, "sleep", sleep)
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for(text="ready", timeout=1.0)
+
+    assert result["status"] == "timeout"
+    assert calls == [pytest.approx(1.0)]
+    assert sleeps == [pytest.approx(0.2)]
+    assert clock.now == pytest.approx(1.0)
 
 
 def test_wait_for_url_rejects_empty_pattern():
@@ -424,7 +458,7 @@ def test_wait_for_url_timeout_hints(monkeypatch, info, expected_hint):
 
 def test_wait_for_url_retries_unload_and_reports_last_error(monkeypatch):
     _install_page_driver(monkeypatch)
-    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0])
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         S,
@@ -436,6 +470,40 @@ def test_wait_for_url_retries_unload_and_reports_last_error(monkeypatch):
 
     assert result["status"] == "timeout"
     assert "navigation blink" in result["error"]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_wait_for_url_rejects_non_positive_or_non_finite_timeout(timeout):
+    with pytest.raises(ValueError, match="finite.*greater than zero"):
+        S.wait_for_url("target", timeout=timeout)
+
+
+def test_wait_for_url_retry_sleep_and_bridge_budget_stay_inside_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    sleeps = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    def exec_js(_script, **kwargs):
+        calls.append(kwargs["timeout"])
+        clock.now += 0.8
+        raise RuntimeError("navigation blink")
+
+    monkeypatch.setattr(S.time, "sleep", sleep)
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for_url("target", timeout=1.0)
+
+    assert result["status"] == "timeout"
+    assert calls == [pytest.approx(1.0)]
+    assert sleeps == [pytest.approx(0.2)]
+    assert clock.now == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(

@@ -53,6 +53,7 @@ from . import bridge as bridge_module  # noqa: E402
 from .browser_bridge import (  # noqa: E402
     BridgeNoResponseError,
     BrowserBridge,
+    is_scriptable_url,
     state_paths_report,
 )
 from .extension_build import (  # noqa: E402
@@ -76,6 +77,23 @@ from .page_input import (  # noqa: E402
 from .paths import state_dir  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+# Keep timeout validation at the public boundary.  A comparison such as
+# ``timeout <= 0`` is not enough: ``NaN`` passes it, ``inf`` turns a deadline
+# into an effectively unbounded wait, and a numeric string currently behaves
+# differently depending on which tool received it.  Converting once here also
+# means the hot path does not repeatedly coerce the same value.
+def _positive_timeout(value: Any, *, name: str = "timeout") -> float:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be a finite number greater than zero"
+        ) from None
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(f"{name} must be a finite number greater than zero")
+    return normalized
 
 
 # --- Stdio logging -----------------------------------------------------------
@@ -864,9 +882,7 @@ def switch_session(
 
 # --- exec_js: the one bridge roundtrip every tool goes through ---------------
 def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0) -> dict[str, Any]:
-    timeout = float(timeout)
-    if timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
+    timeout = _positive_timeout(timeout)
     deadline = time.monotonic() + timeout
 
     def remaining() -> float:
@@ -1245,8 +1261,14 @@ def get_setup_status() -> dict[str, Any]:
             "restarting the bridge or reloading the extension cannot clear it.",
         )
     if extension_build_verdict == "stamp_not_regenerated":
+        # A stale MCP process is the component verdict and its restart is the
+        # only action that can clear a newer bridge/extension mismatch. Keep
+        # that instruction first when both conditions are present; the stamp
+        # repair remains immediately after it instead of sending the operator
+        # to reload an extension that is not the primary fault.
+        note_index = 1 if package_is_stale else 0
         status["notes"].insert(
-            0,
+            note_index,
             "An extension file was edited without regenerating the build stamp "
             f"(background.js says {recorded_build_stamp}, the sources hash to "
             f"{tree_build_stamp}), so extension_build_verdict cannot tell a stale "
@@ -1520,9 +1542,7 @@ def open_url(
     beforeunload: str = "dismiss",
     intent_leave: Optional[bool] = None,
 ) -> dict[str, Any]:
-    timeout = float(timeout)
-    if timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
+    timeout = _positive_timeout(timeout)
     deadline = time.monotonic() + timeout
     policy = _validate_dialog_policy(beforeunload)
     driver = require_driver()
@@ -1791,9 +1811,10 @@ def _direct_cdp(
     deadline: Optional[float] = None,
 ) -> Any:
     driver = require_driver()
-    timeout = float(timeout)
-    if timeout <= 0:
-        raise TimeoutError("CDP deadline exhausted before dispatch")
+    try:
+        timeout = _positive_timeout(timeout)
+    except ValueError as exc:
+        raise TimeoutError("CDP deadline exhausted before dispatch") from exc
     deadline = deadline if deadline is not None else time.monotonic() + timeout
 
     def remaining() -> float:
@@ -2134,9 +2155,8 @@ def open_new_tab(
     owner_id: Optional[str] = None,
 ) -> dict[str, Any]:
     driver = require_driver()
-    if timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
-    deadline = time.monotonic() + float(timeout)
+    timeout = _positive_timeout(timeout)
+    deadline = time.monotonic() + timeout
     operation_id = f"open-tab-{secrets.token_urlsafe(18)}"
     client_id = _split_session_target(str(session_id))[0] if session_id is not None else None
 
@@ -3245,6 +3265,7 @@ def wait_for(
     gone: bool = False,
     session_id: Optional[str] = None,
 ) -> dict[str, Any]:
+    timeout = _positive_timeout(timeout)
     given = [n for n, v in (("selector", selector), ("text", text),
                             ("url_pattern", url_pattern), ("js", js)) if v]
     if len(given) != 1:
@@ -3278,7 +3299,7 @@ def wait_for(
     # it never resolves and the bridge reports ACK-but-no-result. Chunking means
     # an unload costs one chunk, and the next chunk lands on the new document.
     CHUNK = 4.0
-    deadline = time.monotonic() + float(timeout)
+    deadline = time.monotonic() + timeout
     started = time.monotonic()
     info: dict[str, Any] = {}
     last_error = None
@@ -3319,7 +3340,12 @@ def wait_for(
             }})
             """
             try:
-                resp = exec_js(script, session_id=None, timeout=chunk + 8)
+                # The bridge may need its whole remaining budget when a page
+                # unloads after ACK.  Giving it ``chunk + 8`` used to turn a
+                # public one-second wait into a nine-second call.  The page's
+                # own promise still resolves at ``chunk``; the transport simply
+                # cannot outlive the caller's one total deadline now.
+                resp = exec_js(script, session_id=None, timeout=remaining)
                 raw = resp.get("data")
                 info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception as e:
@@ -3327,7 +3353,9 @@ def wait_for(
                 # side-effect-free, so just try the next chunk.
                 last_error = str(e)
                 info = {}
-                time.sleep(0.3)
+                retry_delay = min(0.3, max(0.0, deadline - time.monotonic()))
+                if retry_delay > 0:
+                    time.sleep(retry_delay)
                 continue
             if info.get("met"):
                 break
@@ -3377,6 +3405,7 @@ def wait_for_url(
     pattern = str(url_pattern or "")
     if not pattern.strip():
         raise ValueError("url_pattern must not be empty")
+    timeout = _positive_timeout(timeout)
     # The condition is evaluated by the browser, so JavaScript RegExp syntax is
     # authoritative here. Python's ``re`` accepts a different language (and
     # rejects valid JS features such as named groups). An invalid JavaScript
@@ -3400,7 +3429,7 @@ def wait_for_url(
     if wait_ready:
         probe = f"({probe} && document.readyState === 'complete')"
     CHUNK = 4.0
-    deadline = time.monotonic() + float(timeout)
+    deadline = time.monotonic() + timeout
     started = time.monotonic()
     info: dict[str, Any] = {}
     last_error = None
@@ -3430,14 +3459,16 @@ def wait_for_url(
             }})
             """
             try:
-                resp = exec_js(script, session_id=None, timeout=chunk + 8)
+                resp = exec_js(script, session_id=None, timeout=remaining)
                 raw = resp.get("data")
                 info = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception as e:
                 # 页面在等待中卸载，或会话眨了一下眼。等待本身没有副作用，下一块重试。
                 last_error = str(e)
                 info = {}
-                time.sleep(0.3)
+                retry_delay = min(0.3, max(0.0, deadline - time.monotonic()))
+                if retry_delay > 0:
+                    time.sleep(retry_delay)
                 continue
             if info.get("met"):
                 break
@@ -3655,9 +3686,8 @@ def execute_js(
     timeout: float = 15.0,
     dialog_policy: str = "dismiss",
 ) -> dict[str, Any]:
-    if timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
-    deadline = time.monotonic() + float(timeout)
+    timeout = _positive_timeout(timeout)
+    deadline = time.monotonic() + timeout
 
     def remaining() -> float:
         return max(0.0, deadline - time.monotonic())
@@ -4102,6 +4132,87 @@ def _focus_proof_value(result: Any) -> Optional[bool]:
     return bool(value["value"])
 
 
+def _resolve_page_input_session(
+    driver: BrowserBridge,
+    session_id: Optional[str],
+    *,
+    deadline: float,
+    operation: str,
+) -> str:
+    """Resolve one page-input target without letting discovery outlive the call.
+
+    The common path uses the short-lived session cache. A cache miss for a
+    caller-named tab, or a remembered implicit tab that disappeared, gets one
+    bounded fresh snapshot before the target is rejected or replaced.
+    """
+
+    def fetch(*, fresh: bool) -> list[dict[str, Any]]:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError(
+                f"{operation} deadline exhausted before session resolution"
+            )
+        sessions = active_sessions(timeout=remaining, fresh=fresh)
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"{operation} deadline exhausted during session resolution"
+            )
+        return sessions
+
+    sessions = fetch(fresh=False)
+    if session_id is not None:
+        requested = str(session_id)
+        if any(str(item.get("id")) == requested for item in sessions):
+            return requested
+        # The two-second cache may predate a just-opened tab. Confirm once
+        # before refusing an explicit target; never substitute another tab.
+        sessions = fetch(fresh=True)
+        if any(str(item.get("id")) == requested for item in sessions):
+            return requested
+        raise RuntimeError(f"Session {requested} not found")
+
+    current = (
+        str(driver.default_session_id)
+        if driver.default_session_id is not None
+        else None
+    )
+    if current and any(str(item.get("id")) == current for item in sessions):
+        return current
+    if current or not sessions:
+        # A missing remembered default may be a stale cache rather than a dead
+        # tab. Re-read before repicking so implicit calls do not jump tabs.
+        sessions = fetch(fresh=True)
+        if current and any(str(item.get("id")) == current for item in sessions):
+            return current
+    if not sessions:
+        raise RuntimeError(
+            "No connected browser tabs. Load the unpacked extension from the "
+            "reported extension path, keep this MCP server running via Hermes, "
+            "and open a normal http/https page in Chrome."
+        )
+
+    # A caller that named no tab expressed no preference, so avoid pages Chrome
+    # cannot script when another live target exists. Preserve the old fallback
+    # when every connected page is restricted.
+    candidates = [
+        item for item in sessions if is_scriptable_url(item.get("url"))
+    ] or sessions
+    preferred_browser = os.environ.get(
+        "BROWSERTAP_PREFERRED_BROWSER", ""
+    ).strip().lower()
+    if preferred_browser:
+        preferred = [
+            item
+            for item in candidates
+            if str(item.get("browser", "")).lower() == preferred_browser
+        ]
+        if preferred:
+            candidates = preferred
+    target = str(candidates[0]["id"])
+    driver.default_session_id = target
+    return target
+
+
 def _run_page_input(
     commands: list[dict[str, Any]],
     session_id: Optional[str],
@@ -4113,6 +4224,7 @@ def _run_page_input(
     """Dispatch one uninterrupted CDP input sequence to one resolved tab."""
     if not commands:
         raise InputValidationError("page input commands must not be empty")
+    timeout = _positive_timeout(timeout)
     # Chrome drops Input.* events sent to a tab that has never received focus,
     # even though the CDP commands return success.  Focus emulation makes the
     # renderer input-capable without activating the tab or changing the user's
@@ -4143,8 +4255,11 @@ def _run_page_input(
                 )
             target_session = str(session_id)
         else:
-            target_session = (
-                switch_session(session_id=session_id) if directed else switch_session()
+            target_session = _resolve_page_input_session(
+                driver,
+                session_id,
+                deadline=deadline,
+                operation="page input",
             )
         ext_cmd = getattr(driver, "ext_cmd", None)
 
@@ -4365,12 +4480,15 @@ def page_click(
         raise InputValidationError(
             "page_click requires exactly one targeting mode: selector, or both x and y"
         )
+    timeout = _positive_timeout(timeout)
+    deadline = time.monotonic() + timeout
 
     if not selector_mode:
         out = _run_page_input(
             click_commands(x, y, button=button, clicks=clicks),  # type: ignore[arg-type]
             session_id,
             timeout,
+            deadline=deadline,
         )
         out["target"] = {"x": x, "y": y}
         return out
@@ -4379,15 +4497,25 @@ def page_click(
     prev_default = driver.default_session_id
     directed = session_id is not None
     try:
-        target_session = switch_session(session_id=session_id) if directed else switch_session()
+        target_session = _resolve_page_input_session(
+            driver,
+            session_id,
+            deadline=deadline,
+            operation="page_click",
+        )
         resolver_x = 0 if offset_x is None else offset_x
         resolver_y = 0 if offset_y is None else offset_y
+        resolver_budget = max(0.0, deadline - time.monotonic())
+        if resolver_budget <= 0:
+            raise TimeoutError(
+                "page_click deadline exhausted before target resolution"
+            )
         before = _page_selector_info(
             selector,
             resolver_x,
             resolver_y,
             target_session,
-            timeout,
+            resolver_budget,
             verify_hit=True,
             center_x=offset_x is None,
             center_y=offset_y is None,
@@ -4454,10 +4582,15 @@ def page_click(
                         f"resume with session_id={target_session!r} after the challenge clears."
                     ),
                 }
+        input_budget = max(0.0, deadline - time.monotonic())
+        if input_budget <= 0:
+            raise TimeoutError("page_click deadline exhausted before input dispatch")
         out = _run_page_input(
             click_commands(resolved_x, resolved_y, button=button, clicks=clicks),
             target_session,
-            timeout,
+            input_budget,
+            session_validated=True,
+            deadline=deadline,
         )
         out["target"] = {
             "selector": selector,
@@ -4472,9 +4605,38 @@ def page_click(
             "scrolled_into_view": bool(before.get("scrolledIntoView")),
         }
 
-        after = _page_selector_info(
-            selector, resolver_x, resolver_y, target_session, timeout
-        )
+        post_budget = max(0.0, deadline - time.monotonic())
+        if post_budget <= 0:
+            out["challenge_detected"] = None
+            out["attempts"] = None
+            out["challenge_check"] = {
+                "enforced": False,
+                "reason": "deadline_exhausted",
+                "before_click_detected": before_marker is not None,
+            }
+            return out
+        try:
+            after = _page_selector_info(
+                selector, resolver_x, resolver_y, target_session, post_budget
+            )
+        except Exception as exc:
+            # The click batch already completed. A post-click observation is
+            # allowed to become unknown, but it must never turn that mutation
+            # into a reported failure or trigger an automatic replay.
+            out["challenge_detected"] = None
+            out["attempts"] = None
+            out["challenge_check"] = {
+                "enforced": False,
+                "reason": (
+                    "probe_timed_out"
+                    if isinstance(exc, TimeoutError)
+                    else "probe_failed"
+                ),
+                "before_click_detected": before_marker is not None,
+                "error_type": type(exc).__name__,
+            }
+            return out
+        out["challenge_check"] = {"enforced": True}
         after_marker = after.get("challengeMarker") if after.get("found") else None
         if after_marker:
             after_marker = str(after_marker)
@@ -4530,9 +4692,7 @@ def page_type(
         raise InputValidationError("clear must be a boolean")
     if not isinstance(submit_key, str):
         raise InputValidationError("submit_key must be a string")
-    timeout = float(timeout)
-    if timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
+    timeout = _positive_timeout(timeout)
     deadline = time.monotonic() + timeout
     driver = require_driver()
     previous_default = driver.default_session_id
@@ -4696,7 +4856,19 @@ def upload_files(
     session_id: Optional[str] = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    files = [paths] if isinstance(paths, str) else list(paths)
+    if not isinstance(selector, str) or not selector.strip():
+        raise InputValidationError("selector must be a non-empty CSS string")
+    if isinstance(paths, str):
+        files = [paths]
+    elif isinstance(paths, list):
+        files = list(paths)
+    else:
+        raise InputValidationError("paths must be a path string or a list of path strings")
+    if not files:
+        raise InputValidationError("paths must contain at least one file")
+    if any(not isinstance(path, str) or not path for path in files):
+        raise InputValidationError("every upload path must be a non-empty string")
+    timeout = _positive_timeout(timeout)
     missing = [p for p in files if not Path(p).is_file()]
     if missing:
         raise RuntimeError(f"file(s) not found: {missing}")
@@ -4705,6 +4877,11 @@ def upload_files(
     # debugger stays attached, so this cannot be split across cdp_command calls.
     batch = {
         "cmd": "batch",
+        # The outer bridge wait and the debugger batch share the same public
+        # budget. Without this, a timed-out caller can leave the extension
+        # attaching a debugger and setting files after the result was abandoned.
+        "deadlineEpochMs": int(time.time() * 1000 + timeout * 1000),
+        "timeoutMs": max(1, int(timeout * 1000)),
         "commands": [
             {"cmd": "cdp", "method": "DOM.getDocument", "params": {"depth": -1}},
             {"cmd": "cdp", "method": "DOM.querySelector",
@@ -4723,13 +4900,21 @@ def upload_files(
         raise RuntimeError(f"upload failed: {data.get('error')}")
     results = data if isinstance(data, list) else (
         data.get("results") if isinstance(data, dict) else None)
-    node = None
-    if isinstance(results, list) and len(results) > 1 and isinstance(results[1], dict):
-        node = results[1].get("nodeId")
-        if not node:
-            raise RuntimeError(
-                f"selector {selector!r} matched no element (DOM.querySelector returned "
-                f"{results[1]}); check the selector and that the input is in the top frame")
+    if not isinstance(results, list) or len(results) < 2 or not isinstance(results[1], dict):
+        raise RuntimeError(
+            "upload returned an incomplete batch result; the file-input state "
+            "could not be verified, so inspect the page before retrying"
+        )
+    node = results[1].get("nodeId")
+    if isinstance(node, bool) or not isinstance(node, int) or node <= 0:
+        raise RuntimeError(
+            f"selector {selector!r} matched no element (DOM.querySelector returned "
+            f"{results[1]}); check the selector and that the input is in the top frame")
+    if len(results) < 3 or not isinstance(results[2], dict):
+        raise RuntimeError(
+            "upload batch did not confirm DOM.setFileInputFiles; the file-input "
+            "state is unknown, so inspect the page before retrying"
+        )
     return {"status": "ok", "selector": selector, "files": files, "node_id": node}
 
 
@@ -5884,6 +6069,19 @@ def _physical_error_result(status: str, message: str) -> dict[str, Any]:
     return {"status": status, "message": message}
 
 
+def _require_coordinate_pair(
+    first: Any,
+    second: Any,
+    first_name: str,
+    second_name: str,
+) -> None:
+    """Reject an optional coordinate pair when exactly one axis is supplied."""
+    if (first is None) != (second is None):
+        raise InputValidationError(
+            f"{first_name} and {second_name} must be provided together or both omitted"
+        )
+
+
 async def _run_approved_physical_action(
     ctx: Context,
     summary: str,
@@ -6050,6 +6248,8 @@ async def mouse_click(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _require_coordinate_pair(x, y, "x", "y")
+
     def action() -> dict[str, Any]:
         pyautogui = _pyautogui()
         if x is not None and y is not None:
@@ -6121,6 +6321,8 @@ async def type_text(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _require_coordinate_pair(click_x, click_y, "click_x", "click_y")
+
     def action() -> dict[str, Any]:
         pyautogui = _pyautogui()
         if click_x is not None and click_y is not None:

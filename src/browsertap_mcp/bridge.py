@@ -339,9 +339,27 @@ def _process_is_gone(pid: int) -> bool:
 
 def _terminate_process(pid: int, timeout: float) -> bool:
     if sys.platform == "win32":
+        from ctypes import wintypes
+
         PROCESS_TERMINATE = 0x0001
         SYNCHRONIZE = 0x00100000
-        handle = ctypes.windll.kernel32.OpenProcess(
+        kernel32 = ctypes.windll.kernel32
+        # ctypes otherwise assumes c_int for arguments and return values. A
+        # HANDLE is pointer-sized, so the default truncates valid handles in a
+        # 64-bit process before TerminateProcess ever sees them.
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(
             PROCESS_TERMINATE | SYNCHRONIZE, False, pid
         )
         if not handle:
@@ -350,13 +368,13 @@ def _terminate_process(pid: int, timeout: float) -> bool:
             # daemon) must not be reported as a completed stop.
             return _process_is_gone(pid)
         try:
-            if not ctypes.windll.kernel32.TerminateProcess(handle, 0):
+            if not kernel32.TerminateProcess(handle, 0):
                 return False
             wait_ms = max(0, min(int(timeout * 1000), 0xFFFFFFFE))
-            result = ctypes.windll.kernel32.WaitForSingleObject(handle, wait_ms)
+            result = kernel32.WaitForSingleObject(handle, wait_ms)
             return result == 0
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            kernel32.CloseHandle(handle)
 
     try:
         os.kill(pid, signal.SIGTERM)

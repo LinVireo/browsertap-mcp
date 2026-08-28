@@ -99,6 +99,15 @@ def test_press_without_modifiers_keeps_normal_keydown():
     assert [command["params"]["type"] for command in commands] == ["keyDown", "keyUp"]
 
 
+@pytest.mark.parametrize("key", ["ß", "é", "١"])
+def test_press_accepts_printable_unicode_without_invalid_ascii_mapping(key):
+    commands = press_commands(key)
+    assert [command["params"]["type"] for command in commands] == ["keyDown", "keyUp"]
+    assert commands[0]["params"]["key"] == key
+    assert commands[0]["params"]["code"] == ""
+    assert commands[0]["params"]["windowsVirtualKeyCode"] == 0
+
+
 @pytest.mark.parametrize("chord", ["", "ctrl", "ctrl,,p", "ctrl,wat,p", "ctrl,p,q"])
 def test_page_press_rejects_malformed_chords(chord):
     with pytest.raises(InputValidationError):

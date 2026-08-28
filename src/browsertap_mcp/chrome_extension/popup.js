@@ -35,15 +35,20 @@ function localizeDocument() {
 }
 
 async function loadIndicatorVisibility() {
-  const stored = await chrome.storage.local.get('btap_indicator_visible');
+  // Read the current and legacy keys together. The popup opens on the user's
+  // click, so the extra storage round trip is visible on slower profiles; the
+  // combined read preserves the same precedence and migration retry semantics.
+  const stored = await chrome.storage.local.get([
+    'btap_indicator_visible',
+    'tmwd_indicator_visible',
+  ]);
   let visible = stored.btap_indicator_visible;
   if (visible === undefined) {
     // Carry the pre-BTAP preference over once. The popup is the only place with
     // a healthy extension context guaranteed, so the migration lives here;
     // content.js just reads both keys.
-    const legacy = await chrome.storage.local.get('tmwd_indicator_visible');
-    if (legacy.tmwd_indicator_visible !== undefined) {
-      visible = legacy.tmwd_indicator_visible;
+    if (stored.tmwd_indicator_visible !== undefined) {
+      visible = stored.tmwd_indicator_visible;
       try {
         await chrome.storage.local.set({ btap_indicator_visible: visible });
         await chrome.storage.local.remove?.('tmwd_indicator_visible');
@@ -60,6 +65,9 @@ async function saveIndicatorVisibility() {
 
 async function fetchCookies() {
   const out = document.getElementById('out');
+  // A refresh replaces the previous jar. Invalidate it before any query so a
+  // failed read can never leave stale credentials available to Copy.
+  renderedCookies = null;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url) { out.textContent = message('noActiveTab'); return; }

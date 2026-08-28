@@ -246,6 +246,44 @@ def test_process_is_gone_requires_proof(monkeypatch):
     assert bridge._process_is_gone(9) is False
 
 
+def test_terminate_process_declares_pointer_sized_win32_signatures(monkeypatch):
+    from ctypes import wintypes
+
+    calls = []
+
+    class Callable:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            calls.append(args)
+            return self.callback(*args)
+
+    handle = 0x123456789ABCDEF
+    kernel32 = SimpleNamespace(
+        OpenProcess=Callable(lambda *_args: handle),
+        TerminateProcess=Callable(lambda *_args: 1),
+        WaitForSingleObject=Callable(lambda *_args: 0),
+        CloseHandle=Callable(lambda *_args: 1),
+    )
+    monkeypatch.setattr(bridge.sys, "platform", "win32")
+    monkeypatch.setattr(
+        bridge.ctypes,
+        "windll",
+        SimpleNamespace(kernel32=kernel32),
+        raising=False,
+    )
+
+    assert bridge._terminate_process(123, 1.25) is True
+    assert calls[0] == (0x00100001, False, 123)
+    assert calls[1] == (handle, 0)
+    assert calls[2] == (handle, 1250)
+    assert calls[3] == (handle,)
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert kernel32.TerminateProcess.restype is wintypes.BOOL
+    assert kernel32.WaitForSingleObject.restype is wintypes.DWORD
+
+
 def test_write_bridge_record_refuses_when_own_identity_is_unknowable(monkeypatch, tmp_path):
     monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
 

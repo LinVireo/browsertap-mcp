@@ -126,6 +126,22 @@ def test_persist_token_creates_secure_file_and_ignores_chmod_failure(monkeypatch
     assert path.read_text(encoding="utf-8") == "abc\n"
 
 
+def test_persist_token_retries_partial_writes(monkeypatch, tmp_path):
+    path = tmp_path / "token"
+    real_write = T.os.write
+    writes = []
+
+    def partial_write(fd, data):
+        chunk = bytes(data[: max(1, len(data) // 2)])
+        writes.append(chunk)
+        return real_write(fd, chunk)
+
+    monkeypatch.setattr(T.os, "write", partial_write)
+    assert T._persist_token(path, "partial-write-token") == "partial-write-token"
+    assert len(writes) > 1
+    assert path.read_text(encoding="utf-8") == "partial-write-token\n"
+
+
 def test_persist_token_converges_when_another_process_wins(monkeypatch, tmp_path):
     path = tmp_path / "token"
     path.write_text("winner\n", encoding="utf-8")
@@ -403,6 +419,40 @@ def test_remote_command_maps_http_statuses_and_json_errors(monkeypatch, tmp_path
     )
     with pytest.raises(TimeoutError, match="bridge HTTP request timed out"):
         driver._remote_cmd({"cmd": "x"}, timeout=1.25)
+
+
+@pytest.mark.parametrize("payload", [None, [], "ok", 7])
+def test_remote_command_rejects_non_object_json(payload):
+    driver = driver_stub(remote=True)
+    driver._http = SimpleNamespace(
+        post=lambda *args, **kwargs: FakeResponse(200, payload)
+    )
+    with pytest.raises(RuntimeError, match="expected an object"):
+        driver._remote_cmd({"cmd": "x"})
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf"), "bad"])
+def test_bridge_waiting_entry_points_reject_invalid_timeouts(timeout):
+    driver = driver_stub()
+    calls = [
+        lambda: driver.execute_js("return 1", timeout=timeout),
+        lambda: driver.ext_cmd({"cmd": "tabs"}, timeout=timeout),
+        lambda: driver.get_all_sessions(timeout=timeout),
+        lambda: driver.diagnose(timeout=timeout),
+    ]
+    for call in calls:
+        with pytest.raises(ValueError, match="finite number greater than zero"):
+            call()
+
+
+def test_bridge_command_boundaries_reject_wrong_container_types():
+    driver = driver_stub()
+    with pytest.raises(ValueError, match="code must be a string"):
+        driver.execute_js(None)
+    with pytest.raises(ValueError, match="cmd must be a JSON object"):
+        driver.ext_cmd([])
+    with pytest.raises(ValueError, match="cmd must be a JSON object"):
+        driver._remote_cmd("tabs")
 
 
 def test_remote_get_sessions_diagnose_and_set_session(monkeypatch):
@@ -753,6 +803,23 @@ def test_http_link_execute_js_success_and_error(http_app):
     http_app.execute_js = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("dead tab"))
     body = json.loads(wsgi_post(http_app.app, "/link", command)["body"])
     assert body["r"]["error"] == "dead tab"
+
+
+@pytest.mark.parametrize(
+    "command, method_name",
+    [
+        ({"cmd": "ext_cmd", "payload": {"cmd": "tabs"}, "timeout": "bad"}, "ext_cmd"),
+        ({"cmd": "execute_js", "code": "return 1", "timeout": "bad"}, "execute_js"),
+    ],
+)
+def test_http_link_invalid_timeout_returns_an_error_without_dispatch(
+    http_app, command, method_name
+):
+    setattr(http_app, method_name, lambda *args, **kwargs: pytest.fail("must not dispatch"))
+    response = wsgi_post(http_app.app, "/link", command)
+    assert response["status"] == 200
+    error = json.loads(response["body"])["r"]["error"]
+    assert "finite number greater than zero" in error
 
 
 def test_http_result_route_records_success_error_and_ignores_other(http_app):
@@ -1413,6 +1480,20 @@ def test_find_session_skips_inactive_and_url_less_entries():
         "c:2": T.Session("c:2", {"type": "ws"}, FakeSocket()),
     }
     assert driver.find_session("x") == []
+
+
+def test_find_session_rejects_non_string_patterns_and_skips_bad_urls():
+    driver = driver_stub()
+    driver.sessions = {
+        "c:none": T.Session("c:none", {"url": None, "type": "ws"}, FakeSocket()),
+        "c:number": T.Session("c:number", {"url": 7, "type": "ws"}, FakeSocket()),
+        "c:good": T.Session("c:good", {"url": "https://good.test", "type": "ws"}, FakeSocket()),
+    }
+    assert [item[0] for item in driver.find_session("good.test")] == ["c:good"]
+    with pytest.raises(ValueError, match="url_pattern must be a string"):
+        driver.find_session(None)
+    with pytest.raises(ValueError, match="url_pattern must be a string"):
+        driver.set_session(7)
 
 
 def test_jump_delegates_to_execute_js_with_json_quoted_url():

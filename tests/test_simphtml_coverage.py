@@ -199,6 +199,54 @@ def test_get_html_cutlist_keeps_instruction_hit_and_emits_hint(monkeypatch):
     assert "[FAKE ELEMENT] 6 more items hidden" in html
 
 
+def test_get_html_cutlist_uses_one_roundtrip_and_keeps_script_order():
+    page = _list_page(7)
+    driver = QueueDriver([
+        {
+            "data": {
+                "__btap_cutlist_payload__": True,
+                "groups": [{"selector": ".item"}],
+                "page": page,
+            }
+        }
+    ])
+
+    html = S.get_html(
+        driver,
+        cutlist=True,
+        instruction="item-6",
+        maxchars=100_000,
+    )
+
+    assert "[FAKE ELEMENT]" in html
+    assert len(driver.calls) == 1
+    script = driver.calls[0][0]
+    groups_call = "const __btapCutlistGroups = listGroups(document.body);"
+    assert script.index(groups_call) < script.index("pageOutline(false)")
+
+
+def test_get_html_cutlist_preserves_extra_js_scope_and_early_return_shape():
+    driver = QueueDriver([
+        {"data": [{"selector": ".item"}]},
+        {"data": "<p>caller result</p>"},
+    ])
+
+    result = S.get_html(
+        driver,
+        cutlist=True,
+        extra_js=(
+            "const __btapCutlistGroups = 'caller-owned';\n"
+            "await Promise.resolve();\n"
+            "return '<p>caller result</p>';"
+        ),
+    )
+
+    assert result == "<p>caller result</p>"
+    assert len(driver.calls) == 2
+    assert "const __btapCutlistGroups" not in driver.calls[0][0]
+    assert driver.calls[1][0].startswith("const __btapCutlistGroups = 'caller-owned';")
+
+
 def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch, caplog):
     caplog.set_level("DEBUG", logger="browsertap_mcp.simphtml")
     page = _list_page(6) + "<div>" + "".join('<i class="few">x</i>' for _ in range(4)) + "</div>"
@@ -394,6 +442,53 @@ def test_execute_js_rich_expired_deadline_never_calls_driver(monkeypatch):
     assert result["status"] == "no_response"
     assert result["tab_id"] is None
     assert driver.calls == []
+
+
+def test_execute_js_rich_no_monitor_skips_settling_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(S.time, "sleep", sleeps.append)
+
+    result = S.execute_js_rich(
+        "return 7",
+        QueueDriver([{"data": 7, "executed_tab_id": 42}]),
+        no_monitor=True,
+        timeout=2,
+        before_sids=set(),
+        session_id="c:42",
+    )
+
+    assert result["status"] == "success"
+    assert sleeps == []
+
+
+def test_execute_js_rich_only_settles_for_a_started_monitor(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(S.time, "sleep", sleeps.append)
+    monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: [])
+
+    pages = iter(["<p>before</p>", "<p>after</p>"])
+    monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: next(pages))
+    S.execute_js_rich(
+        "return 1",
+        QueueDriver([{"data": 1}], sessions={}),
+        timeout=2,
+        before_sids=set(),
+    )
+    assert len(sleeps) == 1
+
+    sleeps.clear()
+    monkeypatch.setattr(
+        S,
+        "get_html",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("snapshot down")),
+    )
+    S.execute_js_rich(
+        "return 1",
+        QueueDriver([{"data": 1}], sessions={}),
+        timeout=2,
+        before_sids=set(),
+    )
+    assert sleeps == []
 
 
 def test_execute_js_rich_retries_undelivered_and_reports_switch_and_tabs(monkeypatch):

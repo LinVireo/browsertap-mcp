@@ -862,7 +862,9 @@ def test_exec_injection_reaches_every_frame_but_returns_the_top_one():
     assert "buildSubframeScopeScript(dialogScope)" in inject
     # The caller's code must still run in the top frame only, and the result must
     # be selected by frame id rather than by position.
-    assert "window.top === window ? await eval(s) : eval(sub)" in inject
+    assert "if (window.top === window) {" in inject
+    assert "__btap_top_frame_result: true, value: await eval(s)" in inject
+    assert "return eval(sub);" in inject
     assert "entry?.frameId === 0" in inject
 
 

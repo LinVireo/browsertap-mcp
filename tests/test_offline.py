@@ -159,6 +159,27 @@ def test_upload_files_rejects_a_directory(tmp_path):
         S.upload_files("input[type=file]", str(tmp_path))
 
 
+@pytest.mark.parametrize(
+    "selector, paths, message",
+    [
+        ("", ["unused"], "selector"),
+        ("input[type=file]", [], "at least one"),
+        ("input[type=file]", [123], "non-empty string"),
+        ("input[type=file]", {"path": "unused"}, "path string or a list"),
+    ],
+)
+def test_upload_files_rejects_invalid_selector_or_path_shapes(
+    monkeypatch, selector, paths, message
+):
+    monkeypatch.setattr(
+        S,
+        "exec_js",
+        lambda *args, **kwargs: pytest.fail("invalid upload must not touch the browser"),
+    )
+    with pytest.raises(ValueError, match=message):
+        S.upload_files(selector, paths)
+
+
 # --- the tool surface ---------------------------------------------------
 
 EXPECTED_TOOLS = {
@@ -492,6 +513,35 @@ def test_ext_cmd_consumes_result_arriving_in_final_poll_slice(monkeypatch):
     result = driver.ext_cmd({"cmd": "tabs"}, timeout=0.05)
 
     assert result == {"data": {"ok": True}, "client_id": "c"}
+
+
+def test_command_wait_is_woken_by_bridge_activity():
+    driver = BrowserBridge.__new__(BrowserBridge)
+    driver._activity_condition = threading.Condition()
+    driver._activity_serial = 0
+    seen = driver._activity_snapshot()
+    started = time.monotonic()
+
+    def notify():
+        time.sleep(0.01)
+        driver._notify_activity()
+
+    thread = threading.Thread(target=notify, daemon=True)
+    thread.start()
+    driver._wait_for_activity(seen, 1.0)
+    elapsed = time.monotonic() - started
+    thread.join(1)
+
+    assert elapsed < 0.2
+
+
+def test_command_wait_keeps_legacy_stub_sleep_fallback(monkeypatch):
+    driver = BrowserBridge.__new__(BrowserBridge)
+    sleeps = []
+    monkeypatch.setattr("browsertap_mcp.browser_bridge.time.sleep", sleeps.append)
+
+    assert driver._wait_for_activity(None, 0.25) is None
+    assert sleeps == [0.25]
 
 
 def test_remote_ext_cmd_preserves_bridge_selected_client_id(monkeypatch):
@@ -927,6 +977,191 @@ def test_page_input_unknown_batch_router_uses_bounded_legacy_route(monkeypatch):
     # long as it only ever ran on one machine. Same epsilon as the reserve split
     # asserted further down this file.
     assert 0 < legacy_calls[0][2] <= 0.2 + 1e-9
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda timeout: S.page_press("enter", timeout=timeout),
+        lambda timeout: S.page_drag(1, 2, 3, 4, timeout=timeout),
+    ],
+)
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_page_input_tools_reject_non_positive_or_non_finite_timeout(call, timeout):
+    with pytest.raises(ValueError, match="finite number greater than zero"):
+        call(timeout)
+
+
+def test_page_click_uses_one_deadline_across_resolution_input_and_postcheck(
+    monkeypatch,
+):
+    clock = [100.0]
+    session_budgets = []
+    resolver_budgets = []
+    input_budgets = []
+
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            input_budgets.append(timeout)
+            clock[0] += 0.35
+            return {"data": [{}, {"result": {"value": True}}, {}]}
+
+    def fake_sessions(timeout=None, fresh=False):
+        session_budgets.append((timeout, fresh))
+        clock[0] += 0.1
+        return [{"id": "c:42", "url": "https://example.test/"}]
+
+    resolver_calls = [
+        {
+            "found": True,
+            "x": 10,
+            "y": 20,
+            "width": 100,
+            "height": 50,
+            "challengeMarker": None,
+            "hitVerified": True,
+        },
+        {
+            "found": True,
+            "x": 10,
+            "y": 20,
+            "width": 100,
+            "height": 50,
+            "challengeMarker": None,
+        },
+    ]
+
+    def fake_resolver(*args, **kwargs):
+        resolver_budgets.append(args[4])
+        clock[0] += 0.2 if len(resolver_budgets) == 1 else 0.1
+        return resolver_calls.pop(0)
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(S.time, "time", lambda: 200.0)
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+    monkeypatch.setattr(S, "active_sessions", fake_sessions)
+    monkeypatch.setattr(S, "_page_selector_info", fake_resolver)
+
+    result = S.page_click(
+        selector="#pay",
+        session_id="c:42",
+        timeout=1.0,
+    )
+
+    assert result["status"] == "success"
+    assert result["challenge_check"] == {"enforced": True}
+    assert session_budgets == [(pytest.approx(1.0), False)]
+    assert resolver_budgets == [pytest.approx(0.9), pytest.approx(0.35)]
+    assert input_budgets == [pytest.approx(0.7)]
+    assert clock[0] == pytest.approx(100.75)
+
+
+def test_page_click_deadline_after_dispatch_keeps_success_and_skips_postcheck(
+    monkeypatch,
+):
+    clock = [50.0]
+    resolver_calls = []
+    input_calls = []
+
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            input_calls.append(timeout)
+            clock[0] += timeout
+            return {"data": [{}, {"result": {"value": True}}, {}]}
+
+    def fake_resolver(*args, **kwargs):
+        resolver_calls.append(args[4])
+        clock[0] += 0.4
+        return {
+            "found": True,
+            "x": 10,
+            "y": 20,
+            "width": 100,
+            "height": 50,
+            "challengeMarker": "challenge-before",
+            "hitVerified": True,
+        }
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(S.time, "time", lambda: 200.0)
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+    monkeypatch.setattr(
+        S,
+        "active_sessions",
+        lambda timeout=None, fresh=False: [
+            {"id": "c:42", "url": "https://example.test/"}
+        ],
+    )
+    monkeypatch.setattr(S, "_page_selector_info", fake_resolver)
+
+    result = S.page_click(
+        selector="#pay",
+        session_id="c:42",
+        timeout=1.0,
+    )
+
+    assert result["status"] == "success"
+    assert len(input_calls) == 1
+    assert len(resolver_calls) == 1
+    assert result["challenge_detected"] is None
+    assert result["attempts"] is None
+    assert result["challenge_check"] == {
+        "enforced": False,
+        "reason": "deadline_exhausted",
+        "before_click_detected": True,
+    }
+
+
+def test_page_click_postcheck_failure_does_not_reclassify_or_replay_click(
+    monkeypatch,
+):
+    resolver_calls = []
+    input_calls = []
+
+    class _D:
+        default_session_id = "c:previous"
+
+        def ext_cmd(self, payload, client_id=None, timeout=15.0):
+            input_calls.append(payload)
+            return {"data": [{}, {"result": {"value": True}}, {}]}
+
+    def fake_resolver(*args, **kwargs):
+        resolver_calls.append(args[4])
+        if len(resolver_calls) == 2:
+            raise TimeoutError("post-click probe timed out")
+        return {
+            "found": True,
+            "x": 10,
+            "y": 20,
+            "width": 100,
+            "height": 50,
+            "challengeMarker": None,
+            "hitVerified": True,
+        }
+
+    monkeypatch.setattr(S, "require_driver", lambda: _D())
+    monkeypatch.setattr(
+        S,
+        "active_sessions",
+        lambda timeout=None, fresh=False: [
+            {"id": "c:42", "url": "https://example.test/"}
+        ],
+    )
+    monkeypatch.setattr(S, "_page_selector_info", fake_resolver)
+
+    result = S.page_click(selector="#pay", session_id="c:42", timeout=1.0)
+
+    assert result["status"] == "success"
+    assert len(input_calls) == 1
+    assert len(resolver_calls) == 2
+    assert result["challenge_detected"] is None
+    assert result["challenge_check"]["enforced"] is False
+    assert result["challenge_check"]["reason"] == "probe_timed_out"
+    assert result["challenge_check"]["error_type"] == "TimeoutError"
 
 
 def test_driver_does_not_dispatch_when_session_recovers_at_deadline(monkeypatch):
@@ -1630,7 +1865,7 @@ def test_upload_files_parses_a_bare_results_array(monkeypatch):
     def fake_exec_js(script, session_id=None, timeout=15.0):
         calls.append(script)
         # DOM.getDocument -> {root:{nodeId:1}}; DOM.querySelector -> {nodeId:42}
-        return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]}
+        return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}, {}]}
 
     monkeypatch.setattr(S, "exec_js", fake_exec_js)
     import os
@@ -1641,6 +1876,9 @@ def test_upload_files_parses_a_bare_results_array(monkeypatch):
         out = S.upload_files("#file", f.name)
         assert out["status"] == "ok"
         assert out["node_id"] == 42
+        batch = json.loads(calls[0])
+        assert batch["deadlineEpochMs"] > 0
+        assert batch["timeoutMs"] == 30000
     finally:
         os.unlink(f.name)
 
@@ -1690,6 +1928,23 @@ def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
             S.upload_files("#nope", f.name)
     finally:
         os.unlink(f.name)
+
+
+def test_upload_files_refuses_an_unconfirmed_set_file_result(monkeypatch, tmp_path):
+    upload = tmp_path / "upload.txt"
+    upload.write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(
+        S,
+        "exec_js",
+        lambda *args, **kwargs: {
+            "data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="state is unknown"):
+        S.upload_files("#file", str(upload))
+
+    assert upload.read_text(encoding="utf-8") == "fixture"
 
 
 def test_set_cookies_refuses_document_cookie_fallback_with_tab_id(monkeypatch):

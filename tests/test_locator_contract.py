@@ -78,8 +78,13 @@ def test_click_resolvers_reject_disabled_targets_without_changing_query_semantic
 def test_page_click_ambiguous_locator_dispatches_nothing(monkeypatch):
     driver = _Driver()
     monkeypatch.setattr(S, "require_driver", lambda: driver)
-    monkeypatch.setattr(S, "ensure_sessions", lambda *args, **kwargs: [{"id": "chrome:test:7"}])
-    monkeypatch.setattr(S, "switch_session", lambda session_id=None: session_id or driver.default_session_id)
+    monkeypatch.setattr(
+        S,
+        "active_sessions",
+        lambda *args, **kwargs: [
+            {"id": "chrome:test:7", "url": "https://example.test/"}
+        ],
+    )
     monkeypatch.setattr(
         S,
         "_page_selector_info",

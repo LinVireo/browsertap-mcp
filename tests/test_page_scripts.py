@@ -97,6 +97,7 @@ _WALK_HARNESS = r"""
 globalThis.Node = {ELEMENT_NODE: 1, TEXT_NODE: 3, COMMENT_NODE: 8};
 const mutations = [];
 const reads = [];
+let rectReads = 0;
 
 function text(value) {
     return {nodeType: 3, textContent: value, cloneNode() { return {nodeType: 3, textContent: value, live: false}; }};
@@ -145,7 +146,7 @@ function el(tag, opts) {
             if (this.live) reads.push([this.tagName, 'checkVisibility']);
             return this.visible;
         },
-        getBoundingClientRect() { return this.rect; },
+        getBoundingClientRect() { rectReads++; return this.rect; },
         // Answers the tag-name arm of the interactive selector and nothing else,
         // so `:-webkit-autofill` is correctly a miss.
         matches(selector) {
@@ -363,7 +364,7 @@ def test_the_analysis_leaves_every_live_node_untouched():
         + """
         const run = new Function(%s);
         const html = run();
-        console.log(JSON.stringify({mutations, reads: reads.length, html}));
+        console.log(JSON.stringify({mutations, reads: reads.length, rectReads, html}));
         """
         % json.dumps(_page_outline_payload())
     )
@@ -376,6 +377,10 @@ def test_the_analysis_leaves_every_live_node_untouched():
     # Not vacuous: the walk really did happen, so "no mutations" is a finding
     # rather than a harness that was never reached.
     assert report["reads"] > 0
+    # Visibility and range filtering share the same layout rectangle. Reading it
+    # twice for every rendered node needlessly forces another layout query on a
+    # real page, which is especially expensive on long documents.
+    assert report["rectReads"] == 4
     assert "hidden text" not in report["html"]
     # Form state lives in properties, so it only reaches the model if the clone
     # carries it as an attribute.

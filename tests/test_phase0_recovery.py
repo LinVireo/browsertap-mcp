@@ -90,6 +90,20 @@ def _batch_source() -> str:
     return source[start:end]
 
 
+def _cdp_handlers_source() -> str:
+    source = BACKGROUND.read_text(encoding="utf-8")
+    start = source.index("function batchDeadlineRemainingMs")
+    end = source.index("\n// Filter out chrome://", start)
+    return source[start:end]
+
+
+def _ws_exec_source() -> str:
+    source = BACKGROUND.read_text(encoding="utf-8")
+    start = source.index("async function handleWsExec(data)")
+    end = source.index("\n\nfunction connectWS()", start)
+    return source[start:end]
+
+
 def _websocket_keepalive_source() -> str:
     source = BACKGROUND.read_text(encoding="utf-8")
     start = source.index("function scheduleProbe()")
@@ -2152,6 +2166,104 @@ async function sendDebuggerCommandWithTimeout(
     ]
 
 
+def test_extension_cdp_retryability_tracks_actual_command_dispatch():
+    handlers = _cdp_handlers_source()
+    script = f"""
+const chrome = {{ tabs: {{ query: async () => [] }} }};
+function isScriptable() {{ return true; }}
+function boundedCdpTimeout(value, fallback = 20000) {{
+  const requested = Number(value);
+  return Number.isFinite(requested) && requested > 0 ? requested : fallback;
+}}
+function debuggerFailureCode(error) {{ return error.code || 'cdp_error'; }}
+let mode = 'attach-failure';
+let sendCalls = 0;
+async function attachBtapDebugger(target) {{
+  if (mode === 'attach-failure') {{
+    const error = new Error('cdp_timeout: attach failed');
+    error.code = 'cdp_timeout';
+    throw error;
+  }}
+  return {{ attachment: {{ target }}, released: false }};
+}}
+async function detachBtapDebugger(lease) {{ lease.released = true; }}
+async function sendDebuggerCommandWithTimeout() {{
+  sendCalls += 1;
+  const error = new Error('cdp_timeout: command outcome unknown');
+  error.code = 'cdp_timeout';
+  error.dispatched = true;
+  throw error;
+}}
+{handlers}
+(async () => {{
+  const attachFailure = await handleCDP({{
+    tabId: 7, method: 'Runtime.evaluate', params: {{ expression: '1' }},
+  }}, {{}});
+  mode = 'command-failure';
+  const commandFailure = await handleCDP({{
+    tabId: 7, method: 'Runtime.evaluate', params: {{ expression: 'sideEffect()' }},
+  }}, {{}});
+  process.stdout.write(JSON.stringify({{ attachFailure, commandFailure, sendCalls }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["attachFailure"]["dispatched"] is False
+    assert outcome["attachFailure"]["commands_dispatched"] == 0
+    assert outcome["attachFailure"]["retryable"] is True
+    assert outcome["commandFailure"]["dispatched"] is True
+    assert outcome["commandFailure"]["commands_dispatched"] == 1
+    assert outcome["commandFailure"]["retryable"] is False
+    assert outcome["sendCalls"] == 1
+
+
+def test_extension_batch_error_reports_partial_progress_without_inviting_replay():
+    handlers = _cdp_handlers_source()
+    script = f"""
+const chrome = {{ tabs: {{ query: async () => [] }} }};
+function isScriptable() {{ return true; }}
+function boundedCdpTimeout(value, fallback = 20000) {{
+  const requested = Number(value);
+  return Number.isFinite(requested) && requested > 0 ? requested : fallback;
+}}
+function debuggerFailureCode(error) {{ return error.code || 'cdp_error'; }}
+async function attachBtapDebugger(target) {{
+  return {{ attachment: {{ target }}, released: false }};
+}}
+async function detachBtapDebugger(lease) {{ lease.released = true; }}
+let sendCalls = 0;
+async function sendDebuggerCommandWithTimeout() {{
+  sendCalls += 1;
+  if (sendCalls === 1) return {{ value: 'first-completed' }};
+  const error = new Error('debugger_detached: second command outcome unknown');
+  error.code = 'debugger_detached';
+  error.dispatched = true;
+  throw error;
+}}
+{handlers}
+(async () => {{
+  const result = await handleBatch({{
+    tabId: 8,
+    commands: [
+      {{ cmd: 'cdp', method: 'Runtime.evaluate', params: {{ expression: 'first()' }} }},
+      {{ cmd: 'cdp', method: 'Runtime.evaluate', params: {{ expression: 'second()' }} }},
+    ],
+  }}, {{}});
+  process.stdout.write(JSON.stringify({{ result, sendCalls }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    result = outcome["result"]
+    assert result["ok"] is False
+    assert result["results"] == [{"value": "first-completed"}]
+    assert result["commands_completed"] == 1
+    assert result["commands_dispatched"] == 2
+    assert result["dispatched"] is True
+    assert result["retryable"] is False
+    assert outcome["sendCalls"] == 2
+
+
 @pytest.mark.parametrize("waiting_state", ["recovery", "detaching"])
 def test_extension_batch_attach_wait_obeys_original_deadline_without_input(
     waiting_state,
@@ -2333,6 +2445,42 @@ createTabStatus({{ operation_id: 'op-pending' }}).then(result =>
     assert result["createCalls"] == 0
 
 
+def test_extension_create_status_retries_after_transient_storage_read_failure():
+    function_source = _create_operation_source()
+    script = f"""
+const logs = [];
+console.log = (...args) => logs.push(args.join(' '));
+const stored = {{ btapCreateOperationsV1: {{ 'op-recovered': {{
+  operation_id: 'op-recovered', status: 'completed', url: 'https://recovered.test/',
+  client_id: 'chrome:profile', id: 77, generation: 'generation-77',
+  created_at: Date.now(), tab_status: 'complete', load_ready: true,
+}} }} }};
+let reads = 0;
+const chrome = {{
+  storage: {{ session: {{
+    get: async key => {{
+      reads += 1;
+      if (reads === 1) throw new Error('No SW');
+      return {{ [key]: stored[key] }};
+    }},
+    set: async value => Object.assign(stored, value),
+  }} }},
+}};
+{function_source}
+(async () => {{
+  const first = await createTabStatus({{ operation_id: 'op-recovered' }});
+  const second = await createTabStatus({{ operation_id: 'op-recovered' }});
+  process.stdout.write(JSON.stringify({{ first, second, reads, logs }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    result = _run_node_script(script)
+    assert result["first"]["data"]["status"] == "unknown"
+    assert result["first"]["data"]["may_have_created"] is True
+    assert result["second"]["data"]["operation_id"] == "op-recovered"
+    assert result["second"]["data"]["id"] == 77
+    assert result["reads"] == 2
+
+
 def test_extension_tab_updates_publish_stable_lifecycle_generations():
     source = BACKGROUND.read_text(encoding="utf-8")
     assert "tabGenerationFor" in source
@@ -2472,6 +2620,55 @@ def test_extension_manifest_matches_package_version_and_branding():
     assert "config.js" not in injected_files
 
 
+def test_extension_reinjects_tabs_in_bounded_parallel_batches():
+    """Extension reload recovery must not wait on every tab serially."""
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('const REINJECT_CONCURRENCY');
+const end = source.indexOf('\\n\\n// --- Bounded, tab-scoped', start);
+if (start < 0 || end < 0) throw new Error('reinject helper not found');
+const tabs = [
+  {{ id: 1, url: 'https://one.test/' }},
+  {{ id: 2, url: 'https://two.test/' }},
+  {{ id: 3, url: 'https://three.test/' }},
+  {{ id: 4, url: 'https://four.test/' }},
+  {{ id: 5, url: 'chrome://settings/' }},
+  {{ id: 6, url: 'https://six.test/' }},
+  {{ id: 7, url: 'https://seven.test/' }},
+  {{ id: 8, url: 'https://eight.test/' }},
+  {{ id: 9, url: 'https://nine.test/' }},
+];
+const calls = [];
+let active = 0;
+let maxActive = 0;
+const chrome = {{
+  tabs: {{ query: async () => tabs }},
+  scripting: {{
+    executeScript: async (request) => {{
+      const tabId = request.target.tabId;
+      calls.push(tabId);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      active -= 1;
+      if (tabId === 3) throw new Error('restricted');
+      return {{}};
+    }},
+  }},
+}};
+function isScriptable(url) {{ return !String(url).startsWith('chrome://'); }}
+eval(source.slice(start, end));
+(async () => {{
+  await reinjectAllTabs();
+  process.stdout.write(JSON.stringify({{ calls, maxActive }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+    assert outcome["calls"] == [1, 2, 3, 4, 6, 7, 8, 9]
+    assert outcome["maxActive"] == 4
+
+
 def test_extension_logs_an_evicted_worker_as_routine_not_as_an_extension_error():
     """An MV3 eviction mid-call must not read as a broken extension.
 
@@ -2495,7 +2692,7 @@ const fs = require('fs');
 const source = fs.readFileSync(__BACKGROUND__, 'utf8');
 const helperStart = source.indexOf('function isWorkerGoneError');
 const helperEnd = source.indexOf('\\nfunction bridgeStatusMessage', helperStart);
-const updateStart = source.indexOf('async function sendTabsUpdate');
+const updateStart = source.indexOf('let tabsUpdatePromise');
 const updateEnd = source.indexOf('\\nchrome.tabs.onUpdated.addListener', updateStart);
 if (helperStart < 0 || helperEnd < 0 || updateStart < 0 || updateEnd < 0) {
   throw new Error('isWorkerGoneError or sendTabsUpdate not found');
@@ -2606,6 +2803,78 @@ def test_no_extension_api_failure_in_the_ws_client_is_reported_as_an_error():
     ], loud
     # The classification helper is what the rest of them go through now.
     assert source.count("isWorkerGoneError(e)") == 6, "5 call sites plus the definition"
+
+
+def test_tabs_updates_are_single_flight_and_finish_with_the_latest_snapshot():
+    """A burst must not let an old, slow tab query overwrite a newer result."""
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('let tabsUpdatePromise');
+const end = source.indexOf('\\nchrome.tabs.onUpdated.addListener', start);
+if (start < 0 || end < 0) throw new Error('tabs update scheduler not found');
+const WebSocket = {{ OPEN: 1 }};
+const sent = [];
+const ws = {{
+  readyState: WebSocket.OPEN,
+  send(payload) {{ sent.push(JSON.parse(payload)); }},
+}};
+let resolveFirstQuery;
+let queryCalls = 0;
+let activeQueries = 0;
+let maxActiveQueries = 0;
+const chrome = {{ tabs: {{ query() {{
+  queryCalls += 1;
+  activeQueries += 1;
+  maxActiveQueries = Math.max(maxActiveQueries, activeQueries);
+  if (queryCalls === 1) {{
+    return new Promise(resolve => {{
+      resolveFirstQuery = tabs => {{ activeQueries -= 1; resolve(tabs); }};
+    }});
+  }}
+  activeQueries -= 1;
+  return Promise.resolve([{{ id: queryCalls, url: `https://tab-${{queryCalls}}.test/`, title: 'latest' }}]);
+}} }} }};
+function ensureConnected() {{}}
+function isScriptable() {{ return true; }}
+function getClientId() {{ return Promise.resolve('chrome_test'); }}
+function getBrowserType() {{ return 'chrome'; }}
+function tabGenerationFor(tabId) {{ return Promise.resolve(`generation-${{tabId}}`); }}
+function isWorkerGoneError() {{ return false; }}
+eval(source.slice(start, end) + '\\nglobalThis.__tabsUpdateSchedulerIdle = () => tabsUpdatePromise === null && tabsUpdateDirty === false;');
+(async () => {{
+  const first = sendTabsUpdate();
+  const second = sendTabsUpdate();
+  const third = sendTabsUpdate();
+  const sharedPromise = first === second && second === third;
+  resolveFirstQuery([{{ id: 1, url: 'https://tab-1.test/', title: 'old' }}]);
+  await Promise.all([first, second, third]);
+  const afterBurst = {{
+    queryCalls,
+    sent: sent.map(message => message.tabs[0]?.id),
+    maxActiveQueries,
+  }};
+  await sendTabsUpdate();
+  process.stdout.write(JSON.stringify({{
+    sharedPromise,
+    afterBurst,
+    queryCalls,
+    sent: sent.map(message => message.tabs[0]?.id),
+    schedulerIdle: globalThis.__tabsUpdateSchedulerIdle(),
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["sharedPromise"] is True
+    assert outcome["afterBurst"] == {
+        "queryCalls": 2,
+        "sent": [1, 2],
+        "maxActiveQueries": 1,
+    }
+    assert outcome["queryCalls"] == 3
+    assert outcome["sent"] == [1, 2, 3]
+    assert outcome["schedulerIdle"] is True
 
 
 def test_extension_keepalive_uses_interval_and_reconnects_failed_sockets():
@@ -2811,6 +3080,154 @@ process.stdout.write(JSON.stringify({
     assert result["statusBroadcasts"] == 3
 
 
+def test_websocket_command_reply_preserves_explicit_falsy_payloads():
+    source = _websocket_connect_source()
+    script = f"""
+const sent = [];
+const sockets = [];
+const timers = [];
+class FakeWebSocket {{
+  constructor() {{
+    this.readyState = FakeWebSocket.OPEN;
+    sockets.push(this);
+  }}
+  send(payload) {{ sent.push(JSON.parse(payload)); }}
+  close() {{ this.readyState = 3; }}
+}}
+FakeWebSocket.CONNECTING = 0;
+FakeWebSocket.OPEN = 1;
+const WebSocket = FakeWebSocket;
+function setTimeout(callback, delay) {{
+  const timer = {{ callback, delay }};
+  timers.push(timer);
+  return timer;
+}}
+function clearTimeout() {{}}
+let ws = null;
+let connectInFlight = false;
+let lastPongAt = 0;
+const WS_URL = 'ws://127.0.0.1:18765';
+const console = {{ log() {{}}, error() {{}} }};
+function broadcastBridgeStatus() {{}}
+function scheduleProbe() {{}}
+function scheduleKeepalive() {{}}
+function stopKeepalive() {{}}
+async function getClientId() {{ return 'chrome:test'; }}
+function getBrowserType() {{ return 'chrome'; }}
+function isScriptable() {{ return true; }}
+async function tabGenerationFor() {{ return 'generation'; }}
+function isWorkerGoneError() {{ return false; }}
+async function handleWsExec() {{}}
+async function handleExtMessage(message) {{
+  if (message.cmd === 'batch-value') return {{ ok: true, results: message.value }};
+  return {{ ok: true, data: message.value }};
+}}
+const chrome = {{ tabs: {{ query: async () => [] }} }};
+{source}
+(async () => {{
+  connectWS();
+  const socket = sockets[0];
+  await socket.onopen();
+  const values = [null, false, 0, ''];
+  for (let index = 0; index < values.length; index += 1) {{
+    await socket.onmessage({{ data: JSON.stringify({{
+      id: `value-${{index}}`, code: {{ cmd: 'value', value: values[index] }},
+    }}) }});
+  }}
+  await socket.onmessage({{ data: JSON.stringify({{
+    id: 'batch', code: {{ cmd: 'batch-value', value: [null, false, 0, ''] }},
+  }}) }});
+  const replies = Object.fromEntries(
+    sent.filter(item => item.id).map(item => [item.id, item.result]),
+  );
+  process.stdout.write(JSON.stringify({{ replies }}));
+}})().catch(error => {{ process.stderr.write(String(error)); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["replies"] == {
+        "value-0": None,
+        "value-1": False,
+        "value-2": 0,
+        "value-3": "",
+        "batch": [None, False, 0, ""],
+    }
+
+
+@pytest.mark.parametrize("failure_mode", ["throw_after_effect", "missing_result"])
+def test_execute_script_unknown_outcome_is_never_replayed(failure_mode):
+    source = _ws_exec_source()
+    script = f"""
+const failureMode = {json.dumps(failure_mode)};
+const replies = [];
+let sideEffects = 0;
+let executeCalls = 0;
+let cdpCalls = 0;
+const console = {{ log() {{}}, error() {{}} }};
+const WebSocket = {{ OPEN: 1 }};
+const ws = {{
+  readyState: WebSocket.OPEN,
+  send(payload) {{ replies.push(JSON.parse(payload)); }},
+}};
+function currentExecDialogPolicy() {{ return null; }}
+function claimManualExecDialogPolicy() {{ return null; }}
+async function executeManualScript() {{ throw new Error('manual path not expected'); }}
+function buildPageScript() {{ return 'wrapped'; }}
+function buildSubframeScopeScript() {{ return 'scope'; }}
+function buildCdpScript() {{ return 'cdp-wrapped'; }}
+async function withCspOff(_tabId, fn) {{ return await fn(); }}
+async function runCdpExecFallback() {{
+  cdpCalls += 1;
+  sideEffects += 1;
+  return {{ ok: true, data: 'cdp-result' }};
+}}
+async function tabGenerationFor() {{ return 'generation'; }}
+const listeners = new Set();
+const chrome = {{
+  scripting: {{
+    async executeScript() {{
+      executeCalls += 1;
+      sideEffects += 1;
+      if (failureMode === 'throw_after_effect') {{
+        throw new Error('result channel failed after execution');
+      }}
+      return [{{ frameId: 0 }}];
+    }},
+  }},
+  tabs: {{
+    onCreated: {{
+      addListener(listener) {{ listeners.add(listener); }},
+      removeListener(listener) {{ listeners.delete(listener); }},
+    }},
+    get: async id => ({{ id, url: 'https://example.test/', title: 'Example' }}),
+  }},
+}};
+{source}
+(async () => {{
+  await handleWsExec({{ id: 'exec-1', tabId: 9, code: 'sideEffect()' }});
+  process.stdout.write(JSON.stringify({{
+    sideEffects,
+    executeCalls,
+    cdpCalls,
+    replies,
+    listenerCount: listeners.size,
+  }}));
+}})().catch(error => {{ process.stderr.write(String(error)); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["sideEffects"] == 1
+    assert outcome["executeCalls"] == 1
+    assert outcome["cdpCalls"] == 0
+    assert outcome["listenerCount"] == 0
+    assert outcome["replies"][0] == {"type": "ack", "id": "exec-1"}
+    error_reply = outcome["replies"][-1]
+    assert error_reply["type"] == "error"
+    assert error_reply["error"]["dispatched"] is True
+    assert error_reply["error"]["may_have_executed"] is True
+    assert error_reply["error"]["retryable"] is False
+
+
 def test_content_script_has_no_page_dom_privileged_command_channel():
     source = (BACKGROUND.parent / "content.js").read_text(encoding="utf-8")
 
@@ -2847,6 +3264,129 @@ def test_extension_popup_binds_the_cookie_read_and_the_clipboard_copy_to_gesture
     # btap_port from storage for the documented non-default-port setup.
     assert 'id="bridge-port"' not in popup
     assert "btap_port" not in script
+
+
+def test_extension_popup_loads_indicator_preferences_in_one_storage_read_and_retries_migration():
+    popup_path = BACKGROUND.parent / "popup.js"
+    script = """
+const fs = require('fs');
+const source = fs.readFileSync(__POPUP__, 'utf8');
+const indicator = { checked: null };
+const document = {
+  addEventListener() {},
+  getElementById(id) { return id === 'indicator-visible' ? indicator : null; },
+  documentElement: {},
+  querySelectorAll() { return []; },
+};
+let stored = {};
+let failNextSet = false;
+const reads = [];
+const writes = [];
+const removals = [];
+const chrome = {
+  storage: { local: {
+    get(keys) {
+      reads.push(keys);
+      const names = Array.isArray(keys) ? keys : [keys];
+      return Promise.resolve(Object.fromEntries(
+        names.filter(name => Object.hasOwn(stored, name)).map(name => [name, stored[name]]),
+      ));
+    },
+    set(value) {
+      writes.push(value);
+      if (failNextSet) {
+        failNextSet = false;
+        return Promise.reject(new Error('storage unavailable'));
+      }
+      Object.assign(stored, value);
+      return Promise.resolve();
+    },
+    remove(name) {
+      removals.push(name);
+      delete stored[name];
+      return Promise.resolve();
+    },
+  } },
+};
+eval(source + '\\n;globalThis.__loadIndicatorVisibility = loadIndicatorVisibility;');
+
+async function run(initial, failSet = false) {
+  stored = { ...initial };
+  failNextSet = failSet;
+  reads.length = 0;
+  writes.length = 0;
+  removals.length = 0;
+  indicator.checked = null;
+  await globalThis.__loadIndicatorVisibility();
+  return {
+    checked: indicator.checked,
+    reads: [...reads],
+    writes: [...writes],
+    removals: [...removals],
+    stored: { ...stored },
+  };
+}
+
+(async () => {
+  const currentWins = await run({
+    btap_indicator_visible: false,
+    tmwd_indicator_visible: true,
+  });
+  const legacyMigrates = await run({ tmwd_indicator_visible: false });
+  const missingDefaultsVisible = await run({});
+  const failedMigration = await run({ tmwd_indicator_visible: true }, true);
+  const retryAfterFailure = await run(stored);
+  process.stdout.write(JSON.stringify({
+    currentWins,
+    legacyMigrates,
+    missingDefaultsVisible,
+    failedMigration,
+    retryAfterFailure,
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+""".replace("__POPUP__", json.dumps(str(popup_path)))
+
+    result = _run_node_script(script)
+    expected_read = [["btap_indicator_visible", "tmwd_indicator_visible"]]
+
+    assert result["currentWins"] == {
+        "checked": False,
+        "reads": expected_read,
+        "writes": [],
+        "removals": [],
+        "stored": {
+            "btap_indicator_visible": False,
+            "tmwd_indicator_visible": True,
+        },
+    }
+    assert result["legacyMigrates"] == {
+        "checked": False,
+        "reads": expected_read,
+        "writes": [{"btap_indicator_visible": False}],
+        "removals": ["tmwd_indicator_visible"],
+        "stored": {"btap_indicator_visible": False},
+    }
+    assert result["missingDefaultsVisible"] == {
+        "checked": True,
+        "reads": expected_read,
+        "writes": [],
+        "removals": [],
+        "stored": {},
+    }
+    assert result["failedMigration"] == {
+        "checked": True,
+        "reads": expected_read,
+        "writes": [{"btap_indicator_visible": True}],
+        "removals": [],
+        "stored": {"tmwd_indicator_visible": True},
+    }
+    assert result["retryAfterFailure"] == {
+        "checked": True,
+        "reads": expected_read,
+        "writes": [{"btap_indicator_visible": True}],
+        "removals": ["tmwd_indicator_visible"],
+        "stored": {"btap_indicator_visible": True},
+    }
 
 
 def test_extension_popup_rejects_non_http_pages_and_handles_malformed_cookie_data():
@@ -2923,15 +3463,49 @@ eval(source + '\\n;globalThis.__fetchCookies = fetchCookies; globalThis.__copyCo
   };
   clipboardShouldFail = false;
 
+  // A failed refresh must invalidate the last successful read. Otherwise a
+  // user who moves from an HTTP page to a restricted page can still copy the
+  // previous page's credentials from the popup.
+  activeUrl = 'chrome://extensions';
+  response = { ok: true, data: [] };
+  await globalThis.__fetchCookies();
+  await globalThis.__copyCookies();
+  const staleAfterUnsupported = {
+    clipboardWrites: [...clipboardWrites],
+    button: copyBtn.textContent,
+  };
+
+  activeUrl = 'https://example.com/account';
   response = { ok: true, data: null };
   let malformedThrew = false;
   try { await globalThis.__fetchCookies(); } catch (_) { malformedThrew = true; }
+  const malformed = {
+    text: out.textContent,
+    malformedThrew,
+    sendMessageCalls,
+  };
+  await globalThis.__copyCookies();
+  const staleAfterMalformed = {
+    clipboardWrites: [...clipboardWrites],
+    button: copyBtn.textContent,
+  };
+
+  response = { ok: false, error: 'bridge unavailable' };
+  await globalThis.__fetchCookies();
+  await globalThis.__copyCookies();
+  const staleAfterError = {
+    clipboardWrites: [...clipboardWrites],
+    button: copyBtn.textContent,
+  };
   process.stdout.write(JSON.stringify({
     unsupported,
     valid,
     copied,
     refused,
-    malformed: { text: out.textContent, malformedThrew, sendMessageCalls },
+    staleAfterUnsupported,
+    staleAfterMalformed,
+    staleAfterError,
+    malformed,
   }));
 })().catch(error => { console.error(error); process.exit(1); });
 """.replace("__POPUP__", json.dumps(str(popup_path)))
@@ -2964,6 +3538,18 @@ eval(source + '\\n;globalThis.__fetchCookies = fetchCookies; globalThis.__copyCo
         "button": "copyFailed",
         "listStillRendered": "sid=abc [S]",
     }
+    assert result["staleAfterUnsupported"] == {
+        "clipboardWrites": ["sid=abc"],
+        "button": "copyNothing",
+    }
+    assert result["staleAfterMalformed"] == {
+        "clipboardWrites": ["sid=abc"],
+        "button": "copyNothing",
+    }
+    assert result["staleAfterError"] == {
+        "clipboardWrites": ["sid=abc"],
+        "button": "copyNothing",
+    }
     assert result["malformed"] == {
         "text": "errorPrefixunknownError",
         "malformedThrew": False,
@@ -2984,11 +3570,15 @@ const chrome = {{
     getAll(query) {{
       cookieCalls.push(query);
       if (query.partitionKey) return Promise.resolve([
-        {{ name: 'partitioned', value: 'p', domain: 'example.com' }},
-        {{ name: 'base', value: 'duplicate', domain: 'example.com' }},
+        {{
+          name: 'partitioned', value: 'p', domain: 'example.com', path: '/',
+          partitionKey: {{ topLevelSite: 'https://example.com' }},
+        }},
+        {{ name: 'base', value: 'duplicate', domain: 'example.com', path: '/' }},
+        {{ name: 'base', value: 'scoped', domain: 'example.com', path: '/account' }},
       ]);
       return Promise.resolve([
-        {{ name: 'base', value: 'b', domain: 'example.com' }},
+        {{ name: 'base', value: 'b', domain: 'example.com', path: '/' }},
       ]);
     }},
   }},
@@ -3025,8 +3615,20 @@ const chrome = {{
     assert result["valid"] == {
         "ok": True,
         "data": [
-            {"name": "base", "value": "b", "domain": "example.com"},
-            {"name": "partitioned", "value": "p", "domain": "example.com"},
+            {"name": "base", "value": "b", "domain": "example.com", "path": "/"},
+            {
+                "name": "partitioned",
+                "value": "p",
+                "domain": "example.com",
+                "path": "/",
+                "partitionKey": {"topLevelSite": "https://example.com"},
+            },
+            {
+                "name": "base",
+                "value": "scoped",
+                "domain": "example.com",
+                "path": "/account",
+            },
         ],
     }
     assert result["cookieCalls"] == [
@@ -3415,13 +4017,157 @@ process.stdout.write(JSON.stringify({{
 def test_extension_bridge_port_is_persistent_and_not_fixed_to_one_url():
     source = BACKGROUND.read_text(encoding="utf-8")
 
-    assert "chrome.storage.local.get('btap_port')" in source
-    # The pre-BTAP key is still read once so an install already pointed at a
-    # non-default bridge does not silently fall back to 18765 after the rename.
-    assert "chrome.storage.local.get('tmwd_port')" in source
+    # The current and pre-BTAP keys are read together: a cold worker pays one
+    # storage round trip while an install already pointed at a non-default
+    # bridge still migrates instead of silently falling back to 18765.
+    assert "chrome.storage.local.get(['btap_port', 'tmwd_port'])" in source
+    assert "stored.btap_port" in source
+    assert "stored.tmwd_port" in source
     assert "chrome.storage.onChanged.addListener" in source
     assert "new WebSocket(WS_URL)" in source
     assert "HTTP_PROBE = `http://127.0.0.1:${bridgePort + 1}/link`" in source
+
+
+def test_extension_load_bridge_port_handles_precedence_migration_and_storage_failures():
+    """Exercise the real bridge-port loader instead of only checking its text.
+
+    The loader runs while the service worker is cold, so an unnecessary second
+    storage round trip is user-visible on every reconnect.  Its migration write
+    is also deliberately retryable: losing that write must not make the next
+    worker silently fall back to the default port.
+    """
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('const DEFAULT_BRIDGE_PORT');
+const end = source.indexOf('\\nconst bridgeConfigReady = loadBridgePort()', start);
+if (start < 0 || end < 0) throw new Error('bridge port loader not found');
+let stored = {{}};
+let getCalls = 0;
+let setCalls = 0;
+let removeCalls = 0;
+let failGet = false;
+let failSet = false;
+const logs = [];
+console.log = (...args) => logs.push({{ level: 'log', text: String(args[0]) }});
+console.error = (...args) => logs.push({{ level: 'error', text: String(args[0]) }});
+const chrome = {{ storage: {{ local: {{
+  get(keys) {{
+    getCalls += 1;
+    if (failGet) return Promise.reject(new Error('storage unavailable'));
+    const result = {{}};
+    for (const key of keys) {{
+      if (Object.prototype.hasOwnProperty.call(stored, key)) result[key] = stored[key];
+    }}
+    return Promise.resolve(result);
+  }},
+  set(items) {{
+    setCalls += 1;
+    if (failSet) return Promise.reject(new Error('write unavailable'));
+    Object.assign(stored, items);
+    return Promise.resolve();
+  }},
+  remove(key) {{
+    removeCalls += 1;
+    delete stored[key];
+    return Promise.resolve();
+  }},
+}} }} }};
+eval(source.slice(start, end) + '\\nglobalThis.__loadBridgePort = loadBridgePort;'
+  + '\\nglobalThis.__bridgePortState = () => ({{ bridgePort, WS_URL, HTTP_PROBE }});');
+
+function reset(nextStored, {{ readFails = false, writeFails = false }} = {{}}) {{
+  stored = {{ ...nextStored }};
+  getCalls = 0;
+  setCalls = 0;
+  removeCalls = 0;
+  failGet = readFails;
+  failSet = writeFails;
+  logs.length = 0;
+}}
+
+async function run(nextStored, options) {{
+  reset(nextStored, options);
+  await __loadBridgePort();
+  return {{
+    state: __bridgePortState(),
+    stored: {{ ...stored }},
+    getCalls,
+    setCalls,
+    removeCalls,
+    logs: logs.slice(),
+  }};
+}}
+
+(async () => {{
+  const currentWins = await run({{ btap_port: 19001, tmwd_port: 19002 }});
+  const legacyMigrates = await run({{ tmwd_port: 19002 }});
+  const noValueUsesDefault = await run({{}});
+  const readFailureUsesDefault = await run({{}}, {{ readFails: true }});
+  const firstWriteFails = await run({{ tmwd_port: 19003 }}, {{ writeFails: true }});
+  failSet = false;
+  logs.length = 0;
+  await __loadBridgePort();
+  const retryAfterWriteFailure = {{
+    state: __bridgePortState(),
+    stored: {{ ...stored }},
+    getCalls,
+    setCalls,
+    removeCalls,
+    logs: logs.slice(),
+  }};
+  process.stdout.write(JSON.stringify({{
+    currentWins,
+    legacyMigrates,
+    noValueUsesDefault,
+    readFailureUsesDefault,
+    firstWriteFails,
+    retryAfterWriteFailure,
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+
+    assert outcome["currentWins"]["state"] == {
+        "bridgePort": 19001,
+        "WS_URL": "ws://127.0.0.1:19001",
+        "HTTP_PROBE": "http://127.0.0.1:19002/link",
+    }
+    assert outcome["currentWins"]["getCalls"] == 1
+    assert outcome["currentWins"]["setCalls"] == 0
+    assert outcome["currentWins"]["removeCalls"] == 0
+
+    assert outcome["legacyMigrates"]["state"]["bridgePort"] == 19002
+    assert outcome["legacyMigrates"]["stored"] == {"btap_port": 19002}
+    assert outcome["legacyMigrates"]["getCalls"] == 1
+    assert outcome["legacyMigrates"]["setCalls"] == 1
+    assert outcome["legacyMigrates"]["removeCalls"] == 1
+
+    assert outcome["noValueUsesDefault"]["state"]["bridgePort"] == 18765
+    assert outcome["noValueUsesDefault"]["getCalls"] == 1
+    assert outcome["noValueUsesDefault"]["setCalls"] == 0
+
+    assert outcome["readFailureUsesDefault"]["state"]["bridgePort"] == 18765
+    assert outcome["readFailureUsesDefault"]["getCalls"] == 1
+    assert outcome["readFailureUsesDefault"]["logs"] == [
+        {
+            "level": "error",
+            "text": "[BTAP-WS] bridge port storage unavailable, using default",
+        }
+    ]
+
+    assert outcome["firstWriteFails"]["state"]["bridgePort"] == 19003
+    assert outcome["firstWriteFails"]["stored"] == {"tmwd_port": 19003}
+    assert outcome["firstWriteFails"]["getCalls"] == 1
+    assert outcome["firstWriteFails"]["setCalls"] == 1
+    assert outcome["firstWriteFails"]["removeCalls"] == 0
+
+    retry = outcome["retryAfterWriteFailure"]
+    assert retry["state"]["bridgePort"] == 19003
+    assert retry["stored"] == {"btap_port": 19003}
+    assert retry["getCalls"] == 2
+    assert retry["setCalls"] == 2
+    assert retry["removeCalls"] == 1
 
 
 def test_extension_reports_the_build_it_is_actually_running():
@@ -4518,6 +5264,150 @@ eval(source.slice(sweepStart, sweepEnd));
     assert outcome["markers"] == 2
 
 
+def test_debugger_detach_watchdog_is_cleared_after_fast_or_bounded_completion():
+    """A detach cap must not leave one live timer per successful cleanup."""
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('function debuggerTargetKey');
+const end = source.indexOf('\\nfunction consumeDebuggerDetach', start);
+if (start < 0 || end < 0) throw new Error('debugger detach helpers not found');
+const debuggerAttachments = new Map();
+const timers = [];
+function setTimeout(callback, delay) {{
+  const timer = {{ callback, delay, cleared: false }};
+  timers.push(timer);
+  return timer;
+}}
+function clearTimeout(timer) {{ if (timer) timer.cleared = true; }}
+let mode = 'fast';
+const chrome = {{ debugger: {{
+  detach() {{ return mode === 'fast' ? Promise.resolve() : new Promise(() => {{}}); }},
+}} }};
+eval(source.slice(start, end));
+(async () => {{
+  await detachDebuggerFromChrome({{ target: {{ tabId: 7 }} }});
+  const fast = {{ total: timers.length, active: timers.filter(t => !t.cleared).length }};
+  mode = 'bounded';
+  const pending = detachDebuggerFromChrome({{ target: {{ tabId: 8 }} }});
+  await Promise.resolve();
+  const watchdog = timers.find(t => !t.cleared);
+  if (!watchdog) throw new Error('detach watchdog was not armed');
+  watchdog.callback();
+  await pending;
+  const bounded = {{
+    total: timers.length,
+    active: timers.filter(t => !t.cleared).length,
+    delay: watchdog.delay,
+  }};
+  process.stdout.write(JSON.stringify({{ fast, bounded }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+    assert outcome["fast"] == {"total": 1, "active": 0}
+    assert outcome["bounded"] == {"total": 2, "active": 0, "delay": 1000}
+
+
+def test_csp_relaxed_injection_watchdog_is_cleared_after_success_or_timeout():
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('const CSP_RULE_BASE');
+const end = source.indexOf('\\n// --- WebSocket client', start);
+if (start < 0 || end < 0) throw new Error('CSP helpers not found');
+const timers = [];
+function setTimeout(callback, delay) {{
+  const timer = {{ callback, delay, cleared: false }};
+  timers.push(timer);
+  return timer;
+}}
+function clearTimeout(timer) {{ if (timer) timer.cleared = true; }}
+const ruleCalls = [];
+const chrome = {{ declarativeNetRequest: {{
+  getSessionRules() {{ return Promise.resolve([]); }},
+  updateSessionRules(details) {{ ruleCalls.push(details); return Promise.resolve(); }},
+}} }};
+const cspRefs = new Map();
+let cspNextRuleId = 90000;
+eval(source.slice(start, end));
+(async () => {{
+  const fast = await withCspOff(4, async () => 'ok');
+  const fastTimers = timers.filter(t => !t.cleared).length;
+  let failure = null;
+  const pending = withCspOff(5, () => new Promise(() => {{}}));
+  await Promise.resolve();
+  const watchdog = timers.find(t => !t.cleared);
+  if (!watchdog) throw new Error('CSP watchdog was not armed');
+  watchdog.callback();
+  try {{ await pending; }} catch (error) {{ failure = error.message; }}
+  process.stdout.write(JSON.stringify({{
+    fast, fastTimers,
+    failure,
+    activeTimers: timers.filter(t => !t.cleared).length,
+    timeoutDelay: watchdog.delay,
+    ruleCallCount: ruleCalls.length,
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+    assert outcome["fast"] == "ok"
+    assert outcome["fastTimers"] == 0
+    assert outcome["failure"] == "CSP-relaxed injection timed out"
+    assert outcome["activeTimers"] == 0
+    assert outcome["timeoutDelay"] == 30000
+    assert outcome["ruleCallCount"] >= 2
+
+
+def test_server_probe_clears_abort_watchdogs_on_each_fetch_outcome():
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('async function isServerAlive');
+const end = source.indexOf('\\nfunction ensureConnected', start);
+if (start < 0 || end < 0) throw new Error('server probe helper not found');
+const timers = [];
+function setTimeout(callback, delay) {{
+  const timer = {{ callback, delay, cleared: false }};
+  timers.push(timer);
+  return timer;
+}}
+function clearTimeout(timer) {{ if (timer) timer.cleared = true; }}
+let fetchMode = 'primary';
+const fetchCalls = [];
+function fetch(url) {{
+  fetchCalls.push(url);
+  if (fetchMode === 'primary') {{
+    fetchMode = 'fallback';
+    return Promise.reject(new Error('primary unavailable'));
+  }}
+  return Promise.resolve({{ status: 426 }});
+}}
+const HTTP_PROBE = 'http://127.0.0.1:18766/link';
+let bridgePort = 18765;
+eval(source.slice(start, end));
+(async () => {{
+  const alive = await isServerAlive();
+  process.stdout.write(JSON.stringify({{
+    alive,
+    fetchCalls,
+    timers: timers.map(timer => ({{ delay: timer.delay, cleared: timer.cleared }})),
+    active: timers.filter(timer => !timer.cleared).length,
+  }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    outcome = _run_node_script(script)
+    assert outcome["alive"] is True
+    assert outcome["fetchCalls"] == [
+        "http://127.0.0.1:18766/link",
+        "http://127.0.0.1:18765/",
+    ]
+    assert outcome["timers"] == [
+        {"delay": 1500, "cleared": True},
+        {"delay": 800, "cleared": True},
+    ]
+    assert outcome["active"] == 0
+
+
 def test_extension_client_id_is_minted_once_under_concurrent_callers():
     """The client id is half of every session id the server holds.
 
@@ -4606,14 +5496,14 @@ eval(source.slice(start, end));
     cold = outcome["afterCold"]
     assert len(cold["ids"]) == 1, cold["ids"]
     assert cold["ids"][0].startswith("chrome_")
-    # btap_client_id then tmwd_client_id, once each: one storage pass total.
-    assert cold["getCalls"] == 2
+    # Current and legacy ids are read in one storage pass total.
+    assert cold["getCalls"] == 1
     assert cold["setCalls"] == 1
     assert cold["persisted"] == cold["ids"][0]
     # Resolved value still short-circuits: no storage traffic once it is known.
     assert outcome["afterWarm"] == {
         "ids": cold["ids"],
-        "getCalls": 2,
+        "getCalls": 1,
         "setCalls": 1,
     }
     assert len(outcome["degradedIds"]) == 1
@@ -4798,6 +5688,54 @@ async function scenario() {
     assert outcome["loaded"] is True
     assert outcome["provisional"] == []
     assert outcome["logs"] == []
+
+
+def test_generation_storage_and_tab_reads_start_together():
+    """Worker recovery should pay the slower API latency, not both in series."""
+    outcome = _run_generation_harness(
+        """
+const stored = {btapTabGenerationsV1: {'7': 'gen-seven'}};
+let setCalls = 0;
+let getCalls = 0;
+let storageStarted = false;
+let tabsStarted = false;
+let resolveStorage;
+let resolveTabs;
+const chrome = {
+  storage: {session: {
+    get: key => {
+      getCalls += 1;
+      storageStarted = true;
+      return new Promise(resolve => { resolveStorage = () => resolve({[key]: stored[key]}); });
+    },
+    set: async value => { setCalls += 1; Object.assign(stored, value); },
+  }},
+  tabs: {query: () => {
+    tabsStarted = true;
+    return new Promise(resolve => { resolveTabs = () => resolve([{id: 7}]); });
+  }},
+};
+__SOURCE__
+async function scenario() {
+  const pending = loadTabGenerations();
+  await Promise.resolve();
+  const startedTogether = storageStarted && tabsStarted;
+  resolveStorage();
+  await Promise.resolve();
+  const tabsWereAlreadyPending = tabsStarted;
+  resolveTabs();
+  await pending;
+  return {startedTogether, tabsWereAlreadyPending, seven: tabGenerations.get(7)};
+}
+"""
+        + _GENERATION_TAIL
+    )
+
+    assert outcome["startedTogether"] is True
+    assert outcome["tabsWereAlreadyPending"] is True
+    assert outcome["seven"] == "gen-seven"
+    assert outcome["getCalls"] == 1
+    assert outcome["setCalls"] == 1
 
 
 def test_an_unreadable_generation_snapshot_is_not_overwritten():

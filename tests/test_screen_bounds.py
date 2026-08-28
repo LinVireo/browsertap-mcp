@@ -14,7 +14,10 @@ instead -- see `TestUnknownBounds`.
 
 from __future__ import annotations
 
+import inspect
+import re
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -331,6 +334,45 @@ class TestMssProbe:
         assert P._mss_virtual_screen() is None
 
 
+class TestMssApiIsReal:
+    """Every other mss test substitutes the module, so none of them can see a
+    call to a name mss does not export.
+
+    That is not hypothetical: both call sites were once changed to `mss.MSS()`
+    and all eight fake-module sites were updated in the same edit, so the suite
+    stayed green while `capture_desktop_screenshot` raised AttributeError on
+    every machine and `screen_bounds()` fell back to None -- which turns the
+    out-of-range refusal above into an unenforced pass. `MSS` is the per-platform
+    class inside `mss.windows` / `mss.linux` / `mss.darwin`; the only name the
+    package exports at top level is the `mss()` factory.
+
+    This asks the installed package instead of a stand-in, so it fails for a
+    rename in either direction and in either module, and it reads the attribute
+    out of the source rather than repeating it -- a test naming `mss` itself
+    would have to be edited by the same hand that broke the call, and would then
+    agree with it.
+    """
+
+    CALL = re.compile(r"\bmss\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+    @pytest.mark.parametrize(
+        "module", [P, S], ids=["physical_input", "server"]
+    )
+    def test_every_mss_attribute_the_code_calls_exists(self, module):
+        mss = pytest.importorskip("mss", reason="mss ships in the desktop extra")
+        source = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+        # Docstrings mention the same call, which is deliberate: a stale comment
+        # naming a dead API is the trail that produced this defect.
+        called = sorted(set(self.CALL.findall(source)))
+        assert called, f"no mss call found in {module.__name__}; update this test"
+        missing = [name for name in called if not hasattr(mss, name)]
+        assert not missing, (
+            f"{module.__name__} calls mss.{{{','.join(missing)}}}, which the "
+            f"installed mss {getattr(mss, '__version__', '?')} does not export. "
+            f"Top-level names: {sorted(n for n in dir(mss) if not n.startswith('_'))}"
+        )
+
+
 class TestSourceSelection:
     def test_mss_wins_because_it_needs_no_particular_load_order(self, monkeypatch):
         monkeypatch.setattr(
@@ -528,4 +570,48 @@ class TestToolsRefuseBeforeDispatch:
         result = await S.mouse_click(ctx=_Ctx(), x=2400, y=1300, session_id="client:7")
 
         assert result["status"] == "coordinates_off_screen"
+        assert activations == []
+
+    @pytest.mark.parametrize(
+        ("tool", "kwargs", "message"),
+        [
+            (
+                "mouse_click",
+                {"x": 100, "y": None},
+                "x and y must be provided together or both omitted",
+            ),
+            (
+                "mouse_click",
+                {"x": None, "y": 100},
+                "x and y must be provided together or both omitted",
+            ),
+            (
+                "type_text",
+                {"text": "secret", "click_x": 100, "click_y": None},
+                "click_x and click_y must be provided together or both omitted",
+            ),
+            (
+                "type_text",
+                {"text": "secret", "click_x": None, "click_y": 100},
+                "click_x and click_y must be provided together or both omitted",
+            ),
+        ],
+    )
+    async def test_half_coordinate_pairs_are_rejected_before_any_gate(
+        self, monkeypatch, tool, kwargs, message
+    ):
+        gui, probes = _install_tool_harness(monkeypatch)
+        activations = []
+        monkeypatch.setattr(
+            S,
+            "_maybe_activate",
+            lambda mode, sid=None: activations.append((mode, sid))
+            or {"on_screen": True},
+        )
+
+        with pytest.raises(S.InputValidationError, match=message):
+            await getattr(S, tool)(ctx=_Ctx(), session_id="client:7", **kwargs)
+
+        assert gui.calls == []
+        assert probes == []
         assert activations == []

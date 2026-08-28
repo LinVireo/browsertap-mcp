@@ -64,22 +64,53 @@ def cmd_doctor() -> int:
     err = None
     diag = None
     try:
-        sessions = driver.get_all_sessions()
-    except Exception as e:
-        err = str(e)
-    try:
-        diag = driver.diagnose()
-    except Exception as e:
-        diag = {"cause": "diagnose_failed", "ok": False, "error": str(e)}
-    try:
         payload = get_setup_status()
     except Exception as e:
+        # get_setup_status normally contains both the session snapshot and the
+        # bridge diagnosis. Only fall back to the direct calls when that status
+        # request itself failed; otherwise doctor would pay for both roundtrips
+        # twice on every healthy invocation.
+        try:
+            sessions = driver.get_all_sessions()
+        except Exception as session_error:
+            err = str(session_error)
+        try:
+            diag = driver.diagnose()
+        except Exception as diagnosis_error:
+            diag = {
+                "cause": "diagnose_failed",
+                "ok": False,
+                "error": str(diagnosis_error),
+            }
         payload = {
             "status": "bridge_unreachable",
             "action": "restart_bridge",
             "extension_path": str(chrome_extension_dir()),
             "setup_error": str(e),
         }
+    else:
+        raw_sessions = payload.get("tabs")
+        if isinstance(raw_sessions, list):
+            sessions = raw_sessions
+        else:
+            # Keep compatibility with older status providers that predate the
+            # detailed tab payload, without adding a call for current bridges.
+            try:
+                sessions = driver.get_all_sessions()
+            except Exception as session_error:
+                err = str(session_error)
+        raw_diagnosis = payload.get("diagnosis")
+        if isinstance(raw_diagnosis, dict):
+            diag = raw_diagnosis
+        else:
+            try:
+                diag = driver.diagnose()
+            except Exception as diagnosis_error:
+                diag = {
+                    "cause": "diagnose_failed",
+                    "ok": False,
+                    "error": str(diagnosis_error),
+                }
     payload.update({
         "remote_mode": getattr(driver, "is_remote", False),
         "bridge_host": getattr(driver, "host", "127.0.0.1"),

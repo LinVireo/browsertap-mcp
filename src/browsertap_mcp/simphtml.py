@@ -308,6 +308,14 @@ def get_main_block(driver, extra_js="", text_only=False, timeout=15,
         session_id=session_id,
         allow_failover=allow_failover,
     )
+    page = _page_from_response(raw)
+    if text_only:
+        return _collapsed_text(page)
+    return page
+
+
+def _page_from_response(raw):
+    """Return a page payload, preserving the bridge's no-response diagnosis."""
     # A timeout carries no 'data' at all, only 'result' with the reason.
     if 'data' not in raw:
         reason = raw.get('result') or 'no data returned'
@@ -317,9 +325,42 @@ def get_main_block(driver, extra_js="", text_only=False, timeout=15,
     if page is None:
         raise PageUnavailable(
             "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
-    if text_only:
-        return _collapsed_text(page)
     return page
+
+
+_CUTLIST_PAYLOAD_MARK = "__btap_cutlist_payload__"
+_CUTLIST_FALLBACK = object()
+
+
+def _get_cutlist_page(driver, extra_js, timeout, session_id):
+    """Read repeated groups and the page outline in one browser roundtrip."""
+    raw = _execute_in_session(
+        driver,
+        (
+            f"{js_list_groups}\n"
+            "const __btapCutlistGroups = listGroups(document.body);\n"
+            f"{extra_js}\n{js_page_outline}\n"
+            "return {"
+            f"{json.dumps(_CUTLIST_PAYLOAD_MARK)}: true, "
+            "groups: __btapCutlistGroups, page: pageOutline(false)"
+            "};"
+        ),
+        timeout,
+        session_id=session_id,
+    )
+    payload = _page_from_response(raw)
+    if not (
+        isinstance(payload, dict)
+        and payload.get(_CUTLIST_PAYLOAD_MARK) is True
+    ):
+        # An unmarked list or dict is the response shape of an older
+        # bridge/test double answering the legacy listGroups-only payload.
+        return payload, _CUTLIST_FALLBACK
+    page = payload.get('page')
+    if page is None:
+        raise PageUnavailable(
+            "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
+    return payload.get('groups', []), page
 
 TOP_CHANGE_MAXCHARS = 2000
 
@@ -468,20 +509,37 @@ def _collapse_list(soup, selector, instruction):
 
 def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
              text_only=False, timeout=15, link_refs=None, session_id=None):
-    if cutlist:
-        rr = _execute_in_session(
+    if cutlist and not text_only and not extra_js.strip():
+        rr, page = _get_cutlist_page(driver, extra_js, timeout, session_id)
+        if page is _CUTLIST_FALLBACK:
+            page = get_main_block(
+                driver,
+                extra_js=extra_js,
+                text_only=False,
+                timeout=timeout,
+                session_id=session_id,
+            )
+    else:
+        if cutlist and not text_only:
+            # `extra_js` is authored as part of the driver's AsyncFunction and
+            # may contain an early return, top-level await, lexical declarations
+            # or reads of `this` / `arguments`. Nesting it merely to retain a
+            # cutlist result would change at least one of those semantics. Keep
+            # the historical two-call order for this uncommon path: discover
+            # groups first, then execute extra_js immediately before pageOutline.
+            rr = _execute_in_session(
+                driver,
+                js_list_groups + "return listGroups(document.body);",
+                timeout,
+                session_id=session_id,
+            ).get('data', [])
+        page = get_main_block(
             driver,
-            js_list_groups + "return listGroups(document.body);",
-            timeout,
+            extra_js=extra_js,
+            text_only=text_only,
+            timeout=timeout,
             session_id=session_id,
-        ).get('data', [])
-    page = get_main_block(
-        driver,
-        extra_js=extra_js,
-        text_only=text_only,
-        timeout=timeout,
-        session_id=session_id,
-    )
+        )
     # Hard cap before parsing: BeautifulSoup on a multi-MB page dominates the
     # call's latency, and callers only ever see maxchars of it anyway.
     if isinstance(page, str) and len(page) > 1_500_000: page = page[:1_500_000]
@@ -823,7 +881,10 @@ def execute_js_rich(
         )
         if response.get('closed', 0) == 1:
             reloaded = True
-        if not blocked_dialog and not no_response_kind(response):
+        # Only the transient monitor consumes this settling window. A
+        # no-monitor call returns immediately after the result, and a failed
+        # baseline or a reloaded page has no post-call monitor/diff to sample.
+        if monitor_started and not reloaded and not blocked_dialog and not no_response_kind(response):
             time.sleep(min(1.0, _remaining(deadline)))
     except Exception as e:
         error_msg = _error_text(e)

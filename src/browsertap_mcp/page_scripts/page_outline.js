@@ -48,28 +48,29 @@ function pageOutline(textOnly = false) {
   // text back in front of the model with nothing anywhere reporting a problem.
   // `manifest.json` therefore declares 121, and
   // `tests/test_distribution_contract.py` derives that floor from this file.
-  const renders = (el) => {
+  const renderState = (el) => {
     try {
       if (!el.checkVisibility({
         contentVisibilityAuto: true,
         opacityProperty: true,
         visibilityProperty: true,
-      })) return false;
+      })) return { rendered: false, rect: null };
     } catch (_) {
       const s = window.getComputedStyle(el);
-      if (s.display === 'none' || s.visibility === 'hidden') return false;
-      if (parseFloat(s.opacity) <= 0) return false;
+      if (s.display === 'none' || s.visibility === 'hidden') {
+        return { rendered: false, rect: null };
+      }
+      if (parseFloat(s.opacity) <= 0) return { rendered: false, rect: null };
     }
     const r = el.getBoundingClientRect();
-    return r.width > 1 && r.height > 1;
+    return { rendered: r.width > 1 && r.height > 1, rect: r };
   };
 
   // Viewport-relative, so this is "near the current scroll position", not the
   // document. Content beyond it is dropped to keep the payload small, but the
   // drop is counted so the caller can say "scroll and re-scan" instead of
   // concluding the element does not exist.
-  const inRange = (el) => {
-    const r = el.getBoundingClientRect();
+  const inRange = (r) => {
     return Math.abs(r.left) < RANGE_PX && Math.abs(r.top) < RANGE_PX;
   };
 
@@ -104,15 +105,16 @@ function pageOutline(textOnly = false) {
     // An iframe's content is cross-origin more often than not, so record the
     // source and let `simphtml` turn the placeholder back into an <iframe>.
     if (src.tagName === 'IFRAME') {
-      if (!renders(src)) return null;
+      if (!renderState(src).rendered) return null;
       const box = document.createElement('div');
       box.setAttribute('data-tag', 'iframe');
       box.setAttribute('data-iframe-content', src.src || '');
       return box;
     }
 
-    const shown = renders(src);
-    if (shown && !inRange(src)) { offscreen += 1; return null; }
+    const state = renderState(src);
+    const shown = state.rendered;
+    if (shown && !inRange(state.rect)) { offscreen += 1; return null; }
     if (!shown && src.getAttribute('aria-hidden') === 'true') return null;
 
     const clone = src.cloneNode(false);

@@ -192,11 +192,20 @@ def _key_details(key: str) -> tuple[str, str, int]:
     if named:
         return named
     if len(key) == 1 and key.isprintable():
-        if key.isalpha():
-            return key, f"Key{key.upper()}", ord(key.upper())
-        if key.isdigit():
+        # ``str.isalpha()``/``str.isdigit()`` cover far more than the
+        # standardized DOM ``code`` names.  In particular, ``"ß".upper()``
+        # is ``"SS"`` (two code points), which used to leak a ``TypeError``
+        # out of ``ord`` even though the public contract accepts one printable
+        # character.  Keep the fast, conventional VK/code mapping for ASCII;
+        # for other printable Unicode characters let CDP carry the character
+        # in ``key`` and use the neutral virtual-key value instead of inventing
+        # an invalid ``Key…``/``Digit…`` name.
+        if "a" <= key <= "z" or "A" <= key <= "Z":
+            upper = key.upper()
+            return key, f"Key{upper}", ord(upper)
+        if "0" <= key <= "9":
             return key, f"Digit{key}", ord(key)
-        return key, "", ord(key)
+        return key, "", ord(key) if ord(key) <= 0x7F else 0
     raise InputValidationError(f"unsupported key: {key}")
 
 
