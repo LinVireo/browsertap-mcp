@@ -6,6 +6,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-08-29
+
+### Added
+
+- The release seal now proves that the live suite was answered by the extension
+  build in the sealed source tree. `live-preflight.json` records
+  `extension_build_verdict`, `extension_build_enforced` and both build stamps,
+  and the acceptance report reads them: a live run answered by a stale service
+  worker, or one whose verdict could not be established, no longer counts as
+  live evidence. A stamp that was never regenerated names its own fix.
+
+### Changed
+
+- Both READMEs now state plainly that reusing an already-logged-in browser is
+  not unique to this project, and name the cases where
+  [playwright-mcp](https://github.com/microsoft/playwright-mcp) is the better
+  choice: one-step Chrome Web Store install, headless, Docker, CI, Firefox or
+  WebKit, accessibility-tree snapshots with stable handles, and a smaller
+  default tool surface. What remains specific to this server — guarded
+  OS-level input, retargeting without raising a window, the whole `chrome.*`
+  surface, and working with zero tabs open — is stated in the same place.
+
 ## [0.4.17] - 2026-08-26
 
 ### Changed
@@ -1173,7 +1195,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...HEAD
+[0.4.18]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...v0.4.18
 [0.4.17]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.16...v0.4.17
 [0.4.16]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.15...v0.4.16
 [0.4.15]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...v0.4.15

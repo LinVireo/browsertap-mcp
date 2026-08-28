@@ -42,6 +42,20 @@ def _passing_tool_evidence() -> dict[str, object]:
     }
 
 
+_EXTENSION_BUILD_STAMP = "a" * 64
+
+
+def _passing_live_preflight() -> dict[str, object]:
+    return {
+        "components": {
+            "extension_build_verdict": "matches_tree",
+            "extension_build_enforced": True,
+            "extension_build_stamp": _EXTENSION_BUILD_STAMP,
+            "expected_extension_build_stamp": _EXTENSION_BUILD_STAMP,
+        }
+    }
+
+
 def _passing_lint_report():
     """A clean ruff run as `scripts/lint_report.py` records it.
 
@@ -122,6 +136,9 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     passing_xml = '<testsuite><testcase classname="c" name="t" /></testsuite>'
     (artifacts / "offline-junit.xml").write_text(passing_xml, encoding="utf-8")
     (artifacts / "live-junit.xml").write_text(passing_xml, encoding="utf-8")
+    (artifacts / "live-preflight.json").write_text(
+        json.dumps(_passing_live_preflight()), encoding="utf-8"
+    )
     for name in ("tool-coverage-offline.json", "tool-coverage-live.json"):
         (artifacts / name).write_text(json.dumps(_passing_tool_evidence()), encoding="utf-8")
     (artifacts / "lint.json").write_text(json.dumps(_passing_lint_report()), encoding="utf-8")
@@ -146,6 +163,7 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
                 artifacts / "coverage.json",
                 artifacts / "offline-junit.xml",
                 artifacts / "live-junit.xml",
+                artifacts / "live-preflight.json",
                 artifacts / "tool-coverage-offline.json",
                 artifacts / "tool-coverage-live.json",
                 artifacts / "lint.json",
@@ -490,6 +508,68 @@ def test_unbound_passing_live_result_is_stale_but_does_not_fail_offline_gates():
     assert bound is False
     assert live["status"] == "stale"
     assert "not bound to current source tree" in live["summary"]
+
+
+def test_live_evidence_gate_reads_the_extension_tree_binding(monkeypatch, tmp_path):
+    """A passing live XML cannot vouch for a worker running code outside the tree."""
+    _seal_release_evidence(monkeypatch, tmp_path)
+    preflight = _passing_live_preflight()
+    preflight["components"]["extension_build_verdict"] = "stale_worker"
+    (tmp_path / "artifacts" / "live-preflight.json").write_text(
+        json.dumps(preflight), encoding="utf-8"
+    )
+
+    data = A.build_report_data()
+
+    assert data["gates"]["live_suite"] is True
+    assert data["gates"]["live_evidence"] is False
+    assert data["release_ready"] is False
+    measurement = data["gate_measurements"]["live_evidence"]
+    assert "stale_worker" in measurement
+    assert "outside the sealed source tree" in measurement
+
+
+def test_unknown_extension_tree_binding_is_not_a_pass(monkeypatch, tmp_path):
+    """An absent or unenforced comparison is unknown, not a successful comparison."""
+    _seal_release_evidence(monkeypatch, tmp_path)
+    path = tmp_path / "artifacts" / "live-preflight.json"
+    variants = []
+
+    unverifiable = _passing_live_preflight()
+    unverifiable["components"].update(
+        extension_build_verdict="unverifiable", extension_build_enforced=False
+    )
+    variants.append(unverifiable)
+
+    missing = _passing_live_preflight()
+    missing["components"].pop("extension_build_verdict")
+    variants.append(missing)
+
+    for preflight in variants:
+        path.write_text(json.dumps(preflight), encoding="utf-8")
+        data = A.build_report_data()
+        measurement = data["gate_measurements"]["live_evidence"]
+
+        assert data["gates"]["live_evidence"] is False
+        assert "unknown:" in measurement
+
+
+def test_an_unregenerated_extension_stamp_names_its_fix(monkeypatch, tmp_path):
+    _seal_release_evidence(monkeypatch, tmp_path)
+    preflight = _passing_live_preflight()
+    preflight["components"].update(
+        extension_build_verdict="stamp_not_regenerated", extension_build_enforced=False
+    )
+    (tmp_path / "artifacts" / "live-preflight.json").write_text(
+        json.dumps(preflight), encoding="utf-8"
+    )
+
+    data = A.build_report_data()
+    measurement = data["gate_measurements"]["live_evidence"]
+
+    assert data["gates"]["live_evidence"] is False
+    assert "stamp_not_regenerated" in measurement
+    assert "python -m scripts.extension_stamp --write" in measurement
 
 
 def test_main_returns_nonzero_when_release_gates_fail(monkeypatch, tmp_path):

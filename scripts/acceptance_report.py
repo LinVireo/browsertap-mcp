@@ -316,6 +316,64 @@ def _bind_live_status(
     return live, live_bound
 
 
+def _extension_build_status(
+    manifest: dict[str, object] | None,
+) -> tuple[bool, str]:
+    """Read the one sealed record that can bind the running worker to this tree."""
+    relative = "artifacts/live-preflight.json"
+    if not _recorded(manifest, relative):
+        return False, f"unknown: `{relative}` is not bound by the evidence manifest"
+    try:
+        payload = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+        components = payload["components"]
+    except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
+        return False, f"unknown: `{relative}` is unavailable or malformed"
+    if not isinstance(components, dict):
+        return False, f"unknown: `{relative}` has no component record"
+
+    missing = [
+        field
+        for field in ("extension_build_verdict", "extension_build_enforced")
+        if field not in components
+    ]
+    if missing:
+        return False, f"unknown: `{relative}` is missing {', '.join(missing)}"
+
+    verdict = components["extension_build_verdict"]
+    enforced = components["extension_build_enforced"]
+    if verdict == "stale_worker":
+        return False, (
+            "stale_worker: the live run was answered by extension code outside "
+            f"the sealed source tree, recorded in `{relative}`"
+        )
+    if verdict == "stamp_not_regenerated":
+        return False, (
+            "stamp_not_regenerated: regenerate the extension stamp with "
+            "`python -m scripts.extension_stamp --write`"
+        )
+    if enforced is not True:
+        return False, (
+            "unknown: extension build comparison was not enforced "
+            f"(verdict={verdict!r}) in `{relative}`"
+        )
+    if verdict != "matches_tree":
+        return False, f"unknown: extension build verdict is {verdict!r} in `{relative}`"
+
+    reported_stamp = components.get("extension_build_stamp")
+    expected_stamp = components.get("expected_extension_build_stamp")
+    if not isinstance(reported_stamp, str) or not isinstance(expected_stamp, str):
+        return False, f"unknown: `{relative}` is missing the extension build stamps"
+    if reported_stamp != expected_stamp:
+        return False, (
+            "unknown: extension build stamps disagree despite a matches_tree verdict "
+            f"in `{relative}`"
+        )
+    return True, (
+        f"extension build matches_tree with enforcement from `{relative}` "
+        f"(stamp {reported_stamp})"
+    )
+
+
 def _sealed_source(manifest: dict[str, object] | None) -> dict[str, object]:
     source = manifest.get("source") if isinstance(manifest, dict) else None
     return source if isinstance(source, dict) else {}
@@ -395,6 +453,7 @@ def build_report_data() -> dict[str, object]:
     live = _live_junit(evidence_manifest)
     live, live_bound = _bind_live_status(live, evidence_manifest)
     live_passed = live["status"] == "pass" and live_bound
+    extension_build_ok, extension_build_summary = _extension_build_status(evidence_manifest)
     sealed_source = _sealed_source(evidence_manifest)
     if sealed_source.get("git_dirty") is True:
         # A seal taken over an uncommitted worktree cannot be reproduced from Git:
@@ -436,6 +495,7 @@ def build_report_data() -> dict[str, object]:
     live_evidence_ok = (
         evidence_fresh
         and live_passed
+        and extension_build_ok
         and tool_coverage.get("all_evidence_executed") is True
         and tool_coverage.get("fully_verified_tools") == registered == 55
     )
@@ -468,7 +528,7 @@ def build_report_data() -> dict[str, object]:
             live_evidence_ok,
             f"{tool_coverage.get('fully_verified_tools', 0)}/{registered} tools fully "
             f"verified from `{tool_coverage_source}`; all_evidence_executed="
-            f"{tool_coverage.get('all_evidence_executed')}",
+            f"{tool_coverage.get('all_evidence_executed')}; {extension_build_summary}",
         ),
         "code_coverage": (code_coverage_ok, coverage_text),
         "documentation": (

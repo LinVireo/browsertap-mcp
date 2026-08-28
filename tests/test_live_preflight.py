@@ -430,6 +430,7 @@ def test_an_unreadable_ownership_registry_does_not_fail_the_live_layer():
 # one field at a time below. Written out in full rather than built from the real
 # call because the point of these tests is that the offline layer can check the
 # reasoning with no bridge and no browser.
+_EXTENSION_BUILD_STAMP = "a" * 64
 _HEALTHY = {
     "status": "healthy",
     "action": "none",
@@ -439,6 +440,10 @@ _HEALTHY = {
     "protocol_version": 3,
     "expected_protocol_version": 3,
     "missing_extension_capabilities": [],
+    "extension_build_verdict": "matches_tree",
+    "extension_build_enforced": True,
+    "extension_build_stamp": _EXTENSION_BUILD_STAMP,
+    "expected_extension_build_stamp": _EXTENSION_BUILD_STAMP,
     "reload_extension_required": False,
     "restart_bridge_required": False,
     "restart_mcp_session_required": False,
@@ -649,12 +654,19 @@ def test_the_recorded_summary_leaves_this_machine_out_of_the_published_evidence(
         "protocol_version",
         "expected_protocol_version",
         "missing_extension_capabilities",
+        "extension_build_verdict",
+        "extension_build_enforced",
+        "extension_build_stamp",
+        "expected_extension_build_stamp",
         "reload_extension_required",
         "restart_bridge_required",
         "restart_mcp_session_required",
     }
     # The evidence has to answer the question it exists for.
-    assert recorded["extension_version"] == "0.4.3"
+    assert recorded["extension_build_verdict"] == "matches_tree"
+    assert recorded["extension_build_enforced"] is True
+    assert recorded["extension_build_stamp"] == _EXTENSION_BUILD_STAMP
+    assert recorded["expected_extension_build_stamp"] == _EXTENSION_BUILD_STAMP
 
 
 def test_the_live_fixture_refuses_a_stale_build_instead_of_skipping_it():

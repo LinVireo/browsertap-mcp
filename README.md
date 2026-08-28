@@ -10,11 +10,13 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 [Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
-A Model Context Protocol (MCP) server that drives **the real Chrome you are already using**, through a Chrome extension and the Chrome DevTools Protocol. Your agent works inside your existing browser session, so logins, cookies, and open tabs are all already there — no separate sandbox browser to authenticate again.
+A Model Context Protocol (MCP) server that drives **the real Chrome you are already using — and the real desktop it sits on — without taking the screen away from you.** It attaches to your running browser through a Chrome extension and the Chrome DevTools Protocol, so logins, cookies, and open tabs are already there. Three things follow from being an extension on your own machine rather than a browser someone launched for automation: a *selected* tab is not a *foreground* tab, so page work runs in the tab you named while you keep using the screen; five tools send real OS-level mouse and keyboard input for the cases no protocol event reaches; and the whole `chrome.*` surface is in scope — extension management, bookmarks, scoped site-permission leases, downloads through Chrome's own manager with your profile's cookies.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.17**.
+If what you need is a clean, disposable browser — headless, Docker, CI, Firefox or WebKit — this is the wrong tool and [playwright-mcp](https://github.com/microsoft/playwright-mcp) is the right one. See [When to use something else](#when-to-use-something-else).
 
-It also reaches past the page: five direct tools provide real mouse and keyboard input at the OS level when page-level input is not enough. `resolve_leave_dialog` is one additional, narrowly scoped path that can send Enter after two protocol attempts fail. `safe` asks before physical input, while the default `lab` profile runs without elicitation and still enforces the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.18**.
+
+Physical input is gated, not casual: `resolve_leave_dialog` is one narrowly scoped path that can send Enter after two protocol attempts fail, `safe` asks before every physical action, and the default `lab` profile runs without elicitation while still enforcing the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 
 ## Start in 60 seconds
 
@@ -58,6 +60,43 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk; full desktop capture is available for physical-input checks. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
 - **Guarded real physical input** — OS-level mouse move/click/drag, typing, and hotkeys are the last-resort path. `lab` can run without elicitation; `safe` prompts per call. Both profiles keep the lock, quiet-input gate, ownership checks, target activation, and on-screen confirmation.
 - **Multi-browser** — Chrome, Edge, and Opera can all connect to one bridge at the same time without clobbering each other's sessions.
+
+## When to use something else
+
+Reusing the browser you are already logged into is **not** unique to this
+project, and a comparison that pretended otherwise would waste your time.
+[playwright-mcp](https://github.com/microsoft/playwright-mcp) has an
+`--extension` mode that attaches to your running Chrome for the same reason, and
+it is the better tool for most jobs:
+
+- **You want it installed in one step.** playwright-mcp's extension comes from
+  the Chrome Web Store. This one is `Load unpacked` from a directory, by hand,
+  and Chrome shows a developer-mode warning for as long as it stays that way.
+- **Headless, Docker, or CI.** Deliberately out of scope here — the premise is a
+  browser a person is sitting in front of, which is why there is no Docker image
+  (see *Requirements*).
+- **Firefox or WebKit.** Chromium only here; this is a Chrome extension plus CDP.
+- **An accessibility-tree snapshot with stable `ref` handles.** playwright-mcp's
+  snapshots are its main way of reading a page. `scan_page` gives you simplified
+  HTML or text with `#r1`-style link refs instead, which is a different trade.
+- **A smaller default tool surface.** playwright-mcp ships roughly two dozen
+  tools by default and puts the rest behind `--caps`. This server registers all
+  55 unconditionally.
+
+What is left, and what this project is actually for:
+
+- **Real OS-level mouse and keyboard**, with the guards around it — the
+  cross-process lock, the quiet-input window, out-of-bounds refusal, and
+  `on_screen` confirming the window was really visible. CDP input cannot leave
+  the browser window; these tools drive the desktop.
+- **Background by default.** `switch_tab` retargets without raising anything, so
+  the agent works in one tab while you keep using the screen. A tool that
+  launched its own browser has no reason to offer this.
+- **The whole `chrome.*` surface** — extension management, `call_extension`,
+  bookmarks, timed site-permission leases, and downloads through Chrome's own
+  manager with your profile's cookies. Playwright is not an extension and cannot
+  reach these.
+- **Work with zero tabs open**, because the service worker is enough.
 
 ## Requirements
 

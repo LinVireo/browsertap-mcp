@@ -8,15 +8,22 @@
 
 [使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
-`browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
-Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
+`browsertap-mcp` 是一个 MCP 服务，操作的是**你正在用的那个真实 Chrome、以及它所在的真实桌面，
+并且不会把屏幕从你手里抢走**。它通过 Chrome 扩展加 CDP 接上正在运行的浏览器，登录态、Cookies
+和已打开的标签页本来就在。「装在自己机器上的扩展」而不是「为自动化另起的浏览器」，带来三件事：
+*选中*的标签页不等于*前台*的标签页，页面操作在你指定的那个标签页里跑，你照常用屏幕；五个工具
+在协议事件到不了的场景下发送真实的操作系统级鼠标和键盘输入；整个 `chrome.*` 面都在范围内——
+扩展管理、书签、限时站点权限租约、用 Chrome 自己的下载管理器带上你 profile 的 Cookies 下载。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.17**。
+如果你要的是一个干净、用完即弃的浏览器——headless、Docker、CI、Firefox 或 WebKit——那这不是
+合适的工具，[playwright-mcp](https://github.com/microsoft/playwright-mcp) 才是。见
+[什么时候该用别的](#什么时候该用别的)。
 
-当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
-`resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
-profile 对物理输入进行询问；默认 `lab` profile 免询问执行，也可通过配置恢复会话级询问。
-两种 profile 均保留输入锁、安静窗口、目标激活和屏幕确认。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.18**。
+
+物理输入是有闸门的，不是随手就发：`resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理
+失败后才可能发送 Enter；`safe` profile 每次物理动作前询问；默认 `lab` profile 免询问执行，但同样
+保留输入锁、安静窗口、目标激活和屏幕确认。
 
 ## 60 秒上手
 
@@ -59,6 +66,32 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **页面与桌面截图**：CDP 页面截图作为 MCP 图片内容返回，也可保存到文件；桌面截图仅用于核对实际屏幕和物理输入。不支持图片输入的模型应改用 `scan_page`、页面 API 或 OCR。
 - **受保护的物理输入**：系统级鼠标、键盘和热键仅作为页面级操作无法完成时的后备方案。`lab` 可免 elicitation 执行，`safe` 对每次调用进行询问；两种 profile 均保留跨进程锁、安静窗口、所有权检查、目标激活和屏幕确认。
 - **多浏览器共存**：Chrome、Edge 和 Opera 可同时连接同一个 bridge，各会话相互隔离。
+
+## 什么时候该用别的
+
+「复用你已经登录好的浏览器」**并不是**本项目独有的能力，装作独有只会浪费你的时间。
+[playwright-mcp](https://github.com/microsoft/playwright-mcp) 有一个 `--extension` 模式，
+出于同样的理由接上你正在运行的 Chrome，而且在多数场景下它是更合适的选择：
+
+- **希望一步装好。** playwright-mcp 的扩展来自 Chrome Web Store。本项目目前只能手工
+  `加载已解压的扩展程序`，而且只要这样装着，Chrome 就会一直显示开发者模式警告。
+- **headless、Docker 或 CI。** 这里是刻意不做的：前提就是有人正坐在浏览器前面，所以也不提供
+  Docker 镜像（见*环境要求*）。
+- **Firefox 或 WebKit。** 这里只有 Chromium：一个 Chrome 扩展加 CDP。
+- **带稳定 `ref` 句柄的无障碍树快照。** 那是 playwright-mcp 读页面的主要方式。`scan_page`
+  给的是简化 HTML 或文本加 `#r1` 形式的链接引用，是另一种取舍。
+- **更小的默认工具面。** playwright-mcp 默认约二十几个工具，其余放在 `--caps` 后面。
+  本服务把 55 个全部无条件注册。
+
+剩下的这些，才是本项目真正要解决的：
+
+- **真实的操作系统级鼠标和键盘**，连带它周围的闸门——跨进程锁、安静输入窗口、越界拒绝，
+  以及 `on_screen` 确认窗口确实可见。CDP 输入出不了浏览器窗口，这几个工具驱动的是桌面。
+- **默认后台。** `switch_tab` 只改目标、不抬窗口，agent 在一个标签页里干活，你照常用屏幕。
+  自己另起浏览器的工具没有理由提供这一条。
+- **整个 `chrome.*` 面**——扩展管理、`call_extension`、书签、限时站点权限租约，以及用
+  Chrome 自己的下载管理器带上你 profile 的 Cookies 下载。Playwright 不是扩展，碰不到这些。
+- **零标签页也能干活**，因为 service worker 就够了。
 
 ## 环境要求
 

@@ -458,7 +458,10 @@ def component_versions(status: Mapping[str, Any] | None) -> dict[str, Any] | Non
     This record is written into `artifacts/`, which live.yml uploads and which
     gets attached to an external review, so a whitelist keeps a field added
     upstream tomorrow out by default -- a blacklist would publish it and wait to
-    be noticed.
+    be noticed. The two build stamps are safe to publish because they are
+    content hashes with no local path: one came from the running worker and the
+    other was derived from this checkout, so the record can show the comparison
+    that produced `extension_build_verdict` without exposing this machine.
     """
     if not isinstance(status, Mapping):
         return None
@@ -473,6 +476,10 @@ def component_versions(status: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "protocol_version",
             "expected_protocol_version",
             "missing_extension_capabilities",
+            "extension_build_verdict",
+            "extension_build_enforced",
+            "extension_build_stamp",
+            "expected_extension_build_stamp",
             "reload_extension_required",
             "restart_bridge_required",
             "restart_mcp_session_required",
