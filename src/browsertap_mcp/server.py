@@ -1139,8 +1139,21 @@ def get_setup_status() -> dict[str, Any]:
         for capability in _REQUIRED_EXTENSION_CAPABILITIES
         if extension_capabilities.get(capability) is not True
     )
+    # The version number is the *weakest* of the four signals below and the only one
+    # a reload cannot be needed for on its own, so it yields to the stamp rather than
+    # being OR-ed in beside it. `matches_tree` means the worker's own JavaScript
+    # hashes to this directory with two lines normalised away, one of which is the
+    # manifest version -- so the only difference a reload could remove is the number
+    # Chrome parsed at load time, and Chrome never re-parses it without one. Left as
+    # a bare `or`, every release bump demanded a human click whose sole effect was to
+    # stop this gate complaining, and `tests/live_preflight.py` reads the flag rather
+    # than the verdict and has no override, so that click gated the whole live layer.
+    # It stays authoritative whenever the stamp cannot judge (`unverifiable`,
+    # `stamp_not_regenerated`): a weak signal beats none.
+    version_skew = extension_version != __version__ and not extension_is_newer
+    version_skew_is_only_the_release_number = extension_build_verdict == "matches_tree"
     reload_extension_required = (
-        (extension_version != __version__ and not extension_is_newer)
+        (version_skew and not version_skew_is_only_the_release_number)
         or (protocol_version != _EXTENSION_PROTOCOL_VERSION and not protocol_is_newer)
         # A newer extension that no longer advertises a capability this build
         # requires is also a stale-package problem: reloading cannot add back
@@ -1249,6 +1262,20 @@ def get_setup_status() -> dict[str, Any]:
             "than a pass. A worker loaded before the stamp existed reads this way, and "
             "so does a bridge daemon too old to forward the field. Reload the unpacked "
             "extension once, and `browsertap bridge --restart` covers the other half.",
+        )
+    if version_skew and version_skew_is_only_the_release_number:
+        # The disclosure half of letting the stamp overrule the version number. Without
+        # it a reader sees `healthy` next to two different version numbers and has to
+        # guess which one this process believed, and the honest answer -- neither, it
+        # compared the code instead -- is not derivable from the other fields.
+        status["notes"].insert(
+            0,
+            f"The extension reports version {extension_version} against this "
+            f"build's {__version__}, and no reload is needed: extension_build_verdict "
+            "is matches_tree, so the worker's own JavaScript hashes to this tree and "
+            "the only difference is the release number Chrome parsed when the "
+            "extension was loaded. Chrome does not re-parse it without a reload, so "
+            "this gap persists for the life of the install and means nothing.",
         )
     if package_is_stale:
         # Lead with the only action that can clear this, because the two flags a

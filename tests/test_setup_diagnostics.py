@@ -647,3 +647,125 @@ def test_an_unreadable_recorded_stamp_is_disclosed_without_losing_the_verdict(
     # how a gate starts getting skimmed.
     assert not any("reported none" in n for n in quiet["notes"])
 
+
+def test_a_release_bump_alone_does_not_demand_a_reload(monkeypatch, tmp_path):
+    """The stamp overrules the version number, which is the weakest of the four.
+
+    Measured on this project at 0.4.18: the bridge had been restarted, the worker's
+    stamp matched the tree, protocol matched, every capability was present, and
+    `doctor` still exited 1 asking for a reload -- because `versioning bump` had
+    rewritten `manifest.json` and Chrome only parses that at load time. So the gap
+    could not close on its own, and the reload it demanded would have changed
+    exactly one thing: the number this gate was complaining about.
+
+    That is not a cosmetic annoyance. `tests/live_preflight.py` reads
+    `reload_extension_required` rather than the verdict and has no override, so a
+    human click stood between every release bump and any live evidence at all.
+    """
+    directory, stamp = _extension_tree(tmp_path, "bumped")
+    older = "0.0.1"
+    assert older != __version__
+
+    result = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(extension_version=older, extension_build_stamp=stamp),
+    )
+
+    assert result["extension_build_verdict"] == "matches_tree"
+    assert result["extension_build_enforced"] is True
+    assert result["reload_extension_required"] is False
+    assert result["status"] == "healthy"
+    assert result["action"] == "none"
+    # The version gap is still published, and explained. `healthy` sitting next to
+    # two different version numbers is otherwise a reader's dead end: nothing else
+    # in the payload says which one this process believed, and the true answer --
+    # neither, it compared the code -- is not derivable from the other fields.
+    assert result["extension_version"] == older
+    assert result["package_version"] == __version__
+    note = result["notes"][0]
+    assert older in note and __version__ in note
+    assert "matches_tree" in note
+
+
+def test_the_version_number_still_decides_when_the_stamp_cannot(monkeypatch, tmp_path):
+    """A weak signal beats none, so the fallback is not removed -- only demoted.
+
+    An extension built before the stamp existed reports none, which is the exact
+    population that most needs the version comparison: it is the only evidence
+    left. Both cases here are `enforced: False`, so neither may claim the worker
+    was checked, and the version number is what names the fix.
+    """
+    directory, _ = _extension_tree(tmp_path, "no-stamp-old-version")
+    older = "0.0.1"
+
+    unverifiable = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(extension_version=older),
+        runtime={"protocol_version": 3},
+    )
+
+    assert unverifiable["extension_build_verdict"] == "unverifiable"
+    assert unverifiable["extension_build_enforced"] is False
+    assert unverifiable["reload_extension_required"] is True
+    assert unverifiable["status"] == "stale_extension"
+    assert unverifiable["action"] == "reload_extension"
+
+    # And the other unenforced verdict, which a developer's own edit produces. The
+    # stamp is equally unable to judge, so the version number decides here too --
+    # and the reload it asks for is real, because the sources moved.
+    edited, stamp = _extension_tree(tmp_path, "unregenerated-old-version")
+    (edited / "content.js").write_text("// added later\n", encoding="utf-8", newline="")
+
+    result = _build_status(
+        monkeypatch,
+        edited,
+        _healthy_diagnosis(extension_version=older, extension_build_stamp=stamp),
+    )
+
+    assert result["extension_build_verdict"] == "stamp_not_regenerated"
+    assert result["extension_build_enforced"] is False
+    assert result["reload_extension_required"] is True
+    assert result["action"] == "reload_extension"
+
+
+def test_a_matching_stamp_does_not_excuse_a_protocol_or_capability_gap(monkeypatch, tmp_path):
+    """Only the version number yields to the stamp. The other two are not opinions.
+
+    A worker whose JavaScript hashes to this tree while speaking a different
+    protocol, or while failing to advertise a capability this tree's code requires,
+    is not a release-number gap -- it is a contradiction, and the two possible
+    causes (a hand-modified install, a bridge misreporting the runtime) both need a
+    human. Folding these into the same yield would turn the strongest signal into a
+    blanket excuse, which is worse than the cry-wolf it was fixing.
+    """
+    directory, stamp = _extension_tree(tmp_path, "matching-but-wrong")
+
+    protocol = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(
+            extension_version="0.0.1", protocol_version=2, extension_build_stamp=stamp
+        ),
+    )
+
+    assert protocol["extension_build_verdict"] == "matches_tree"
+    assert protocol["reload_extension_required"] is True
+    assert protocol["action"] == "reload_extension"
+
+    capability = _build_status(
+        monkeypatch,
+        directory,
+        _healthy_diagnosis(
+            extension_version="0.0.1",
+            extension_capabilities={},
+            extension_build_stamp=stamp,
+        ),
+    )
+
+    assert capability["extension_build_verdict"] == "matches_tree"
+    assert capability["missing_extension_capabilities"] != []
+    assert capability["reload_extension_required"] is True
+    assert capability["action"] == "reload_extension"
+

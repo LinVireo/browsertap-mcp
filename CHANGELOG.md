@@ -6,6 +6,25 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-08-29
+
+### Fixed
+
+- Bumping the release version no longer asks you to reload the Chrome
+  extension. `get_setup_status` compares the extension's compiled build stamp
+  against the source tree, and when that comparison says `matches_tree` the
+  worker is running this code -- the only difference left is the version string
+  Chrome parsed when the extension was loaded, which Chrome does not re-parse
+  without a reload. That number was still being OR-ed into
+  `reload_extension_required` beside the stamp verdict, so every release left
+  the extension permanently one version behind and demanded a manual reload
+  whose only effect was on the number the check was complaining about. The live
+  suite reads that flag and has no override, so the click stood between a
+  version bump and any live evidence at all. The version number is now the
+  fallback used when the stamp cannot judge, and a mismatch the stamp overrules
+  is still reported as a note rather than hidden. A protocol-version or missing
+  capability gap still requires a reload, matching stamp or not.
+
 ## [0.4.18] - 2026-08-29
 
 ### Added
@@ -1195,7 +1214,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...HEAD
+[0.4.19]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...v0.4.19
 [0.4.18]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...v0.4.18
 [0.4.17]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.16...v0.4.17
 [0.4.16]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.15...v0.4.16

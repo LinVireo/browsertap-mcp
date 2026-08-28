@@ -87,6 +87,32 @@ describes a build nobody has. `extension_build_enforced` is the usual
 `on_screen` / `input_quiet.enforced` shape: false means no comparison happened,
 so a caller must treat the answer as unknown and not as a pass.
 
+The first row of that table is a rule the code has to follow, not advice for the
+reader, and for three releases it did not. `reload_extension_required` OR-ed the
+version comparison in beside the verdict, so `matches_tree` could only ever add a
+reload demand and never withdraw one -- the strongest signal wired as a judge that
+can convict but not acquit. Because `versioning bump` rewrites `manifest.json` and
+Chrome parses it only at load time, **every release bump left the extension one
+version behind for the life of the install**, and `tests/live_preflight.py` reads
+that flag rather than the verdict and has no override. So a human click stood
+between each bump and any live evidence at all, and the click changed exactly one
+thing: the number the gate was complaining about. Measured at 0.4.18 -- bridge
+restarted to the new version, stamps equal, protocol equal, every capability
+present, `doctor` still exiting 1 with `action: reload_extension`.
+
+The version number is now the fallback it always was: it decides whenever the
+stamp cannot (`unverifiable`, `stamp_not_regenerated`), because a weak signal beats
+none, and it yields when the stamp says `matches_tree`. Two things must survive an
+edit there. **Only the version number yields.** A worker whose JavaScript hashes to
+this tree while speaking a different protocol, or while missing a capability this
+tree requires, is a contradiction rather than a release-number gap, and folding
+those into the same yield would turn the strongest signal into a blanket excuse --
+`test_a_matching_stamp_does_not_excuse_a_protocol_or_capability_gap` fails if you
+do. And **the gap is still published**, with a note saying why no reload is needed:
+`healthy` sitting next to two different version numbers is otherwise a dead end,
+because nothing else in the payload says which one this process believed, and the
+true answer -- neither, it compared the code -- is not derivable from the rest.
+
 There is a **fourth** kind of code the table above does not cover, and it is the
 one exception to "an edit needs a reload or a restart". The two files in
 `src/browsertap_mcp/page_scripts/` -- `page_outline.js` and `list_groups.js` --
