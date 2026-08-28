@@ -11,7 +11,7 @@
 `browsertap-mcp` 是一个通过 Chrome 扩展和 CDP 操作**当前真实浏览器会话**的 MCP 服务。
 Agent 可直接使用现有登录态、Cookies 和已打开的标签页，无需另行启动沙盒浏览器或重复登录。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.15**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.17**。
 
 当页面级输入无法完成操作时，BTAP 还提供五个直接发送操作系统级鼠标和键盘输入的工具。
 `resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理失败后才可能发送 Enter。`safe`
@@ -595,9 +595,9 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 禁掉物理输入是同一个取舍。
 
 - **mouse_move** —— `x`(integer)、`y`(integer)、`duration`(number,可选):移动耗时秒数,默认 `0`(直接跳到目标点)、`session_id`(string,可选):要提前台的标签页、`activate_session`(string,可选):默认 `current`(先把目标标签页提前台),也可传 session id 或 `none`
-- **mouse_click** —— `x`(integer,可选)、`y`(integer,可选):都省略时点当前指针位置、`button`(string,可选):默认 `left`,也接受 `right`/`middle`、`clicks`(integer,可选):默认 `1`、`interval`(number,可选):多次点击的间隔秒数,默认 `0.1`、`session_id`(string,可选):要提前台的标签页,正常情况就传这个、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
+- **mouse_click** —— `x`(integer,可选)、`y`(integer,可选):必须同时提供或同时省略（同时省略时点击当前指针位置，半坐标会被拒绝）、`button`(string,可选):默认 `left`,也接受 `right`/`middle`、`clicks`(integer,可选):默认 `1`、`interval`(number,可选):多次点击的间隔秒数,默认 `0.1`、`session_id`(string,可选):要提前台的标签页,正常情况就传这个、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
 - **mouse_drag** —— `x1`(integer)、`y1`(integer)、`x2`(integer)、`y2`(integer)、`duration`(number,可选):按住按键移动的秒数,默认 `0.3`、`button`(string,可选):默认 `left`、`session_id`(string,可选):要提前台的标签页、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
-- **type_text** —— `text`(string)、`interval`(number,可选):每个字符的间隔秒数,默认 `0.01`、`click_x`(integer,可选)、`click_y`(integer,可选):先点这里让输入框获得焦点、`session_id`(string,可选):要提前台的标签页,正常情况就传这个、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
+- **type_text** —— `text`(string)、`interval`(number,可选):每个字符的间隔秒数,默认 `0.01`、`click_x`(integer,可选)、`click_y`(integer,可选):必须同时提供或同时省略；提供时先点这里让输入框获得焦点，半坐标会被拒绝、`session_id`(string,可选):要提前台的标签页,正常情况就传这个、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
 - **hotkey** —— `keys_csv`(string):逗号分隔,如 `ctrl,c`、`session_id`(string,可选):要提前台的标签页、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
 - **pointer_info** —— 当前指针坐标、主显示器尺寸,以及跨全部显示器的 `screen_bounds` 矩形(`source` 说明是哪个探测答的,几何读不到时为 `null`)。只读,不需要批准。无参数
 </details>

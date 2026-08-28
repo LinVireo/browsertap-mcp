@@ -15,7 +15,7 @@ on the copy.
 - Copyright: `lsdefine`
 
 The browser layer here began as GenericAgent's. What is still derived from it,
-measured line-for-line against upstream `0c235a8` on 2026-08-25 with
+measured line-for-line against upstream `17d9f4d` on 2026-08-28 with
 `difflib.SequenceMatcher(None, upstream_lines, our_lines, autojunk=False)`.
 "Identical lines" counts how much of the *upstream* file survives here, so the
 denominator is upstream's line count and the percentage is that share:
@@ -23,8 +23,8 @@ denominator is upstream's line count and the percentage is that share:
 | In this distribution | Upstream file | Identical lines |
 |---|---|---|
 | `src/browsertap_mcp/simphtml.py` | `simphtml.py` | 55 of 873 (6%) |
-| `src/browsertap_mcp/browser_bridge.py` | `TMWebDriver.py` | 96 of 289 (33%) |
-| `src/browsertap_mcp/chrome_extension/background.js` | `assets/tmwd_cdp_bridge/background.js` | 234 of 422 (55%) |
+| `src/browsertap_mcp/browser_bridge.py` | `TMWebDriver.py` | 91 of 289 (31%) |
+| `src/browsertap_mcp/chrome_extension/background.js` | `assets/tmwd_cdp_bridge/background.js` | 226 of 422 (54%) |
 | `src/browsertap_mcp/chrome_extension/manifest.json` | `assets/tmwd_cdp_bridge/manifest.json` | 29 of 40 (72%) |
 | `src/browsertap_mcp/chrome_extension/content.js` | `assets/tmwd_cdp_bridge/content.js` | 7 of 19 (37%) |
 | `src/browsertap_mcp/chrome_extension/popup.html` | `assets/tmwd_cdp_bridge/popup.html` | 11 of 19 (58%) |
@@ -61,11 +61,11 @@ the engine already answers for every collection, including the `Set`s, `Map`s an
 generators the enumerated version silently turned into `{}`.
 
 What is left differs in kind between the two largest remaining rows, and the
-block structure is the honest way to say so. Of `browser_bridge.py`'s 96 lines,
-88 sit in runs of one to three lines and the longest run is four -- most of that
+block structure is the honest way to say so. Of `browser_bridge.py`'s 91 lines,
+87 sit in runs of one to three lines and the longest run is four -- most of that
 is Python's own shape, the `except Exception as e:` and `return` lines any two
-programs sharing a task will write identically. `background.js`'s 234 include 113
-in runs of four or more, the longest twelve: sequences of `chrome.*` calls and
+programs sharing a task will write identically. `background.js`'s 226 include 102
+in runs of four or more, the longest ten: sequences of `chrome.*` calls and
 the message-dispatch chain, which is still upstream's expression of the problem
 and is credited as such.
 

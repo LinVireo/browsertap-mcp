@@ -71,14 +71,14 @@ FAMILY_UPSTREAM = "simphtml.py"
 # with `--write`; never hand-edit an entry to silence the check, because the whole
 # point is that a changed derived file and a stale table are the same event.
 MEASURED_AGAINST: dict[str, str] = {
-    "src/browsertap_mcp/browser_bridge.py": "7b808980c10df6d45bc3def7d9dd8fd38f9157fc49ed2d7955276a134695aa5a",
-    "src/browsertap_mcp/chrome_extension/background.js": "8feac3f4e092ce6018983e63346ef03afa26059ae0354426ea797c06179d2933",
+    "src/browsertap_mcp/browser_bridge.py": "9e3427f2afcbdfa121a20d501f5cb5fb01e4955636bfa1cd9ff0bea6aa3722cd",
+    "src/browsertap_mcp/chrome_extension/background.js": "28df5f788a47f004f9a823a3a3973ffe4e66aaa96474e77d89eda17760677d7b",
     "src/browsertap_mcp/chrome_extension/content.js": "942d5df35bedba224c13db6930f2d07bccf554f7713c28885fd5f5b51f8a644d",
     "src/browsertap_mcp/chrome_extension/disable_dialogs.js": "1edc19d8a6a5bf0850cc0e8f2123fe799d80fb5b7afa578fa014586d7181970a",
     "src/browsertap_mcp/chrome_extension/manifest.json": "a7394272189f6b0acd168dfbbc0196a624df8395c802df3e1cde8611df3d8758",
     "src/browsertap_mcp/chrome_extension/popup.html": "5fd4ea0d2351bd244d95c1ef9fc592864e4b839f8d7a70bc914ddf7bb71c95af",
-    "src/browsertap_mcp/chrome_extension/popup.js": "b8295038ad083c13529ce3668bded40b8047cdf143f70986201d470944d42cce",
-    "src/browsertap_mcp/simphtml.py": "d07c2281961077ad3b5dd8896d335074939d8e6f8c4354069621312c6588eab8",
+    "src/browsertap_mcp/chrome_extension/popup.js": "82e0aca6b52141c31af9e7a0c09ed123cae8230e1743046384b4bd602849d5dd",
+    "src/browsertap_mcp/simphtml.py": "a7c6bafb2b06e2e6107ec2cdb185f665a7eb9347c9faa9cc295d6ca98d4ac24d",
 }
 
 _ROW_RE = re.compile(

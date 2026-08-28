@@ -6,6 +6,34 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.17] - 2026-08-26
+
+### Changed
+
+- The live suite now records user browser activity as `tab_activity` context
+  instead of skipping because a user opened, closed, navigated, or focused a
+  tab. It fails only when a tab owned by the suite remains open, and reports
+  whether the cause was a missing cleanup call or a lifecycle-generation
+  mismatch.
+- The release workflow now runs the shared Python and extension JavaScript lint
+  gate before tests and distribution builds, so a publish cannot pass on Python
+  checks while shipping invalid extension code.
+- Distribution validation now compares the installable package-file sets in the
+  wheel and source archive, rejecting stale build output that would make the two
+  release artifacts disagree.
+
+### Fixed
+
+- A failed or unsupported popup cookie refresh now clears the previous result,
+  so `Copy` cannot reuse credentials read from an earlier tab or page.
+- `mouse_click` requires `x` and `y` together, and `type_text` requires
+  `click_x` and `click_y` together. Half-specified pairs are rejected before
+  approval, activation, or input dispatch.
+- Desktop capture and virtual-screen probing use the supported `mss.mss()` factory,
+  keeping the desktop path compatible with current `mss` releases.
+
+## [0.4.16] - 2026-08-26
+
 ### Fixed
 
 - **`execute_js` no longer loses a collection it was not told about by name.** The
@@ -1145,7 +1173,9 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.15...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...HEAD
+[0.4.17]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.16...v0.4.17
+[0.4.16]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.15...v0.4.16
 [0.4.15]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...v0.4.15
 [0.4.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...v0.4.13
