@@ -14,7 +14,7 @@ A Model Context Protocol (MCP) server that drives **the real Chrome you are alre
 
 If what you need is a clean, disposable browser — headless, Docker, CI, Firefox or WebKit — this is the wrong tool and [playwright-mcp](https://github.com/microsoft/playwright-mcp) is the right one. See [When to use something else](#when-to-use-something-else).
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.19**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
 
 Physical input is gated, not casual: `resolve_leave_dialog` is one narrowly scoped path that can send Enter after two protocol attempts fail, `safe` asks before every physical action, and the default `lab` profile runs without elicitation while still enforcing the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
 

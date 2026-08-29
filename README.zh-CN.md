@@ -19,7 +19,7 @@
 合适的工具，[playwright-mcp](https://github.com/microsoft/playwright-mcp) 才是。见
 [什么时候该用别的](#什么时候该用别的)。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.19**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.20**。
 
 物理输入是有闸门的，不是随手就发：`resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理
 失败后才可能发送 Enter；`safe` profile 每次物理动作前询问；默认 `lab` profile 免询问执行，但同样

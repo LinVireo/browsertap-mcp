@@ -38,6 +38,14 @@ ORIGINAL_EXTENSION_FILES = frozenset(
     {
         "_locales/en/messages.json",
         "_locales/zh_CN/messages.json",
+        # Drawn here for the Chrome Web Store listing, which requires a 128x128
+        # icon inside the package. Upstream ships no image of any kind, so these
+        # borrow nothing; the generator that produced them is not part of the
+        # distribution.
+        "icon16.png",
+        "icon32.png",
+        "icon48.png",
+        "icon128.png",
     }
 )
 

@@ -6,6 +6,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.4.20] - 2026-08-29
+
+### Added
+
+- The packaged extension now ships its own icons (16, 32, 48 and 128 px) and
+  declares them in `manifest.json` for both the extension list and the toolbar
+  action. Chrome previously drew a generated placeholder, and the Chrome Web
+  Store requires a 128x128 icon inside the package, so this was the one code
+  prerequisite left for a store listing. The artwork is original; upstream
+  ships no image of any kind.
+
 ## [0.4.19] - 2026-08-29
 
 ### Fixed
@@ -1214,7 +1225,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...HEAD
+[0.4.20]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...v0.4.20
 [0.4.19]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...v0.4.19
 [0.4.18]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...v0.4.18
 [0.4.17]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.16...v0.4.17

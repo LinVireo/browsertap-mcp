@@ -75,7 +75,7 @@ MEASURED_AGAINST: dict[str, str] = {
     "src/browsertap_mcp/chrome_extension/background.js": "d98793bc567649594c9a32f8dad06e31a6d516a2e7a6cc58693138987a583e74",
     "src/browsertap_mcp/chrome_extension/content.js": "942d5df35bedba224c13db6930f2d07bccf554f7713c28885fd5f5b51f8a644d",
     "src/browsertap_mcp/chrome_extension/disable_dialogs.js": "1edc19d8a6a5bf0850cc0e8f2123fe799d80fb5b7afa578fa014586d7181970a",
-    "src/browsertap_mcp/chrome_extension/manifest.json": "a7394272189f6b0acd168dfbbc0196a624df8395c802df3e1cde8611df3d8758",
+    "src/browsertap_mcp/chrome_extension/manifest.json": "ff0cd455bb7741e036d51d16600aa3b1babcf1226a1b0fcc36b0d4b740582c17",
     "src/browsertap_mcp/chrome_extension/popup.html": "5fd4ea0d2351bd244d95c1ef9fc592864e4b839f8d7a70bc914ddf7bb71c95af",
     "src/browsertap_mcp/chrome_extension/popup.js": "82e0aca6b52141c31af9e7a0c09ed123cae8230e1743046384b4bd602849d5dd",
     "src/browsertap_mcp/simphtml.py": "a7c6bafb2b06e2e6107ec2cdb185f665a7eb9347c9faa9cc295d6ca98d4ac24d",
