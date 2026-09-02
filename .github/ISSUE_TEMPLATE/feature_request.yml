@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose a capability or a change to an existing one
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        BTAP has a deliberate scope: it operates the browser the user is already
+        running. Headless, CI, containers, Firefox, and WebKit are out of scope,
+        and so is defeating bot checks. A request that needs one of those is
+        better served by a different tool, and saying so early saves everyone
+        time. See the "when to use playwright-mcp instead" section in the
+        [README](../blob/main/README.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The task, not the API. What you currently do instead, and where it falls
+        short.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: >
+        If it is a new tool, what it takes and returns. If it changes an existing
+        one, name the tool and what changes for callers who depend on today's
+        behavior.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      options:
+        - A new MCP tool
+        - A change to an existing MCP tool
+        - Bridge or extension behavior
+        - Documentation or agent skill
+        - Packaging, install, or release
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: These are the boundaries the project holds; checking them is not a formality.
+      options:
+        - label: This works with the user's own already-running browser, not a launched or headless one.
+          required: true
+        - label: This does not aim to bypass, solve, or route around a bot check or CAPTCHA.
+          required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Including existing tools that nearly work. If `execute_js` or
+        `cdp_command` can already do this, say why a dedicated tool is better --
+        every added tool costs context in the agent's tool list.

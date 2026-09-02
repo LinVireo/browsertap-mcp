@@ -1,0 +1,111 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you paste anything: this tool drives your real browser
+        profile.** Screenshots, console dumps, network captures, and `scan_page`
+        output can all carry your cookies, tokens, and private page content.
+        Redact them, or use a synthetic page to reproduce.
+
+        Security vulnerabilities do not belong here. Use the private advisory
+        flow described in [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you called, what came back, and what you expected instead.
+      placeholder: |
+        Called `page_click` with selector "#submit" on a synthetic form page.
+        Returned status='no_response'. Expected the click to land.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: >
+        The tool calls in order, with a page anyone can reach. If it only
+        reproduces on a private page, say what that page does differently
+        (framed content, heavy SPA, websocket terminal, custom CSP) rather than
+        sharing the page.
+      placeholder: |
+        1. open_new_tab("https://example.com")
+        2. scan_page()
+        3. page_click(selector="...")
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: BTAP version
+      description: "`browsertap --version`, or the installed package version."
+      placeholder: 0.4.20
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      description: Chrome or Edge, and the exact version. Both can be connected at once; say which one the failing tab was in.
+      placeholder: Chrome 141.0.7390.55
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup-status
+    attributes:
+      label: get_setup_status output
+      description: >
+        This answers most of the questions a maintainer would otherwise have to
+        ask: whether the extension is attached, which bridge ports are live, and
+        whether remote mode is on. Redact the token if your build echoes one.
+      render: text
+
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Automation profile
+      description: "`BROWSERTAP_MODE`, or whatever `get_automation_profile` reports."
+      options:
+        - safe
+        - lab
+        - not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: preconditions
+    attributes:
+      label: Does it need any of these to reproduce?
+      description: Leave unchecked what does not apply.
+      options:
+        - label: A connected extension
+        - label: An authenticated `/link` request
+        - label: Physical input (mouse/keyboard at the OS level)
+        - label: A specific site that shows a bot check or challenge
+        - label: More than one browser connected at the same time
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Confirmation
+      options:
+        - label: I removed cookies, tokens, personal screenshots, and profile data from this report.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true
