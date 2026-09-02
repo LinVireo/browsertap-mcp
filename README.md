@@ -8,7 +8,7 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
 
-[Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
+[Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Privacy](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
 A Model Context Protocol (MCP) server that drives **the real Chrome you are already using — and the real desktop it sits on — without taking the screen away from you.** It attaches to your running browser through a Chrome extension and the Chrome DevTools Protocol, so logins, cookies, and open tabs are already there. Three things follow from being an extension on your own machine rather than a browser someone launched for automation: a *selected* tab is not a *foreground* tab, so page work runs in the tab you named while you keep using the screen; five tools send real OS-level mouse and keyboard input for the cases no protocol event reaches; and the whole `chrome.*` surface is in scope — extension management, bookmarks, scoped site-permission leases, downloads through Chrome's own manager with your profile's cookies.
 
@@ -27,6 +27,8 @@ with the Windows PowerShell paths and the config for every supported client.
 # 1. Install from PyPI into a virtual environment.
 python -m venv .venv && ./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
 ./.venv/bin/browsertap extension-path   # prints the directory step 2 needs
+
+# 2. Load that directory into Chrome by hand -- no command for this one; see below.
 
 # 3. Point your MCP client at that same executable (Claude Code shown).
 claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
@@ -81,7 +83,7 @@ it is the better tool for most jobs:
   HTML or text with `#r1`-style link refs instead, which is a different trade.
 - **A smaller default tool surface.** playwright-mcp ships roughly two dozen
   tools by default and puts the rest behind `--caps`. This server registers all
-  55 unconditionally.
+  56 unconditionally.
 
 What is left, and what this project is actually for:
 
@@ -457,8 +459,8 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
   - `url` (string), `session_id` (string, optional), `timeout` (number, optional): default `15`, `beforeunload` (string, optional): default `dismiss`, `intent_leave` (boolean, optional): `false` forces page preservation
 - **download_file** — download an HTTP(S) URL through Chrome's native download manager, using that browser profile's cookies and authenticated session. It waits by default and returns `status="completed"` plus a verified absolute `path`; interrupted downloads return `failed`, while a timeout or `wait=false` returns `in_progress` with `download_id`. An explicit `session_id` must still be live and is never replaced with another profile. Use this for attachments instead of page `fetch`.
   - `url` (string), `filename` (string, optional): relative download name, `directory` (string, optional): arbitrary absolute destination directory; creates parents, `wait` (boolean, optional): default `true`; `directory` requires `true`, `timeout` (number, optional): default 60 seconds, maximum 1800, `session_id` (string, optional): selects the browser profile, `overwrite` (boolean, optional): default `false`; an existing final destination raises an error unless explicitly `true`. If a directory download times out, `directory_applied=false`: the move is no longer tracked and Chrome may finish into its default download directory.
-- **open_new_tab** — open a background tab by default with a unique `operation_id` and wait a bounded time for exact session/generation registration; pass `active=true` only when foreground work is genuinely required. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates repeated requests with the same operation id. Ownership is registered only from a completed record containing the exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only says whether session-scoped tools can be used immediately. A pre-create registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after create dispatch, an unresolved ACK/reconciliation returns `status="unknown",may_have_created=true,retry_safe=false`. Keep its random `owner_id` capability and use it only for that task's cleanup. For an unresolved dispatched create, do not call `open_new_tab` again for the same request; retain `operation_id` as diagnostic/support evidence.
-  - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner)
+- **open_new_tab** — open a background tab by default with a unique `operation_id` and wait a bounded time for exact session/generation registration; pass `active=true` only when foreground work is genuinely required. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates repeated requests with the same operation id. Ownership is registered only from a completed record containing the exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only says whether session-scoped tools can be used immediately. A pre-create registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after create dispatch, an unresolved ACK/reconciliation returns `status="unknown",may_have_created=true,retry_safe=false`. Keep the returned `owner_id` capability and use it only for that task's cleanup. For an unresolved dispatched create, call `open_new_tab` again with the same `operation_id`, the returned `client_id`, and the same `owner_id`; that recovery call only reads the durable operation record and never replays `tabs/create`. If the record is not found, do not guess by URL or issue a replacement create.
+  - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner), `operation_id` (optional recovery handle), `client_id` (optional browser client selector for recovery)
 - **close_tabs** — *(no tab needed)* accept native numeric tab ids or full `client:tabId` session ids, including `chrome-extension://` tabs. The default `only_if_agent_owned=true` requires the `owner_id` returned by `open_new_tab` and verifies the current lifecycle generation before closing, so pre-existing user tabs and another agent's tabs are refused. If the user already closed an owned tab, cleanup returns `status=already_gone, closed_by=user` without reusing its native id. An actual owned close returns `closed_by=agent`; an explicit unowned/operator override returns `closed_by=none` so it is not counted as task-owned cleanup. Set `only_if_agent_owned=false` only when the operator explicitly asked to close an unowned/user tab.
   - `tab_id`, `session_id` (optional browser constraint), `owner_id` (required by the safe default), `only_if_agent_owned` (boolean, default `true`)
 </details>
@@ -474,8 +476,10 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
   - `url_pattern` (string): regex or substring to match against the URL, `timeout` (number, optional): default 15, `wait_ready` (boolean, optional): require `readyState === 'complete'`, default `true`, `session_id` (string, optional)
 - **scroll_page** — scroll and report the new position, so a long page can be read in passes.
   - `to` (string, optional): default `bottom`; also accepts `top`, a pixel offset, or a CSS selector to bring into view, `session_id` (string, optional), `timeout` (number, optional): default `15`
-- **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the shared default. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses the script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises; `no_response` reports `delivery_state` and `retry_safe`, and BTAP never replays an acknowledged script whose side effects may already have run.
-  - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`
+- **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the shared default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
+  - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`, `wait` (boolean, optional): default `true`
+- **get_execute_js_result** — read or briefly wait for one `execute_js` operation by `operation_id`. This is a read-only claim: it never replays the script. A completed result is consumed once; pending and unknown/expired handles return explicit statuses. Results are retained for 10 minutes. Large values use the same lossless `result_file` metadata as `execute_js`.
+  - `operation_id` (string), `timeout` (number, optional): default `0`, range `0`–`120`
 - **handle_dialog** — inspect or answer a dialog left open on a tab. `action="manual"` reports it without choosing (`blocked_by_dialog`, or `no_dialog` if nothing is open); `accept`/`dismiss` answer it and release any paused `execute_js` or `open_url`. `prompt_text` supplies the text for an accepted `prompt`.
   - `action` (string), `prompt_text` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `3`, capped at three seconds
 - **resolve_leave_dialog** — for an already-open shell/ttyd/IDE leave prompt: two protocol accepts, then physical Enter only when lab permits it.
@@ -608,32 +612,11 @@ Run `browsertap doctor` first. For connection, version, dialog,
 permission, and physical-input recovery procedures, see the dedicated
 [troubleshooting guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md).
 
-## Credits
-
-BTAP is maintained by `LinVireo`. The MIT copyright notice in
-[LICENSE](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE) is retained
-unchanged (`zhea`); maintenance and copyright attribution are distinct roles. The
-canonical public repository for this distribution is `LinVireo/browsertap-mcp`.
-
-The browser layer here began as
-[GenericAgent](https://github.com/lsdefine/GenericAgent)'s, and part of it still is.
-Thanks to that project and its author for the original implementation.
-
-Originally from GenericAgent:
-- `simphtml.py` -- still substantially upstream's file, extended here
-- `TMWebDriver.py` (now maintained as `browser_bridge.py`)
-- the `tmwd_cdp_bridge` Chrome extension resources
-
-GenericAgent is MIT-licensed, so its copyright notice has to reach anyone who
-receives a copy of this. It is reproduced in full, with a line-for-line
-measurement of how much of each file is still upstream's, in
-[THIRD-PARTY-NOTICES.md](https://github.com/LinVireo/browsertap-mcp/blob/main/THIRD-PARTY-NOTICES.md) -- which ships inside both the wheel and the
-sdist, not only in this repository. Everything else in this distribution -- the
-MCP tool surface, the bridge and its token authentication, the release evidence
-pipeline, the test suite, and both READMEs -- was written here.
-
-If you fork or redistribute this, keep both notices: `LICENSE` and that file.
-
 ## License
 
-MIT
+MIT — see [LICENSE](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE),
+which ships inside both the wheel and the sdist. Keep it if you fork or
+redistribute this.
+
+BTAP is maintained by `LinVireo`, and the canonical public repository for this
+distribution is `LinVireo/browsertap-mcp`.

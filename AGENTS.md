@@ -5,7 +5,7 @@ show on its own -- the traps that cost someone an afternoon. General coding
 style, the gate commands and the release flow live in
 [CONTRIBUTING.md](CONTRIBUTING.md) ([简体中文](CONTRIBUTING.zh-CN.md)).
 
-**What each tool does is not in this file.** The full parameter table for all 55
+**What each tool does is not in this file.** The full parameter table for all 56
 tools is the `## Tools` section of [README.md](README.md)
 ([简体中文](README.zh-CN.md)). That table is the single authoritative list; do
 not copy it here, it will go stale.
@@ -87,48 +87,38 @@ describes a build nobody has. `extension_build_enforced` is the usual
 `on_screen` / `input_quiet.enforced` shape: false means no comparison happened,
 so a caller must treat the answer as unknown and not as a pass.
 
-The first row of that table is a rule the code has to follow, not advice for the
-reader, and for three releases it did not. `reload_extension_required` OR-ed the
-version comparison in beside the verdict, so `matches_tree` could only ever add a
-reload demand and never withdraw one -- the strongest signal wired as a judge that
-can convict but not acquit. Because `versioning bump` rewrites `manifest.json` and
-Chrome parses it only at load time, **every release bump left the extension one
-version behind for the life of the install**, and `tests/live_preflight.py` reads
-that flag rather than the verdict and has no override. So a human click stood
-between each bump and any live evidence at all, and the click changed exactly one
-thing: the number the gate was complaining about. Measured at 0.4.18 -- bridge
-restarted to the new version, stamps equal, protocol equal, every capability
-present, `doctor` still exiting 1 with `action: reload_extension`.
+`matches_tree` is enforced in code, not advice. For three releases it was not:
+`reload_extension_required` OR-ed the version comparison in beside the verdict, so
+`matches_tree` could add a reload demand but never withdraw one. Every `versioning bump`
+rewrites `manifest.json` and Chrome only parses that at load time, so each bump left the
+extension one version behind for the life of the install -- and `tests/live_preflight.py`
+read that flag rather than the verdict, with no override, so each bump demanded a human
+Reload that changed only the number the gate complained about (measured at 0.4.18: bridge
+and stamps current, `doctor` still exiting 1 with `action: reload_extension`).
 
-The version number is now the fallback it always was: it decides whenever the
-stamp cannot (`unverifiable`, `stamp_not_regenerated`), because a weak signal beats
-none, and it yields when the stamp says `matches_tree`. Two things must survive an
-edit there. **Only the version number yields.** A worker whose JavaScript hashes to
-this tree while speaking a different protocol, or while missing a capability this
-tree requires, is a contradiction rather than a release-number gap, and folding
-those into the same yield would turn the strongest signal into a blanket excuse --
-`test_a_matching_stamp_does_not_excuse_a_protocol_or_capability_gap` fails if you
-do. And **the gap is still published**, with a note saying why no reload is needed:
-`healthy` sitting next to two different version numbers is otherwise a dead end,
-because nothing else in the payload says which one this process believed, and the
-true answer -- neither, it compared the code -- is not derivable from the rest.
+The version number is now only a fallback: it decides when the stamp cannot
+(`unverifiable`, `stamp_not_regenerated`) and yields when the stamp says `matches_tree`.
+Two things must survive an edit there. **Only the version number yields** -- a worker
+whose JavaScript matches this tree but speaks a different protocol, or misses a required
+capability, is a contradiction rather than a version gap; folding it in would turn the
+strongest signal into a blanket excuse, and
+`test_a_matching_stamp_does_not_excuse_a_protocol_or_capability_gap` fails if you do.
+**The version gap is still published**, with a note saying why no reload is needed --
+`healthy` beside two different version numbers is otherwise unexplained, and the true
+answer (the code was compared, not the numbers) is not derivable from the payload.
 
 There is a **fourth** kind of code the table above does not cover, and it is the
-one exception to "an edit needs a reload or a restart". The two files in
-`src/browsertap_mcp/page_scripts/` -- `page_outline.js` and `list_groups.js` --
-are **not** part of the extension. `simphtml.py` reads them off disk at import
-(`_load_page_script`) and `get_html` / `get_main_block` inject them through
-`execute_js` on **every call**, so an edit is live the moment the MCP server
-restarts (immediate on an editable install) with **no reload and no bridge
-restart**. That is the whole reason this layer was carved out of the extension:
-it is what decides *what the model sees of a page* (visibility analysis, the main
-content block), and iterating on it used to mean editing a `r'''...'''` literal
-inside `simphtml.py`, which no JavaScript tool could read. Do not move a page
-script into `chrome_extension/` to "keep the JS together"; you would trade a
-zero-friction edit for a manual Reload per iteration and hand it `chrome.*` APIs
-it must never call (a page script runs in the page, not the worker -- eslint's
-second config block gives it `globals.browser` only, so a stray `chrome.` fails
-`no-undef`).
+one exception to "an edit needs a reload or a restart": the two files in
+`src/browsertap_mcp/page_scripts/` -- `page_outline.js` and `list_groups.js` -- are
+**not** part of the extension. `simphtml.py` reads them off disk at import
+(`_load_page_script`) and `get_html` / `get_main_block` inject them through `execute_js`
+on **every call**, so an edit is live the moment the MCP server restarts: no reload, no
+bridge restart. That is why the layer exists at all -- it decides what the model sees of
+a page (visibility analysis, main content block), and iterating on it used to mean
+editing an `an r-string literal` literal inside `simphtml.py`. Do not move a page script into
+`chrome_extension/`: you trade a zero-friction edit for a manual Reload per iteration,
+and the page context must never call `chrome.*` (eslint's second config block gives it
+`globals.browser` only, so a stray `chrome.` fails `no-undef`).
 
 The one rule that must survive an edit to either file: the file ends with a bare
 reference to its entry point (`pageOutline;` / `listGroups;`), **never a call**.
@@ -280,19 +270,16 @@ answer is the proof. Two rules survive any change here:
   landed and let the caller check the page, exactly as the timeout path does.
 
 The quiet-input gate in front of these tools has the same shape a third time. It
-raises `input_activity_detected` only when a marker present in **both** samples
-changed, and the markers are a **Windows-only** last-input timestamp plus the
-pointer position -- unavailable under Wayland, in a headless container, and on
-macOS without the accessibility permission. All three missing means nothing to
-compare, so the gate was a bare `sleep()` that passed unconditionally and said
-nothing, on the machines least likely to be watched. It now returns a report and
-`run_physical_action` attaches it to the result as `input_quiet`. Two things must
-survive an edit: **a vacuous pass is reported, not refused** -- refusing would
-take physical input away from machines where pyautogui works fine, which is why
-this mirrors `on_screen` rather than `activation_failed`; and **`enforced` is
-computed from what was comparable in both samples**, so hardcoding it True puts
-the silence back. Never read a pass as "the desktop was idle" without checking
-that field.
+raises `input_activity_detected` only when a marker present in **both** samples changed,
+and the markers are **Windows-only** -- last-input timestamp plus pointer position,
+unavailable under Wayland, in a headless container, and on macOS without the
+accessibility permission. When nothing can be compared the gate used to be a bare
+`sleep()` that passed silently on exactly the machines nobody watches; it now returns a
+report, attached to the result as `input_quiet`. Two things must survive an edit: **a
+vacuous pass is reported, not refused** -- refusing would take physical input away from
+machines where pyautogui works fine, which is why this mirrors `on_screen` rather than
+`activation_failed`; and **`enforced` is computed from what was comparable in both
+samples** -- hardcoding it True puts the silence back.
 
 The same shape has a second half: a resolved element can be *found* and still not
 be the thing at that pixel. A cookie banner, a modal backdrop or a sticky header
@@ -531,118 +518,32 @@ the assertion turns flaky.
 
 - **Line endings are a correctness property here, not a formatting one.** The
   release seal hashes the *raw bytes* of every tracked file
-  (`evidence_manifest.source_identity`), so a CRLF working copy gives
-  `content_sha256` a value nobody else can reproduce -- not even from a clone
-  of the commit it names -- and nothing in the sealed record mentions line
-  endings, so the first reader to notice is a third party who cannot verify
-  it. Two tests in `tests/test_evidence_manifest.py` hold that down, and they
-  are not the same check. One asks **git** whether an `eol` attribute governs
-  every tracked path: `.gitattributes` is a single `* text=auto eol=lf` rule
-  because the suffix list it replaced had lost three times (`*.mjs`, `*.yml`
-  and `*.toml` appended late, `.yaml` never covered) and no suffix can cover
-  `LICENSE` or `.gitignore` at all -- measured at 0.4.15, five tracked paths
-  were ungoverned and a fresh clone of the sealed commit differed from the
-  worktree in three of them. The other fails if any tracked text file in the
-  worktree holds CRLF, because the attribute governs a *checkout* while a
-  local tool can undo it afterwards: `Path.write_text` translates on Windows,
-  which is how `check_derived_notices.py --write` did it to its own source and
-  how a `ruff format` with `line-ending = auto` did it to 21 files at once.
-  Neither test can be satisfied by the other, so do not fold them together.
+  (`evidence_manifest.source_identity`), so a CRLF working copy gives `content_sha256` a
+  value nobody can reproduce -- not even from a clone of the named commit. Two different
+  tests in `tests/test_evidence_manifest.py` hold this down. One asks **git** whether an
+  `eol` attribute governs every tracked path: `.gitattributes` is a single
+  `* text=auto eol=lf` rule because the suffix list it replaced kept losing (`*.mjs`,
+  `*.yml`, `*.toml` appended late; extensionless files like `LICENSE` uncoverable) --
+  measured at 0.4.15: five tracked paths ungoverned, clone vs worktree differing in
+  three. The other fails if any tracked text file in the worktree holds CRLF: the
+  attribute governs a *checkout*, but a local tool can undo it afterwards (Windows
+  `Path.write_text` translates on write; a `ruff format` with `line-ending = auto` once
+  did it to 21 files at once). Neither test can satisfy the other -- do not fold them.
 
-- **Editing a derived file is a two-step operation now.** Eight files here are
-  derived from GenericAgent, and `THIRD-PARTY-NOTICES.md` states line-for-line how
-  much of each upstream file survives. Those figures can only be measured against
-  an upstream checkout, which is not in this tree, so for three releases the only
-  automated question asked about them was whether `identical / total` matched the
-  stated percent. That is self-consistency, not truth, and it stayed green while
-  the table drifted: `7efc604` edited `simphtml.py` and `popup.js`, nothing
-  re-measured, and the notice shipped claiming `780 of 873` for a file that by
-  then matched 757. Editing one of the eight therefore means:
-
-  ```bash
-  git clone https://github.com/lsdefine/GenericAgent <dir>
-  python -m scripts.check_derived_notices --upstream <dir> --check   # what drifted
-  # correct the table from its output -- the rows are generated, never typed
-  python -m scripts.check_derived_notices --upstream <dir> --write   # record the hashes
-  ```
-
-  `--upstream` is mandatory rather than defaulted, for the same reason
-  `--check-installed-skills` refuses to run without a directory: a measurement
-  against a path that happens not to exist is worse than no measurement. What
-  makes the offline suite able to catch this at all is `MEASURED_AGAINST`, the
-  sha256 of each derived file as of the last measurement -- comparing that to the
-  tree needs nothing but the tree.
-
-  Two things about that hash are load-bearing, and both exist to stop the gate
-  from crying wolf, because a gate that goes red on noise is one people learn to
-  route around. It works on lines rather than bytes, so line endings cannot move
-  it: every tracked path is pinned to LF by `.gitattributes` -- one
-  `* text=auto eol=lf` rule, since the suffix list it replaced could not cover an
-  extensionless file -- but a tree that arrives another way is not, and a script
-  that round-trips a file through Python's text mode on Windows produces CRLF,
-  which is how 21 tracked files in this repository came to hold it at once. Note
-  which half does that work before simplifying either: reading in text mode
-  already collapses CRLF on the way in, and `splitlines()` drops it too, so the
-  property survives losing one of them and **no single-line change here can make
-  the CRLF test go red**. Measured with the same pair in
-  `tests/test_extension_build.py`.
-
-  The second is that it is **blind to exactly two generated lines**, and to no
-  others. `GENERATED_LINES` is that list, and both entries earn their place the
-  same way -- the line is written by a script here, and it does not exist upstream
-  at all, so it cannot be part of an `identical` count in either direction:
-
-  * `manifest.json`'s version string, which `versioning bump` rewrites on every
-    release. Upstream declares `"version": "2.0"` and every value this package can
-    hold is a `MAJOR.MINOR.PATCH` triple, so the line fails to match before the
-    bump and after it -- measured at 0.4.14 and 0.4.15, `29 of 40` both times.
-  * `background.js`'s `BTAP_BUILD` stamp, which `scripts.extension_stamp --write`
-    regenerates whenever *any* extension file changes. Without it, editing
-    `content.js` would demand a re-measure of `background.js` as well -- a file
-    nobody touched. The pattern is imported from
-    `browsertap_mcp.extension_build` rather than copied, because two copies would
-    drift and the symptom would be this gate going red on every regeneration.
-
-  Either exemption missing meant a release demanded a re-measure that needs an
-  upstream clone and could only return the same number. Nothing else may be
-  excluded, and that is asserted rather than trusted:
-  `test_the_notice_fingerprint_ignores_only_the_two_generated_lines` fails if
-  normalising touches any other line of any derived file, and it reads the set from
-  `GENERATED_LINES` rather than a list typed in the test, so adding a third
-  exemption is red rather than quiet. Each entry also has a partner test that fails
-  if a *real* edit to that same file leaves the hash alone.
-- **A reverse gate can only ask about the file set it was told about.** The check
-  that every derived file is credited enumerated `chrome_extension/`, which was
-  the whole derived set until the T0 refactor carved two files out of
-  `simphtml.py`'s string literals into `page_scripts/`. Those two held a higher
-  share of upstream's lines than anything except `popup.html` -- 76% and 85% of
-  their own content -- and shipped uncredited for three releases, invisible to the
-  one gate built to catch exactly that, because they arrived by a *refactor*
-  rather than a fork. Both were replaced outright in 0.4.15 and the files there
-  now are original, but the hole they went through was the enumeration, so that is
-  what changed: anything under `page_scripts/` is treated as derived unless it is
-  named in `ORIGINAL_PAGE_SCRIPTS`, which makes the next extraction a red gate
-  instead of a silent one. Adding a derived file outside those two directories
-  still means adding its directory to `_expected_derived_paths()` and its pair to
-  `DERIVED_PAIRS`.
-
-  The same directory caught a **second** gate the same way in the same release,
-  which is why this is stated as a shape and not as one file's history.
+- **A gate can only ask about the file set it was told about**, and browser-side code
+  now lives in two directories rather than one. Measured twice in the same release, both
+  times because a check enumerated `chrome_extension/` while `page_scripts/` had just
+  been carved out of `simphtml.py`'s string literals:
   `test_manifest_declares_the_chrome_floor_its_own_api_use_forces` derives
-  `minimum_chrome_version` from the APIs the browser-side code actually calls, and
-  it read `chrome_extension/*.js` -- the whole of that code until the page analysis
-  moved. So the highest floor in the tree (Chrome 121, for the
-  `Element.checkVisibility()` option names) sat in a directory the gate could not
-  see, and a manifest saying 111 read as verified. Both gates now assert their own
-  file set, so losing a directory is red rather than quiet. When you add
-  browser-side code in a third place, those two asserts are what will tell you.
-
-  One consequence of that replacement is worth knowing before you read the notice:
-  every upstream file has exactly one heir here again, so the table's rows are
-  independent. While three of them shared `simphtml.py` as an ancestor **their
-  numerators overlapped and could not be summed**; `family_total()` walks upstream
-  line *indices* so each counts once, and it is still called because a future
-  split would recreate the overlap.
+  `minimum_chrome_version` from the browser APIs actually called and read
+  `chrome_extension/*.js` only, so the tree's highest floor (Chrome 121, for the
+  `Element.checkVisibility()` option names) sat outside what the gate could see while the
+  manifest said 111; and `extension_build`'s digest walks the whole directory rather than
+  a list of names for the same reason. Both gates assert their own file sets now, which is
+  what will catch browser-side code added in a third place --
+  `test_no_browser_side_file_ships_without_the_suite_knowing` compares
+  `SHIPPED_EXTENSION_FILES` to the directory in both directions, so a new file there is a
+  red gate rather than a silent arrival.
 
 ## 9. Machine-specific notes
 

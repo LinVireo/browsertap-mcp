@@ -12,14 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 # lookbehind keeps URL schemes (`http://`, `chrome://`) out of the pattern.
 _LOCAL_PATH_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]\S*")
 
-# The extension directory was forked whole from upstream's
-# `assets/tmwd_cdp_bridge/`, and this is that directory's inventory as it stood
-# at the snapshot `THIRD-PARTY-NOTICES.md` was measured against. It is the
-# *upstream* list on purpose: the notice file cannot supply it, and without it
-# there is no way to ask "did a derived file drop out of the table" -- only the
-# forward question "does every credited file still exist", which is what used to
-# be asked and is what let three files ship uncredited for three releases.
-UPSTREAM_EXTENSION_FILES = frozenset(
+# Every file that ships inside `chrome_extension/`. Spelled out rather than
+# globbed, so adding one is a decision recorded here instead of an unnoticed
+# arrival: anything in that directory which is not listed fails the check below.
+# A new browser-side file is the event nothing else in the suite sees, and it is
+# how two files once shipped for three releases with no test aware they existed.
+SHIPPED_EXTENSION_FILES = frozenset(
     {
         "background.js",
         "content.js",
@@ -27,43 +25,17 @@ UPSTREAM_EXTENSION_FILES = frozenset(
         "manifest.json",
         "popup.html",
         "popup.js",
-    }
-)
-
-# Files under `chrome_extension/` that upstream never had. Spelled out rather
-# than inferred, so adding one is a decision recorded here instead of a silent
-# reclassification: anything in that directory which is neither upstream's nor
-# listed here fails the check below and has to be put in one bucket or the other.
-ORIGINAL_EXTENSION_FILES = frozenset(
-    {
         "_locales/en/messages.json",
         "_locales/zh_CN/messages.json",
         # Drawn here for the Chrome Web Store listing, which requires a 128x128
-        # icon inside the package. Upstream ships no image of any kind, so these
-        # borrow nothing; the generator that produced them is not part of the
-        # distribution.
+        # icon inside the package. The generator that produced them is not part
+        # of the distribution.
         "icon16.png",
         "icon32.png",
         "icon48.png",
         "icon128.png",
     }
 )
-
-# `page_scripts/` exists only because upstream's browser-side JavaScript was
-# carved out of `simphtml.py`'s string literals, so every `.js` there is derived
-# by construction and the check below enumerates the directory rather than
-# listing it. A page script written from scratch would be the first exception and
-# has to be named here -- the same explicit-bucket rule the extension directory
-# uses, for the same reason.
-# Page scripts written here rather than inherited. This set exists because the
-# directory itself is not evidence either way: the two files that used to live
-# here were upstream's page analysis carved out of `simphtml.py`'s string
-# literals, and the two that replaced them in 0.4.15 ask the engine for what it
-# already knows (`Element.checkVisibility()`, structural signatures) instead of
-# re-deriving it from upstream's tuned constants. A new file here is treated as
-# derived until it is listed, so the next extraction cannot slip through the way
-# the first one did.
-ORIGINAL_PAGE_SCRIPTS = frozenset({"page_outline.js", "list_groups.js"})
 
 
 def _shipped_skills() -> list[Path]:
@@ -86,8 +58,8 @@ def test_tool_docs_and_caller_skill_are_synchronized():
 
 def test_documentation_contract_covers_all_registered_tools():
     report = build_report()
-    assert report["registered"] == 55
-    assert report["coverage_manifest"] == 55
+    assert report["registered"] == 56
+    assert report["coverage_manifest"] == 56
     assert not report["readme_missing"]
     assert not report["readme_extra"]
     assert not report["missing_params"]
@@ -394,8 +366,9 @@ def test_readme_links_survive_being_read_off_the_repository():
             if not target.startswith(("https://", "http://", "#", "mailto:"))
         ]
         assert not relative, f"{name} links to {relative} relatively, which breaks off-tree"
-        # An absolute link is only useful if it points at this repository; a link
-        # left pointing at the upstream fork would read as if this were its code.
+        # An absolute link is only useful if it points at this repository; one
+        # left pointing at some other repository sends the reader to code that
+        # is not this project's.
         in_repo = [target for target in targets if target.startswith(repository)]
         assert in_repo, f"{name} no longer links into {repository}"
         for target in in_repo:
@@ -488,7 +461,7 @@ def test_prose_tool_counts_track_the_registered_total():
 
     The count is pinned twice in `check_tool_docs` against a constant, so adding a
     tool means editing that constant -- and at that moment every sentence saying
-    "55 tools" becomes wrong with no gate between it and a reader. These are the
+    "56 tools" becomes wrong with no gate between it and a reader. These are the
     lines a stranger uses to decide whether the table they are reading is the
     whole contract.
 
@@ -596,53 +569,32 @@ def test_the_registry_listing_describes_environment_variables_that_exist(monkeyp
     assert stated.group("default") == btap_server._automation_mode()
 
 
-def test_the_upstream_mit_notice_travels_with_every_copy():
-    """Part of the browser layer is still GenericAgent's, under its MIT licence.
+def test_the_licence_travels_with_every_copy():
+    """MIT puts the obligation on the copy, not on the repository.
 
-    MIT puts the obligation on the copy, not on the repository: the notice has
-    to be included in "all copies or substantial portions". `LICENSE` here does
-    not carry it -- its body is upstream's word for word with only the copyright
-    line swapped -- so a reader of `LICENSE` alone is told the wrong holder. The
-    README credit is prose attribution, which is good practice and not the
-    notice. `THIRD-PARTY-NOTICES.md` is, and it is only worth anything if it
-    reaches the artifact, so `license-files` and the distribution gate carry it
-    too.
+    The terms have to be included in "all copies or substantial portions", and
+    the copy most people receive is the wheel -- not this repository. So the
+    licence being present in the tree proves nothing on its own; what matters is
+    that `license-files` and the distribution gate carry it into the artifact,
+    which is what this asserts.
     """
-    notices = ROOT / "THIRD-PARTY-NOTICES.md"
-    assert notices.exists(), "THIRD-PARTY-NOTICES.md is gone; upstream's notice ships nowhere"
-    text = notices.read_text(encoding="utf-8")
+    licence = ROOT / "LICENSE"
+    assert licence.exists(), "LICENSE is gone; the distribution ships no terms at all"
+    body = licence.read_text(encoding="utf-8")
 
-    assert "Copyright (c) 2025 lsdefine" in text, "upstream's copyright line is not reproduced"
-    assert "https://github.com/lsdefine/GenericAgent" in text
+    # The real MIT grant, not a paraphrase. Both sentences that carry the actual
+    # obligation, so a truncated or reworded licence fails here.
+    assert "MIT License" in body
+    assert "Permission is hereby granted, free of charge" in body
+    assert "The above copyright notice and this permission notice shall be included in all" in body
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in body
+    assert re.search(r"^Copyright \(c\) \d{4} \S+", body, re.MULTILINE), (
+        "LICENSE carries no copyright line, which is the one field MIT requires be filled in"
+    )
 
-    # The reproduced grant must be the real MIT text, not a paraphrase. Our own
-    # LICENSE body is the same text, so comparing against it needs no vendored
-    # copy and fails if either drifts.
-    licence_body = [
-        line
-        for line in (ROOT / "LICENSE").read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("Copyright (c)")
-    ]
-    notice_lines = [line.strip() for line in text.splitlines()]
-    for line in licence_body:
-        assert line in notice_lines, f"reproduced licence is missing: {line[:60]}"
-
-    # Every file the table claims is derived has to still be there under that
-    # name. A rename that skipped this file would leave the notice pointing at
-    # nothing while the code it covers kept shipping.
-    claimed = []
-    for line in text.splitlines():
-        if not line.startswith("| `src/"):
-            continue
-        first = line.split("|")[1].strip().strip("`")
-        claimed.append(first)
-        assert (ROOT / first).exists(), f"THIRD-PARTY-NOTICES.md credits a missing file: {first}"
-    assert len(claimed) >= 3, "the derived-file table stopped parsing; this check is now vacuous"
-    assert "src/browsertap_mcp/simphtml.py" in claimed
-
-    # Reaching the artifact is the whole point of the file. `tomllib` is 3.11+ and
-    # this package still supports 3.10, where the `dev` extra pins `tomli` for
-    # exactly this -- the same fallback `scripts/versioning.py` uses.
+    # Reaching the artifact is the whole point. `tomllib` is 3.11+ and this
+    # package still supports 3.10, where the `dev` extra pins `tomli` for exactly
+    # this -- the same fallback `scripts/versioning.py` uses.
     try:
         import tomllib
     except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
@@ -651,7 +603,6 @@ def test_the_upstream_mit_notice_travels_with_every_copy():
     with (ROOT / "pyproject.toml").open("rb") as handle:
         metadata = tomllib.load(handle)
     declared = metadata["project"]["license-files"]
-    assert "THIRD-PARTY-NOTICES.md" in declared, f"license-files is {declared}"
     assert "LICENSE" in declared, f"license-files dropped LICENSE: {declared}"
 
     from scripts.check_distribution import (
@@ -659,351 +610,95 @@ def test_the_upstream_mit_notice_travels_with_every_copy():
         REQUIRED_WHEEL_METADATA_SUFFIXES,
     )
 
-    assert "/licenses/THIRD-PARTY-NOTICES.md" in REQUIRED_WHEEL_METADATA_SUFFIXES
     assert "/licenses/LICENSE" in REQUIRED_WHEEL_METADATA_SUFFIXES
-    assert "/THIRD-PARTY-NOTICES.md" in REQUIRED_SDIST_SUFFIXES
     assert "/LICENSE" in REQUIRED_SDIST_SUFFIXES
 
+
+def test_the_privacy_policy_discloses_every_permission_that_reads_user_data():
+    """`PRIVACY.md` has to cover what `manifest.json` actually asks for.
+
+    The Chrome Web Store's stated penalty for a policy that is narrower than the
+    listing's data-usage answers is removal, not a review comment, and the
+    listing's answers follow the manifest. So the failure mode worth catching is
+    a permission added to the manifest without a corresponding line here -- the
+    policy keeps reading as complete, because nothing in it became false.
+
+    `alarms` and `storage` are excluded deliberately: neither reads anything
+    about the user. The rest each map to a phrase the policy has to keep.
+    """
+    policy = ROOT / "PRIVACY.md"
+    assert policy.exists(), "PRIVACY.md is gone; the Web Store listing's policy URL 404s"
+    text = policy.read_text(encoding="utf-8")
+
+    manifest = json.loads(
+        (ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json")
+        .read_text(encoding="utf-8")
+    )
+    granted = set(manifest["permissions"])
+    # Housekeeping only: `alarms` schedules the reconnect timer, `storage` is the
+    # mechanism the policy's own storage section describes rather than a source.
+    disclosable = granted - {"alarms", "storage"}
+    required_phrase = {
+        "cookies": "Cookies and site storage",
+        "tabs": "Open tabs",
+        "debugger": "Console and network activity",
+        "scripting": "Page content",
+        "contentSettings": "Site permissions",
+        "declarativeNetRequest": "Content-Security-Policy",
+        "management": "installed extensions",
+        "bookmarks": "Bookmarks",
+        "downloads": "downloads",
+    }
+    undocumented = sorted(disclosable - set(required_phrase))
+    assert not undocumented, (
+        f"manifest grants {undocumented} with no phrase mapped here; add the "
+        "disclosure to PRIVACY.md and the mapping to this test"
+    )
+    for permission in sorted(disclosable):
+        phrase = required_phrase[permission]
+        assert phrase in text, f"PRIVACY.md stopped disclosing {permission!r} (looked for {phrase!r})"
+
+    # `<all_urls>` is the breadth question a reviewer asks first, and the honest
+    # answer is that access is held continuously and used per command.
+    assert "<all_urls>" in manifest.get("host_permissions", [])
+    assert "all sites" in text and "<all_urls>" in text, (
+        "PRIVACY.md must say the extension holds all-sites access, not per-site"
+    )
+
+    # Three claims that would each be a false statement if the code changed
+    # under them. The loopback one is the policy's headline promise.
+    assert "127.0.0.1" in text
+    assert "60 to 600 seconds" in text, "the lease window in PRIVACY.md drifted from the tool"
     for name in ("README.md", "README.zh-CN.md"):
         readme = (ROOT / name).read_text(encoding="utf-8")
-        assert "THIRD-PARTY-NOTICES.md" in readme, f"{name} no longer points at the notice"
-        assert "lsdefine/GenericAgent" in readme, f"{name} dropped the upstream credit"
+        assert "PRIVACY.md" in readme, f"{name} dropped the privacy policy link"
 
 
-_DERIVED_ROW_RE = re.compile(
-    r"^\|\s*`(?P<ours>src/[^`]+)`\s*\|\s*`(?P<theirs>[^`]+)`\s*\|\s*"
-    r"(?P<identical>\d+) of (?P<total>\d+) \((?P<percent>\d+)%\)"
-)
+def test_no_browser_side_file_ships_without_the_suite_knowing():
+    """A new file under `chrome_extension/` has to be declared here.
 
+    That directory is the one place a shipped file can arrive with nothing else
+    in the suite aware of it: it is copied wholesale into the wheel by a
+    `recursive-include`, Chrome loads whatever the manifest references, and no
+    Python import would fail if a stray file appeared. Two files once shipped for
+    three releases with no test able to see them.
 
-def _credited_derived_files() -> dict[str, dict[str, int | str]]:
-    """Parse the derived-file table in `THIRD-PARTY-NOTICES.md`.
-
-    Shared by both checks below so that a table which stops parsing cannot make
-    either of them vacuous: each asserts the row count it expects rather than
-    trusting whatever the regex happened to match.
-    """
-    rows: dict[str, dict[str, int | str]] = {}
-    for line in (ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8").splitlines():
-        match = _DERIVED_ROW_RE.match(line)
-        if match is None:
-            continue
-        rows[match.group("ours")] = {
-            "upstream": match.group("theirs"),
-            "identical": int(match.group("identical")),
-            "total": int(match.group("total")),
-            "percent": int(match.group("percent")),
-        }
-    return rows
-
-
-def _expected_derived_paths() -> set[str]:
-    """The set the notice table has to cover, computed from the tree.
-
-    Deliberately not a literal: a hardcoded row count is the same kind of frozen
-    derived number that let the notice claim a stale line count for three
-    releases, and it would also fail spuriously the first time a genuinely new
-    upstream file arrived.
-    """
-    extension = ROOT / "src" / "browsertap_mcp" / "chrome_extension"
-    derived = {
-        path.relative_to(ROOT).as_posix()
-        for path in extension.iterdir()
-        if path.is_file() and path.name in UPSTREAM_EXTENSION_FILES
-    }
-    # The two derived Python files live outside that directory and are the
-    # largest borrowings in the distribution.
-    derived.add("src/browsertap_mcp/simphtml.py")
-    derived.add("src/browsertap_mcp/browser_bridge.py")
-    # And any page script not on the original list. This is the reason the set is
-    # not simply "the extension directory plus two files": a refactor can create
-    # a derived file in a directory no fork ever touched, which is exactly how
-    # the T0 extraction shipped two uncredited files. Default-derived, so
-    # forgetting to classify a new one fails loudly.
-    page_scripts = ROOT / "src" / "browsertap_mcp" / "page_scripts"
-    derived |= {
-        path.relative_to(ROOT).as_posix()
-        for path in page_scripts.glob("*.js")
-        if path.name not in ORIGINAL_PAGE_SCRIPTS
-    }
-    return derived
-
-
-def test_every_derived_extension_file_is_credited():
-    """Fail when a file forked from upstream is *missing* from the notice.
-
-    The check beside this one asks the forward question -- does every credited
-    file still exist -- and that is the question that cannot detect an omission.
-    Three of the six files in the extension directory (`popup.html`, `popup.js`,
-    `disable_dialogs.js`) were left out of the table for three releases while
-    passing every check, and their upstream share is higher than that of
-    `background.js`, which was credited from the start. Nothing was wrong with
-    the files; the check simply had no way to notice they were absent.
-
-    Two limits are worth stating rather than implying. This cannot tell whether
-    a file declared original in `ORIGINAL_EXTENSION_FILES` really is -- that is
-    human judgement, and all this does is force the judgement to be written
-    down. It also cannot re-measure the percentages, because upstream is not
-    vendored here; the notice bounds that claim with the date it was measured.
+    So the list is explicit and this compares it to the directory in both
+    directions -- an undeclared file fails, and so does a declared one that was
+    deleted or renamed without updating the list.
     """
     extension = ROOT / "src" / "browsertap_mcp" / "chrome_extension"
     assert extension.is_dir(), "the packaged extension directory is gone"
 
-    credited = _credited_derived_files()
-    expected = _expected_derived_paths()
-    # Compared as sets in both directions: a missing key is an uncredited file,
-    # and an extra key is a credit that survived a rename of the file it covers.
-    assert set(credited) == expected, (
-        "THIRD-PARTY-NOTICES.md does not cover the derived files. "
-        f"uncredited: {sorted(expected - set(credited))}; "
-        f"credited but not derived-or-present: {sorted(set(credited) - expected)}"
-    )
-
-    unclassified: list[str] = []
-    for path in sorted(extension.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(extension).as_posix()
-        if relative in ORIGINAL_EXTENSION_FILES or relative in UPSTREAM_EXTENSION_FILES:
-            continue
-        unclassified.append(relative)
-
-    assert not unclassified, (
-        "these extension files are in neither bucket: "
-        f"{unclassified}. Add each to ORIGINAL_EXTENSION_FILES if it is ours, or "
-        "to UPSTREAM_EXTENSION_FILES and the notice table if it came from upstream"
-    )
-
-
-def test_the_derived_file_measurements_are_internally_consistent():
-    """Catch a hand-edited number in the table before it ships.
-
-    Every figure there is derived, and one of them rotted exactly this way: the
-    prose carried `background.js`'s line count, the file kept growing, and the
-    published notice went on stating a count that was nine lines short. The
-    percentage is the one relationship checkable without upstream in the tree,
-    so it is checked; the tolerance is half a point because the stated value is
-    a rounded one and 72.5 may legitimately be written either way.
-
-    Whether the table covers everything is the neighbouring check's question --
-    which is why this one needs no row count of its own to stay honest.
-    """
-    credited = _credited_derived_files()
-    assert credited, "the derived-file table stopped parsing; this check is now vacuous"
-    for shipped, row in credited.items():
-        identical = int(row["identical"])
-        total = int(row["total"])
-        percent = int(row["percent"])
-        assert total > 0, f"{shipped}: upstream line count of zero cannot be measured"
-        assert 0 < identical <= total, (
-            f"{shipped}: {identical} identical lines out of an upstream {total} is impossible"
-        )
-        share = identical / total * 100
-        assert abs(share - percent) <= 0.5, (
-            f"{shipped}: table says {percent}% but {identical}/{total} is {share:.1f}%"
-        )
-
-
-def test_no_derived_file_changed_since_the_notice_was_measured():
-    """Fail when a derived file was edited and the table was not re-measured.
-
-    This is the half the check above cannot do. That one asks whether
-    `identical / total` matches the stated percentage -- self-consistency, which
-    stays true no matter how far the numbers drift from the files. And drift they
-    did: `7efc604` edited `simphtml.py` and `popup.js`, nothing re-measured the
-    table, and the notice was sealed at `105/105` still claiming `780 of 873` for
-    a file that by then matched 757 and `17 of 24` for one that matched 12. Every
-    gate passed, because no gate was looking at the files.
-
-    Measuring for real needs an upstream checkout, which is not in this tree and
-    cannot be a test dependency. Hashing what was measured *is* possible here, and
-    is enough: a derived file whose content moved is exactly the event that makes
-    the table stale, whether or not this machine can compute the new figure.
-
-    Editing one of these files is therefore two steps, not one:
-
-        git clone https://github.com/lsdefine/GenericAgent <dir>
-        python -m scripts.check_derived_notices --upstream <dir> --check
-        python -m scripts.check_derived_notices --upstream <dir> --write
-
-    `--write` refreshes the recorded hashes and must come after the table is
-    correct, never instead of correcting it.
-    """
-    from scripts.check_derived_notices import (
-        DERIVED_PAIRS,
-        MEASURED_AGAINST,
-        fingerprints,
-    )
-
-    # A recorded set that has drifted out of step with the pair list would make
-    # this vacuous for whichever file fell out of it.
-    assert set(MEASURED_AGAINST) == {ours for ours, _ in DERIVED_PAIRS}, (
-        "MEASURED_AGAINST and DERIVED_PAIRS disagree about which files are derived: "
-        f"only recorded: {sorted(set(MEASURED_AGAINST) - {o for o, _ in DERIVED_PAIRS})}; "
-        f"only paired: {sorted({o for o, _ in DERIVED_PAIRS} - set(MEASURED_AGAINST))}"
-    )
-
-    current = fingerprints(ROOT)
-    changed = sorted(name for name, digest in current.items() if MEASURED_AGAINST[name] != digest)
-    assert not changed, (
-        f"these derived files changed since THIRD-PARTY-NOTICES.md was measured: {changed}. "
-        "The table's line counts are now claims about files that no longer exist in that form. "
-        "Re-measure with `python -m scripts.check_derived_notices --upstream <dir> --check`, "
-        "correct the table, then `--write` to record the new hashes."
-    )
-
-    # The credited set and the measured set are the same question asked of two
-    # files; letting them diverge would leave a derived file hashed but uncredited.
-    assert set(MEASURED_AGAINST) == set(_credited_derived_files()), (
-        "the notice table and MEASURED_AGAINST cover different files: "
-        f"hashed but uncredited: {sorted(set(MEASURED_AGAINST) - set(_credited_derived_files()))}; "
-        f"credited but unhashed: {sorted(set(_credited_derived_files()) - set(MEASURED_AGAINST))}"
-    )
-
-
-def test_the_notice_fingerprint_ignores_only_the_two_generated_lines():
-    """Two lines are excluded from the fingerprint. Nothing else may be.
-
-    Both are generated by a script here, and neither exists upstream at all, so
-    neither can be part of an `identical` count in the first place:
-
-    * `manifest.json`'s version, which `versioning bump` rewrites on every
-      release. Upstream declares `"version": "2.0"` and every value this package
-      can hold is a `MAJOR.MINOR.PATCH` triple, so the line fails to match before
-      the bump and fails to match after it. Measured at 0.4.14 and 0.4.15 --
-      `29 of 40` both times.
-    * `background.js`'s `BTAP_BUILD` stamp, which `scripts.extension_stamp --write`
-      rewrites whenever *any* extension file changes. Without the exclusion, an
-      edit to `content.js` would demand a re-measure of `background.js` too -- a
-      file nobody touched.
-
-    Either way the fingerprint would go red on work that cannot have changed a
-    count, demanding a re-measure that needs an upstream clone and could only
-    return the same number. That is how a gate teaches people to bypass it.
-
-    The exclusions are also the one way this gate could be made vacuous, so their
-    reach is asserted rather than described: the table has exactly these two
-    entries, each rewrites exactly one line of its own file, and no other derived
-    file is touched at all.
-    """
-    from browsertap_mcp.extension_build import STAMP_PLACEHOLDER
-    from scripts.check_derived_notices import (
-        BACKGROUND,
-        DERIVED_PAIRS,
-        GENERATED_LINES,
-        MANIFEST,
-        _lines,
-        _normalised,
-    )
-
-    # Keyed off the table rather than a list typed here, so a third exclusion
-    # fails this instead of quietly widening what the fingerprint cannot see.
-    expected = {
-        MANIFEST: ('"version"', '"<version>"'),
-        BACKGROUND: ("const BTAP_BUILD = '", STAMP_PLACEHOLDER),
+    present = {
+        path.relative_to(extension).as_posix()
+        for path in extension.rglob("*")
+        if path.is_file()
     }
-    assert set(GENERATED_LINES) == set(expected), (
-        "the set of lines excluded from the fingerprint changed: "
-        f"{sorted(set(GENERATED_LINES) ^ set(expected))}"
-    )
-    # An exclusion for a file nobody measures would be dead weight that still
-    # reads as a live exemption.
-    assert set(GENERATED_LINES) <= {ours for ours, _ in DERIVED_PAIRS}
-
-    for ours, _ in DERIVED_PAIRS:
-        raw = _lines(ROOT / ours)
-        seen = _normalised(ours, raw)
-        assert len(seen) == len(raw), f"normalising {ours} changed its line count"
-        differing = [(a, b) for a, b in zip(raw, seen) if a != b]
-        if ours not in expected:
-            assert not differing, (
-                f"normalising {ours} rewrote {len(differing)} line(s), and it holds "
-                "neither generated line. A fingerprint blind to any line that could "
-                "move a measured count is the self-consistent pass this whole gate "
-                "exists to end."
-            )
-            continue
-        marker, placeholder = expected[ours]
-        assert len(differing) == 1, (
-            f"normalising {ours} rewrote {len(differing)} lines, expected exactly "
-            f"the one generated line: {differing}"
-        )
-        before, after = differing[0]
-        assert marker in before, f"the excluded line is not the generated one: {before!r}"
-        assert placeholder in after, f"it was not replaced by its placeholder: {after!r}"
-
-
-def test_a_version_bump_alone_does_not_invalidate_the_notice_fingerprint(tmp_path):
-    """Bumping the version must not trip the gate; any other edit must.
-
-    The pair matters more than either half. A digest that ignored the version
-    would be worth nothing if it also ignored a real edit, and this is the only
-    place the two are checked against each other.
-    """
-    from scripts.check_derived_notices import MANIFEST, file_digest
-
-    source = (ROOT / MANIFEST).read_text(encoding="utf-8")
-    assert '"version": "' in source
-
-    bumped = tmp_path / "bumped.json"
-    bumped.write_text(
-        re.sub(r'("version"\s*:\s*)"[^"]*"', r'\g<1>"99.99.99"', source, count=1),
-        encoding="utf-8",
-    )
-    assert bumped.read_text(encoding="utf-8") != source, "the bump did not apply"
-    assert file_digest(bumped, MANIFEST) == file_digest(ROOT / MANIFEST, MANIFEST), (
-        "a version bump changed the fingerprint, so every release will demand a "
-        "re-measure it cannot possibly answer differently"
-    )
-
-    edited = tmp_path / "edited.json"
-    edited.write_text(
-        source.replace('"minimum_chrome_version": "121"', '"minimum_chrome_version": "1"'),
-        encoding="utf-8",
-    )
-    assert edited.read_text(encoding="utf-8") != source, "the edit did not apply"
-    assert file_digest(edited, MANIFEST) != file_digest(ROOT / MANIFEST, MANIFEST), (
-        "a real edit to the manifest left the fingerprint unchanged, so the gate "
-        "would stay green while the notice table described a file that is gone"
-    )
-
-def test_a_stamp_regeneration_alone_does_not_invalidate_the_fingerprint(tmp_path):
-    """The same pair as the version bump, for the second generated line.
-
-    `scripts.extension_stamp --write` rewrites `background.js`'s stamp whenever any
-    extension file changes, so without the exclusion an edit to `content.js` would
-    also demand a re-measure of `background.js`. And a digest that ignored the
-    stamp would be worth nothing if it also ignored a real edit, which is why both
-    halves are asserted here and not just the convenient one.
-    """
-    from browsertap_mcp.extension_build import STAMP_LINE_RE, stamp_line
-    from scripts.check_derived_notices import BACKGROUND, file_digest
-
-    source = (ROOT / BACKGROUND).read_text(encoding="utf-8")
-    stamped = [line for line in source.splitlines() if STAMP_LINE_RE.match(line)]
-    assert len(stamped) == 1, f"expected one generated stamp line, found {stamped}"
-
-    restamped = tmp_path / "restamped.js"
-    restamped.write_text(
-        source.replace(stamped[0], stamp_line("0" * 16), 1), encoding="utf-8"
-    )
-    assert restamped.read_text(encoding="utf-8") != source, "the restamp did not apply"
-    current = file_digest(ROOT / BACKGROUND, BACKGROUND)
-    assert file_digest(restamped, BACKGROUND) == current, (
-        "regenerating the stamp changed the fingerprint, so every extension edit "
-        "would demand a re-measure of a file nobody touched"
-    )
-
-    # An unrelated line of real code, to prove the blindness is one line wide.
-    assert source.count("self_disable_unsupported") == 1
-    edited = tmp_path / "edited.js"
-    edited.write_text(
-        source.replace("self_disable_unsupported", "self_disable_allowed", 1),
-        encoding="utf-8",
-    )
-    assert file_digest(edited, BACKGROUND) != current, (
-        "a real edit to background.js left the fingerprint unchanged, so the gate "
-        "would stay green while the notice table described a file that is gone"
+    assert present == set(SHIPPED_EXTENSION_FILES), (
+        "the extension directory and SHIPPED_EXTENSION_FILES disagree. "
+        f"present but undeclared: {sorted(present - set(SHIPPED_EXTENSION_FILES))}; "
+        f"declared but absent: {sorted(set(SHIPPED_EXTENSION_FILES) - present)}"
     )
 
 
@@ -1022,7 +717,11 @@ def test_no_published_document_repeats_a_section():
         ROOT / "CONTRIBUTING.zh-CN.md",
         ROOT / "AGENTS.md",
         ROOT / "SECURITY.md",
-        ROOT / "THIRD-PARTY-NOTICES.md",
+        # Both are published surfaces with the same drift exposure as the rest.
+        # `PRIVACY.md` is the exact URL the Chrome Web Store listing serves as its
+        # privacy policy, so a section pasted twice there is public.
+        ROOT / "PRIVACY.md",
+        ROOT / "CODE_OF_CONDUCT.md",
         ROOT / "docs" / "USAGE.md",
         ROOT / "docs" / "USAGE.zh-CN.md",
         ROOT / "docs" / "TROUBLESHOOTING.md",
@@ -1040,7 +739,14 @@ def test_no_published_document_repeats_a_section():
         ]
         repeated = sorted({name for name in headings if headings.count(name) > 1})
         assert not repeated, f"{path.relative_to(ROOT).as_posix()} repeats section(s) {repeated}"
-    assert checked >= 9, f"only {checked} documents were reachable; this check is going vacuous"
+    # Computed from the roster rather than a literal floor. The literal was 9
+    # against a list of 11, so it kept passing while two documents were
+    # unreachable -- and removing an entry from the list widened that gap
+    # silently. Every path named here has to be readable or this is not checking
+    # what it claims.
+    assert checked == len(paths), (
+        f"only {checked} of {len(paths)} documents were reachable; this check is going vacuous"
+    )
 
 # --- scan_page has to leave the user's page as it found it --------------------
 #

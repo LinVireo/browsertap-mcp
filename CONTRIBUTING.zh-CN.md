@@ -5,6 +5,10 @@
 提交的改动应保持 BTAP 的核心行为：操作用户正在使用的真实浏览器会话，优先使用后台
 页面/CDP 能力，只有在明确且确实必要时才使用前台物理输入。
 
+参与本项目须遵守[行为准则](CODE_OF_CONDUCT.md)。其中有一条在本项目比在多数项目更
+要紧：本工具驱动的是真实浏览器配置文件，所以在 issue 或 pull request 里贴复现步骤
+之前，请先把 cookie、令牌、浏览历史和页面截图脱敏。
+
 ## 开发环境
 
 ```text
@@ -161,7 +165,7 @@ offline JUnit、覆盖率、工具证据，以及各一份 wheel/source archive�
 
 工具名称、参数、默认值或行为发生变化时，必须在同一个改动中同步：
 
-1. `README.md` 与 `README.zh-CN.md` 中作为权威列表的 55 个工具说明；
+1. `README.md` 与 `README.zh-CN.md` 中作为权威列表的 56 个工具说明；
 2. 工具自身的 MCP `description=` 文本；
 3. 调用方契约 `src/browsertap_mcp/skills/browsertap-default/SKILL.md`
    （先调哪个工具、什么时候必须带 `session_id`）；
@@ -193,35 +197,6 @@ python -m scripts.check_tool_docs --check-installed-skills \
 本仓库不记录这些路径；只加开关却不给目录会直接失败，不会静默通过。不加任何开关的默认门禁
 校验四件事：随包发布的 skill、工具注册、文档里的参数与默认值，以及版本一致性 —— 也就是
 没有已安装副本的贡献者能验证的全部内容。
-
-## 署名：改动上游派生文件
-
-本仓库有十个文件派生自 [GenericAgent](https://github.com/lsdefine/GenericAgent)
-（MIT），`THIRD-PARTY-NOTICES.md` 逐行记录了每个上游文件还有多少留在这里。**留着派生
-代码是许可证允许的；让那份声明保持准确才是它要求的**，所以那张表属于交付物本身，不是
-描述交付物的文档。
-
-那些数字只能对着上游 checkout 测出来，而上游不在本树里。所以改动这十个文件中的任何一个
-都是两步，不是一步：
-
-```bash
-git clone https://github.com/lsdefine/GenericAgent /tmp/upstream
-python -m scripts.check_derived_notices --upstream /tmp/upstream --check
-# 按它的输出改表 —— 表格行是生成的，永远不要手打
-python -m scripts.check_derived_notices --upstream /tmp/upstream --write
-```
-
-`--upstream` 故意没有默认值：对着一个恰好不存在的路径做测量，比不测量更糟。
-
-漏掉这两步离线套件仍然抓得到，因为 `--write` 会记下每个派生文件的 sha256，
-`tests/test_documentation_contract.py` 拿它和当前树比。于是「改了派生文件却没重新测量」
-是一道红门，而不是一份悄悄不再成立的声明 —— 后者已经真的发生过三个版本，那段时间唯一
-自动检查的问题是每一行自己的算术对不对得上。
-
-新增派生文件要同时加 `DERIVED_PAIRS` 里的配对；如果它不在
-`src/browsertap_mcp/chrome_extension/` 下面，还要把它所在目录加进
-`_expected_derived_paths()`。十个里现在有三个同源于一个上游文件，所以**它们的行数会重叠、
-不能相加**。
 
 ## 版本与发布卫生
 

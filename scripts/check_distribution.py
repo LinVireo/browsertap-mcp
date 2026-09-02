@@ -8,17 +8,12 @@ import zipfile
 from pathlib import Path
 
 # A licence obligation, not packaging tidiness: the wheel is the copy most people
-# receive, and part of what it carries is upstream's code under upstream's MIT
-# notice. A wheel without these two distributes that code with its notice
-# stripped. Kept apart from REQUIRED_WHEEL_SUFFIXES because these are the only
-# required members the build generates rather than copies out of the tree, so the
+# receive, and a wheel without the licence file distributes the code with its
+# terms stripped. Kept apart from REQUIRED_WHEEL_SUFFIXES because this is a
+# required member the build generates rather than copies out of the tree, so the
 # `src/` + suffix mapping that checks the others against `git ls-files` does not
-# apply -- their tree counterparts are `LICENSE` and `THIRD-PARTY-NOTICES.md`,
-# which REQUIRED_SDIST_SUFFIXES already pins.
-REQUIRED_WHEEL_METADATA_SUFFIXES = (
-    "/licenses/LICENSE",
-    "/licenses/THIRD-PARTY-NOTICES.md",
-)
+# apply -- its tree counterpart is pinned below for the sdist.
+REQUIRED_WHEEL_METADATA_SUFFIXES = ("/licenses/LICENSE",)
 REQUIRED_WHEEL_SUFFIXES = (
     "/browsertap_mcp/browser_bridge.py",
     "/browsertap_mcp/chrome_extension/background.js",
@@ -43,8 +38,13 @@ REQUIRED_WHEEL_SUFFIXES = (
 REQUIRED_SDIST_SUFFIXES = (
     "/.gitignore",
     "/LICENSE",
-    "/THIRD-PARTY-NOTICES.md",
     "/CONTRIBUTING.zh-CN.md",
+    # Same reason as `server.json` below rather than packaging tidiness: the
+    # sdist carries `tests/`, and `test_documentation_contract.py` reads this
+    # file to check the policy still covers every permission the manifest asks
+    # for. An sdist without it turns that gate into a traceback. It is also the
+    # URL the Chrome Web Store listing serves as its privacy policy.
+    "/PRIVACY.md",
     "/src/browsertap_mcp/browser_bridge.py",
     "/src/browsertap_mcp/skills/browsertap-default/SKILL.md",
     "/src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",

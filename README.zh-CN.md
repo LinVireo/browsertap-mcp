@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
 
-[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
+[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [隐私政策](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
 `browsertap-mcp` 是一个 MCP 服务，操作的是**你正在用的那个真实 Chrome、以及它所在的真实桌面，
 并且不会把屏幕从你手里抢走**。它通过 Chrome 扩展加 CDP 接上正在运行的浏览器，登录态、Cookies
@@ -34,6 +34,8 @@
 # 1. 从 PyPI 装进一个虚拟环境。
 python -m venv .venv && ./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
 ./.venv/bin/browsertap extension-path   # 打印第 2 步要用的目录
+
+# 2. 手动把这个目录装进 Chrome —— 这一步没有命令，见下文。
 
 # 3. 把 MCP 客户端指向同一个可执行文件（以 Claude Code 为例）。
 claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
@@ -81,7 +83,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **带稳定 `ref` 句柄的无障碍树快照。** 那是 playwright-mcp 读页面的主要方式。`scan_page`
   给的是简化 HTML 或文本加 `#r1` 形式的链接引用，是另一种取舍。
 - **更小的默认工具面。** playwright-mcp 默认约二十几个工具，其余放在 `--caps` 后面。
-  本服务把 55 个全部无条件注册。
+  本服务把 56 个全部无条件注册。
 
 剩下的这些，才是本项目真正要解决的：
 
@@ -471,8 +473,8 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `url`(string)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`、`beforeunload`(string,可选):默认 `dismiss`、`intent_leave`(boolean,可选):`false` 强制保留页面
 - **download_file** —— 通过 Chrome 原生下载管理器下载 HTTP(S) URL，并使用该浏览器 profile 的 Cookies 和登录态。默认等待完成，返回 `status="completed"` 和已验证的绝对 `path`；中断返回 `failed`，超时或 `wait=false` 返回带 `download_id` 的 `in_progress`。显式 `session_id` 必须仍然有效，失效时不会改用其他 profile。附件下载应使用本工具，不应在页面内调用 `fetch`
   - `url`(string)、`filename`(string,可选):相对下载名称、`directory`(string,可选):任意绝对目标目录并自动建父目录;要求 `wait=true`、`wait`(boolean,可选):默认 `true`、`timeout`(number,可选):默认 60 秒,最大 1800、`session_id`(string,可选):选择浏览器 profile、`overwrite`(boolean,可选):默认 `false`,最终目标已存在时拒绝,只有显式 `true` 才替换。带 `directory` 的调用若超时会返回 `directory_applied=false`:后续搬移不再受跟踪,Chrome 可能继续下载到浏览器默认目录
-- **open_new_tab** —— 默认在后台创建标签页，为本次创建生成唯一 `operation_id`，并在限定时间内等待准确的 session/generation 注册；仅在确需前台操作时传入 `active=true`。返回 `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`。扩展会对相同 operation ID 去重；只有包含准确 `client_id+tab_id+generation` 的 completed 记录才登记 ownership，即使 `ready=false`；`ready` 仅表示 session 工具是否可立即使用。创建投递前 registry 状态不确定时返回 `status="unknown",may_have_created=false,retry_safe=true`；创建已投递但 ACK/对账仍不确定时返回 `status="unknown",may_have_created=true,retry_safe=false`。随机 `owner_id` 仅用于该任务清理。对于已投递但结果仍不确定的创建，不得为同一请求再次调用 `open_new_tab`；应保留 `operation_id` 作为诊断信息
-  - `url`(string)、`timeout`(number,可选):默认 `15`、`active`(boolean,可选):默认 `false`、`session_id`(string,可选):选择浏览器/profile、`owner_id`(string,可选):让同一任务的多个新 tab 共用一个 owner
+- **open_new_tab** —— 默认在后台创建标签页，为本次创建生成唯一 `operation_id`，并在限定时间内等待准确的 session/generation 注册；仅在确需前台操作时传入 `active=true`。返回 `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`。扩展会对相同 operation ID 去重；只有包含准确 `client_id+tab_id+generation` 的 completed 记录才登记 ownership，即使 `ready=false`；`ready` 仅表示 session 工具是否可立即使用。创建投递前 registry 状态不确定时返回 `status="unknown",may_have_created=false,retry_safe=true`；创建已投递但 ACK/对账仍不确定时返回 `status="unknown",may_have_created=true,retry_safe=false`。保留返回的 `owner_id`，只用于该任务清理。对于已投递但结果仍不确定的创建，再次调用 `open_new_tab` 时必须传回相同的 `operation_id`、`client_id` 和 `owner_id`；这个恢复调用只读取持久化 operation 记录，绝不会再次发送 `tabs/create`。记录不存在时不得按 URL 猜测或创建替代标签页
+  - `url`(string)、`timeout`(number,可选):默认 `15`、`active`(boolean,可选):默认 `false`、`session_id`(string,可选):选择浏览器/profile、`owner_id`(string,可选):让同一任务的多个新 tab 共用一个 owner、`operation_id`(string,可选):恢复句柄、`client_id`(string,可选):恢复时锁定浏览器 client
 - **close_tabs** —— *(零标签页可用)* 接受原生数字 tab ID 或完整 `client:tabId` session ID，对 `chrome-extension://` 页面同样有效。默认 `only_if_agent_owned=true`，必须传入 `open_new_tab` 返回的 `owner_id`，并在关闭前核对当前 lifecycle generation；用户预存标签页、其他 Agent 的标签页和复用 ID 的新生命周期均会被拒绝。若用户已关闭 owned 标签页，清理返回 `status=already_gone, closed_by=user`，不会使用旧原生 ID 关闭其他标签页；实际关闭 owned 标签页时返回 `closed_by=agent`；显式关闭非 owned/U 标签页时返回 `closed_by=none`，且不计入本任务 owned 清理。仅当用户明确要求关闭非 owned/U 标签页时，才可设置 `only_if_agent_owned=false`
   - `tab_id`(integer/string 或数组)、`session_id`(string,可选)、`owner_id`(string,安全默认下必填)、`only_if_agent_owned`(boolean,默认 `true`)
 </details>
@@ -488,8 +490,10 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `url_pattern`(string):匹配 URL 的正则或子串、`timeout`(number,可选):默认 15、`wait_ready`(boolean,可选):要求 `readyState === 'complete'`,默认 `true`、`session_id`(string,可选)
 - **scroll_page** —— 滚动并报告新位置,长页面可以分几屏读完
   - `to`(string,可选):默认 `bottom`,也可传 `top`、像素偏移或要滚到可见的 CSS 选择器、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
-- **execute_js** —— 在页面中执行 JavaScript 并返回结果。`timeout` 是覆盖对话框策略设置、monitor 快照、投递/重试、导航检查和清理的单一总 deadline；显式 `session_id` 在这些浏览器往返中保持不变，不依赖共享默认目标。脚本导致页面导航时返回 `status="navigated"` 和 `landed_url`，而不是 `success`，且脚本返回值不可用。`dialog_policy` 控制 `alert`/`confirm`/`prompt`：`dismiss`（默认）和 `accept` 直接应答并记录到 `dialogs`；`manual` 保持原生对话框打开、暂停脚本并返回 `blocked_by_dialog`，后续由 `handle_dialog` 处理。标签页已有 manual 执行暂停时立即返回 `busy`。等待页面状态应使用 `wait_for`/`wait_for_url`，不要在 `execute_js` 中嵌入延迟 `setTimeout` 或 sleep Promise；`no_response` 会返回 `delivery_state` 与 `retry_safe`，已 ACK、可能执行过副作用的脚本不会被自动重放
-  - `script`(string)、`session_id`(string,可选)、`no_monitor`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`dialog_policy`(string,可选):`dismiss`(默认)、`accept` 或 `manual`
+- **execute_js** —— 在页面中执行 JavaScript 并返回结果。`timeout` 是覆盖对话框策略设置、monitor 快照、投递/重试、导航检查和清理的单一总 deadline；显式 `session_id` 在这些浏览器往返中保持不变，不依赖共享默认目标。真正的长任务可设 `wait=false`：扩展确认收到后，BTAP 立即返回 `status="in_progress"` 和 `operation_id`，后续用 `get_execute_js_result` 领取结果，不得重放脚本；后台模式有意不支持 `dialog_policy="manual"`。脚本导致页面导航时返回 `status="navigated"` 和 `landed_url`，而不是 `success`，且脚本返回值不可用。`dialog_policy` 控制 `alert`/`confirm`/`prompt`：`dismiss`（默认）和 `accept` 直接应答并记录到 `dialogs`；`manual` 只用于同步调用，保持原生对话框打开、暂停脚本并返回 `blocked_by_dialog`，后续由 `handle_dialog` 处理。标签页已有 manual 执行暂停时立即返回 `busy`。等待页面状态应使用 `wait_for`/`wait_for_url`，不要在 `execute_js` 中嵌入延迟 `setTimeout` 或 sleep Promise。JSON 编码后的 `js_return` 超过 24 KiB UTF-8 内联上限时，BTAP 会把完整值写入私有临时 JSON 文件，并返回 `result_file`、`result_bytes`、`result_sha256` 和 `result_format`，不再返回会被截断的半截内容
+  - `script`(string)、`session_id`(string,可选)、`no_monitor`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`dialog_policy`(string,可选):`dismiss`(默认)、`accept` 或 `manual`、`wait`(boolean,可选):默认 `true`
+- **get_execute_js_result** —— 按 `operation_id` 读取或短暂等待一次 `execute_js` 的结果。它只领取结果，绝不重放脚本；完成结果只消费一次，进行中和未知/过期句柄会返回明确状态。结果保留 10 分钟；大值沿用 `execute_js` 的无损 `result_file` 元数据
+  - `operation_id`(string)、`timeout`(number,可选):默认 `0`,范围 `0`–`120`
 - **handle_dialog** —— 检查或应答某个标签页上留着的对话框。`action="manual"` 只上报不选择(`blocked_by_dialog`,没有对话框则是 `no_dialog`);`accept`/`dismiss` 应答并释放被暂停的 `execute_js` 或 `open_url`。`prompt_text` 给被 accept 的 `prompt` 提供文本
   - `action`(string):`dismiss`、`accept` 或 `manual`、`prompt_text`(string,可选)、`session_id`(string,可选)、`timeout`(number,可选):默认 `3`,上限 3 秒
 - **resolve_leave_dialog** —— 用于处理 shell、ttyd 或 IDE 页面离开时已出现的对话框：先执行两次协议级 accept；仅在 lab 允许物理输入时使用 Enter 作为最后后备方案
@@ -640,28 +644,9 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 应先运行 `browsertap doctor`。连接、版本、对话框、权限和物理输入相关的恢复流程见
 [故障排查指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
 
-## 致谢
-
-BTAP 由 `LinVireo` 维护。[LICENSE](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
-中的 MIT 版权声明按原样保留（`zhea`）；维护者与版权归属是两个不同角色。本发行版的权威公开仓库为
-`LinVireo/browsertap-mcp`。
-
-这里的浏览器层起自 [GenericAgent](https://github.com/lsdefine/GenericAgent)，其中一部分至今仍是。
-感谢该项目及其作者提供的原始实现。
-
-源出 GenericAgent 的部分：
-- `simphtml.py` —— 至今仍主要是上游那个文件，在此基础上扩展
-- `TMWebDriver.py`（现由 `browser_bridge.py` 维护）
-- `tmwd_cdp_bridge` Chrome 扩展资源
-
-GenericAgent 采用 MIT 许可，因此其版权声明必须随每一份副本一同交付。声明全文，以及每个文件
-还有多少行逐字来自上游的实测数据，见
-[THIRD-PARTY-NOTICES.md](https://github.com/LinVireo/browsertap-mcp/blob/main/THIRD-PARTY-NOTICES.md)——它同时打进 wheel 与 sdist，不只存在于本仓库。
-本发行版的其余部分——MCP 工具面、bridge 及其 token 鉴权、发布证据链、测试套件与两份
-README——均在此编写。
-
-Fork 或二次分发时请同时保留两份声明：`LICENSE` 与该文件。
-
 ## 许可证
 
-MIT
+MIT —— 见 [LICENSE](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)，
+它同时打进 wheel 与 sdist。Fork 或二次分发时请保留。
+
+BTAP 由 `LinVireo` 维护，本发行版的权威公开仓库为 `LinVireo/browsertap-mcp`。

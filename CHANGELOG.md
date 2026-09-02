@@ -5,6 +5,57 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `PRIVACY.md`, the privacy policy the Chrome Web Store listing serves. It
+  states what the extension can reach, that its only network destination is
+  `127.0.0.1`, and what persists on disk. Two disclosures go beyond the
+  permission names: the extension holds all-sites access (`<all_urls>`) rather
+  than a per-site grant, and it strips a tab's Content-Security-Policy header
+  while a script runs in that tab. A contract test derives the required
+  disclosures from `manifest.json`, so adding a permission that reads user data
+  now fails offline until the policy covers it.
+
+### Security
+
+- `execute_js` no longer reaches the extension's internal command router. A
+  string script that happened to parse as JSON was coerced into a command
+  envelope, so passing `{"cmd":"site_permission",...}` as a *script* called
+  `setSitePermission` directly and skipped the `ctx.elicit` approval that
+  `set_site_permission` requires in `safe` mode -- the approval `SECURITY.md`
+  promises for every site-allow action. Caller scripts are now marked on the
+  wire so they cannot parse as JSON, and the extension coerces only the three
+  envelopes the server still sends as text (`cookies`, `cdp`, `batch`). As a
+  side effect, `execute_js('[1,2,3]')` returns its array instead of failing as
+  an unknown command.
+
+### Changed
+
+- `execute_js(wait=false)` now returns an acknowledged `operation_id` for
+  genuinely long-running scripts. `get_execute_js_result` can wait briefly for
+  or claim the late result without replaying side effects; completed results are
+  consumed once and retained for 10 minutes.
+- `execute_js` now preserves the final expression in multi-statement scripts
+  that use top-level `await` (for example, `const value = await read(); value`).
+  The extension previously evaluated the declaration successfully but returned
+  `undefined`, which crossed the bridge as a silent missing `js_return`.
+- Large `execute_js` return values are now lossless across bounded MCP text
+  channels. When the JSON-encoded `js_return` exceeds 24 KiB UTF-8, the
+  complete value is written to a private temporary JSON file and the response
+  carries `result_file`, `result_bytes`, `result_sha256`, and `result_format`
+  instead of a silently truncated inline payload.
+- The toast `disable_dialogs.js` draws on the user's own page follows the page's
+  colour scheme instead of being a fixed dark panel. It hardcoded `#222` on
+  `#fff`, which is wrong on a light theme and cannot follow a theme switch; it
+  now sets `color-scheme: light dark` and paints with the `Canvas` /
+  `CanvasText` system colours, the same mechanism `popup.html` already uses. It
+  also resets inherited styling (`all: initial`) so a host page's CSS cannot
+  restyle it, and uses `inset-inline-end` so it stays out of the way on
+  right-to-left pages.
+- `test_no_published_document_repeats_a_section` asserts that every document on
+  its roster was reachable, instead of a literal floor of nine against a list of
+  eleven. The literal tolerated two unreadable documents, and removing an entry
+  from the list widened that gap without failing anything.
 
 ## [0.4.20] - 2026-08-29
 
@@ -144,12 +195,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   version of that. The gate that derives this floor from the code now reads
   `page_scripts/` as well as the extension directory, which is what caught the
   stale 111.
-- The fingerprint that tells a maintainer the notice table needs re-measuring is
-  blind to `manifest.json`'s own version string, which every release rewrites and
-  which cannot change how many upstream lines survive -- measured at both 0.4.14
-  and 0.4.15 as `29 of 40`. Without that, cutting any release turned the gate red
-  and demanded a re-measure that needs an upstream clone and could not answer
-  differently. Nothing else is excluded, and two tests fail if that ever widens.
 
 ### Fixed
 
@@ -166,15 +211,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Five kinds of state the previous pass dropped now survive into the simplified
   copy: a checked checkbox, a `<select>`'s current value, the links inside a
   `<nav>`, a form's submit button, and a button in an overlay.
-
-### Removed
-
-- `THIRD-PARTY-NOTICES.md` no longer credits `src/browsertap_mcp/page_scripts/`
-  to GenericAgent, because there is nothing left there to credit -- the 528
-  upstream lines those two files held are not in this distribution. Eight files
-  remain derived, and each now has exactly one upstream ancestor, so the notice's
-  per-file rows can be read on their own rather than sharing a denominator.
-
 ## [0.4.14] - 2026-08-24
 
 ### Added
@@ -265,41 +301,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   scripts` and the release finalizer did not run ruff at all, so a sealed
   `release_ready: true` and a red CI run on the very same commit could both be
   correct, and the sealed one was what the release notes quoted. CI and
-  `scripts/finalize_change.py` now call this module, so the target list exists
-  once, and it writes `artifacts/lint.json`, which the evidence manifest binds
-  next to the coverage and junit records -- turning "ruff was run somewhere" into
-  "ruff reported clean over this exact tree".
-- The lint artifact records how many files were scanned, per target, and the gate
-  requires it. `ruff check` over a path that matches nothing exits 0 with an empty
-  diagnostic list, so a narrowed target list would otherwise turn the gate greener
-  the less it checked -- the same shape as an installed-skill check with no
-  directory to compare against.
-- Three reverse checks in `tests/test_documentation_contract.py`. The licence test
-  only asked whether every credited file still exists, which is the question that
-  cannot detect an omission: `popup.html`, `popup.js` and `disable_dialogs.js` are
-  forked from upstream and were missing from `THIRD-PARTY-NOTICES.md` for three
-  releases while passing every gate. The tree is now walked instead, every file
-  under `src/browsertap_mcp/chrome_extension/` must be classified as derived or
-  original, and each measurement in the table must be internally consistent. A
-  third check rejects a published document that repeats a `##` section.
-
-### Changed
-
-- `THIRD-PARTY-NOTICES.md` credits all eight derived files, states the metric and
-  the denominator it measured them with, and gives a percentage on every row.
-  The three newly listed files have a *higher* upstream share than
-  `background.js`, which was credited from the start; size was what made the
-  difference, and size is not what the licence asks about.
-- The notice no longer carries `browser_bridge.py`'s and `background.js`'s current
-  line counts in prose. One of them said 4591 while the file had reached 4600: a
-  number that has to be re-typed on every edit teaches the reader to re-type it,
-  which is how it went stale in the first place. The table's figures are dated and
-  measured instead.
-- The acceptance report computes its own denominator. `Score: {n}/100` was a
-  literal beside a weight table anyone could add a gate to, so the first added
-  gate would have published a score out of the wrong total; both numbers now come
-  from `GATE_WEIGHTS`, and full marks is `105/105`.
-
 ### Fixed
 
 - Removed a duplicated `## Listing on the MCP Registry` section from
@@ -361,32 +362,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   or changes this process's awareness level.
 
 ## [0.4.11] - 2026-08-23
-
-### Added
-
-- `THIRD-PARTY-NOTICES.md`, carrying upstream GenericAgent's MIT notice in full.
-  Part of the browser layer is still upstream's code -- measured line-for-line,
-  780 of `simphtml.py`'s 873 upstream lines are unchanged here, longest identical
-  run 192 -- and MIT puts its notice obligation on every copy, not on the
-  repository. `LICENSE` did not discharge it: its body is upstream's word for
-  word with only the copyright line swapped, so a reader of `LICENSE` alone was
-  told the wrong holder, and the README credit is prose attribution rather than
-  the notice. The file ships inside the wheel and the sdist, not only in the
-  tree: `license-files` is now explicit so both land in `.dist-info/licenses/`,
-  and `check_distribution` requires them there -- a wheel is the copy most
-  people receive, and one without them distributes upstream's code with its
-  notice stripped. `tests/test_documentation_contract.py` compares the
-  reproduced grant against `LICENSE`'s own body, so a paraphrase of either
-  fails, and requires every file the notice credits to still exist under that
-  name.
-
-### Changed
-
-- Corrected the credit in both READMEs. It said the derived files "have each
-  been substantially rewritten since", which does not hold for `simphtml.py` at
-  89% unchanged; it now says what is still upstream's and points at the measured
-  table. Both READMEs also now name the notice file, and the credit asks a
-  redistributor to keep both notices rather than the attribution alone.
 
 ### Fixed
 
@@ -959,9 +934,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Both READMEs link with absolute URLs. They are the package's long description
   on an index page, where a relative link resolves against the index host and
   404s, taking the usage guide, the security policy and the licence with it.
-- The fork-divergence paragraph in both READMEs no longer quotes exact commit and
-  line counts that went stale within a release; it names the command that prints
-  the current figure instead.
 - Every GitHub reference now points at `LinVireo/agent-browser-mcp`. The account
   was renamed from `0xlinn`; GitHub redirects the old paths, but the canonical
   URL in the metadata an index renders should be the current one.

@@ -6,6 +6,11 @@ Contributions should preserve BTAP's defining behavior: operate the user's real
 browser session, prefer background page/CDP work, and use foreground physical
 input only as an explicit last resort.
 
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). One
+clause matters more here than in most projects: this tool drives a real browser
+profile, so redact cookies, tokens, history, and page screenshots before putting
+a reproduction in an issue or pull request.
+
 ## Development setup
 
 ```text
@@ -203,7 +208,7 @@ leaves the rest, which `--check` then reports as a mismatch.
 When a tool name, parameter, default, or behavior changes, update all of these
 in the same change:
 
-1. `README.md` and `README.zh-CN.md` (the authoritative 55-tool table);
+1. `README.md` and `README.zh-CN.md` (the authoritative 56-tool table);
 2. the tool's MCP `description=` text;
 3. `src/browsertap_mcp/skills/browsertap-default/SKILL.md` (the caller
    contract: which tool to call first, when `session_id` is mandatory);
@@ -243,39 +248,6 @@ rather than silently passing. The default gate — no flag — checks the shippe
 copies, tool registration, documented parameters and defaults, and version
 consistency, which is everything a contributor without installed copies can
 verify.
-
-## Attribution: editing a file derived from upstream
-
-Ten files here are derived from [GenericAgent](https://github.com/lsdefine/GenericAgent)
-(MIT), and `THIRD-PARTY-NOTICES.md` states line-for-line how much of each upstream
-file survives. Keeping the derived lines is what the licence permits; keeping the
-notice *accurate* is what it asks for, so the table is part of the deliverable and
-not documentation about it.
-
-The figures can only be measured against an upstream checkout, which is not in
-this tree. So editing any of the ten is two steps, not one:
-
-```bash
-git clone https://github.com/lsdefine/GenericAgent /tmp/upstream
-python -m scripts.check_derived_notices --upstream /tmp/upstream --check
-# correct the table from that output -- the rows are generated, never typed
-python -m scripts.check_derived_notices --upstream /tmp/upstream --write
-```
-
-`--upstream` has no default on purpose: a measurement against a path that happens
-not to exist is worse than no measurement.
-
-The offline suite can still catch a skipped re-measurement, because `--write`
-records the sha256 of every derived file and
-`tests/test_documentation_contract.py` compares those to the tree. Forgetting the
-two steps above is a red gate rather than a notice that quietly stops being true —
-which is what happened for three releases while the only automated question was
-whether each row's own arithmetic added up.
-
-Adding a derived file needs its pair in `DERIVED_PAIRS` and, if it lives outside
-`src/browsertap_mcp/chrome_extension/`, its directory in
-`_expected_derived_paths()`. Three of the ten now descend from a single upstream
-file, so their line counts overlap and must not be added together.
 
 ## Version and release hygiene
 
