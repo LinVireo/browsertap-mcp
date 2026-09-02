@@ -37,18 +37,13 @@ claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
 On Windows the same three commands use `.\.venv\Scripts\python.exe` and
 `.\.venv\Scripts\browsertap.exe`.
 
-**Activate the virtual environment before using the bare `browsertap` name.**
-The commands above spell out `./.venv/bin/browsertap` because nothing is on
-`PATH` yet. Everything further down this file writes it as plain `browsertap`,
-which works once you have run:
-
-```bash
-source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
-```
-
-Without that, use the explicit `./.venv/bin/browsertap` form. MCP client config
-is the one place that must *always* carry the full path, because your client
-does not inherit your shell — see [Add the server to your client](#3-add-the-server-to-your-client).
+**Nothing here needs the virtual environment activated.** The commands above
+spell out `./.venv/bin/browsertap` on purpose, and that explicit form works
+everywhere. Later sections write it as plain `browsertap` for brevity — read
+those as the same explicit path unless you happen to have the venv activated,
+in which case the bare name resolves too. MCP client config must *always* carry
+the full path either way, because your client does not inherit your shell — see
+[Add the server to your client](#3-add-the-server-to-your-client).
 
 **Step 2 is manual, and it is the slow one.** There is no Chrome Web Store
 listing yet, so the extension is loaded by hand: open `chrome://extensions`, turn
