@@ -57,7 +57,25 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def cmd_doctor() -> int:
-    driver = get_driver()
+    try:
+        driver = get_driver()
+    except Exception as init_error:
+        # get_driver() can fail before the bridge is even contacted: invalid host,
+        # environment variable type errors, missing dependencies. These failures
+        # must still produce JSON so automated tooling can parse the diagnosis.
+        payload = {
+            "status": "initialization_failed",
+            "action": "check_config",
+            "extension_path": str(chrome_extension_dir()),
+            "error": str(init_error),
+            "error_type": type(init_error).__name__,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(
+            f"\n[!!] initialization_failed: {type(init_error).__name__}: {init_error}",
+            file=sys.stderr,
+        )
+        return 1
     ws_port = getattr(driver, "port", 18765)
     http_port = ws_port + 1
     sessions = []
