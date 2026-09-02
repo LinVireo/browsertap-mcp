@@ -37,6 +37,19 @@ claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
 On Windows the same three commands use `.\.venv\Scripts\python.exe` and
 `.\.venv\Scripts\browsertap.exe`.
 
+**Activate the virtual environment before using the bare `browsertap` name.**
+The commands above spell out `./.venv/bin/browsertap` because nothing is on
+`PATH` yet. Everything further down this file writes it as plain `browsertap`,
+which works once you have run:
+
+```bash
+source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
+```
+
+Without that, use the explicit `./.venv/bin/browsertap` form. MCP client config
+is the one place that must *always* carry the full path, because your client
+does not inherit your shell — see [Add the server to your client](#3-add-the-server-to-your-client).
+
 **Step 2 is manual, and it is the slow one.** There is no Chrome Web Store
 listing yet, so the extension is loaded by hand: open `chrome://extensions`, turn
 on **Developer mode**, click **Load unpacked**, and pick the directory
@@ -83,7 +96,10 @@ it is the better tool for most jobs:
   HTML or text with `#r1`-style link refs instead, which is a different trade.
 - **A smaller default tool surface.** playwright-mcp ships roughly two dozen
   tools by default and puts the rest behind `--caps`. This server registers all
-  56 unconditionally.
+  56 unconditionally, with no way to trim them, so a client whose tool list
+  grows past its context budget must filter them itself. If that is a blocker
+  for you, this is one point where [playwright-mcp](https://github.com/microsoft/playwright-mcp)
+  has the more flexible design.
 
 What is left, and what this project is actually for:
 
@@ -171,6 +187,21 @@ the bridge connection state and does not display page content, cookies, tokens,
 or URLs. Open the extension popup and clear **Show connection status on pages**
 to hide it. Hiding the badge does not stop the bridge, keepalive, or automatic
 reconnect behavior.
+
+#### The extension popup
+
+The popup holds the badge toggle above and two buttons, both of which act on
+the tab you are looking at:
+
+| Control | What it does |
+|---|---|
+| **Refresh** | Lists that tab's cookies **including their values, and including `HttpOnly` ones** the page's own JavaScript cannot read. It is a debugging aid, so it deliberately shows what a `document.cookie` dump would hide. |
+| **Copy** | Writes every listed cookie to the system clipboard as `name=value` lines. |
+
+Treat both as handling live credentials: anything that later reads your
+clipboard receives session cookies, and a screenshot of the popup captures
+them. See [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)
+for where this sits in the threat model.
 
 ### 3. Add the server to your client
 
@@ -285,10 +316,13 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 
 ```bash
 browsertap                      # run the MCP server (stdio)
+browsertap --version            # print the installed package version
 browsertap extension-path       # print the unpacked extension directory
 browsertap skill-path           # print the directory holding the shipped agent skills
 browsertap doctor               # diagnose the local setup, as JSON
 browsertap bridge               # run the bridge in the foreground
+browsertap bridge --restart     # restart the managed bridge; does not touch the browser
+browsertap bridge --stop        # stop the exact managed bridge process
 browsertap print-hermes-config  # print a Hermes config snippet
 ```
 
@@ -297,6 +331,13 @@ returns a structured verdict: `cause` is one of `healthy`,
 `ext_never_registered`, `sw_slept_or_dropped`, `registering`, or
 `bridge_unreachable`, and `advice` is the matching one-line fix. `registering`
 means the extension is connected but no normal `http(s)` content tab is ready.
+
+It always prints JSON on stdout, including when the configuration itself is
+wrong. An unparseable `BROWSERTAP_BRIDGE_PORT` or a `BROWSERTAP_BRIDGE_HOST`
+that does not resolve fails before any bridge call, and is reported as
+`status: "initialization_failed"` with `action: "check_config"` plus the
+offending `error` and `error_type` — not as a traceback. Exit status is `0` only
+when `status` is `healthy`.
 
 BTAP creates `~/.browsertap/bridge-token` on first use and every bridge/MCP
 process reads that same file. Closing browsers or editors does not rotate it. Removing

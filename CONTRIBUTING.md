@@ -101,6 +101,13 @@ failure mode ruff does not have: a flat config whose `files:` pattern stops
 matching still walks the directory, still exits 0, and reports every file clean
 having enforced nothing at all.
 
+**The type-check half is mypy**, wired the same way and reported in the
+`types` section of the same `artifacts/lint.json`. It comes from the dev extra
+(`pip install -e ".[dev]"`), so a contributor who skipped that gets
+`status: unavailable` with exactly that hint, and exactly like the JS half a
+release cannot seal over it. CI enforces it, so commit only what
+`python -m mypy src` accepts locally.
+
 `ruff format` is not a gate and most of the existing sources are not
 format-clean, so running it across a file you are only editing buries the change
 in unrelated reflows. Match the surrounding style instead.
