@@ -1,4 +1,4 @@
-"""Execute and report the 55-tool behavior-evidence contract."""
+"""Execute and report the 56-tool behavior-evidence contract."""
 
 from __future__ import annotations
 

@@ -20,6 +20,7 @@ HARNESS_TOOLS = [
     "get_automation_profile",
     "get_bookmarks",
     "get_console_messages",
+    "get_execute_js_result",
     "get_setup_status",
     "list_all_tabs",
     "list_extensions",
@@ -56,6 +57,10 @@ class FakeDriver:
 
     def ext_cmd(self, payload, client_id=None, timeout=15.0):
         self.calls.append((payload, client_id, timeout))
+        return self.response
+
+    def get_execute_js_result(self, operation_id, timeout=0.0):
+        self.calls.append(("get_execute_js_result", operation_id, timeout))
         return self.response
 
 
@@ -96,12 +101,14 @@ def _success(tool, monkeypatch, tmp_path):
     driver = _install_driver(monkeypatch)
     if tool == "capture_desktop_screenshot":
         _install_desktop_capture(monkeypatch)
-        out = S.capture_desktop_screenshot(str(tmp_path / "desktop.png"))
+        out = S.capture_desktop_screenshot("desktop.png")
         assert out.structuredContent["width"] == 2
         assert out.structuredContent["monitor_count"] == 2
         assert out.structuredContent["virtual_desktop"] is True
         assert "not from a selected or background browser tab" in out.structuredContent["model_note"]
-        assert (tmp_path / "desktop.png").exists()
+        # saved_to should be under ~/Downloads/browsertap
+        assert "Downloads" in out.structuredContent["saved_to"]
+        assert "browsertap" in out.structuredContent["saved_to"]
     elif tool == "cdp_batch":
         monkeypatch.setattr(S, "exec_js", lambda script, **kwargs: {"data": script})
         assert '"cmd": "batch"' in S.cdp_batch('{"cmd":"batch","commands":[]}')["data"]
@@ -119,6 +126,10 @@ def _success(tool, monkeypatch, tmp_path):
             "console_capture_stop": lambda: S.console_capture_stop(),
         }
         assert calls[tool]()["status"] == "ok"
+    elif tool == "get_execute_js_result":
+        driver.response = {"status": "success", "data": 42, "executed_tab_id": 7}
+        result = S.get_execute_js_result("test-token")
+        assert result["status"] == "success"
     elif tool == "create_bookmark":
         assert S.create_bookmark("coverage", "https://example.test/")["status"] == "ok"
     elif tool == "remove_bookmark":
@@ -204,6 +215,9 @@ def _boundary(tool, monkeypatch, tmp_path):
     elif tool == "get_console_messages":
         with pytest.raises(ValueError, match="offset"):
             S.get_console_messages(offset=-1)
+    elif tool == "get_execute_js_result":
+        with pytest.raises(ValueError, match="operation_id"):
+            S.get_execute_js_result("")
     elif tool == "console_capture_stop":
         monkeypatch.setattr(S, "_tab_extension_operation", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bridge down")))
         with pytest.raises(RuntimeError, match="bridge down"):

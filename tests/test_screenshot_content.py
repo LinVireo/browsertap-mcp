@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -45,13 +46,13 @@ def _install_capture(monkeypatch, driver=None, sessions=None):
 
 def test_capture_page_screenshot_attaches_image_even_when_saved(monkeypatch, tmp_path):
     _install_capture(monkeypatch)
-    target = tmp_path / "shot.png"
 
-    result = S.capture_page_screenshot(save_path=str(target))
+    result = S.capture_page_screenshot(save_path="shot.png")
 
     assert isinstance(result, CallToolResult)
-    assert target.read_bytes() == PNG_BYTES
-    assert result.structuredContent["saved_to"] == str(target.resolve())
+    saved_path = Path(result.structuredContent["saved_to"])
+    assert saved_path.read_bytes() == PNG_BYTES
+    assert result.structuredContent["saved_to"] == str(saved_path.resolve())
     assert result.structuredContent["image_attached"] is True
     assert "base64" not in result.structuredContent
     assert isinstance(result.content[0], TextContent)
@@ -76,7 +77,7 @@ def test_fastmcp_preserves_text_image_and_structured_metadata(monkeypatch, tmp_p
     _install_capture(monkeypatch)
 
     result = asyncio.run(
-        S.mcp.call_tool("capture_page_screenshot", {"save_path": str(tmp_path / "mcp.png")})
+        S.mcp.call_tool("capture_page_screenshot", {"save_path": "mcp.png"})
     )
 
     assert isinstance(result, CallToolResult)

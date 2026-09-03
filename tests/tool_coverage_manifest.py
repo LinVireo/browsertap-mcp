@@ -108,6 +108,10 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         True,
         "tests/test_dialog_policy.py::test_execute_js_restores_default_even_when_policy_cleanup_fails",
     ),
+    "get_execute_js_result": harness(
+        "get_execute_js_result",
+        reason="async result polling tool added but not yet covered by behavior tests",
+    ),
     "extension_path": harness(
         "extension_path", reason="the pure diagnostic wrapper had registration coverage only"
     ),

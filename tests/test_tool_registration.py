@@ -34,8 +34,8 @@ EXPECTED = {
     # waiting / scrolling
     "wait_for", "scroll_page",
     # execution
-    "execute_js", "handle_dialog", "resolve_leave_dialog", "cdp_command",
-    "cdp_batch", "debugger_targets",
+    "execute_js", "get_execute_js_result", "handle_dialog", "resolve_leave_dialog",
+    "cdp_command", "cdp_batch", "debugger_targets",
     # data
     "get_cookies", "capture_page_screenshot", "capture_desktop_screenshot",
     "upload_files",
@@ -89,13 +89,13 @@ def test_expected_tool_set(by_name):
 
 
 def test_behavior_manifest_matches_exact_registered_set(by_name):
-    assert len(by_name) == len(TOOL_COVERAGE) == 55
+    assert len(by_name) == len(TOOL_COVERAGE) == 56
     assert set(TOOL_COVERAGE) == set(by_name)
 
 
 def test_behavior_evidence_nodes_are_unique_and_tool_bound():
     report = build_tool_coverage_report(execute=False)
-    assert report["contract_valid_tools"] == report["registered"] == 55
+    assert report["contract_valid_tools"] == report["registered"]
     assert not report["duplicate_evidence"]
     assert not report["shared_evidence_nodes"]
     assert not report["evidence_without_tool_name"]

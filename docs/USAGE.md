@@ -3,7 +3,7 @@
 English | [中文](USAGE.zh-CN.md)
 
 This guide describes the least disruptive way to use `browsertap-mcp` with
-an existing Chrome, Edge, or Opera session. The full 55-tool contract and every
+an existing Chrome, Edge, or Opera session. The full 56-tool contract and every
 parameter remain in the root [README](../README.md); this document defines the
 recommended workflows and operation boundaries.
 
