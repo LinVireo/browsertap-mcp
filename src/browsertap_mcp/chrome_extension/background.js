@@ -4788,26 +4788,17 @@ function connectWS() {
     try {
       const data = JSON.parse(event.data);
       if (data.type === 'pong') { lastPongAt = Date.now(); return; }
-      if (data.id && data.code) {
-        let code = data.code;
-        // If code is a JSON string representing an object, parse it
-        if (typeof code === 'string') {
-          try { const p = JSON.parse(code); if (p && typeof p === 'object') code = p; } catch (_) {}
-        }
-        if (typeof code === 'object' && code !== null && code.cmd) {
-          // Custom protocol message → route to handleExtMessage
-          if (code.tabId === undefined && data.tabId !== undefined) code.tabId = data.tabId;
-          const res = await handleExtMessage(code, {});
-          reply({ type: res.ok ? 'result' : 'error', id: data.id, result: resultPayload(res), error: res.error });
-        } else if (typeof code === 'string') {
-          // Plain JS code
-          await handleWsExec(data);
-        } else if (typeof code === 'object' && code !== null) {
-          // Object without cmd → legacy extension message
-          const msg = code.tabId === undefined && data.tabId !== undefined ? { ...code, tabId: data.tabId } : code;
-          const res = await handleExtMessage(msg, {});
-          reply({ type: res.ok ? 'result' : 'error', id: data.id, result: resultPayload(res), error: res.error });
-        }
+      // Route by field presence to prevent JSON.parse confusion attacks:
+      // - data.cmd (object) → internal command channel
+      // - data.code (string) → JS execution channel
+      if (data.id && data.cmd && typeof data.cmd === 'object') {
+        // Command path: route directly to handleExtMessage, never parse user JS
+        if (data.cmd.tabId === undefined && data.tabId !== undefined) data.cmd.tabId = data.tabId;
+        const res = await handleExtMessage(data.cmd, {});
+        reply({ type: res.ok ? 'result' : 'error', id: data.id, result: resultPayload(res), error: res.error });
+      } else if (data.id && data.code && typeof data.code === 'string') {
+        // JS execution path: pass string directly to eval, never parse as command
+        await handleWsExec(data);
       }
     } catch (e) {
       // Name the two cases apart: a dead socket is benign (bridge restarted),

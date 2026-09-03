@@ -1657,7 +1657,10 @@ class BrowserBridge:
 
         exec_id = str(uuid.uuid4())
         try:
-            entry['ws'].send_message(json.dumps({'id': exec_id, 'code': cmd}))
+            # Send commands via 'cmd' field (not 'code') to prevent JSON.parse
+            # confusion: the extension can now route by field presence rather
+            # than by trying to parse a JS string as JSON.
+            entry['ws'].send_message(json.dumps({'id': exec_id, 'cmd': cmd}))
         except Exception as e:
             self.ext_clients.pop(client_id, None)
             raise ExtensionNotConnectedError(

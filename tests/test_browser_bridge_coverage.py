@@ -1113,7 +1113,7 @@ def test_ext_cmd_local_success_prefers_default_browser_and_cleans_ack(monkeypatc
     monkeypatch.setattr(T.uuid, "uuid4", lambda: "cmd-1")
     result = driver.ext_cmd({"cmd": "tabs"})
     assert result == {"data": {"ok": True}, "client_id": "one"}
-    assert one.messages[0]["code"] == {"cmd": "tabs"}
+    assert one.messages[0]["cmd"] == {"cmd": "tabs"}
     assert "cmd-1" not in driver.acks
 
 
@@ -1154,6 +1154,43 @@ def test_ext_cmd_local_timeout_cleans_late_state(monkeypatch):
         driver.ext_cmd({"cmd": "tabs"}, client_id="c", timeout=0.001)
     assert "cmd-timeout" not in driver.results
     assert "cmd-timeout" not in driver.acks
+
+
+def test_execute_js_with_json_payload_does_not_route_to_ext_cmd():
+    """Verify that JSON.parse command hijacking is prevented.
+
+    Before the fix, sending JS code like '{"cmd":"get_cookies"}' via execute_js
+    would be parsed by the extension and routed to handleExtMessage, exposing
+    internal commands. After the fix, the extension routes by field presence:
+    data.cmd → command channel, data.code → JS execution channel.
+    """
+    driver = driver_stub()
+
+    class CaptureSocket(FakeSocket):
+        def __init__(self):
+            super().__init__()
+            self.sent_payloads = []
+
+        def send_message(self, message):
+            payload = json.loads(message)
+            self.sent_payloads.append(payload)
+            # Simulate successful JS execution (not command routing)
+            driver.acks[payload["id"]] = time.time()
+            driver.results[payload["id"]] = {"success": True, "data": "executed"}
+
+    sock = CaptureSocket()
+    _install_exec_session(driver, socket=sock)
+
+    # Attack payload: JSON string that looks like a command
+    attack_code = '{"cmd":"get_cookies","domain":".example.com"}'
+    driver.execute_js(attack_code, timeout=1)
+
+    # Verify the payload was sent via 'code' field (JS execution), not 'cmd'
+    assert len(sock.sent_payloads) == 1
+    sent = sock.sent_payloads[0]
+    assert "code" in sent, "JS payload must use 'code' field"
+    assert "cmd" not in sent, "JS payload must NOT use 'cmd' field"
+    assert sent["code"] == attack_code, "JS code must be sent verbatim"
 
 
 def _install_exec_session(driver, *, session_type="ext_ws", socket=None, session_id="c:7"):
