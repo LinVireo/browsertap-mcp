@@ -97,6 +97,12 @@ docs/superpowers/
 .claude/settings.local.json
 .claude/settings.local.json.*
 *.bak-*
+*-bak-*
+
+# local agent configs with absolute paths
+CODE_REVIEW_REPORT.md
+.codex/
+opencode.json
 *.bak
 
 # local test/build caches that are safe to regenerate
