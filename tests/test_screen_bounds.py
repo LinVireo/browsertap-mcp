@@ -353,7 +353,10 @@ class TestMssApiIsReal:
     agree with it.
     """
 
-    CALL = re.compile(r"\bmss\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    # Match `mss.NAME` even when the call is stored (`factory = ... or mss.mss`)
+    # rather than invoked inline (`mss.mss()`). Requiring `(` missed the getattr
+    # fallback in `capture_desktop_screenshot` and made this gate vacuous.
+    CALL = re.compile(r"\bmss\.([A-Za-z_][A-Za-z0-9_]*)")
 
     @pytest.mark.parametrize(
         "module", [P, S], ids=["physical_input", "server"]

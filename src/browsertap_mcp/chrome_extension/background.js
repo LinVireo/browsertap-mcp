@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '814c213a3627aeec';
+const BTAP_BUILD = 'b90e576660fa9984';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.

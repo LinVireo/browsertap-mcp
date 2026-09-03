@@ -349,9 +349,9 @@ def test_execute_js_surfaces_native_manual_pause_without_a_guessed_value(monkeyp
     assert result["dialog"] == observed
     assert result["dialogs"] == [observed]
     assert rich_calls[0]["no_monitor"] is False
-    assert rich_calls[0]["script"] == "confirm('Proceed?')"
+    assert rich_calls[0]["script"] == "/*__btap_js*/\nconfirm('Proceed?')"
     set_policy = driver.calls[0][0]
-    assert set_policy["source"] == "confirm('Proceed?')"
+    assert set_policy["source"] == "/*__btap_js*/\nconfirm('Proceed?')"
 
 
 def test_execute_js_rich_skips_only_post_monitor_for_native_dialog_pause(monkeypatch):
@@ -483,7 +483,7 @@ def test_execute_js_marks_only_the_user_script_with_its_policy_token(monkeypatch
     result = S.execute_js("return 1 + 1", session_id=sid)
 
     assert result["js_return"] == 2
-    assert seen == ["/*__btap_dialog_scope:scope-123*/\nreturn 1 + 1"]
+    assert seen == ["/*__btap_dialog_scope:scope-123*/\n/*__btap_js*/\nreturn 1 + 1"]
 
 
 def test_execute_js_passes_explicit_session_without_parking_shared_default(monkeypatch):

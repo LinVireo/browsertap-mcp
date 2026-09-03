@@ -862,7 +862,7 @@ def test_open_new_tab_ready_session_executes_immediately_without_listing(monkeyp
     assert created["owned"] is True
     assert created["owner_id"]
     assert immediate["js_return"] == 2
-    assert executed == [("/*__btap_dialog_scope:scope-ready*/\n1+1", created["session_id"])]
+    assert executed == [("/*__btap_dialog_scope:scope-ready*/\n/*__btap_js*/\n1+1", created["session_id"])]
 
 
 def test_open_new_tab_reconciles_lost_create_ack_to_exact_session(monkeypatch):
@@ -3131,11 +3131,11 @@ const chrome = {{ tabs: {{ query: async () => [] }} }};
   const values = [null, false, 0, ''];
   for (let index = 0; index < values.length; index += 1) {{
     await socket.onmessage({{ data: JSON.stringify({{
-      id: `value-${{index}}`, code: {{ cmd: 'value', value: values[index] }},
+      id: `value-${{index}}`, cmd: {{ cmd: 'value', value: values[index] }},
     }}) }});
   }}
   await socket.onmessage({{ data: JSON.stringify({{
-    id: 'batch', code: {{ cmd: 'batch-value', value: [null, false, 0, ''] }},
+    id: 'batch', cmd: {{ cmd: 'batch-value', value: [null, false, 0, ''] }},
   }}) }});
   const replies = Object.fromEntries(
     sent.filter(item => item.id).map(item => [item.id, item.result]),
@@ -4320,13 +4320,19 @@ def test_save_pdf_accepts_real_extension_ws_payload(tmp_path, monkeypatch):
     encoded = base64.b64encode(pdf_bytes).decode("ascii")
     driver = _Driver([{"data": {"data": encoded}}])
     _install(monkeypatch, driver)
-    target = tmp_path / "capture.pdf"
+    # Redirect Downloads/browsertap to tmp_path for testing
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    downloads_browsertap = fake_home / "Downloads" / "browsertap"
+    downloads_browsertap.mkdir(parents=True)
+    monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+    target_relative = "capture.pdf"
 
-    result = S.save_pdf(str(target), session_id="chrome:profile:7")
+    result = S.save_pdf(target_relative, session_id="chrome:profile:7")
 
     assert result["status"] == "success"
     assert result["size"] == len(pdf_bytes)
-    assert target.read_bytes() == pdf_bytes
+    assert (downloads_browsertap / "capture.pdf").read_bytes() == pdf_bytes
     assert driver.calls[0][0]["method"] == "Page.printToPDF"
 
 
