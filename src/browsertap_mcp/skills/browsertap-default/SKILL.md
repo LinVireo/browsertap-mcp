@@ -232,7 +232,7 @@ hotkey(keys_csv="ctrl,c", session_id=B)
 | 探测/诊断 | `get_setup_status`、`get_automation_profile`、`set_automation_profile`、`extension_path`、`pointer_info`（只读，不需批准；**已废弃**，改用 `execute_js` 读元素几何） |
 | 标签页 | `list_tabs`、`list_all_tabs`、`switch_tab`、`activate_tab`、`open_url`、`open_new_tab`、`close_tabs` |
 | 读页面 | `scan_page`（简化 HTML/文本，长链接压成 `#r1` 短引用，真实 URL 一并返回）、`capture_page_screenshot` |
-| 执行 | `execute_js`（带 `dialog_policy`）、`cdp_command`、`cdp_batch`、`debugger_targets`、`save_pdf` |
+| 执行 | `execute_js`（带 `dialog_policy`；长任务可用 `wait=false`）、`get_execute_js_result`（按 `operation_id` 领取，不重放）、`cdp_command`、`cdp_batch`、`debugger_targets`、`save_pdf` |
 | 等待/滚动 | `wait_for`、`wait_for_url`（等导航落定：URL 匹配 + readyState complete）、`scroll_page` |
 | 后台页面输入 | `page_click`、`page_type`、`page_press`、`page_drag`（视口坐标，不需批准） |
 | 对话框 | `handle_dialog`、`resolve_leave_dialog`（配合 `execute_js(dialog_policy="manual")`、`open_url(beforeunload="manual"|"accept")`） |
