@@ -728,3 +728,27 @@ def run_physical_action(
         if isinstance(result, dict):
             result.setdefault("input_quiet", quiet)
         return result
+
+
+def delivery_reachability(point: tuple[int, int] | None) -> dict[str, Any] | None:
+    """
+    Check whether physical input can reach the target point.
+
+    On Windows, UIPI (User Interface Privilege Isolation) blocks input from
+    lower-integrity processes to higher-integrity windows. This function checks
+    the integrity level at the target coordinates after window activation.
+
+    Args:
+        point: (x, y) screen coordinates to check, or None to skip the check
+
+    Returns:
+        dict with reachability status, or None if the check could not be performed
+    """
+    if point is None:
+        return None
+
+    # Placeholder implementation - returns None to indicate check not performed
+    # Full implementation would need platform-specific UIPI checking on Windows
+    # via GetGUIThreadInfo, WindowFromPoint, and GetWindowThreadProcessId to
+    # compare integrity levels
+    return None

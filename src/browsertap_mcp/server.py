@@ -8,6 +8,7 @@ import base64
 # upstream would turn the two `except` clauses that use it into AttributeError
 # at the moment they were supposed to catch a malformed payload.
 import binascii
+import errno
 import functools
 import hashlib
 import inspect
@@ -102,6 +103,144 @@ def _positive_timeout(value: Any, *, name: str = "timeout") -> float:
     if not math.isfinite(normalized) or normalized <= 0:
         raise ValueError(f"{name} must be a finite number greater than zero")
     return normalized
+
+
+def _validate_safe_path(
+    save_path: str,
+    *,
+    allowed_base: Optional[Path] = None,
+    description: str = "save_path",
+) -> Path:
+    """Validate that save_path stays within an allowed directory.
+
+    Prevents path traversal attacks by ensuring user-supplied paths cannot
+    write to arbitrary filesystem locations.
+
+    Args:
+        save_path: User-provided path (should be relative)
+        allowed_base: Base directory to restrict writes to. Defaults to
+                     ~/Downloads/browsertap if not specified.
+        description: Parameter name for error messages
+
+    Returns:
+        Resolved absolute path within allowed_base
+
+    Raises:
+        ValueError: If path is empty, absolute, or traverses outside allowed_base
+
+    Examples:
+        >>> _validate_safe_path("report.pdf")
+        PosixPath('/home/user/Downloads/browsertap/report.pdf')
+
+        >>> _validate_safe_path("/etc/passwd")
+        ValueError: save_path must be a relative path within ...
+
+        >>> _validate_safe_path("../../etc/passwd")
+        ValueError: ... path traversal detected
+    """
+    if not isinstance(save_path, (str, Path)) or not str(save_path).strip():
+        raise ValueError(f"{description} must not be empty")
+
+    # Default to a safe location in user's Downloads
+    if allowed_base is None:
+        allowed_base = Path.home() / "Downloads" / "browsertap"
+    allowed_base = allowed_base.resolve()
+
+    path = Path(save_path).expanduser()
+
+    # Reject absolute paths to prevent writing to arbitrary locations.
+    # ``pathlib`` on Windows turns a POSIX path such as ``/etc/passwd`` into
+    # a drive-qualified path during normalization, so test the raw input too.
+    if path.is_absolute() or path.drive or str(save_path).startswith("/"):
+        raise ValueError(
+            f"{description} must be a relative path within {allowed_base}"
+        )
+
+    # Resolve relative to allowed_base and check traversal
+    final_path = (allowed_base / path).resolve()
+    if not final_path.is_relative_to(allowed_base):
+        raise ValueError(
+            f"{description} must stay within {allowed_base}, "
+            f"attempted path traversal detected"
+        )
+
+    return final_path
+
+
+def _atomic_write_bytes(path: Path, data: bytes, *, max_size: Optional[int] = None) -> None:
+    """Atomically write binary data to a file, with size limits and cleanup on failure.
+
+    Uses the temporary file + fsync + atomic rename pattern to ensure the target
+    file is never left in a partially-written state. If the write fails, the
+    temporary file is cleaned up and the original target (if any) remains unchanged.
+
+    Args:
+        path: Target file path (must already be validated with _validate_safe_path)
+        data: Binary data to write
+        max_size: Optional maximum file size in bytes. If data exceeds this,
+                 ValueError is raised before any write occurs.
+
+    Raises:
+        ValueError: If data exceeds max_size
+        RuntimeError: On write failures (disk full, permissions, etc.)
+
+    Examples:
+        >>> path = _validate_safe_path("screenshot.png")
+        >>> _atomic_write_bytes(path, png_bytes, max_size=50*1024*1024)
+    """
+    if max_size is not None and len(data) > max_size:
+        raise ValueError(
+            f"File size {len(data)} bytes exceeds maximum {max_size} bytes"
+        )
+
+    # Ensure parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create temporary file in same directory (ensures same filesystem for atomic rename)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=".tmp_",
+        suffix=path.suffix
+    )
+
+    try:
+        # Write data in a loop to handle partial writes
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError(f"write returned {written}")
+            remaining = remaining[written:]
+
+        # Flush to disk before rename
+        os.fsync(fd)
+        os.close(fd)
+
+        # Atomic rename
+        os.replace(tmp_path, path)
+
+    except OSError as exc:
+        # Close fd if still open
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+        # Clean up temporary file
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+        # Provide user-friendly error messages for common issues
+        if exc.errno == errno.ENOSPC:
+            raise RuntimeError(f"Failed to save {path.name}: disk full") from exc
+        elif exc.errno == errno.EACCES:
+            raise RuntimeError(
+                f"Failed to save {path.name}: permission denied for {path.parent}"
+            ) from exc
+        else:
+            raise RuntimeError(f"Failed to save {path.name}: {exc}") from exc
 
 
 # --- Stdio logging -----------------------------------------------------------
@@ -4446,7 +4585,8 @@ def save_pdf(
     if len(raw) < 8 or not raw.startswith(b"%PDF-"):
         raise RuntimeError("save_pdf failed: decoded data is not a valid PDF document")
 
-    path = Path(save_path).expanduser().resolve()
+    # Validate path to prevent traversal outside allowed directory
+    path = _validate_safe_path(save_path, description="save_path")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -6355,9 +6495,10 @@ def capture_page_screenshot(
             "do not treat `size` as a dimension, it is the byte count"
         )
     if save_path:
-        path = Path(save_path).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(raw)
+        # Validate path to prevent traversal outside allowed directory.
+        path = _validate_safe_path(save_path, description="save_path")
+        # Atomic write with size limit (50MB for screenshots)
+        _atomic_write_bytes(path, raw, max_size=50 * 1024 * 1024)
         out["saved_to"] = str(path)
     if return_base64:
         out["base64"] = b64
@@ -6404,6 +6545,7 @@ def _pyautogui():
 
 @mcp.tool(description="Capture the complete visible virtual desktop across all displays and return text metadata plus MCP image content; this is not a background-tab screenshot, save_path only adds a disk copy, and return_base64 is opt-in. width/height/left/top are PHYSICAL screen pixels and are exactly the range mouse_click accepts, unscaled.")
 def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False) -> CallToolResult:
+    _warn_physical_input_deprecated("capture_desktop_screenshot", "capture_page_screenshot")
     import io
     try:
         import mss
@@ -6471,9 +6613,10 @@ def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False)
         ),
     }
     if save_path:
-        path = Path(save_path).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(raw)
+        # Validate path to prevent traversal outside allowed directory.
+        path = _validate_safe_path(save_path, description="save_path")
+        # Atomic write with size limit (50MB for screenshots)
+        _atomic_write_bytes(path, raw, max_size=50 * 1024 * 1024)
         out["saved_to"] = str(path)
     if return_base64:
         out["base64"] = base64.b64encode(raw).decode("ascii")
@@ -6488,8 +6631,39 @@ def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False)
 
 
 # --- Physical input: operator approval gate ----------------------------------
+
+# Deprecation notice for physical input tools (0.5.0)
+_PHYSICAL_INPUT_DEPRECATION_WARNING = """
+⚠️ DEPRECATION WARNING: This tool will be removed in version 0.6.0.
+
+Physical input tools (mouse_click, mouse_move, mouse_drag, type_text, hotkey,
+pointer_info, capture_desktop_screenshot) control the OS desktop, not just the browser,
+which creates security concerns and maintenance burden.
+
+MIGRATION: Use page-level alternatives instead:
+- mouse_click → page_click (clicks elements in the browser)
+- mouse_move → not needed (page_click handles positioning)
+- mouse_drag → page_drag (drags within the page)
+- type_text → page_type (types in browser inputs)
+- hotkey → page_press (sends keyboard events to page)
+- pointer_info → execute_js to query element positions
+- capture_desktop_screenshot → capture_page_screenshot (safer, browser-only)
+
+For more details, see: https://github.com/LinVireo/browsertap-mcp/issues/XXX
+""".strip()
+
+
+def _warn_physical_input_deprecated(tool_name: str, alternative: str) -> None:
+    """Log deprecation warning for physical input tools (to be removed in 0.6.0)."""
+    logger.warning(
+        "%s is deprecated and will be removed in v0.6.0. Use %s instead.",
+        tool_name, alternative
+    )
+
+
 class PhysicalInputApproval(BaseModel):
     approve: StrictBool = Field(description="Approve this one physical input action")
+
 
 
 async def _request_physical_approval(ctx: Context, summary: str) -> bool:
@@ -6660,6 +6834,8 @@ async def mouse_move(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _warn_physical_input_deprecated("mouse_move", "page_click (no separate move needed)")
+
     def action() -> dict[str, Any]:
         pyautogui = _pyautogui()
         pyautogui.moveTo(x, y, duration=duration)
@@ -6734,6 +6910,7 @@ async def mouse_click(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _warn_physical_input_deprecated("mouse_click", "page_click")
     _require_coordinate_pair(x, y, "x", "y")
 
     def action() -> dict[str, Any]:
@@ -6770,6 +6947,8 @@ async def mouse_drag(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _warn_physical_input_deprecated("mouse_drag", "page_drag")
+
     def action() -> dict[str, Any]:
         pyautogui = _pyautogui()
         pyautogui.moveTo(x1, y1)
@@ -6807,6 +6986,7 @@ async def type_text(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _warn_physical_input_deprecated("type_text", "page_type")
     _require_coordinate_pair(click_x, click_y, "click_x", "click_y")
 
     def action() -> dict[str, Any]:
@@ -6834,6 +7014,7 @@ async def hotkey(
     session_id: Optional[str] = None,
     activate_session: Optional[str] = "current",
 ) -> dict[str, Any]:
+    _warn_physical_input_deprecated("hotkey", "page_press")
     keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
     if not keys:
         raise RuntimeError("keys_csv must contain at least one key")
@@ -6857,6 +7038,7 @@ async def hotkey(
     serialize=False,
 )
 def pointer_info() -> dict[str, Any]:
+    _warn_physical_input_deprecated("pointer_info", "execute_js to query element positions")
     pyautogui = _pyautogui()
 
     x, y = pyautogui.position()

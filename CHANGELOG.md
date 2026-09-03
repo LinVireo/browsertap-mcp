@@ -15,9 +15,46 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   while a script runs in that tab. A contract test derives the required
   disclosures from `manifest.json`, so adding a permission that reads user data
   now fails offline until the policy covers it.
+- `get_execute_js_result` tool for retrieving results from
+  `execute_js(wait=false)` operations. Acknowledged operations can be polled or
+  claimed without replaying side effects; completed results are consumed once
+  and retained for 10 minutes.
+
+### Deprecated
+
+- **Physical input tools will be removed in v0.6.0.** The following tools now log
+  deprecation warnings on every invocation:
+  - `mouse_click` → use `page_click` instead (browser-safe element clicking)
+  - `mouse_move` → use `page_click` (no separate move needed)
+  - `mouse_drag` → use `page_drag` (drag within the page)
+  - `type_text` → use `page_type` (type in browser inputs)
+  - `hotkey` → use `page_press` (send keyboard events to page)
+  - `pointer_info` → use `execute_js` to query element positions
+  - `capture_desktop_screenshot` → use `capture_page_screenshot` (safer, browser-only)
+  
+  **Rationale:** Physical input tools control the OS desktop (not just the browser),
+  creating security boundary issues and maintenance burden. Page-level alternatives
+  provide the same functionality with tighter security constraints.
 
 ### Security
 
+- **Path traversal protection** for file-writing tools. `save_pdf`,
+  `capture_page_screenshot`, and `capture_desktop_screenshot` now validate that
+  user-supplied `save_path` parameters stay within `~/Downloads/browsertap` by
+  default. Absolute paths (`/etc/passwd`, `C:\Windows\...`), parent directory
+  traversal (`../../outside`), and symlink escape attempts are rejected with a
+  `ValueError`. This prevents arbitrary filesystem writes through malicious path
+  manipulation. The validation is implemented by the internal `_validate_safe_path`
+  function and is covered by comprehensive unit and integration tests in
+  `tests/test_path_traversal_protection.py`.
+- **Atomic file writes** for screenshot tools. `capture_page_screenshot` and
+  `capture_desktop_screenshot` now use the temporary file + fsync + atomic rename
+  pattern (via `_atomic_write_bytes`), ensuring saved files are never left in a
+  partially-written state. Write failures clean up temporary files and provide
+  user-friendly error messages for common issues (disk full, permission denied).
+- **File size limits** for screenshot tools. Screenshots exceeding 50MB are now
+  rejected before any write occurs, preventing resource exhaustion attacks through
+  oversized image payloads.
 - `execute_js` no longer reaches the extension's internal command router. A
   string script that happened to parse as JSON was coerced into a command
   envelope, so passing `{"cmd":"site_permission",...}` as a *script* called

@@ -135,6 +135,13 @@ physical input.
   existing file: there is no directory allowlist. A client that can name a path
   the user can read can therefore attach it to a page's file input. Restrict
   this the way you would restrict any other file-reading tool.
+- File-writing tools (`save_pdf`, `capture_page_screenshot`,
+  `capture_desktop_screenshot`) validate that user-supplied paths stay within
+  `~/Downloads/browsertap` by default. Absolute paths, `..` parent directory
+  traversal, and symlink escape attempts are rejected with a `ValueError`. This
+  prevents arbitrary filesystem writes through path traversal attacks. The
+  validation applies to the `save_path` parameter; when that parameter is
+  omitted the file is not written to disk and no path validation occurs.
 - A page screenshot is scoped to a browser tab; a desktop screenshot may
   include any visible application. Review screenshots before sharing them.
 
