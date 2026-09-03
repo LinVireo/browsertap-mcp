@@ -10,13 +10,13 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 [Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Privacy](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
-A Model Context Protocol (MCP) server that drives **the real Chrome you are already using — and the real desktop it sits on — without taking the screen away from you.** It attaches to your running browser through a Chrome extension and the Chrome DevTools Protocol, so logins, cookies, and open tabs are already there. Three things follow from being an extension on your own machine rather than a browser someone launched for automation: a *selected* tab is not a *foreground* tab, so page work runs in the tab you named while you keep using the screen; five tools send real OS-level mouse and keyboard input for the cases no protocol event reaches; and the whole `chrome.*` surface is in scope — extension management, bookmarks, scoped site-permission leases, downloads through Chrome's own manager with your profile's cookies.
+A Model Context Protocol (MCP) server that drives **the real Chrome you are already using — without taking the screen away from you.** It attaches to your running browser through a Chrome extension and the Chrome DevTools Protocol, so logins, cookies, and open tabs are already there. Three things follow from being an extension on your own machine rather than a browser someone launched for automation: a *selected* tab is not a *foreground* tab, so page work runs in the tab you named while you keep using the screen; `page_click`, `page_type`, `page_press`, and `page_drag` dispatch trusted input events *inside that tab*, without moving your cursor or raising a window; and the whole `chrome.*` surface is in scope — extension management, bookmarks, scoped site-permission leases, downloads through Chrome's own manager with your profile's cookies.
 
 If what you need is a clean, disposable browser — headless, Docker, CI, Firefox or WebKit — this is the wrong tool and [playwright-mcp](https://github.com/microsoft/playwright-mcp) is the right one. See [When to use something else](#when-to-use-something-else).
 
 Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
 
-Physical input is gated, not casual: `resolve_leave_dialog` is one narrowly scoped path that can send Enter after two protocol attempts fail, `safe` asks before every physical action, and the default `lab` profile runs without elicitation while still enforcing the cross-process lock, quiet-input gate, target activation, and on-screen confirmation.
+The OS-level input tools — `mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`, `pointer_info`, `capture_desktop_screenshot` — are **deprecated and scheduled for removal in v0.6.0**; each one logs a warning on every call and names its `page_*` replacement. Use the page tools. While the desktop path is still shipped it stays gated, not casual: `safe` asks before every physical action, and the default `lab` profile runs without elicitation while still enforcing the cross-process lock, quiet-input gate, target activation, and on-screen confirmation. `resolve_leave_dialog` is not part of that deprecation — it is one narrowly scoped path that can send Enter after two protocol attempts fail.
 
 ## Start in 60 seconds
 
@@ -67,8 +67,8 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - **Native CDP access** — single commands or batches. Addressable by tab, extension id, or target id.
 - **Authenticated native downloads** — download attachments through Chrome's download manager with the active browser profile's cookies, wait for completion, and receive the verified local path.
 - **Tab-less operation** — extension management, CDP target listing, and tab listing/closing go straight to the extension's service worker, so they work even with zero tabs open.
-- Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk; full desktop capture is available for physical-input checks. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
-- **Guarded real physical input** — OS-level mouse move/click/drag, typing, and hotkeys are the last-resort path. `lab` can run without elicitation; `safe` prompts per call. Both profiles keep the lock, quiet-input gate, ownership checks, target activation, and on-screen confirmation.
+- Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk, under `~/Downloads/browsertap` by default. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
+- **Deprecated: OS-level physical input** — mouse move/click/drag, typing, hotkeys, `pointer_info`, and `capture_desktop_screenshot` still work but are **going away in v0.6.0**, and every call logs the `page_*` tool to use instead. They remain gated meanwhile: `lab` runs without elicitation, `safe` prompts per call, and both keep the lock, quiet-input gate, ownership checks, target activation, and on-screen confirmation.
 - **Multi-browser** — Chrome, Edge, and Opera can all connect to one bridge at the same time without clobbering each other's sessions.
 
 ## When to use something else
@@ -98,13 +98,14 @@ it is the better tool for most jobs:
 
 What is left, and what this project is actually for:
 
-- **Real OS-level mouse and keyboard**, with the guards around it — the
-  cross-process lock, the quiet-input window, out-of-bounds refusal, and
-  `on_screen` confirming the window was really visible. CDP input cannot leave
-  the browser window; these tools drive the desktop.
 - **Background by default.** `switch_tab` retargets without raising anything, so
   the agent works in one tab while you keep using the screen. A tool that
   launched its own browser has no reason to offer this.
+- **Trusted input into a tab that is not in front.** `page_click`, `page_type`,
+  `page_press`, and `page_drag` dispatch CDP input events at viewport
+  coordinates in the named tab, so a click lands on a page you are not looking
+  at and your cursor never moves. This is the input path; the desktop-level
+  tools are deprecated.
 - **The whole `chrome.*` surface** — extension management, `call_extension`,
   bookmarks, timed site-permission leases, and downloads through Chrome's own
   manager with your profile's cookies. Playwright is not an extension and cannot
@@ -459,7 +460,7 @@ Expected interruptions come back as a `status` field, not an exception:
 
 This server drives your real browser and your real desktop. Anything it can do, you can do — and it inherits every session you are logged into.
 
-- Mouse moves, clicks, typing, and hotkeys are real OS-level input, not synthetic page events. `safe` prompts per call; `lab` can reuse or disable prompts. Once allowed, it drives your actual desktop.
+- Mouse moves, clicks, typing, and hotkeys are real OS-level input, not synthetic page events. `safe` prompts per call; `lab` can reuse or disable prompts. Once allowed, it drives your actual desktop. These tools are deprecated and go away in v0.6.0; the `page_*` tools carry none of this exposure.
 - Page content is untrusted input. A page your agent reads can attempt prompt injection, and the tools available make that consequential.
 - This is **not** a security boundary. See [MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices).
 - Avoid pointing it at sensitive accounts you would not want an MCP client to see, and prefer not to run it on shared or production machines.
@@ -573,7 +574,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
   - `batch_json` (string), `session_id` (string, optional)
 - **debugger_targets** — *(no tab needed)* list every CDP-attachable target, including service workers and extension background pages that `list_tabs` never shows.
   - `session_id` (string, optional)
-- **save_pdf** — bounded `Page.printToPDF`; validates PDF bytes and atomically writes `save_path`. A timeout forcibly releases its debugger lease.
+- **save_pdf** — bounded `Page.printToPDF`; validates PDF bytes and atomically writes `save_path`. `save_path` is **relative** and resolves under `~/Downloads/browsertap`; an absolute path or a `..` escape is rejected with `ValueError`. A timeout forcibly releases its debugger lease.
   - `save_path` (string), `session_id` (string, optional), `landscape` (boolean, optional): default `false`, `print_background` (boolean, optional): default `true`, `prefer_css_page_size` (boolean, optional): default `true`, `scale` (number, optional): default `1.0`, range `0.1`–`2.0`, `page_ranges` (string, optional), `timeout` (number, optional): default `30`
 
 > **On driving *other* extensions:** Chrome refuses cross-extension debugging at attach time, and all three addressing forms (`tab_id`, `extension_id`, `target_id`) are rejected alike unless Chrome was started with `--silent-debugger-extension-api`. These parameters are for this extension's own targets and for diagnosis.
@@ -617,16 +618,18 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 <details>
 <summary><b>Screenshots</b></summary>
 
-- **capture_page_screenshot** — page capture via CDP with viewport, `full_page`, or explicit `clip` modes. PNG, JPEG, and WebP are supported; `quality` is valid only for JPEG/WebP. Returns text metadata plus attached MCP image content; `save_path` only adds a disk copy. Base64 is omitted unless explicitly requested. The metadata names its own units: `image_width`/`image_height` parsed from the returned bytes and `pixel_space: "device"` (CSS × `devicePixelRatio`), so a point read off the picture is not fed straight to `page_click`. A header it cannot parse reports `null` dimensions plus a `dimensions_note` rather than a guess — `size` is the byte count, not a dimension.
+- **capture_page_screenshot** — page capture via CDP with viewport, `full_page`, or explicit `clip` modes. PNG, JPEG, and WebP are supported; `quality` is valid only for JPEG/WebP. Returns text metadata plus attached MCP image content; `save_path` only adds a disk copy, and it is **relative** — it resolves under `~/Downloads/browsertap`, with absolute paths and `..` escapes rejected. Base64 is omitted unless explicitly requested. The metadata names its own units: `image_width`/`image_height` parsed from the returned bytes and `pixel_space: "device"` (CSS × `devicePixelRatio`), so a point read off the picture is not fed straight to `page_click`. A header it cannot parse reports `null` dimensions plus a `dimensions_note` rather than a guess — `size` is the byte count, not a dimension.
   - `session_id` (string, optional), `tab_id` (integer, optional), `format` (string, optional): default `png`, `full_page` (boolean, optional): default `false`, `clip` (object, optional): `x`,`y`,`width`,`height`, optional `scale`, `quality` (integer, optional): 0–100 for JPEG/WebP, `save_path` (string, optional), `return_base64` (boolean, optional): default `false`, `timeout` (number, optional): default `20`
-- **capture_desktop_screenshot** — captures the currently visible OS virtual desktop across all displays and returns metadata plus MCP image content. This is not a selected/background-tab capture; it may include other applications. `save_path` only adds a disk copy. `width`/`height`/`left`/`top` and the image itself are **physical screen pixels** (`pixel_space: "physical"`), unscaled, so they are the same space `mouse_click` takes.
+- **capture_desktop_screenshot** — captures the currently visible OS virtual desktop across all displays and returns metadata plus MCP image content. **Deprecated, removed in v0.6.0 — use `capture_page_screenshot`.** This is not a selected/background-tab capture; it may include other applications. `save_path` only adds a disk copy and is **relative**, resolving under `~/Downloads/browsertap`. `width`/`height`/`left`/`top` and the image itself are **physical screen pixels** (`pixel_space: "physical"`), unscaled, so they are the same space `mouse_click` takes.
   - `save_path` (string, optional), `return_base64` (boolean, optional): default `false`
 </details>
 
 <details>
-<summary><b>Physical input</b></summary>
+<summary><b>Physical input (deprecated, removed in v0.6.0)</b></summary>
 
-Real OS-level input at **desktop screen** coordinates, in **physical pixels** on the virtual desktop (not CSS pixels, not device pixels). It moves your actual cursor and types into whatever has focus. Prefer the `page_*` tools: they are precise, do not interrupt you, and work on a background tab. Reach for these only when page input genuinely cannot work — browser chrome, native file pickers, extension popups, OS dialogs.
+**These six tools are deprecated and will be removed in v0.6.0.** Every call logs a warning naming its replacement: `mouse_click` → `page_click`, `mouse_move` → not needed (`page_click` positions itself), `mouse_drag` → `page_drag`, `type_text` → `page_type`, `hotkey` → `page_press`, `pointer_info` → `execute_js` to read element geometry. They are documented here because they still ship, not because they are a recommended path.
+
+Real OS-level input at **desktop screen** coordinates, in **physical pixels** on the virtual desktop (not CSS pixels, not device pixels). It moves your actual cursor and types into whatever has focus — which is why it is going away: the blast radius is the whole desktop, not one tab. Use the `page_*` tools: they are precise, do not interrupt you, and work on a background tab. The remaining cases these were kept for — browser chrome, native file pickers, extension popups, OS dialogs — are outside what a page-level protocol event can reach at all, so treat them as unsupported rather than as a fallback to reach for when a `page_*` call fails.
 
 In `safe`, each of these five direct tools asks through MCP elicitation. Default `lab` uses `BROWSERTAP_LAB_NO_ELICIT=1` semantics and does not prompt; setting it false restores session-level lab approval. Decline, cancel, or unavailable elicitation returns `requires_user_action`; every profile still enforces the lock, quiet window, ownership, activation, and foreground check. `resolve_leave_dialog` is a sixth physical-input path, limited to a final Enter fallback after two protocol-level attempts and subject to the same gate.
 

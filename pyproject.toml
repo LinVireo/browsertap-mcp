@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "browsertap-mcp"
 dynamic = ["version"]
-description = "Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, cookies, and physical input"
+description = "Real-browser MCP server with a BrowserBridge/CDP transport, background-tab page input, screenshots, and cookies"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

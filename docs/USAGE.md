@@ -15,7 +15,7 @@ BTAP operations are divided into three levels:
 |---|---|---|
 | Background page work | A named tab through CDP or the extension | No. `switch_tab` only retargets later calls. |
 | Foreground tab work | The selected tab and its browser window | Yes. Use `activate_tab` or `switch_tab(activate=true)` explicitly. |
-| Desktop work | The OS screen, cursor, and keyboard | Yes. Physical input can affect whatever is on screen. |
+| Desktop work *(deprecated, removed in v0.6.0)* | The OS screen, cursor, and keyboard | Yes. Physical input can affect whatever is on screen — which is why it is going away; see §5. |
 
 Use background page work by default. A tab being selected by `switch_tab` does
 not make it visible, focused, or active in the browser window.
@@ -68,13 +68,17 @@ BTAP has two intentionally different screenshot tools:
 - `capture_page_screenshot` captures a tab through CDP. It can capture a
   background tab, a full page, or an explicit clip without bringing that tab
   forward. The MCP result includes image content and optional metadata/base64.
-- `capture_desktop_screenshot` captures the current visible OS virtual desktop
+- `capture_desktop_screenshot` — **deprecated, removed in v0.6.0; use
+  `capture_page_screenshot`.** It captures the current visible OS virtual desktop
   across all displays, including negative monitor coordinates when present. It
-  is useful for checking physical input, browser chrome, native dialogs, and
-  file pickers. It is **not** a background-tab screenshot. If the browser is
+  is **not** a background-tab screenshot. If the browser is
   minimized or another window is visible, those are the pixels captured. The
   result includes `monitor_count`, `left`, `top`, and a `model_note` describing
   this boundary.
+
+Both tools, and `save_pdf`, take a **relative** `save_path` that resolves under
+`~/Downloads/browsertap`. An absolute path or a `..` escape is rejected with a
+`ValueError`; the sandbox is not configurable by environment variable.
 
 An image attachment being returned or a file being saved does not prove that
 the current model or host can inspect the pixels. Use an image-capable,
@@ -83,14 +87,25 @@ multimodal model when visual interpretation matters. Otherwise use
 WebGL, and terminal pages, look for structured data first; screenshots are a
 last resort for understanding pixels.
 
-## 5. Foreground activation and physical input
+## 5. Foreground activation, and the deprecated physical-input path
 
-Try page-level/CDP tools first. They are the normal path for forms, buttons,
-keyboard shortcuts inside a page, scrolling, and drag operations.
+Page-level CDP tools are *the* path for forms, buttons, keyboard shortcuts
+inside a page, scrolling, and drag operations. `page_click`, `page_type`,
+`page_press`, and `page_drag` reach all of it without foreground activation.
 
-Foreground activation or OS-level input is justified for browser UI, extension
-popups, native file choosers, OS dialogs, or a page that exposes no usable
-protocol/DOM/API surface. The order is:
+**The OS-level input tools are deprecated and will be removed in v0.6.0**
+(`mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`,
+`pointer_info`, `capture_desktop_screenshot`); each call logs the `page_*` tool
+to use instead. A failing `page_click` is not a reason to switch to
+`mouse_click` — read `obscured` / `outside_viewport` / `not_found` off the
+result and fix the target. Browser UI, extension popups, native file choosers,
+and OS dialogs are outside what a page-level event can reach at all; report that
+as unsupported rather than escalating to the desktop.
+
+Foreground activation on its own — `activate_tab`, or `switch_tab(activate=true)`
+— is not deprecated and sends no input; use it when the user must see a tab.
+
+While the desktop tools still ship, the order they follow is:
 
 1. Explicitly activate the requested tab only when the user must see it or a
    desktop action truly needs it.

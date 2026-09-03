@@ -198,7 +198,7 @@ def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="browsertap",
-        description="Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, and physical input.",
+        description="Real-browser MCP server with a BrowserBridge/CDP transport, background page input, and screenshots.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")

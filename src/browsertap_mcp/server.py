@@ -262,10 +262,15 @@ mcp = FastMCP(
         "Browser automation for the Chrome/Edge the user is already running. A Chrome extension holds the "
         "CDP connection from inside the browser, so the profile, logins and cookies are the user's own; no "
         "browser is launched for automation. Three capabilities follow from that: a selected tab is not a "
-        "foreground tab, so page work runs in the named tab while the user keeps the screen; five tools send "
-        "OS-level mouse and keyboard input for cases no protocol event reaches; the chrome.* surface is in "
+        "foreground tab, so page work runs in the named tab while the user keeps the screen; page_click, "
+        "page_type, page_press and page_drag dispatch trusted input events inside that tab without moving "
+        "the user's cursor or raising a window; the chrome.* surface is in "
         "scope, including extension management, bookmarks, scoped site-permission leases, and downloads "
         "through Chrome's own manager. "
+        "Input goes through the page_* tools. The OS-level tools (mouse_move, mouse_click, mouse_drag, "
+        "type_text, hotkey, pointer_info, capture_desktop_screenshot) are deprecated and will be removed in "
+        "v0.6.0: they drive the whole desktop, so they act on whatever is actually on screen. Do not reach "
+        "for them because a page_* call failed - re-read the page with scan_page and fix the target first. "
         "Out of scope: headless, CI, containers, Firefox and WebKit. Report the mismatch rather than "
         "working around it. "
         "Bot checks are not solved here. A Cloudflare Turnstile verdict is decided before the widget "
@@ -273,7 +278,7 @@ mcp = FastMCP(
         "and where it does not, clicking does not change the verdict. Click it once in the same tab if "
         "present; on status='challenge_stalled', stop and return the tab to the user. Do not launch a "
         "second browser and do not route a challenge through a solver or token service. "
-        "Supports page scanning, JS execution, CDP commands, screenshots, cookies, and desktop physical input. "
+        "Supports page scanning, JS execution, CDP commands, screenshots, cookies, and page-level input. "
         "Page screenshots include MCP image content; a model that cannot process images must not claim to "
         "have seen the pixels and should use scan_page, execute_js, a page-specific API, or OCR instead. "
         "Several browsers can be connected at once; list_tabs shows a browser field per tab. "
@@ -4539,7 +4544,9 @@ def cdp_command(
 # --- Tools: save_pdf, debugger_targets, cdp_batch ----------------------------
 @mcp.tool(
     description=(
-        "Print a real-browser tab to a validated PDF file through bounded CDP. The file is "
+        "Print a real-browser tab to a validated PDF file through bounded CDP. save_path is "
+        "RELATIVE and resolves under ~/Downloads/browsertap; an absolute path or a '..' escape "
+        "is refused. The file is "
         "written atomically only after valid non-empty PDF bytes are returned; a CDP timeout "
         "invalidates and detaches the debugger lease."
     )

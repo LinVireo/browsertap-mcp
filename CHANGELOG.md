@@ -36,6 +36,43 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   creating security boundary issues and maintenance burden. Page-level alternatives
   provide the same functionality with tighter security constraints.
 
+### Changed
+
+- **Documentation no longer presents OS-level input as a capability.** The
+  deprecation above only changed the runtime; every piece of prose a reader or an
+  agent sees first still opened with "five tools send real OS-level mouse and
+  keyboard input", which is the opposite of the migration advice logged one layer
+  down. Rewritten in both READMEs (lede, key features, "what this project is
+  actually for", the physical-input section heading), the FastMCP `instructions`
+  the agent reads at handshake, `docs/USAGE.md` §1/§4/§5 and its Chinese
+  counterpart, the `browsertap-default` skill (priority list, standard flow step
+  5, the tool table), the `browsertap` CLI `--help` description, and the PyPI
+  summary in `pyproject.toml`. The `page_*` tools are now named as *the* input
+  path; the desktop tools are documented as shipped-but-deprecated, with the
+  cases they were kept for (browser chrome, native file pickers, extension
+  popups, OS dialogs) reported as unsupported rather than as a reason to escalate
+  from a failed `page_click`. `resolve_leave_dialog` is called out as *not*
+  deprecated in each place, since it is a protocol path with an Enter fallback,
+  not a desktop tool. No tool block was removed from either README: the
+  `check_tool_docs` contract requires every registered tool and parameter to be
+  documented in both languages, and the tools still exist.
+- The tool table in the `browsertap-default` skill said "工具全表（55 个）" after
+  the count moved to 56, so the one line a caller reads to decide whether the
+  table is complete was the line that was wrong.
+
+### Fixed
+
+- **Documented the write sandbox for the three file-writing tools.** `save_pdf`,
+  `capture_page_screenshot`, and `capture_desktop_screenshot` route `save_path`
+  through `_validate_safe_path`, which takes a *relative* path under
+  `~/Downloads/browsertap` and rejects absolute paths and `..` escapes — but the
+  docs described `save_path` as a path the caller chooses ("atomically writes
+  `save_path`", "only adds a disk copy"). A caller following them passed an
+  absolute path and got a `ValueError` that read like a bug. The tool
+  descriptions, both READMEs, and `docs/USAGE.md` §4 plus its Chinese
+  counterpart now state the sandbox and that it is not configurable by
+  environment variable.
+
 ### Security
 
 - **Path traversal protection** for file-writing tools. `save_pdf`,

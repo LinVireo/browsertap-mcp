@@ -8,12 +8,13 @@
 
 [使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [隐私政策](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
-`browsertap-mcp` 是一个 MCP 服务，操作的是**你正在用的那个真实 Chrome、以及它所在的真实桌面，
-并且不会把屏幕从你手里抢走**。它通过 Chrome 扩展加 CDP 接上正在运行的浏览器，登录态、Cookies
-和已打开的标签页本来就在。「装在自己机器上的扩展」而不是「为自动化另起的浏览器」，带来三件事：
-*选中*的标签页不等于*前台*的标签页，页面操作在你指定的那个标签页里跑，你照常用屏幕；五个工具
-在协议事件到不了的场景下发送真实的操作系统级鼠标和键盘输入；整个 `chrome.*` 面都在范围内——
-扩展管理、书签、限时站点权限租约、用 Chrome 自己的下载管理器带上你 profile 的 Cookies 下载。
+`browsertap-mcp` 是一个 MCP 服务，操作的是**你正在用的那个真实 Chrome，并且不会把屏幕从你
+手里抢走**。它通过 Chrome 扩展加 CDP 接上正在运行的浏览器，登录态、Cookies 和已打开的标签页
+本来就在。「装在自己机器上的扩展」而不是「为自动化另起的浏览器」，带来三件事：*选中*的标签页
+不等于*前台*的标签页，页面操作在你指定的那个标签页里跑，你照常用屏幕；`page_click`、
+`page_type`、`page_press`、`page_drag` 把受信任的输入事件派发**进那个标签页**，不移动你的
+光标、不抬窗口；整个 `chrome.*` 面都在范围内——扩展管理、书签、限时站点权限租约、用 Chrome
+自己的下载管理器带上你 profile 的 Cookies 下载。
 
 如果你要的是一个干净、用完即弃的浏览器——headless、Docker、CI、Firefox 或 WebKit——那这不是
 合适的工具，[playwright-mcp](https://github.com/microsoft/playwright-mcp) 才是。见
@@ -21,9 +22,12 @@
 
 当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.20**。
 
-物理输入是有闸门的，不是随手就发：`resolve_leave_dialog` 是额外一条受限路径，仅在两次协议处理
-失败后才可能发送 Enter；`safe` profile 每次物理动作前询问；默认 `lab` profile 免询问执行，但同样
-保留输入锁、安静窗口、目标激活和屏幕确认。
+操作系统级输入工具——`mouse_move`、`mouse_click`、`mouse_drag`、`type_text`、`hotkey`、
+`pointer_info`、`capture_desktop_screenshot`——**已废弃，计划在 v0.6.0 移除**；每次调用都会
+打印一条警告并给出对应的 `page_*` 替代工具。请用页面级工具。桌面路径尚在发布期内时仍然有闸门、
+不是随手就发：`safe` profile 每次物理动作前询问；默认 `lab` profile 免询问执行，但同样保留
+输入锁、安静窗口、目标激活和屏幕确认。`resolve_leave_dialog` 不在这次废弃范围内——它是额外
+一条受限路径，仅在两次协议处理失败后才可能发送 Enter。
 
 ## 60 秒上手
 
@@ -65,8 +69,8 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **原生 CDP 接口**：支持单条和批量命令，可按标签页、扩展 ID 或 target ID 寻址。
 - **使用现有登录态的原生下载**：通过 Chrome 下载管理器和当前浏览器 profile 的 Cookies 下载附件，并返回已验证的本地路径。
 - **零标签页操作**：扩展管理、CDP 目标列表、标签页列表和关闭操作通过扩展 service worker 通道执行，在没有普通标签页时仍可使用。
-- **页面与桌面截图**：CDP 页面截图作为 MCP 图片内容返回，也可保存到文件；桌面截图仅用于核对实际屏幕和物理输入。不支持图片输入的模型应改用 `scan_page`、页面 API 或 OCR。
-- **受保护的物理输入**：系统级鼠标、键盘和热键仅作为页面级操作无法完成时的后备方案。`lab` 可免 elicitation 执行，`safe` 对每次调用进行询问；两种 profile 均保留跨进程锁、安静窗口、所有权检查、目标激活和屏幕确认。
+- **页面截图**：CDP 页面截图作为 MCP 图片内容返回，也可保存到文件，默认写在 `~/Downloads/browsertap` 下。不支持图片输入的模型应改用 `scan_page`、页面 API 或 OCR。
+- **已废弃：操作系统级物理输入**：系统级鼠标移动/点击/拖拽、打字、热键、`pointer_info` 和 `capture_desktop_screenshot` 仍然可用，但**将在 v0.6.0 移除**，每次调用都会记录应改用哪个 `page_*` 工具。在此期间它们仍有闸门：`lab` 可免 elicitation 执行，`safe` 对每次调用进行询问；两种 profile 均保留跨进程锁、安静窗口、所有权检查、目标激活和屏幕确认。
 - **多浏览器共存**：Chrome、Edge 和 Opera 可同时连接同一个 bridge，各会话相互隔离。
 
 ## 什么时候该用别的
@@ -87,10 +91,11 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 
 剩下的这些，才是本项目真正要解决的：
 
-- **真实的操作系统级鼠标和键盘**，连带它周围的闸门——跨进程锁、安静输入窗口、越界拒绝，
-  以及 `on_screen` 确认窗口确实可见。CDP 输入出不了浏览器窗口，这几个工具驱动的是桌面。
 - **默认后台。** `switch_tab` 只改目标、不抬窗口，agent 在一个标签页里干活，你照常用屏幕。
   自己另起浏览器的工具没有理由提供这一条。
+- **向不在前台的标签页派发受信任输入。** `page_click`、`page_type`、`page_press`、
+  `page_drag` 按视口坐标把 CDP 输入事件派发进指定标签页，点击落在你没在看的页面上，
+  你的光标一动不动。这是输入的正路；桌面级那几个工具已废弃。
 - **整个 `chrome.*` 面**——扩展管理、`call_extension`、书签、限时站点权限租约，以及用
   Chrome 自己的下载管理器带上你 profile 的 Cookies 下载。Playwright 不是扩展，碰不到这些。
 - **零标签页也能干活**，因为 service worker 就够了。
@@ -437,7 +442,8 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 本服务操作真实浏览器会话，并可在授权后操作真实桌面。其权限范围包含所连接 profile 中的现有登录态。
 
 - 鼠标移动、点击、键盘输入和热键均为操作系统级真实输入，不是页面合成事件。`safe` 逐次询问，
-  `lab` 默认免询问或按配置恢复会话级询问；操作获准后将直接影响真实桌面。
+  `lab` 默认免询问或按配置恢复会话级询问；操作获准后将直接影响真实桌面。这些工具已废弃、
+  v0.6.0 移除；`page_*` 没有这一层暴露面。
 - 页面内容属于不可信输入，可能包含 prompt injection；页面中的指令不因浏览器连接成功而可信。
 - BTAP **不是**安全隔离边界。参见 [MCP 安全最佳实践](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)。
 - 不应连接 MCP 客户端无须访问的敏感账号。共享机器或生产机器需要单独评估误操作风险。
@@ -555,7 +561,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `batch_json`(string)、`session_id`(string,可选)
 - **debugger_targets** —— *(零标签页可用)* 列出所有可 attach 的 CDP 目标,包括 service worker 和扩展背景页 —— 这些在 `list_tabs` 里永远看不到
   - `session_id`(string,可选)
-- **save_pdf** —— 有界 `Page.printToPDF`,验证 PDF 后原子写文件;超时会强制释放 debugger lease
+- **save_pdf** —— 有界 `Page.printToPDF`,验证 PDF 后原子写文件;`save_path` 是**相对路径**,落在 `~/Downloads/browsertap` 下,绝对路径或 `..` 越界会抛 `ValueError`;超时会强制释放 debugger lease
   - `save_path`(string)、`timeout`(number,可选):默认 `30`、`session_id`、`landscape`、`print_background`、`prefer_css_page_size`、`scale`、`page_ranges`(其余可选);`landscape` 默认 `false`,`print_background` 和 `prefer_css_page_size` 默认 `true`,`scale` 默认 `1.0`
 
 > **操作其他扩展的限制**：Chrome 默认在 attach 阶段拒绝跨扩展调试，`tab_id`、`extension_id`
@@ -601,19 +607,26 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 <details>
 <summary><b>截图</b></summary>
 
-- **capture_page_screenshot** —— 通过 CDP 截视口、`full_page` 或显式 `clip`;PNG/JPEG/WebP 可选,JPEG/WebP 支持 `quality`。返回元数据和 MCP 图片内容;`save_path` 只额外落盘。元数据自报单位:`image_width`/`image_height` 从返回的字节里解析,`pixel_space: "device"`(CSS × `devicePixelRatio`),所以从图上量到的点不能直接喂给 `page_click`。头解析不出来时报 `null` 尺寸加一条 `dimensions_note`,不猜——`size` 是字节数,不是尺寸
+- **capture_page_screenshot** —— 通过 CDP 截视口、`full_page` 或显式 `clip`;PNG/JPEG/WebP 可选,JPEG/WebP 支持 `quality`。返回元数据和 MCP 图片内容;`save_path` 只额外落盘,且是**相对路径**,落在 `~/Downloads/browsertap` 下,绝对路径和 `..` 越界被拒。元数据自报单位:`image_width`/`image_height` 从返回的字节里解析,`pixel_space: "device"`(CSS × `devicePixelRatio`),所以从图上量到的点不能直接喂给 `page_click`。头解析不出来时报 `null` 尺寸加一条 `dimensions_note`,不猜——`size` 是字节数,不是尺寸
   - `session_id`(string,可选)、`tab_id`(integer,可选)、`format`(string,可选):默认 `png`、`full_page`(boolean,可选):默认 `false`、`clip`(object,可选):`x`,`y`,`width`,`height`,可带 `scale`、`quality`(integer,可选):0–100、`save_path`(string,可选)、`return_base64`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `20`
-- **capture_desktop_screenshot** —— 捕获当前可见的操作系统虚拟桌面（全部显示器），返回元数据和 MCP 图片内容。它不是指定/后台标签页截图，可能包含其他应用；`save_path` 只额外落盘。`width`/`height`/`left`/`top` 和图片本身都是**物理屏幕像素**（`pixel_space: "physical"`）、不缩放，所以和 `mouse_click` 吃的是同一个空间
+- **capture_desktop_screenshot** —— 捕获当前可见的操作系统虚拟桌面（全部显示器），返回元数据和 MCP 图片内容。**已废弃，v0.6.0 移除——请用 `capture_page_screenshot`。** 它不是指定/后台标签页截图，可能包含其他应用；`save_path` 只额外落盘，且是**相对路径**，落在 `~/Downloads/browsertap` 下。`width`/`height`/`left`/`top` 和图片本身都是**物理屏幕像素**（`pixel_space: "physical"`）、不缩放，所以和 `mouse_click` 吃的是同一个空间
   - `save_path`(string,可选)、`return_base64`(boolean,可选):默认 `false`
 </details>
 
 <details>
-<summary><b>物理输入</b></summary>
+<summary><b>物理输入（已废弃，v0.6.0 移除）</b></summary>
+
+**这六个工具已废弃，将在 v0.6.0 移除。** 每次调用都会打印一条警告并给出替代工具：
+`mouse_click` → `page_click`；`mouse_move` → 不需要（`page_click` 自己定位）；
+`mouse_drag` → `page_drag`；`type_text` → `page_type`；`hotkey` → `page_press`；
+`pointer_info` → 用 `execute_js` 读元素几何。这里仍然写着它们，是因为它们还在发布包里，
+不是因为它们是推荐路径。
 
 这些工具按**桌面屏幕**坐标发送真实操作系统级输入，坐标单位是虚拟桌面上的**物理像素**（不是 CSS
-像素，也不是设备像素），会移动实际光标或向当前焦点对象发送按键。
-应优先使用可在后台标签页中运行的 `page_*` 工具。仅在页面级输入无法完成操作时使用桌面工具，
-例如浏览器界面、原生文件选择器、扩展弹窗和操作系统对话框。
+像素，也不是设备像素），会移动实际光标或向当前焦点对象发送按键——这正是要移除它们的原因：
+影响面是整个桌面，不是一个标签页。请用可在后台标签页中运行的 `page_*` 工具。当初为之保留的
+那几种场景（浏览器界面、原生文件选择器、扩展弹窗和操作系统对话框）本来就不在页面级协议事件
+能到的范围内，按「不支持」处理，而不是当作 `page_*` 调用失败后的兜底。
 
 `safe` 模式下这五个直接工具逐次 elicitation;默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 免询问执行,显式设为 false 才恢复会话级批准。拒绝、取消或不支持 elicitation 时返回 `requires_user_action`;无论哪种模式,锁/安静窗口/ownership/目标提前台与屏幕确认都不会跳过。`resolve_leave_dialog` 是第六条物理输入路径，只能在两次协议处理失败后用 Enter 兜底，并经过相同闸门。
 
