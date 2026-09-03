@@ -229,7 +229,7 @@ In tests, never hardcode a real id. The sentinel is
 ## 4. Physical input acts on the *visible* tab
 
 The seven OS-level tools that drove the real mouse and keyboard were removed in
-0.6.0. One physical path is left: `resolve_leave_dialog`'s lab-only Enter
+0.5.0. One physical path is left: `resolve_leave_dialog`'s lab-only Enter
 fallback, sent only after a protocol accept has actually failed. It lands on
 whatever is visible on screen, which is a different thing from the "target tab"
 that `switch_tab` selected.

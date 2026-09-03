@@ -359,7 +359,7 @@ class TestMssApiIsReal:
     CALL = re.compile(r"\bmss\.([A-Za-z_][A-Za-z0-9_]*)")
 
     # server.py holds no mss call since the desktop-screenshot tool was removed
-    # in 0.6.0, so parametrising over it would assert on an empty match set.
+    # in 0.5.0, so parametrising over it would assert on an empty match set.
     @pytest.mark.parametrize("module", [P], ids=["physical_input"])
     def test_every_mss_attribute_the_code_calls_exists(self, module):
         mss = pytest.importorskip("mss", reason="mss ships in the desktop extra")
@@ -460,7 +460,7 @@ def _install_tool_harness(monkeypatch, bounds=FULL_HD):
 async def _dispatch(points=None, **kwargs):
     """Drive the gate the way a coordinate-taking caller would.
 
-    The seven OS-level tools were removed in 0.6.0, so no shipped tool passes
+    The seven OS-level tools were removed in 0.5.0, so no shipped tool passes
     `points=` any more -- resolve_leave_dialog's Enter fallback needs no
     coordinates. The gate itself still enforces the rectangle for any caller
     that does, and that enforcement is what these tests are about, so they

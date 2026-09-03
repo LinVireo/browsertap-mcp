@@ -15,7 +15,7 @@ BTAP operations are divided into three levels:
 |---|---|---|
 | Background page work | A named tab through CDP or the extension | No. `switch_tab` only retargets later calls. |
 | Foreground tab work | The selected tab and its browser window | Yes. Use `activate_tab` or `switch_tab(activate=true)` explicitly. |
-| Desktop work *(deprecated, removed in v0.6.0)* | The OS screen, cursor, and keyboard | Yes. Physical input can affect whatever is on screen — which is why it is going away; see §5. |
+| Desktop work *(deprecated, removed in v0.5.0)* | The OS screen, cursor, and keyboard | Yes. Physical input can affect whatever is on screen — which is why it is going away; see §5. |
 
 Use background page work by default. A tab being selected by `switch_tab` does
 not make it visible, focused, or active in the browser window.
@@ -68,7 +68,7 @@ BTAP has one screenshot tool:
 - `capture_page_screenshot` captures a tab through CDP. It can capture a
   background tab, a full page, or an explicit clip without bringing that tab
   forward. The MCP result includes image content and optional metadata/base64.
-  The OS-level desktop capture was removed in 0.6.0: it photographed whatever
+  The OS-level desktop capture was removed in 0.5.0: it photographed whatever
   window happened to be in front, which is a different question from "what does
   this tab show".
 
@@ -89,7 +89,7 @@ Page-level CDP tools are *the* path for forms, buttons, keyboard shortcuts
 inside a page, scrolling, and drag operations. `page_click`, `page_type`,
 `page_press`, and `page_drag` reach all of it without foreground activation.
 
-**The seven OS-level tools were removed in 0.6.0**, so there is no
+**The seven OS-level tools were removed in 0.5.0**, so there is no
 screen-coordinate surface to escalate to. A failing `page_click` is a targeting
 problem: read `obscured` / `outside_viewport` / `not_found` off the result and
 fix the target. Browser UI, extension popups, native file choosers, and OS

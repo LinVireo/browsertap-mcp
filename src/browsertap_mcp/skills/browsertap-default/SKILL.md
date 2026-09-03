@@ -54,7 +54,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 2. **选中目标**：`switch_tab(browser="chrome")` 或 `switch_tab(url_pattern="linux.do")` 或 `switch_tab(session_id="chrome_xxx:123")`（session id 原样传，形如 `client_id:tab_id`，别拆）。**它只改后续调用的目标，不会把 tab 提到前台**（`activate` 默认 `false`）——改目标永远不打扰用户正在看的东西。真需要标签页到前面才传 `activate=true` 或调 `activate_tab`。
 3. **读页面**：`scan_page`（简化 HTML/文本，保留登录态）。
 4. **执行/交互**：普通点击/输入优先 `page_click` / `page_type` 的结构化 locator（`css` / `role+name` / `text` / `label`，可进同源 `frame` 和开放 `shadow`）；页面数据/API 才优先 `execute_js(script=...)`。`page_press` / `page_drag` 同样走后台 CDP，不抢用户鼠标；需要视觉核对时用 `capture_page_screenshot(session_id=...)`；开页 `open_url` / `open_new_tab`，其中 `open_new_tab` 默认 `active=false` 在后台创建；cookie `get_cookies`。
-5. **没有物理输入工具（0.6.0 已移除）**：`page_*` 是唯一的输入路径。`page_click` 失败是定位问题，不存在屏幕坐标兜底——按返回的 `obscured` / `outside_viewport` / `not_found` 处理再重试。唯一剩下的物理动作是 `resolve_leave_dialog` 的 Enter 兜底（仅 `lab`，且只在两次协议 accept 失败后），跨进程锁、安静窗口、ownership 和前台确认对它同样生效。
+5. **没有物理输入工具（0.5.0 已移除）**：`page_*` 是唯一的输入路径。`page_click` 失败是定位问题，不存在屏幕坐标兜底——按返回的 `obscured` / `outside_viewport` / `not_found` 处理再重试。唯一剩下的物理动作是 `resolve_leave_dialog` 的 Enter 兜底（仅 `lab`，且只在两次协议 accept 失败后），跨进程锁、安静窗口、ownership 和前台确认对它同样生效。
 6. **等待与滚动**：`wait_for(selector=/text=/url_pattern=/js=)`（四个条件互斥，只传一个；`gone=True` 等元素消失）、**`wait_for_url(url_pattern=...)`**（等**导航落定**：URL 匹配 + `document.readyState === 'complete'`，正则或纯子串都试。点击跳转或 `open_url` 之后用它，别用 `wait_for(url_pattern=...)` —— 它只查 URL，新文档还是空白就可能返回）、`scroll_page(to="bottom"/"top"/像素数)`。别用 `execute_js` 里 sleep 硬等。
 7. **上传文件**：`upload_files(selector="input[type=file]", paths=[...])`。
 8. **下载附件**：直接 `download_file(url=..., session_id=...)`，让浏览器原生下载管理器带当前 profile 的 Cookie/登录态下载；默认等待完成并返回已验证的绝对 `path`。显式 `session_id` 必须存活，死 session 会报错而不会改投其它 profile。需要指定落点时给绝对 `directory`（会建父目录，默认拒绝覆盖同名目标；只有明确要替换时才传 `overwrite=true`，且必须保持 `wait=true`）；若超时返回 `directory_applied=false`，说明搬移未发生且不再跟踪，文件可能继续落入浏览器默认下载目录。附件不要用页面 `fetch`，也不要用裸 `Page.navigate` 猜下载目录。
@@ -64,7 +64,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 1. **页面读取/JS/页面 API**：`scan_page`、`execute_js`、`wait_for*`、`scroll_page`、`get_cookies`、`storage_get` —— 不打扰用户、不需要批准。
 2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。`page_click` 的 selector 模式在派发前还会命中判定那个像素：被遮挡返回 `obscured`（带 `occluded_by`），滚动后仍不在视口返回 `outside_viewport`，两者都没点。坐标是**视口 CSS 像素**（相对页面区域），既不是桌面物理像素，也不是页面截图返回的设备像素。
 3. **结构化中断**：对话框用 `handle_dialog`（配 `execute_js(dialog_policy="manual")` / `open_url(beforeunload="manual")`）；站点权限用 `set_site_permission` / `reset_site_permissions`（租约 60–600 秒，到期自动恢复）。
-4. **物理输入 —— 0.6.0 已移除，只剩一条**：`mouse_move` / `mouse_click` / `mouse_drag` / `type_text` / `hotkey` / `pointer_info` / `capture_desktop_screenshot` 已不存在，调用会直接报「无此工具」。它们影响的是整个桌面而不是一个标签页，这就是移除的原因。原先为它们保留的场景（浏览器 chrome、原生文件选择器、扩展弹窗、OS 对话框）按**不支持**上报，不要绕成"页面点不到就动桌面"。桌面截图改用 `capture_page_screenshot`，读几何改用 `execute_js`。仅剩 `resolve_leave_dialog` 会在两次协议处理失败后发一次 Enter：`safe` 直接拒发，默认 `lab` 免询问，显式把 `BROWSERTAP_LAB_NO_ELICIT` 设为 false 才恢复会话级批准。
+4. **物理输入 —— 0.5.0 已移除，只剩一条**：`mouse_move` / `mouse_click` / `mouse_drag` / `type_text` / `hotkey` / `pointer_info` / `capture_desktop_screenshot` 已不存在，调用会直接报「无此工具」。它们影响的是整个桌面而不是一个标签页，这就是移除的原因。原先为它们保留的场景（浏览器 chrome、原生文件选择器、扩展弹窗、OS 对话框）按**不支持**上报，不要绕成"页面点不到就动桌面"。桌面截图改用 `capture_page_screenshot`，读几何改用 `execute_js`。仅剩 `resolve_leave_dialog` 会在两次协议处理失败后发一次 Enter：`safe` 直接拒发，默认 `lab` 免询问，显式把 `BROWSERTAP_LAB_NO_ELICIT` 设为 false 才恢复会话级批准。
 
 ## 后台页面输入（page_*）—— 默认交互方式
 
@@ -74,7 +74,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 - **`execute_js` 全链路定向**：baseline/diff/transient monitor、无 ACK 安全重试、导航落点读取都继续使用同一个显式 `session_id`，不会在中间步骤掉回共享默认；`timeout` 是覆盖策略设置、执行、重试、monitor 与清理的单一总 deadline，不要再为各阶段额外叠加等待。
 - **Xterm/ttyd 输入**：`page_type(selector=".xterm", ...)`、传 xterm 后代，或在页面只有一个 `.xterm-helper-textarea` 时省略 selector，都会自动聚焦 helper textarea 后派发受信任输入。要清当前 shell 行时先 `page_press("ctrl,u", session_id=...)`，不要把表单语义的 `clear=true` 当作终端清行。
 - **坐标**：`page_click`/`page_drag` 的 `x`/`y` 是**视口 CSS 像素**（`getBoundingClientRect` 报告的空间）。优先用 `selector`（点元素中心，可加 `offset_x`/`offset_y` 偏移）—— 跨域 iframe 里的 Cloudflare Turnstile 复选框可以点，不需要伸进 iframe 的 DOM。
-- **两种像素单位别混**：视口 = CSS 像素（`page_*` 吃这个）；页面截图回来的是**设备像素** = CSS × `devicePixelRatio`，`capture_page_screenshot` 用 `image_width`/`image_height` 和 `pixel_space: "device"` 报出来。125% 缩放下从图上量到的点比 `page_click` 需要的大 25%，直接喂进去会点到页面背景上，而坐标模式没有命中判定、不会告诉你打偏了。吃物理屏幕像素的桌面工具已在 0.6.0 移除，所以不再有第三种单位。
+- **两种像素单位别混**：视口 = CSS 像素（`page_*` 吃这个）；页面截图回来的是**设备像素** = CSS × `devicePixelRatio`，`capture_page_screenshot` 用 `image_width`/`image_height` 和 `pixel_space: "device"` 报出来。125% 缩放下从图上量到的点比 `page_click` 需要的大 25%，直接喂进去会点到页面背景上，而坐标模式没有命中判定、不会告诉你打偏了。吃物理屏幕像素的桌面工具已在 0.5.0 移除，所以不再有第三种单位。
 - **`page_click` 的命中判定（只在 selector 模式）**：派发前先问页面那个坐标上到底是谁。折叠线以下会先滚进视口（结果带 `scrolled_into_view`）；那个像素属于 cookie 横幅、遮罩层或别的覆盖元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者，滚动后仍在视口外返回 `outside_viewport` —— **这两种情况一个事件都没派发**，先处理遮挡（关横幅 / `scroll_page` / 点别的 locator）再重试，不要当作点过了。命中通过的结果带 `hit_verified: true`。坐标模式不做这项判定：坐标指的是像素，落在谁身上由页面决定。
 - **验证码（Turnstile 等）留在用户的浏览器里**：在同一个已连接 tab 里用 `page_click` 处理，尝试次数有上限（回复带 `challenge_detected` 和 `attempts`）；验证码不再推进时结果是 `challenge_stalled`，**停下来把 tab 交还给用户自己处理**。绝不另起 Playwright / headless 浏览器 / 独立自动化 profile 兜底。
 - **选择器没匹配**：返回 `not_found`，什么都没派发。
@@ -82,7 +82,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 ## 唯一剩下的物理动作：`resolve_leave_dialog` 的 Enter 兜底
 
 `mouse_move` / `mouse_click` / `mouse_drag` / `type_text` / `hotkey` / `pointer_info` /
-`capture_desktop_screenshot` 在 0.6.0 移除了，调用会直接报「无此工具」。替代表：
+`capture_desktop_screenshot` 在 0.5.0 移除了，调用会直接报「无此工具」。替代表：
 `mouse_click`→`page_click`、`mouse_move`→不需要、`mouse_drag`→`page_drag`、`type_text`→`page_type`、
 `hotkey`→`page_press`、`pointer_info`→`execute_js` 读几何、`capture_desktop_screenshot`→`capture_page_screenshot`。
 
@@ -236,7 +236,7 @@ BTAP 默认使用 `lab`（`BROWSERTAP_MODE` 未设也视为 lab），并按 `BRO
 - **升级后先看版本诊断**：`get_setup_status` 返回 package/bridge/extension/protocol 版本，以及**比版本更强的 `extension_build_verdict`**——它比对 worker 报回来的源码哈希与当前目录的新鲜哈希，所以 `stale_worker` 才是真要人去 Reload，`matches_tree` 就别再叫人刷；`stamp_not_regenerated` / `unverifiable` 或 `extension_build_enforced=false` 表示这次没测出来，按未知处理而不是通过。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍占端口的旧 bridge 必须执行 `browsertap bridge --restart`。只有 `reload_extension_required=true` 才需要用户在扩展页手动 Reload unpacked extension。若拿到 `status: stale_package` / `action: restart_mcp_session`（某个组件比运行中的服务**更新**），过期的是 MCP 进程自己：让用户重启 MCP 会话，**别叫他重启 bridge 或重载扩展**，那两步只会再报同一个不匹配。
 - **报 401 / unauthorized**：bridge 与 MCP 没有读到同一个持久 token。默认唯一真源是 `~/.browsertap/bridge-token`，各编辑器无需配置；文件已存在时残留的 `BROWSERTAP_BRIDGE_TOKEN` 也不能覆盖它。先按 [[browsertap-bridge-recovery]] 的「成因 6」确认 token 文件路径；默认路径一致时重启升级前的旧 bridge 一次，不要逐个适配或重启编辑器。
 - **tab 卡住，每次调用都返回 `blocked_by_dialog` / `busy`**：`manual` 对话框策略留下了一个开着的原生对话框 + 后面暂停的执行。在那个 `session_id` 上调 `handle_dialog(action="accept")` 或 `"dismiss"` 释放。期间其它 tab 正常工作。
-- **物理输入返回 `requires_user_action` 且从不弹批准**：客户端不支持 elicitation。这些工具已废弃（v0.6.0 移除），正解是改用 `page_*` 而不是设法让批准弹出来；私有 lab 明确接受风险时可设置 `BROWSERTAP_LAB_NO_ELICIT=1` 并重启 MCP 进程。
+- **物理输入返回 `requires_user_action` 且从不弹批准**：客户端不支持 elicitation。这些工具已废弃（v0.5.0 移除），正解是改用 `page_*` 而不是设法让批准弹出来；私有 lab 明确接受风险时可设置 `BROWSERTAP_LAB_NO_ELICIT=1` 并重启 MCP 进程。
 - **验证码 `challenge_stalled`**：BTAP 已停止尝试，把那个 tab 交给用户手动过盾；过完在同一 tab 继续。别另起浏览器。
 - **客户端没有 `download_file`**：MCP 工具 schema 还是旧的，重启 MCP 会话/客户端。
 - **`download_file` 返回 `Unknown command: downloads`**：MCP 已更新但目标浏览器仍加载旧扩展。先看 `get_setup_status.reload_extension_required`；为 true 时去该浏览器的 `chrome://extensions` / `edge://extensions` 手动 Reload BrowserTap Bridge（版本通常与 `get_setup_status.package_version` 一致，但**能证明刷新已落地的是 `extension_build_verdict` 转成 `matches_tree`**，不是版本号相等）。不要据此重启浏览器，也不要退回页面 fetch。

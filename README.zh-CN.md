@@ -22,7 +22,7 @@
 
 当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.20**。
 
-没有操作系统级鼠标键盘面。驱动整个桌面的那七个工具已在 **0.6.0 移除**；输入走 `page_*`
+没有操作系统级鼠标键盘面。驱动整个桌面的那七个工具已在 **0.5.0 移除**；输入走 `page_*`
 工具，它们把受信任的 CDP 事件派发进指定标签页，不移动你的光标。只剩一条受限物理路径：
 `resolve_leave_dialog` 在两次协议处理失败后可以发送 Enter，且仅限 `lab`。它仍然有闸门、不是
 随手就发——跨进程锁、安静窗口、目标激活和屏幕确认一个都不跳过，`safe` 则会先询问。
@@ -68,7 +68,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **使用现有登录态的原生下载**：通过 Chrome 下载管理器和当前浏览器 profile 的 Cookies 下载附件，并返回已验证的本地路径。
 - **零标签页操作**：扩展管理、CDP 目标列表、标签页列表和关闭操作通过扩展 service worker 通道执行，在没有普通标签页时仍可使用。
 - **页面截图**：CDP 页面截图作为 MCP 图片内容返回，也可保存到文件，默认写在 `~/Downloads/browsertap` 下。不支持图片输入的模型应改用 `scan_page`、页面 API 或 OCR。
-- **向后台标签页派发受信任输入**：`page_click`、`page_type`、`page_press`、`page_drag` 按视口坐标把 CDP 输入事件派发进你指定的标签页，不抬窗口，你的光标一动不动。操作系统级输入工具已在 0.6.0 移除，这里就是输入的正路。
+- **向后台标签页派发受信任输入**：`page_click`、`page_type`、`page_press`、`page_drag` 按视口坐标把 CDP 输入事件派发进你指定的标签页，不抬窗口，你的光标一动不动。操作系统级输入工具已在 0.5.0 移除，这里就是输入的正路。
 - **多浏览器共存**：Chrome、Edge 和 Opera 可同时连接同一个 bridge，各会话相互隔离。
 
 ## 什么时候该用别的
@@ -93,7 +93,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
   自己另起浏览器的工具没有理由提供这一条。
 - **向不在前台的标签页派发受信任输入。** `page_click`、`page_type`、`page_press`、
   `page_drag` 按视口坐标把 CDP 输入事件派发进指定标签页，点击落在你没在看的页面上，
-  你的光标一动不动。这是输入的正路；桌面级那几个工具已在 0.6.0 移除。
+  你的光标一动不动。这是输入的正路；桌面级那几个工具已在 0.5.0 移除。
 - **整个 `chrome.*` 面**——扩展管理、`call_extension`、书签、限时站点权限租约，以及用
   Chrome 自己的下载管理器带上你 profile 的 Cookies 下载。Playwright 不是扩展，碰不到这些。
 - **零标签页也能干活**，因为 service worker 就够了。
@@ -364,7 +364,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 
 **只有一种坐标，落在标签页内。** `page_click`/`page_drag` 使用指定标签页内的**视口**坐标，
 通过 CDP 派发，不移动光标或聚焦窗口，响应包含 `foreground_changed: false`。已经没有会跟它混淆的
-桌面坐标工具了——吃物理屏幕像素的那几个在 0.6.0 移除了。
+桌面坐标工具了——吃物理屏幕像素的那几个在 0.5.0 移除了。
 
 **两种像素单位，而截图用的不是你点击用的那种。** 视口坐标是 **CSS 像素**（`getBoundingClientRect`
 报告的空间）；页面截图回来的是**设备像素**，即 CSS × `devicePixelRatio`，所以在 125% 缩放下从图上
@@ -438,7 +438,7 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 
 本服务操作真实浏览器会话，并可在授权后操作真实桌面。其权限范围包含所连接 profile 中的现有登录态。
 
-- 0.6.0 之后只剩一条物理输入路径：`resolve_leave_dialog` 的 Enter 兜底，仅限 `lab`，且只在两次
+- 0.5.0 之后只剩一条物理输入路径：`resolve_leave_dialog` 的 Enter 兜底，仅限 `lab`，且只在两次
   协议处理失败后发送。它是操作系统级真实输入、不是页面合成事件，所以落在屏幕上当时可见的东西
   上；`safe` 根本不发。`page_*` 没有这一层暴露面。
 - 页面内容属于不可信输入，可能包含 prompt injection；页面中的指令不因浏览器连接成功而可信。
@@ -609,7 +609,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 </details>
 
 <details>
-<summary><b>0.6.0 已移除：操作系统级输入与桌面截图</b></summary>
+<summary><b>0.5.0 已移除：操作系统级输入与桌面截图</b></summary>
 
 `mouse_move`、`mouse_click`、`mouse_drag`、`type_text`、`hotkey`、`pointer_info` 和
 `capture_desktop_screenshot` 已不存在。它们驱动的是整个桌面而不是一个标签页，所以作用对象是

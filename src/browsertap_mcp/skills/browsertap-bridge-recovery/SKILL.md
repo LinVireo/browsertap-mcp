@@ -278,7 +278,7 @@ token 不一致，不是扩展坏了**：
 - **xterm 输入不是桥故障**：`page_type` 会把 `.xterm` 容器/后代自动改投 `.xterm-helper-textarea`。
   终端无输入先确认扩展已 Reload 到当前版本，再显式传该页的 `session_id`；清当前 shell 行用
   `page_press("ctrl,u")`，不要因 `clear=true` 不符合终端行编辑语义就重启桥。
-- **`coordinates_off_screen` 不是桥故障**：吃屏幕坐标的那七个工具已在 0.6.0 移除，现网没有工具
+- **`coordinates_off_screen` 不是桥故障**：吃屏幕坐标的那七个工具已在 0.5.0 移除，现网没有工具
   会产生这个状态；闸门本身仍保留这条拒绝路径（落在任何显示器之外就在提前台之前、派发之前被拒，
   一个事件都没发）。真见到它，桥、扩展、pyautogui 都是好的，是坐标错了——不要重启桥，也不要照原
   坐标重试。结果里 `screen_bounds.enforced: false` 表示这台机器读不到显示器几何，此时通过不等于
@@ -304,7 +304,7 @@ token 不一致，不是扩展坏了**：
 
 ## 旁路兜底
 
-- **没有桌面旁路了**：`capture_desktop_screenshot` 和 `mouse_*` 在 0.6.0 移除，桥断时不存在
+- **没有桌面旁路了**：`capture_desktop_screenshot` 和 `mouse_*` 在 0.5.0 移除，桥断时不存在
   「绕过 18766 走 pyautogui」这条兜底。唯一还走 pyautogui 的是 `resolve_leave_dialog` 的 Enter
   兜底，而它本身要先经桥做两次协议 accept，所以桥断时也用不上。桥断就修桥，见上面的分诊。
 - **不用 MCP 工具直接驱动已登录浏览器**：POST `/link` 时从共享 token 文件构造 Bearer 头；不要

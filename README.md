@@ -16,7 +16,7 @@ If what you need is a clean, disposable browser — headless, Docker, CI, Firefo
 
 Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
 
-There is no OS-level mouse or keyboard surface. The seven tools that drove the whole desktop were removed in **0.6.0**; input goes through the `page_*` tools, which dispatch trusted CDP events inside a named tab without moving your cursor. One narrowly scoped physical path is left: `resolve_leave_dialog` can send Enter after two protocol-level attempts fail, and only in `lab`. It stays gated, not casual — the cross-process lock, quiet-input gate, target activation, and on-screen confirmation all still apply, and `safe` asks first.
+There is no OS-level mouse or keyboard surface. The seven tools that drove the whole desktop were removed in **0.5.0**; input goes through the `page_*` tools, which dispatch trusted CDP events inside a named tab without moving your cursor. One narrowly scoped physical path is left: `resolve_leave_dialog` can send Enter after two protocol-level attempts fail, and only in `lab`. It stays gated, not casual — the cross-process lock, quiet-input gate, target activation, and on-screen confirmation all still apply, and `safe` asks first.
 
 ## Start in 60 seconds
 
@@ -68,7 +68,7 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - **Authenticated native downloads** — download attachments through Chrome's download manager with the active browser profile's cookies, wait for completion, and receive the verified local path.
 - **Tab-less operation** — extension management, CDP target listing, and tab listing/closing go straight to the extension's service worker, so they work even with zero tabs open.
 - Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk, under `~/Downloads/browsertap` by default. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
-- **Trusted input into a background tab** — `page_click`, `page_type`, `page_press`, and `page_drag` dispatch CDP input events at viewport coordinates in the tab you name, so nothing is raised and your cursor never moves. The OS-level input tools were removed in 0.6.0; this is the input path.
+- **Trusted input into a background tab** — `page_click`, `page_type`, `page_press`, and `page_drag` dispatch CDP input events at viewport coordinates in the tab you name, so nothing is raised and your cursor never moves. The OS-level input tools were removed in 0.5.0; this is the input path.
 - **Multi-browser** — Chrome, Edge, and Opera can all connect to one bridge at the same time without clobbering each other's sessions.
 
 ## When to use something else
@@ -105,7 +105,7 @@ What is left, and what this project is actually for:
   `page_press`, and `page_drag` dispatch CDP input events at viewport
   coordinates in the named tab, so a click lands on a page you are not looking
   at and your cursor never moves. This is the input path; the desktop-level
-  tools were removed in 0.6.0.
+  tools were removed in 0.5.0.
 - **The whole `chrome.*` surface** — extension management, `call_extension`,
   bookmarks, timed site-permission leases, and downloads through Chrome's own
   manager with your profile's cookies. Playwright is not an extension and cannot
@@ -411,7 +411,7 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Selecting a tab does not raise it.** `switch_tab` defaults to `activate=false`: it only changes which tab later calls target. Nothing moves on screen until you call `activate_tab`, pass `switch_tab(activate=true)`, or approve a physical-input action. Page reading, JS, and the `page_*` input tools all work on a background tab.
 
-**One coordinate space, inside the tab.** `page_click`/`page_drag` take **viewport** coordinates inside one tab and are dispatched through CDP — no cursor movement, no window focus, `foreground_changed: false` in the reply. There is no desktop-coordinate tool to confuse them with any more: the ones that took physical screen pixels were removed in 0.6.0.
+**One coordinate space, inside the tab.** `page_click`/`page_drag` take **viewport** coordinates inside one tab and are dispatched through CDP — no cursor movement, no window focus, `foreground_changed: false` in the reply. There is no desktop-coordinate tool to confuse them with any more: the ones that took physical screen pixels were removed in 0.5.0.
 
 **Two pixel units, and the screenshot does not use the one you click with.** Viewport coordinates are **CSS pixels** — the space `getBoundingClientRect` reports. A page screenshot comes back in **device pixels**, which is CSS × `devicePixelRatio`, so at 125% display scaling a point read off the picture is 25% too large for `page_click`; `capture_page_screenshot` reports `image_width`/`image_height` and `pixel_space: "device"` so the factor is visible instead of assumed. Reading a point off a picture is the one path with no hit test — prefer a `scan_page` selector, which is checked against the page before anything is dispatched.
 
@@ -460,7 +460,7 @@ Expected interruptions come back as a `status` field, not an exception:
 
 This server drives your real browser and your real desktop. Anything it can do, you can do — and it inherits every session you are logged into.
 
-- One physical-input path is left after 0.6.0: `resolve_leave_dialog`'s Enter fallback, `lab` only, and only after two protocol-level attempts fail. It is real OS-level input rather than a synthetic page event, so it lands on whatever is on screen; `safe` refuses to send it at all. The `page_*` tools carry none of this exposure.
+- One physical-input path is left after 0.5.0: `resolve_leave_dialog`'s Enter fallback, `lab` only, and only after two protocol-level attempts fail. It is real OS-level input rather than a synthetic page event, so it lands on whatever is on screen; `safe` refuses to send it at all. The `page_*` tools carry none of this exposure.
 - Page content is untrusted input. A page your agent reads can attempt prompt injection, and the tools available make that consequential.
 - This is **not** a security boundary. See [MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices).
 - Avoid pointing it at sensitive accounts you would not want an MCP client to see, and prefer not to run it on shared or production machines.
@@ -623,7 +623,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 </details>
 
 <details>
-<summary><b>Removed in 0.6.0: OS-level input and desktop capture</b></summary>
+<summary><b>Removed in 0.5.0: OS-level input and desktop capture</b></summary>
 
 `mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`, `pointer_info`
 and `capture_desktop_screenshot` no longer exist. They drove the whole desktop
