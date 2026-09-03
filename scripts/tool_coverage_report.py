@@ -287,13 +287,13 @@ def build_report(*, run_live: bool = False, execute: bool = True) -> dict[str, A
     return {
         "registered": len(registered),
         "contract_valid_tools": len(contract_valid_names & registered),
-        "expected_registered": 55,
+        "expected_registered": 56,
         "manifest_entries": len(manifest_names),
         "mode": "live" if run_live else "offline",
         "execution_enabled": execute,
         "all_evidence_executed": (
             execute
-            and len(contract_valid_names & registered) == len(registered) == 55
+            and len(contract_valid_names & registered) == len(registered) == 56
             and not deferred_live
             and not failed_evidence
             and not unclassified_evidence
@@ -336,9 +336,9 @@ def report_ok(report: dict[str, Any]) -> bool:
             execution_ok = execution_ok and live.get("exit_code") == 0
             execution_ok = execution_ok and report["all_evidence_executed"]
     return (
-        report["registered"] == report["expected_registered"] == 55
-        and report["manifest_entries"] == 55
-        and report["contract_valid_tools"] == 55
+        report["registered"] == report["expected_registered"] == 56
+        and report["manifest_entries"] == 56
+        and report["contract_valid_tools"] == 56
         and execution_ok
         and not any(
             report[key]

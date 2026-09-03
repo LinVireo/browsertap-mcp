@@ -14,9 +14,9 @@ def _passing_docs_report() -> dict[str, object]:
     weaken any test built on it.
     """
     return {
-        "registered": 55,
-        "expected_registered": 55,
-        "coverage_manifest": 55,
+        "registered": 56,
+        "expected_registered": 56,
+        "coverage_manifest": 56,
         "readme_missing": {"README.md": [], "README.zh-CN.md": []},
         "readme_extra": {"README.md": [], "README.zh-CN.md": []},
         "missing_params": {},
@@ -32,9 +32,9 @@ def _passing_docs_report() -> dict[str, object]:
 
 def _passing_tool_evidence() -> dict[str, object]:
     return {
-        "registered": 55,
-        "contract_valid_tools": 55,
-        "fully_verified_tools": 55,
+        "registered": 56,
+        "contract_valid_tools": 56,
+        "fully_verified_tools": 56,
         "all_evidence_executed": True,
         "failed_evidence": [],
         "unclassified_evidence": [],
