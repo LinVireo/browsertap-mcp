@@ -22,12 +22,10 @@
 
 当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.20**。
 
-操作系统级输入工具——`mouse_move`、`mouse_click`、`mouse_drag`、`type_text`、`hotkey`、
-`pointer_info`、`capture_desktop_screenshot`——**已废弃，计划在 v0.6.0 移除**；每次调用都会
-打印一条警告并给出对应的 `page_*` 替代工具。请用页面级工具。桌面路径尚在发布期内时仍然有闸门、
-不是随手就发：`safe` profile 每次物理动作前询问；默认 `lab` profile 免询问执行，但同样保留
-输入锁、安静窗口、目标激活和屏幕确认。`resolve_leave_dialog` 不在这次废弃范围内——它是额外
-一条受限路径，仅在两次协议处理失败后才可能发送 Enter。
+没有操作系统级鼠标键盘面。驱动整个桌面的那七个工具已在 **0.6.0 移除**；输入走 `page_*`
+工具，它们把受信任的 CDP 事件派发进指定标签页，不移动你的光标。只剩一条受限物理路径：
+`resolve_leave_dialog` 在两次协议处理失败后可以发送 Enter，且仅限 `lab`。它仍然有闸门、不是
+随手就发——跨进程锁、安静窗口、目标激活和屏幕确认一个都不跳过，`safe` 则会先询问。
 
 ## 60 秒上手
 
@@ -70,7 +68,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **使用现有登录态的原生下载**：通过 Chrome 下载管理器和当前浏览器 profile 的 Cookies 下载附件，并返回已验证的本地路径。
 - **零标签页操作**：扩展管理、CDP 目标列表、标签页列表和关闭操作通过扩展 service worker 通道执行，在没有普通标签页时仍可使用。
 - **页面截图**：CDP 页面截图作为 MCP 图片内容返回，也可保存到文件，默认写在 `~/Downloads/browsertap` 下。不支持图片输入的模型应改用 `scan_page`、页面 API 或 OCR。
-- **已废弃：操作系统级物理输入**：系统级鼠标移动/点击/拖拽、打字、热键、`pointer_info` 和 `capture_desktop_screenshot` 仍然可用，但**将在 v0.6.0 移除**，每次调用都会记录应改用哪个 `page_*` 工具。在此期间它们仍有闸门：`lab` 可免 elicitation 执行，`safe` 对每次调用进行询问；两种 profile 均保留跨进程锁、安静窗口、所有权检查、目标激活和屏幕确认。
+- **向后台标签页派发受信任输入**：`page_click`、`page_type`、`page_press`、`page_drag` 按视口坐标把 CDP 输入事件派发进你指定的标签页，不抬窗口，你的光标一动不动。操作系统级输入工具已在 0.6.0 移除，这里就是输入的正路。
 - **多浏览器共存**：Chrome、Edge 和 Opera 可同时连接同一个 bridge，各会话相互隔离。
 
 ## 什么时候该用别的
@@ -87,7 +85,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **带稳定 `ref` 句柄的无障碍树快照。** 那是 playwright-mcp 读页面的主要方式。`scan_page`
   给的是简化 HTML 或文本加 `#r1` 形式的链接引用，是另一种取舍。
 - **更小的默认工具面。** playwright-mcp 默认约二十几个工具，其余放在 `--caps` 后面。
-  本服务把 56 个全部无条件注册。
+  本服务把 49 个全部无条件注册。
 
 剩下的这些，才是本项目真正要解决的：
 
@@ -95,7 +93,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
   自己另起浏览器的工具没有理由提供这一条。
 - **向不在前台的标签页派发受信任输入。** `page_click`、`page_type`、`page_press`、
   `page_drag` 按视口坐标把 CDP 输入事件派发进指定标签页，点击落在你没在看的页面上，
-  你的光标一动不动。这是输入的正路；桌面级那几个工具已废弃。
+  你的光标一动不动。这是输入的正路；桌面级那几个工具已在 0.6.0 移除。
 - **整个 `chrome.*` 面**——扩展管理、`call_extension`、书签、限时站点权限租约，以及用
   Chrome 自己的下载管理器带上你 profile 的 Cookies 下载。Playwright 不是扩展，碰不到这些。
 - **零标签页也能干活**，因为 service worker 就够了。
@@ -364,16 +362,15 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 只有调用 `activate_tab`、传入 `switch_tab(activate=true)` 或执行需要前台的物理输入时，浏览器可见
 状态才会改变。页面读取、JavaScript 和 `page_*` 输入工具均可在后台标签页上运行。
 
-**页面坐标与桌面坐标相互独立。** `page_click`/`page_drag` 使用指定标签页内的**视口**坐标，
-通过 CDP 派发，不移动光标或聚焦窗口，响应包含 `foreground_changed: false`。
-`mouse_move`/`mouse_click`/`mouse_drag` 使用**桌面屏幕**坐标并驱动真实光标；两种坐标不可互换。
+**只有一种坐标，落在标签页内。** `page_click`/`page_drag` 使用指定标签页内的**视口**坐标，
+通过 CDP 派发，不移动光标或聚焦窗口，响应包含 `foreground_changed: false`。已经没有会跟它混淆的
+桌面坐标工具了——吃物理屏幕像素的那几个在 0.6.0 移除了。
 
-**三种像素单位，而截图用的不是你点击用的那种。** 视口坐标是 **CSS 像素**（`getBoundingClientRect`
-报告的空间）；桌面坐标是**物理屏幕像素**；页面截图回来的是**设备像素**，即 CSS × `devicePixelRatio`，
-所以在 125% 缩放下从图上量到的点比 `page_click` 需要的大 25%。`capture_page_screenshot` 因此报出
-`image_width`/`image_height` 和 `pixel_space: "device"`，把这个系数摆到明面上而不是让调用方猜。桌面
-截图不做缩放，`pixel_space: "physical"`，它的像素就是 `mouse_click` 的坐标。从图上量点是唯一没有
-命中判定的路径——优先用 `scan_page` 给的 selector，那条路会在派发前先跟页面核对。
+**两种像素单位，而截图用的不是你点击用的那种。** 视口坐标是 **CSS 像素**（`getBoundingClientRect`
+报告的空间）；页面截图回来的是**设备像素**，即 CSS × `devicePixelRatio`，所以在 125% 缩放下从图上
+量到的点比 `page_click` 需要的大 25%。`capture_page_screenshot` 因此报出 `image_width`/`image_height`
+和 `pixel_space: "device"`，把这个系数摆到明面上而不是让调用方猜。从图上量点是唯一没有命中判定的
+路径——优先用 `scan_page` 给的 selector，那条路会在派发前先跟页面核对。
 
 **自动化 profile。** 未设置 `BROWSERTAP_MODE` 时默认使用 `lab`，并按
 `BROWSERTAP_LAB_NO_ELICIT=1` 处理，物理输入和站点 `allow` 不进行 elicitation。
@@ -441,9 +438,9 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 
 本服务操作真实浏览器会话，并可在授权后操作真实桌面。其权限范围包含所连接 profile 中的现有登录态。
 
-- 鼠标移动、点击、键盘输入和热键均为操作系统级真实输入，不是页面合成事件。`safe` 逐次询问，
-  `lab` 默认免询问或按配置恢复会话级询问；操作获准后将直接影响真实桌面。这些工具已废弃、
-  v0.6.0 移除；`page_*` 没有这一层暴露面。
+- 0.6.0 之后只剩一条物理输入路径：`resolve_leave_dialog` 的 Enter 兜底，仅限 `lab`，且只在两次
+  协议处理失败后发送。它是操作系统级真实输入、不是页面合成事件，所以落在屏幕上当时可见的东西
+  上；`safe` 根本不发。`page_*` 没有这一层暴露面。
 - 页面内容属于不可信输入，可能包含 prompt injection；页面中的指令不因浏览器连接成功而可信。
 - BTAP **不是**安全隔离边界。参见 [MCP 安全最佳实践](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)。
 - 不应连接 MCP 客户端无须访问的敏感账号。共享机器或生产机器需要单独评估误操作风险。
@@ -609,47 +606,39 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 
 - **capture_page_screenshot** —— 通过 CDP 截视口、`full_page` 或显式 `clip`;PNG/JPEG/WebP 可选,JPEG/WebP 支持 `quality`。返回元数据和 MCP 图片内容;`save_path` 只额外落盘,且是**相对路径**,落在 `~/Downloads/browsertap` 下,绝对路径和 `..` 越界被拒。元数据自报单位:`image_width`/`image_height` 从返回的字节里解析,`pixel_space: "device"`(CSS × `devicePixelRatio`),所以从图上量到的点不能直接喂给 `page_click`。头解析不出来时报 `null` 尺寸加一条 `dimensions_note`,不猜——`size` 是字节数,不是尺寸
   - `session_id`(string,可选)、`tab_id`(integer,可选)、`format`(string,可选):默认 `png`、`full_page`(boolean,可选):默认 `false`、`clip`(object,可选):`x`,`y`,`width`,`height`,可带 `scale`、`quality`(integer,可选):0–100、`save_path`(string,可选)、`return_base64`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `20`
-- **capture_desktop_screenshot** —— 捕获当前可见的操作系统虚拟桌面（全部显示器），返回元数据和 MCP 图片内容。**已废弃，v0.6.0 移除——请用 `capture_page_screenshot`。** 它不是指定/后台标签页截图，可能包含其他应用；`save_path` 只额外落盘，且是**相对路径**，落在 `~/Downloads/browsertap` 下。`width`/`height`/`left`/`top` 和图片本身都是**物理屏幕像素**（`pixel_space: "physical"`）、不缩放，所以和 `mouse_click` 吃的是同一个空间
-  - `save_path`(string,可选)、`return_base64`(boolean,可选):默认 `false`
 </details>
 
 <details>
-<summary><b>物理输入（已废弃，v0.6.0 移除）</b></summary>
+<summary><b>0.6.0 已移除：操作系统级输入与桌面截图</b></summary>
 
-**这六个工具已废弃，将在 v0.6.0 移除。** 每次调用都会打印一条警告并给出替代工具：
-`mouse_click` → `page_click`；`mouse_move` → 不需要（`page_click` 自己定位）；
-`mouse_drag` → `page_drag`；`type_text` → `page_type`；`hotkey` → `page_press`；
-`pointer_info` → 用 `execute_js` 读元素几何。这里仍然写着它们，是因为它们还在发布包里，
-不是因为它们是推荐路径。
+`mouse_move`、`mouse_click`、`mouse_drag`、`type_text`、`hotkey`、`pointer_info` 和
+`capture_desktop_screenshot` 已不存在。它们驱动的是整个桌面而不是一个标签页，所以作用对象是
+屏幕上当时恰好显示的东西。改用：
 
-这些工具按**桌面屏幕**坐标发送真实操作系统级输入，坐标单位是虚拟桌面上的**物理像素**（不是 CSS
-像素，也不是设备像素），会移动实际光标或向当前焦点对象发送按键——这正是要移除它们的原因：
-影响面是整个桌面，不是一个标签页。请用可在后台标签页中运行的 `page_*` 工具。当初为之保留的
-那几种场景（浏览器界面、原生文件选择器、扩展弹窗和操作系统对话框）本来就不在页面级协议事件
-能到的范围内，按「不支持」处理，而不是当作 `page_*` 调用失败后的兜底。
+| 已移除 | 改用 |
+| --- | --- |
+| `mouse_click` | `page_click` |
+| `mouse_move` | 不需要——`page_click` 自己定位 |
+| `mouse_drag` | `page_drag` |
+| `type_text` | `page_type` |
+| `hotkey` | `page_press` |
+| `pointer_info` | 用 `execute_js` 读元素几何 |
+| `capture_desktop_screenshot` | `capture_page_screenshot` |
 
-`safe` 模式下这五个直接工具逐次 elicitation;默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 免询问执行,显式设为 false 才恢复会话级批准。拒绝、取消或不支持 elicitation 时返回 `requires_user_action`;无论哪种模式,锁/安静窗口/ownership/目标提前台与屏幕确认都不会跳过。`resolve_leave_dialog` 是第六条物理输入路径，只能在两次协议处理失败后用 Enter 兜底，并经过相同闸门。
+`page_*` 调用失败是定位问题，不是去找屏幕坐标兜底的理由——用 `scan_page` 重读页面、修 locator。
+浏览器界面、原生文件选择器、扩展弹窗和操作系统对话框本来就不在页面级协议事件能到的范围内，
+按「不支持」处理，而不是由一条桌面路径顶上。
 
-物理输入按固定顺序执行：获取跨进程锁（已占用时立即返回 `busy`，不排队）；拿坐标跟真实显示器
-几何核对；等待短暂安静窗口
-（检测到鼠标或键盘活动时返回 `input_activity_detected`，不发送输入）；激活目标标签页；发送输入。这个窗口到底能检测到什么，取决于操作系统给不给信号：只有 Windows 提供最后输入时间戳，而指针位置在 Wayland、无头容器、以及未授予辅助功能权限的 macOS 上都读不到。一个信号都拿不到时，窗口照样等完，但没有任何东西可供比对，所以每个结果都带一个 `input_quiet` 字段，列出它实际采样到的标记；一个都没有时 `enforced: false`——这种机器上通过只能当作未经验证，不能当作桌面确实空闲。
-五个直接工具都接受与其他工具相同的 `session_id`。省略时使用全局共享默认目标，该目标可能已被
-其他任务修改。仅在有意操作当前可见桌面或原生 UI 时使用 `activate_session="none"`。无法确认标签页显示
-在屏幕上时返回 `activation_failed`，且不发送输入。
+只剩一条物理路径：`resolve_leave_dialog` 在两次协议 accept 失败后发送 Enter，仅限 `lab`。`safe`
+走 MCP elicitation 询问，被拒绝、取消或客户端不支持时返回 `requires_user_action`。两种情况下闸门
+都不变——跨进程锁（已占用时立即返回 `busy`，不排队）、一段短暂安静窗口（检测到鼠标或键盘活动时
+返回 `input_activity_detected`，不发送输入）、激活目标标签页、然后动作。这个窗口能检测到什么取决于
+操作系统：只有 Windows 提供最后输入时间戳，指针位置在 Wayland、无头容器以及未授予辅助功能权限的
+macOS 上都读不到。一个信号都拿不到时窗口照样等完，但没有任何东西可供比对，所以结果带一个
+`input_quiet` 字段列出实际采样到的标记，一个都没有时 `enforced: false`——这种机器上通过只能当作
+未经验证，不能当作桌面确实空闲。无法确认标签页显示在屏幕上时返回 `activation_failed` 且不发送输入，
+所以最小化的窗口得到的是一个错误，而不是一个发错地方的 Enter。
 
-落在任何显示器之外的点会以 `coordinates_off_screen` 被拒，发生在提前台之前、派发之前：
-`SetCursorPos` 对越界坐标是**静默截断**并报成功，所以在 1920×1080 上传 `(2400, 1300)` 实际点的是
-`(1919, 1079)`——那个能把所有窗口最小化的热角——而响应里不会有任何一处说出这件事。它核对的矩形是
-跨全部显示器的虚拟桌面，每个物理输入结果和 `pointer_info` 都以 `screen_bounds` 报出。几何读不到时
-调用照常继续，带 `screen_bounds.enforced: false` 和一条说明，与安静闸门报出"空过"而不是干脆
-禁掉物理输入是同一个取舍。
-
-- **mouse_move** —— `x`(integer)、`y`(integer)、`duration`(number,可选):移动耗时秒数,默认 `0`(直接跳到目标点)、`session_id`(string,可选):要提前台的标签页、`activate_session`(string,可选):默认 `current`(先把目标标签页提前台),也可传 session id 或 `none`
-- **mouse_click** —— `x`(integer,可选)、`y`(integer,可选):必须同时提供或同时省略（同时省略时点击当前指针位置，半坐标会被拒绝）、`button`(string,可选):默认 `left`,也接受 `right`/`middle`、`clicks`(integer,可选):默认 `1`、`interval`(number,可选):多次点击的间隔秒数,默认 `0.1`、`session_id`(string,可选):要提前台的标签页,正常情况就传这个、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
-- **mouse_drag** —— `x1`(integer)、`y1`(integer)、`x2`(integer)、`y2`(integer)、`duration`(number,可选):按住按键移动的秒数,默认 `0.3`、`button`(string,可选):默认 `left`、`session_id`(string,可选):要提前台的标签页、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
-- **type_text** —— `text`(string)、`interval`(number,可选):每个字符的间隔秒数,默认 `0.01`、`click_x`(integer,可选)、`click_y`(integer,可选):必须同时提供或同时省略；提供时先点这里让输入框获得焦点，半坐标会被拒绝、`session_id`(string,可选):要提前台的标签页,正常情况就传这个、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
-- **hotkey** —— `keys_csv`(string):逗号分隔,如 `ctrl,c`、`session_id`(string,可选):要提前台的标签页、`activate_session`(string,可选):默认 `current`,也可传 session id 或 `none`
-- **pointer_info** —— 当前指针坐标、主显示器尺寸,以及跨全部显示器的 `screen_bounds` 矩形(`source` 说明是哪个探测答的,几何读不到时为 `null`)。只读,不需要批准。无参数
 </details>
 
 ## 故障排查

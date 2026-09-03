@@ -267,10 +267,9 @@ mcp = FastMCP(
         "the user's cursor or raising a window; the chrome.* surface is in "
         "scope, including extension management, bookmarks, scoped site-permission leases, and downloads "
         "through Chrome's own manager. "
-        "Input goes through the page_* tools. The OS-level tools (mouse_move, mouse_click, mouse_drag, "
-        "type_text, hotkey, pointer_info, capture_desktop_screenshot) are deprecated and will be removed in "
-        "v0.6.0: they drive the whole desktop, so they act on whatever is actually on screen. Do not reach "
-        "for them because a page_* call failed - re-read the page with scan_page and fix the target first. "
+        "Input goes through the page_* tools; there is no OS-level mouse or keyboard surface. When a "
+        "page_* call fails, re-read the page with scan_page and fix the target - do not look for a "
+        "screen-coordinate fallback, because none exists. "
         "Out of scope: headless, CI, containers, Firefox and WebKit. Report the mismatch rather than "
         "working around it. "
         "Bot checks are not solved here. A Cloudflare Turnstile verdict is decided before the widget "
@@ -5046,9 +5045,8 @@ def _page_type_target_info(
     description=(
         "Click a CSS/structured locator or viewport coordinates in a specific real browser tab "
         "using background CDP input. Coordinates are viewport-relative CSS pixels (the space "
-        "getBoundingClientRect reports), NOT the physical screen pixels mouse_click takes and NOT "
-        "the device pixels capture_page_screenshot returns -- on a scaled display divide a "
-        "screenshot pixel by devicePixelRatio first. Ambiguous or unreachable targets dispatch "
+        "getBoundingClientRect reports), NOT the device pixels capture_page_screenshot returns "
+        "-- on a scaled display divide a screenshot pixel by devicePixelRatio first. Ambiguous or unreachable targets dispatch "
         "nothing; the tab "
         "is not activated and the desktop cursor does not move. Selector offsets are measured "
         "from the element's top-left corner; an omitted axis uses the element centre. In selector "
@@ -5429,8 +5427,7 @@ def page_press(
     description=(
         "Drag between viewport coordinates in a specific tab using one background CDP input "
         "sequence, without activating the tab or moving the desktop cursor. Both endpoints are "
-        "viewport-relative CSS pixels, like page_click's coordinate mode and unlike mouse_drag's "
-        "physical screen pixels, and neither is hit-tested."
+        "viewport-relative CSS pixels, like page_click's coordinate mode, and neither is hit-tested."
     )
 )
 def page_drag(
@@ -6550,123 +6547,8 @@ def _pyautogui():
     return pyautogui
 
 
-@mcp.tool(description="Capture the complete visible virtual desktop across all displays and return text metadata plus MCP image content; this is not a background-tab screenshot, save_path only adds a disk copy, and return_base64 is opt-in. width/height/left/top are PHYSICAL screen pixels and are exactly the range mouse_click accepts, unscaled.")
-def capture_desktop_screenshot(save_path: str = "", return_base64: bool = False) -> CallToolResult:
-    _warn_physical_input_deprecated("capture_desktop_screenshot", "capture_page_screenshot")
-    import io
-    try:
-        import mss
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError(
-            "Desktop capture requires the optional desktop dependencies. "
-            "Install `browsertap-mcp[desktop]`."
-        ) from exc
-    except Exception as exc:
-        raise RuntimeError(
-            "Desktop capture is unavailable because its imaging backend failed to load "
-            f"({type(exc).__name__}: {exc})."
-        ) from exc
-
-    # See `physical_input._mss_virtual_screen` for why this is reached by name:
-    # `mss.mss` is a deprecated alias for the same class, and the declared floor
-    # (mss>=10.1.0) predates the rename.
-    factory = getattr(mss, "MSS", None) or mss.mss
-    try:
-        with factory() as sct:
-            if not sct.monitors:
-                raise RuntimeError("Desktop capture failed because no display was detected.")
-            # MSS index 0 is the virtual bounding rectangle containing every display;
-            # indexes 1..N are individual monitors.
-            monitor = sct.monitors[0]
-            shot = sct.grab(monitor)
-            img = Image.frombytes("RGB", shot.size, shot.rgb)
-            output = io.BytesIO()
-            img.save(output, format="PNG")
-            raw = output.getvalue()
-    except RuntimeError:
-        # Already an actionable message -- either the no-display check above or a
-        # backend that speaks RuntimeError. Re-wrapping would bury it.
-        raise
-    except Exception as exc:
-        # mss binds to the display while constructing and raises ScreenShotError (not
-        # RuntimeError) on a headless or locked session; Pillow can fail on the
-        # encode. Name the cause instead of surfacing a bare backend traceback.
-        raise RuntimeError(
-            f"Desktop capture failed because the display could not be read "
-            f"({type(exc).__name__}: {exc})."
-        ) from exc
-    out: dict[str, Any] = {
-        "status": "success",
-        "format": "png",
-        "width": shot.width,
-        "height": shot.height,
-        "left": int(monitor.get("left", 0)),
-        "top": int(monitor.get("top", 0)),
-        "monitor_count": max(0, len(sct.monitors) - 1),
-        "virtual_desktop": True,
-        "pixel_space": "physical",
-        "size": len(raw),
-        "image_attached": True,
-        "model_note": (
-            "Pixels are attached from the currently visible OS virtual desktop across all displays, "
-            "not from a selected or background browser tab. If the current model does not support "
-            "images, it has not seen those pixels; use capture_page_screenshot for one browser tab "
-            "or structured page tools when possible. "
-            "This image is not resized, so width/height are both its pixel dimensions and the "
-            "physical screen coordinates mouse_click takes -- but some clients downscale an "
-            "attached image before the model sees it, so rescale any point read off the picture "
-            "back to width x height before using it."
-        ),
-    }
-    if save_path:
-        # Validate path to prevent traversal outside allowed directory.
-        path = _validate_safe_path(save_path, description="save_path")
-        # Atomic write with size limit (50MB for screenshots)
-        _atomic_write_bytes(path, raw, max_size=50 * 1024 * 1024)
-        out["saved_to"] = str(path)
-    if return_base64:
-        out["base64"] = base64.b64encode(raw).decode("ascii")
-    text_metadata = {key: value for key, value in out.items() if key != "base64"}
-    return CallToolResult(
-        content=[
-            TextContent(type="text", text=json.dumps(text_metadata, ensure_ascii=False)),
-            MCPImage(data=raw, format="png").to_image_content(),
-        ],
-        structuredContent=out,
-    )
-
 
 # --- Physical input: operator approval gate ----------------------------------
-
-# Deprecation notice for physical input tools (0.5.0)
-_PHYSICAL_INPUT_DEPRECATION_WARNING = """
-⚠️ DEPRECATION WARNING: This tool will be removed in version 0.6.0.
-
-Physical input tools (mouse_click, mouse_move, mouse_drag, type_text, hotkey,
-pointer_info, capture_desktop_screenshot) control the OS desktop, not just the browser,
-which creates security concerns and maintenance burden.
-
-MIGRATION: Use page-level alternatives instead:
-- mouse_click → page_click (clicks elements in the browser)
-- mouse_move → not needed (page_click handles positioning)
-- mouse_drag → page_drag (drags within the page)
-- type_text → page_type (types in browser inputs)
-- hotkey → page_press (sends keyboard events to page)
-- pointer_info → execute_js to query element positions
-- capture_desktop_screenshot → capture_page_screenshot (safer, browser-only)
-
-For more details, see: https://github.com/LinVireo/browsertap-mcp/issues/XXX
-""".strip()
-
-
-def _warn_physical_input_deprecated(tool_name: str, alternative: str) -> None:
-    """Log deprecation warning for physical input tools (to be removed in 0.6.0)."""
-    logger.warning(
-        "%s is deprecated and will be removed in v0.6.0. Use %s instead.",
-        tool_name, alternative
-    )
-
 
 class PhysicalInputApproval(BaseModel):
     approve: StrictBool = Field(description="Approve this one physical input action")
@@ -6717,19 +6599,6 @@ def _requires_user_action() -> dict[str, Any]:
 
 def _physical_error_result(status: str, message: str) -> dict[str, Any]:
     return {"status": status, "message": message}
-
-
-def _require_coordinate_pair(
-    first: Any,
-    second: Any,
-    first_name: str,
-    second_name: str,
-) -> None:
-    """Reject an optional coordinate pair when exactly one axis is supplied."""
-    if (first is None) != (second is None):
-        raise InputValidationError(
-            f"{first_name} and {second_name} must be provided together or both omitted"
-        )
 
 
 async def _run_approved_physical_action(
@@ -6818,54 +6687,14 @@ async def _run_approved_physical_action(
         return _physical_error_result("coordinates_off_screen", str(exc))
 
 
-_PHYSICAL_INPUT_NOTICE = (
-    " Safe mode requires one-action approval; lab skips prompting by default and uses session "
-    "approval only when BROWSERTAP_LAB_NO_ELICIT is explicitly disabled. By default BTAP "
-    "foregrounds and verifies the selected browser tab after the quiet-input check; prefer an "
-    "explicit session_id for browser input. activate_session='none' is only for intentional "
-    "input to the already-visible desktop or native UI. Windows only: input sent to a window "
-    "running at a higher integrity level (anything started as administrator, and UAC prompts) "
-    "is discarded by the OS with no error, so the result carries input_reachability with the "
-    "two levels compared -- treat deliverable=false as 'this did not land' even though the "
-    "call succeeded, and deliverable=null as unconfirmed."
-)
-
-
-# --- Tools: physical mouse and keyboard --------------------------------------
-@mcp.tool(description="Move the real mouse cursor to absolute virtual-desktop coordinates in PHYSICAL screen pixels (the space pointer_info and capture_desktop_screenshot report, not the CSS pixels page_click takes). A point on no display is refused with coordinates_off_screen rather than clamped to a screen edge." + _PHYSICAL_INPUT_NOTICE)
-async def mouse_move(
-    ctx: Context,
-    x: int,
-    y: int,
-    duration: float = 0.0,
-    session_id: Optional[str] = None,
-    activate_session: Optional[str] = "current",
-) -> dict[str, Any]:
-    _warn_physical_input_deprecated("mouse_move", "page_click (no separate move needed)")
-
-    def action() -> dict[str, Any]:
-        pyautogui = _pyautogui()
-        pyautogui.moveTo(x, y, duration=duration)
-        return {"status": "ok", "x": x, "y": y}
-
-    return await _run_approved_physical_action(
-        ctx,
-        f"move cursor to ({x}, {y})",
-        action,
-        session_id=session_id,
-        activate_session=activate_session,
-        points=[(x, y)],
-    )
-
-
 def _maybe_activate(activate_session: Optional[str],
                     session_id: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Raise the target tab before a screen-coordinate action.
 
     Physical input lands on whatever is actually on screen, so skipping this
-    makes a switch_tab + mouse_click pair click the previously visible tab —
-    silently, since the coordinates are valid and pyautogui reports success.
-    That is why raising the tab is the default and opting out is explicit.
+    would send resolve_leave_dialog's Enter to the previously visible tab —
+    silently, since pyautogui reports success either way. That is why raising
+    the tab is the default and opting out is explicit.
 
     ``session_id`` wins when given, and is the parameter to reach for: every
     other tool here takes one, and the shared global default is not a safe
@@ -6890,178 +6719,6 @@ def _maybe_activate(activate_session: Optional[str],
     except Exception as e:
         # No target tab yet is normal for a desktop click; don't fail the action.
         return {"activation_skipped": str(e)}
-
-
-@mcp.tool(
-    description=(
-        "Click on the real desktop at absolute virtual-desktop coordinates in PHYSICAL screen "
-        "pixels — the space pointer_info and capture_desktop_screenshot report, NOT the viewport "
-        "CSS pixels page_click takes; on a scaled display the two differ by devicePixelRatio. "
-        "A point on no display is refused with coordinates_off_screen rather than clamped to a "
-        "screen edge. "
-        "Pass session_id — the same one you "
-        "pass every other tool (preferred) — and that tab is raised after the quiet check so "
-        "the click lands on it. "
-        "Without one the current global target is raised, which another task may have "
-        "changed. Approval may foreground the selected browser tab. "
-        "activate_session='none' clicks the desktop as-is."
-    )
-)
-async def mouse_click(
-    ctx: Context,
-    x: Optional[int] = None,
-    y: Optional[int] = None,
-    button: str = "left",
-    clicks: int = 1,
-    interval: float = 0.1,
-    session_id: Optional[str] = None,
-    activate_session: Optional[str] = "current",
-) -> dict[str, Any]:
-    _warn_physical_input_deprecated("mouse_click", "page_click")
-    _require_coordinate_pair(x, y, "x", "y")
-
-    def action() -> dict[str, Any]:
-        pyautogui = _pyautogui()
-        if x is not None and y is not None:
-            pyautogui.click(x=x, y=y, clicks=clicks, interval=interval, button=button)
-        else:
-            pyautogui.click(clicks=clicks, interval=interval, button=button)
-        return {"status": "ok", "x": x, "y": y, "button": button, "clicks": clicks}
-
-    target = f" at ({x}, {y})" if x is not None and y is not None else " at the current pointer"
-    return await _run_approved_physical_action(
-        ctx,
-        f"click{target} with {button} button",
-        action,
-        session_id=session_id,
-        activate_session=activate_session,
-        # A click with no coordinates uses wherever the pointer already is, which
-        # the OS put there and cannot be off-screen. Passing it anyway would
-        # probe the display geometry for nothing.
-        points=[(x, y)] if x is not None and y is not None else None,
-    )
-
-
-@mcp.tool(description="Drag the real mouse from one point to another, both in absolute virtual-desktop PHYSICAL screen pixels (see mouse_click for how that differs from page_drag's CSS pixels). Either endpoint on no display is refused with coordinates_off_screen." + _PHYSICAL_INPUT_NOTICE)
-async def mouse_drag(
-    ctx: Context,
-    x1: int,
-    y1: int,
-    x2: int,
-    y2: int,
-    duration: float = 0.3,
-    button: str = "left",
-    session_id: Optional[str] = None,
-    activate_session: Optional[str] = "current",
-) -> dict[str, Any]:
-    _warn_physical_input_deprecated("mouse_drag", "page_drag")
-
-    def action() -> dict[str, Any]:
-        pyautogui = _pyautogui()
-        pyautogui.moveTo(x1, y1)
-        pyautogui.dragTo(x2, y2, duration=duration, button=button)
-        return {"status": "ok", "from": [x1, y1], "to": [x2, y2], "button": button}
-
-    return await _run_approved_physical_action(
-        ctx,
-        f"drag from ({x1}, {y1}) to ({x2}, {y2})",
-        action,
-        session_id=session_id,
-        activate_session=activate_session,
-        points=[(x1, y1), (x2, y2)],
-    )
-
-
-@mcp.tool(
-    description=(
-        "Type text via the real keyboard, optionally after clicking a field at click_x/click_y in "
-        "absolute virtual-desktop PHYSICAL screen pixels (see mouse_click for how that differs "
-        "from the CSS pixels the page_* tools take); a click point on no display is refused with "
-        "coordinates_off_screen. Pass session_id — "
-        "the same one you pass every other tool (preferred) — and that tab is raised after the "
-        "quiet check so the keystrokes go to it. Without one the current global target is raised, "
-        "which another task may have changed. Approval may foreground the selected browser tab. "
-        "activate_session='none' types into whatever already has focus."
-    )
-)
-async def type_text(
-    ctx: Context,
-    text: str,
-    interval: float = 0.01,
-    click_x: Optional[int] = None,
-    click_y: Optional[int] = None,
-    session_id: Optional[str] = None,
-    activate_session: Optional[str] = "current",
-) -> dict[str, Any]:
-    _warn_physical_input_deprecated("type_text", "page_type")
-    _require_coordinate_pair(click_x, click_y, "click_x", "click_y")
-
-    def action() -> dict[str, Any]:
-        pyautogui = _pyautogui()
-        if click_x is not None and click_y is not None:
-            pyautogui.click(click_x, click_y)
-            time.sleep(0.1)
-        pyautogui.write(text, interval=interval)
-        return {"status": "ok", "typed_chars": len(text)}
-
-    return await _run_approved_physical_action(
-        ctx,
-        f"type {len(text)} characters",
-        action,
-        session_id=session_id,
-        activate_session=activate_session,
-        points=[(click_x, click_y)] if click_x is not None and click_y is not None else None,
-    )
-
-
-@mcp.tool(description="Send a hotkey chord like 'command,l' or 'ctrl,shift,p' via the real keyboard." + _PHYSICAL_INPUT_NOTICE)
-async def hotkey(
-    ctx: Context,
-    keys_csv: str,
-    session_id: Optional[str] = None,
-    activate_session: Optional[str] = "current",
-) -> dict[str, Any]:
-    _warn_physical_input_deprecated("hotkey", "page_press")
-    keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
-    if not keys:
-        raise RuntimeError("keys_csv must contain at least one key")
-
-    def action() -> dict[str, Any]:
-        pyautogui = _pyautogui()
-        pyautogui.hotkey(*keys)
-        return {"status": "ok", "keys": keys}
-
-    return await _run_approved_physical_action(
-        ctx,
-        f"send hotkey {keys_csv}",
-        action,
-        session_id=session_id,
-        activate_session=activate_session,
-    )
-
-
-@mcp.tool(
-    description="Report the current desktop mouse position and screen geometry in PHYSICAL pixels. screen_width/screen_height are the PRIMARY display only; screen_bounds is the virtual desktop across every display and is the range mouse_click will accept. These are not the CSS pixels the page_* tools take.",
-    serialize=False,
-)
-def pointer_info() -> dict[str, Any]:
-    _warn_physical_input_deprecated("pointer_info", "execute_js to query element positions")
-    pyautogui = _pyautogui()
-
-    x, y = pyautogui.position()
-    w, h = pyautogui.size()
-    return {
-        "x": x,
-        "y": y,
-        "screen_width": w,
-        "screen_height": h,
-        # The primary size above is what pyautogui knows and is kept for
-        # compatibility, but it is the wrong bound on a multi-monitor desktop --
-        # a legitimate point on a second screen is outside it. This is the
-        # rectangle the physical tools actually validate against, read the same
-        # way, so the two can never disagree.
-        "screen_bounds": physical_input.screen_bounds(),
-    }
 
 
 if __name__ == "__main__":

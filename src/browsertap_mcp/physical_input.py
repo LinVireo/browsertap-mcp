@@ -553,10 +553,10 @@ def _mss_virtual_screen() -> dict[str, int] | None:
     """Virtual-desktop rectangle from mss, which answers on all three platforms.
 
     Index 0 is the bounding rectangle over every display; 1..N are individual
-    monitors. This is the same read `capture_desktop_screenshot` reports as
-    `width`/`height`/`left`/`top`, deliberately: a refusal computed from one
-    rectangle and a screenshot framed by another would tell a caller to click a
-    point its own picture shows.
+    monitors. The rectangle is reported to the caller as
+    `width`/`height`/`left`/`top` so a refusal names the geometry it was
+    computed from: a caller cannot correct an out-of-range point without
+    knowing the real range.
 
     Unlike the Win32 fallback this needs no cooperation from the caller: mss
     makes itself DPI-aware inside `mss.mss()` before reading, so it answers
@@ -690,8 +690,9 @@ def check_screen_bounds(
             f"{int(rect.get('width', 0))}x{int(rect.get('height', 0))} at "
             f"({int(rect.get('left', 0))}, {int(rect.get('top', 0))}). The OS clamps an "
             "out-of-range pointer move to the nearest edge and reports success, so this "
-            "would have acted on a screen corner instead of the requested point. Read the "
-            "real geometry from pointer_info or capture_desktop_screenshot."
+            "would have acted on a screen corner instead of the requested point. The real "
+            "geometry is in the message above; page-level input takes viewport coordinates "
+            "instead and needs no screen geometry at all."
         )
     if rect is None and checked:
         # Said in full, like the quiet gate's: this is the line that stops a

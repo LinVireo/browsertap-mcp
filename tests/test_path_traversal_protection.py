@@ -58,7 +58,6 @@ class TestPathValidationIntegration:
         "tool",
         [
             S.save_pdf,
-            S.capture_desktop_screenshot,
             S.capture_page_screenshot,
         ],
     )

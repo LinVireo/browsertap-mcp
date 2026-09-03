@@ -161,99 +161,12 @@ def test_empty_documents_are_guarded_before_dom_queries():
     assert "if (!root) return [];" in S.simphtml.js_list_groups
 
 
-def test_desktop_screenshot_captures_virtual_desktop_and_explains_pixels(monkeypatch):
-    captured = []
-
-    class Shot:
-        width = 3
-        height = 2
-        size = (3, 2)
-        rgb = b"\x00" * 18
-
-    class Capture:
-        monitors = [
-            {"left": -1, "top": 0, "width": 3, "height": 2},
-            {"left": -1, "top": 0, "width": 1, "height": 2},
-            {"left": 0, "top": 0, "width": 2, "height": 2},
-        ]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def grab(self, monitor):
-            captured.append(monitor)
-            return Shot()
-
-    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Capture))
-
-    result = S.capture_desktop_screenshot()
-
-    assert captured == [Capture.monitors[0]]
-    assert result.structuredContent["monitor_count"] == 2
-    assert result.structuredContent["left"] == -1
-    assert result.structuredContent["virtual_desktop"] is True
-    assert "not from a selected or background browser tab" in result.structuredContent["model_note"]
-
-
 def test_optional_desktop_dependency_errors_are_actionable(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mss", None)
-    with pytest.raises(RuntimeError, match=r"browsertap-mcp\[desktop\]"):
-        S.capture_desktop_screenshot()
+    """resolve_leave_dialog's Enter fallback is the last pyautogui caller.
 
+    It lives behind the `desktop` extra, so a base install must be told which
+    extra to add rather than seeing a bare ImportError.
+    """
     monkeypatch.setitem(sys.modules, "pyautogui", None)
     with pytest.raises(RuntimeError, match=r"browsertap-mcp\[desktop\]"):
         S._pyautogui()
-
-
-def test_desktop_capture_reports_a_display_it_cannot_read(monkeypatch):
-    """mss fails inside `mss.mss()`, and not with a RuntimeError.
-
-    A headless or locked session raises `mss.exception.ScreenShotError`, which is
-    a plain Exception. Guarding only the import let that escape the tool as a raw
-    backend traceback, so the message must name the cause itself -- the class
-    name is the only handle the operator has on it.
-    """
-
-    class ScreenShotError(Exception):
-        pass
-
-    def refuse():
-        raise ScreenShotError("XOpenDisplay() failed")
-
-    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=refuse))
-
-    with pytest.raises(RuntimeError) as excinfo:
-        S.capture_desktop_screenshot()
-
-    message = str(excinfo.value)
-    assert "display could not be read" in message
-    assert "ScreenShotError" in message
-    assert isinstance(excinfo.value.__cause__, ScreenShotError)
-
-
-def test_desktop_capture_keeps_its_own_no_display_diagnosis(monkeypatch):
-    """The empty-monitor check is already actionable, so it must not be wrapped."""
-
-    class Capture:
-        monitors = []
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def grab(self, monitor):
-            raise AssertionError("grab must not run when no monitor was reported")
-
-    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Capture))
-
-    with pytest.raises(RuntimeError) as excinfo:
-        S.capture_desktop_screenshot()
-
-    assert "no display was detected" in str(excinfo.value)
-    # A bare re-raise keeps the original exception; a wrapper would chain it.
-    assert excinfo.value.__cause__ is None

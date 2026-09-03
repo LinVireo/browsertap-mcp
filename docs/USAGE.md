@@ -3,7 +3,7 @@
 English | [中文](USAGE.zh-CN.md)
 
 This guide describes the least disruptive way to use `browsertap-mcp` with
-an existing Chrome, Edge, or Opera session. The full 56-tool contract and every
+an existing Chrome, Edge, or Opera session. The full 49-tool contract and every
 parameter remain in the root [README](../README.md); this document defines the
 recommended workflows and operation boundaries.
 
@@ -61,20 +61,16 @@ every call. At the end, close only tabs created by this task, using the matching
 `owner_id` and generation-aware cleanup. If the user closes one first, report
 it as already gone; never recreate an old tab id just to close it.
 
-## 4. Screenshot sources and model capabilities
+## 4. Screenshots and model capabilities
 
-BTAP has two intentionally different screenshot tools:
+BTAP has one screenshot tool:
 
 - `capture_page_screenshot` captures a tab through CDP. It can capture a
   background tab, a full page, or an explicit clip without bringing that tab
   forward. The MCP result includes image content and optional metadata/base64.
-- `capture_desktop_screenshot` — **deprecated, removed in v0.6.0; use
-  `capture_page_screenshot`.** It captures the current visible OS virtual desktop
-  across all displays, including negative monitor coordinates when present. It
-  is **not** a background-tab screenshot. If the browser is
-  minimized or another window is visible, those are the pixels captured. The
-  result includes `monitor_count`, `left`, `top`, and a `model_note` describing
-  this boundary.
+  The OS-level desktop capture was removed in 0.6.0: it photographed whatever
+  window happened to be in front, which is a different question from "what does
+  this tab show".
 
 Both tools, and `save_pdf`, take a **relative** `save_path` that resolves under
 `~/Downloads/browsertap`. An absolute path or a `..` escape is rejected with a
@@ -87,41 +83,41 @@ multimodal model when visual interpretation matters. Otherwise use
 WebGL, and terminal pages, look for structured data first; screenshots are a
 last resort for understanding pixels.
 
-## 5. Foreground activation, and the deprecated physical-input path
+## 5. Foreground activation, and the one remaining physical path
 
 Page-level CDP tools are *the* path for forms, buttons, keyboard shortcuts
 inside a page, scrolling, and drag operations. `page_click`, `page_type`,
 `page_press`, and `page_drag` reach all of it without foreground activation.
 
-**The OS-level input tools are deprecated and will be removed in v0.6.0**
-(`mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`,
-`pointer_info`, `capture_desktop_screenshot`); each call logs the `page_*` tool
-to use instead. A failing `page_click` is not a reason to switch to
-`mouse_click` — read `obscured` / `outside_viewport` / `not_found` off the
-result and fix the target. Browser UI, extension popups, native file choosers,
-and OS dialogs are outside what a page-level event can reach at all; report that
-as unsupported rather than escalating to the desktop.
+**The seven OS-level tools were removed in 0.6.0**, so there is no
+screen-coordinate surface to escalate to. A failing `page_click` is a targeting
+problem: read `obscured` / `outside_viewport` / `not_found` off the result and
+fix the target. Browser UI, extension popups, native file choosers, and OS
+dialogs are outside what a page-level event can reach at all; report that as
+unsupported.
 
 Foreground activation on its own — `activate_tab`, or `switch_tab(activate=true)`
-— is not deprecated and sends no input; use it when the user must see a tab.
+— sends no input; use it when the user must see a tab.
 
-While the desktop tools still ship, the order they follow is:
+One physical path is left: `resolve_leave_dialog` sends Enter after two protocol
+accepts fail, and only in `lab`. The order it follows is:
 
-1. Explicitly activate the requested tab only when the user must see it or a
-   desktop action truly needs it.
+1. Two protocol-level attempts first. A `no_dialog` result or a transport
+   timeout ends there and sends nothing.
 2. BTAP checks the target window, ownership, and `on_screen` state.
-3. The physical-input lock and quiet-input gate run before any cursor or key
-   event. User activity cancels the action instead of competing with it.
-   Detecting that activity needs a signal from the OS, and not every machine
-   has one: with none available the window still elapses but sees nothing,
-   and the result says so in `input_quiet.enforced`.
+3. The physical-input lock and quiet-input gate run before any key event. User
+   activity cancels the action instead of competing with it. Detecting that
+   activity needs a signal from the OS, and not every machine has one: with none
+   available the window still elapses but sees nothing, and the result says so
+   in `input_quiet.enforced`.
 4. If activation cannot be confirmed, BTAP returns `activation_failed` and sends
    no input.
 
 The default `lab` profile skips elicitation for continuous automation. Set
 `BROWSERTAP_LAB_NO_ELICIT=0` or `false` to restore session-level lab prompts;
-`safe` asks for each physical-input or site-allow action. Neither profile
-disables the lock, quiet-input gate, ownership checks, or screen confirmation.
+`safe` refuses the Enter fallback outright and asks for each site-allow action.
+Neither profile disables the lock, quiet-input gate, ownership checks, or screen
+confirmation.
 
 ## 6. Dialogs, permissions, and challenges
 
@@ -181,8 +177,7 @@ owned tab when finished.
 
 ```text
 I need to inspect the visual layout without changing the foreground tab. Use
-capture_page_screenshot on the selected session. Do not use a desktop screenshot
-unless you need to inspect the actual monitor or a native dialog.
+capture_page_screenshot on the selected session.
 ```
 
 ## 9. Safety boundary

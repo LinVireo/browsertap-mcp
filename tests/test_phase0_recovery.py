@@ -207,9 +207,17 @@ def test_set_automation_profile_is_process_local_and_validated(monkeypatch):
 
 @pytest.mark.anyio
 async def test_lab_no_elicit_skips_physical_prompt_but_keeps_physical_gate(monkeypatch):
+    """no_elicit removes the prompt, not the arbitration gate.
+
+    resolve_leave_dialog's Enter fallback is the only physical caller left, so
+    it is what drives this: the elicitation must not fire, and
+    `run_physical_action` must still be entered exactly once.
+    """
     monkeypatch.setenv("BROWSERTAP_MODE", "lab")
     monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", None)
     gate_calls = []
+    pressed = []
 
     class Context:
         async def elicit(self, *args, **kwargs):
@@ -220,12 +228,30 @@ async def test_lab_no_elicit_skips_physical_prompt_but_keeps_physical_gate(monke
 
     monkeypatch.setattr(S.anyio.to_thread, "run_sync", run_sync)
     monkeypatch.setattr(
+        S,
+        "switch_session",
+        lambda session_id=None: session_id or "chrome_test:1",
+    )
+    # Protocol handling fails without being a transport timeout, which is the
+    # only path that reaches the fallback at all.
+    monkeypatch.setattr(
+        S,
+        "handle_dialog",
+        lambda *args, **kwargs: {
+            "status": "dialog_handle_failed",
+            "handled": False,
+            "error": "the dialog did not close",
+        },
+    )
+    monkeypatch.setattr(
         S.physical_input,
         "run_physical_action",
         lambda summary, action: gate_calls.append(summary) or action(),
     )
     monkeypatch.setattr(
-        S, "_pyautogui", lambda: SimpleNamespace(moveTo=lambda *args, **kwargs: None)
+        S,
+        "_pyautogui",
+        lambda: SimpleNamespace(hotkey=lambda *args: pressed.append(args)),
     )
     monkeypatch.setattr(
         S,
@@ -238,9 +264,12 @@ async def test_lab_no_elicit_skips_physical_prompt_but_keeps_physical_gate(monke
     )
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
 
-    result = await S.mouse_move(ctx=Context(), x=1, y=2)
+    result = await S.resolve_leave_dialog(ctx=Context(), session_id="chrome_test:1")
+
     assert result["status"] == "ok"
+    assert result["resolution"] == "physical_fallback"
     assert len(gate_calls) == 1
+    assert pressed == [("enter",)]
 
 
 def test_storage_timeout_is_structured_and_default_is_30_seconds(monkeypatch):

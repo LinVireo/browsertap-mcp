@@ -20,10 +20,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   claimed without replaying side effects; completed results are consumed once
   and retained for 10 minutes.
 
-### Deprecated
+### Removed
 
-- **Physical input tools will be removed in v0.6.0.** The following tools now log
-  deprecation warnings on every invocation:
+- **BREAKING: the seven OS-level tools are gone.** A caller that invokes one now
+  gets "no such tool" rather than a deprecation warning. `mcp.list_tools()`
+  reports **49** tools, down from 56.
   - `mouse_click` → use `page_click` instead (browser-safe element clicking)
   - `mouse_move` → use `page_click` (no separate move needed)
   - `mouse_drag` → use `page_drag` (drag within the page)
@@ -31,40 +32,51 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   - `hotkey` → use `page_press` (send keyboard events to page)
   - `pointer_info` → use `execute_js` to query element positions
   - `capture_desktop_screenshot` → use `capture_page_screenshot` (safer, browser-only)
-  
-  **Rationale:** Physical input tools control the OS desktop (not just the browser),
-  creating security boundary issues and maintenance burden. Page-level alternatives
-  provide the same functionality with tighter security constraints.
+
+  **Rationale:** they controlled the OS desktop rather than one tab, so they acted
+  on whatever happened to be on screen -- a security boundary problem and a
+  maintenance burden both. The page-level tools cover the same ground under
+  tighter constraints. They were announced as deprecated earlier in this same
+  unreleased cycle, so nothing shipped with the warning stage.
+
+  **`resolve_leave_dialog` is unaffected** and keeps its lab-only Enter fallback,
+  which is why the approval gate, the cross-process lock, the quiet-input window,
+  target activation, and the `on_screen` check all remain. Their internals are
+  unchanged; what went away is every caller that took screen coordinates. The
+  `desktop` extra still carries `pyautogui` for that one path.
 
 ### Changed
 
-- **Documentation no longer presents OS-level input as a capability.** The
-  deprecation above only changed the runtime; every piece of prose a reader or an
-  agent sees first still opened with "five tools send real OS-level mouse and
+- **Documentation no longer presents OS-level input as a capability.** Warning at
+  call time was the weakest layer available: every piece of prose a reader or an
+  agent sees *first* still opened with "five tools send real OS-level mouse and
   keyboard input", which is the opposite of the migration advice logged one layer
-  down. Rewritten in both READMEs (lede, key features, "what this project is
-  actually for", the physical-input section heading), the FastMCP `instructions`
-  the agent reads at handshake, `docs/USAGE.md` §1/§4/§5 and its Chinese
-  counterpart, the `browsertap-default` skill (priority list, standard flow step
-  5, the tool table), the `browsertap` CLI `--help` description, and the PyPI
-  summary in `pyproject.toml`. The `page_*` tools are now named as *the* input
-  path; the desktop tools are documented as shipped-but-deprecated, with the
-  cases they were kept for (browser chrome, native file pickers, extension
-  popups, OS dialogs) reported as unsupported rather than as a reason to escalate
-  from a failed `page_click`. `resolve_leave_dialog` is called out as *not*
-  deprecated in each place, since it is a protocol path with an Enter fallback,
-  not a desktop tool. No tool block was removed from either README: the
-  `check_tool_docs` contract requires every registered tool and parameter to be
-  documented in both languages, and the tools still exist.
-- The tool table in the `browsertap-default` skill said "工具全表（55 个）" after
-  the count moved to 56, so the one line a caller reads to decide whether the
-  table is complete was the line that was wrong.
+  down, and an agent acts on the handshake text rather than on a log line emitted
+  after the call. Rewritten in both READMEs (lede, key features, "what this
+  project is actually for", the folded tool sections), the FastMCP `instructions`
+  the agent reads at handshake, `docs/USAGE.md` §4/§5/§8 and its Chinese
+  counterpart, `AGENTS.md` §4, `SECURITY.md`, both bundled skills, the
+  `browsertap` CLI `--help` description, and the PyPI summary in `pyproject.toml`.
+  The `page_*` tools are named as *the* input path, and the cases the desktop
+  tools were once kept for (browser chrome, native file pickers, extension popups,
+  OS dialogs) are reported as unsupported rather than as a reason to escalate from
+  a failed `page_click`. Each README keeps one folded section listing the removed
+  names against their replacements, so a caller arriving from an older version
+  finds the migration rather than silence.
+- The tool table in the `browsertap-default` skill said "工具全表（55 个）" while
+  56 were registered, so the one line a caller reads to decide whether the table
+  is complete was the line that was wrong. It now says 49 and is verified
+  mechanically against `list_tools()` rather than by eye.
+- The physical-input gate no longer has a caller that passes coordinates.
+  `check_screen_bounds`, `screen_bounds`, and the `points=` argument to the
+  internal dispatch helper are kept -- they are the gate, not a removed tool --
+  but they are now exercised by tests against the helper directly instead of
+  through a shipped tool.
 
 ### Fixed
 
-- **Documented the write sandbox for the three file-writing tools.** `save_pdf`,
-  `capture_page_screenshot`, and `capture_desktop_screenshot` route `save_path`
-  through `_validate_safe_path`, which takes a *relative* path under
+- **Documented the write sandbox for the file-writing tools.** `save_pdf` and
+  `capture_page_screenshot` route `save_path` through `_validate_safe_path`, which takes a *relative* path under
   `~/Downloads/browsertap` and rejects absolute paths and `..` escapes — but the
   docs described `save_path` as a path the caller chooses ("atomically writes
   `save_path`", "only adds a disk copy"). A caller following them passed an
@@ -75,23 +87,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Security
 
-- **Path traversal protection** for file-writing tools. `save_pdf`,
-  `capture_page_screenshot`, and `capture_desktop_screenshot` now validate that
-  user-supplied `save_path` parameters stay within `~/Downloads/browsertap` by
-  default. Absolute paths (`/etc/passwd`, `C:\Windows\...`), parent directory
+- **Path traversal protection** for file-writing tools. `save_pdf` and
+  `capture_page_screenshot` validate that user-supplied `save_path` parameters
+  stay within `~/Downloads/browsertap` by default. Absolute paths (`/etc/passwd`, `C:\Windows\...`), parent directory
   traversal (`../../outside`), and symlink escape attempts are rejected with a
   `ValueError`. This prevents arbitrary filesystem writes through malicious path
   manipulation. The validation is implemented by the internal `_validate_safe_path`
   function and is covered by comprehensive unit and integration tests in
   `tests/test_path_traversal_protection.py`.
-- **Atomic file writes** for screenshot tools. `capture_page_screenshot` and
-  `capture_desktop_screenshot` now use the temporary file + fsync + atomic rename
-  pattern (via `_atomic_write_bytes`), ensuring saved files are never left in a
-  partially-written state. Write failures clean up temporary files and provide
+- **Atomic file writes** for `capture_page_screenshot`, which now uses the
+  temporary file + fsync + atomic rename pattern (via `_atomic_write_bytes`),
+  ensuring saved files are never left in a partially-written state. Write failures clean up temporary files and provide
   user-friendly error messages for common issues (disk full, permission denied).
-- **File size limits** for screenshot tools. Screenshots exceeding 50MB are now
-  rejected before any write occurs, preventing resource exhaustion attacks through
-  oversized image payloads.
+- **File size limit** for `capture_page_screenshot`. A screenshot exceeding 50MB
+  is rejected before any write occurs, preventing resource exhaustion through an
+  oversized image payload.
 - `execute_js` no longer reaches the extension's internal command router. A
   string script that happened to parse as JSON was coerced into a command
   envelope, so passing `{"cmd":"site_permission",...}` as a *script* called

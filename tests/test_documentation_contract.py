@@ -58,8 +58,8 @@ def test_tool_docs_and_caller_skill_are_synchronized():
 
 def test_documentation_contract_covers_all_registered_tools():
     report = build_report()
-    assert report["registered"] == 56
-    assert report["coverage_manifest"] == 56
+    assert report["registered"] == 49
+    assert report["coverage_manifest"] == 49
     assert not report["readme_missing"]
     assert not report["readme_extra"]
     assert not report["missing_params"]

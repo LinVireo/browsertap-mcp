@@ -484,7 +484,7 @@ def build_report_data() -> dict[str, object]:
         if code_coverage is not None
         else f"no total coverage: {code_coverage_source}; {per_file_summary}"
     )
-    tool_contract_ok = evidence_fresh and registered == 56 and contract_valid == registered
+    tool_contract_ok = evidence_fresh and registered == 49 and contract_valid == registered
     offline_evidence_ok = (
         evidence_fresh
         and offline.get("status") == "pass"
@@ -497,7 +497,7 @@ def build_report_data() -> dict[str, object]:
         and live_passed
         and extension_build_ok
         and tool_coverage.get("all_evidence_executed") is True
-        and tool_coverage.get("fully_verified_tools") == registered == 56
+        and tool_coverage.get("fully_verified_tools") == registered == 49
     )
     code_coverage_ok = (
         evidence_fresh

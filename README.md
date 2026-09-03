@@ -16,7 +16,7 @@ If what you need is a clean, disposable browser — headless, Docker, CI, Firefo
 
 Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
 
-The OS-level input tools — `mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`, `pointer_info`, `capture_desktop_screenshot` — are **deprecated and scheduled for removal in v0.6.0**; each one logs a warning on every call and names its `page_*` replacement. Use the page tools. While the desktop path is still shipped it stays gated, not casual: `safe` asks before every physical action, and the default `lab` profile runs without elicitation while still enforcing the cross-process lock, quiet-input gate, target activation, and on-screen confirmation. `resolve_leave_dialog` is not part of that deprecation — it is one narrowly scoped path that can send Enter after two protocol attempts fail.
+There is no OS-level mouse or keyboard surface. The seven tools that drove the whole desktop were removed in **0.6.0**; input goes through the `page_*` tools, which dispatch trusted CDP events inside a named tab without moving your cursor. One narrowly scoped physical path is left: `resolve_leave_dialog` can send Enter after two protocol-level attempts fail, and only in `lab`. It stays gated, not casual — the cross-process lock, quiet-input gate, target activation, and on-screen confirmation all still apply, and `safe` asks first.
 
 ## Start in 60 seconds
 
@@ -68,7 +68,7 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - **Authenticated native downloads** — download attachments through Chrome's download manager with the active browser profile's cookies, wait for completion, and receive the verified local path.
 - **Tab-less operation** — extension management, CDP target listing, and tab listing/closing go straight to the extension's service worker, so they work even with zero tabs open.
 - Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk, under `~/Downloads/browsertap` by default. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
-- **Deprecated: OS-level physical input** — mouse move/click/drag, typing, hotkeys, `pointer_info`, and `capture_desktop_screenshot` still work but are **going away in v0.6.0**, and every call logs the `page_*` tool to use instead. They remain gated meanwhile: `lab` runs without elicitation, `safe` prompts per call, and both keep the lock, quiet-input gate, ownership checks, target activation, and on-screen confirmation.
+- **Trusted input into a background tab** — `page_click`, `page_type`, `page_press`, and `page_drag` dispatch CDP input events at viewport coordinates in the tab you name, so nothing is raised and your cursor never moves. The OS-level input tools were removed in 0.6.0; this is the input path.
 - **Multi-browser** — Chrome, Edge, and Opera can all connect to one bridge at the same time without clobbering each other's sessions.
 
 ## When to use something else
@@ -91,7 +91,7 @@ it is the better tool for most jobs:
   HTML or text with `#r1`-style link refs instead, which is a different trade.
 - **A smaller default tool surface.** playwright-mcp ships roughly two dozen
   tools by default and puts the rest behind `--caps`. This server registers all
-  56 unconditionally, with no way to trim them, so a client whose tool list
+  49 unconditionally, with no way to trim them, so a client whose tool list
   grows past its context budget must filter them itself. If that is a blocker
   for you, this is one point where [playwright-mcp](https://github.com/microsoft/playwright-mcp)
   has the more flexible design.
@@ -105,7 +105,7 @@ What is left, and what this project is actually for:
   `page_press`, and `page_drag` dispatch CDP input events at viewport
   coordinates in the named tab, so a click lands on a page you are not looking
   at and your cursor never moves. This is the input path; the desktop-level
-  tools are deprecated.
+  tools were removed in 0.6.0.
 - **The whole `chrome.*` surface** — extension management, `call_extension`,
   bookmarks, timed site-permission leases, and downloads through Chrome's own
   manager with your profile's cookies. Playwright is not an extension and cannot
@@ -411,9 +411,9 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Selecting a tab does not raise it.** `switch_tab` defaults to `activate=false`: it only changes which tab later calls target. Nothing moves on screen until you call `activate_tab`, pass `switch_tab(activate=true)`, or approve a physical-input action. Page reading, JS, and the `page_*` input tools all work on a background tab.
 
-**Two kinds of coordinates, two kinds of authority.** `page_click`/`page_drag` take **viewport** coordinates inside one tab and are dispatched through CDP — no cursor movement, no window focus, `foreground_changed: false` in the reply. `mouse_move`/`mouse_click`/`mouse_drag` take **desktop screen** coordinates and drive your real cursor. The two are not interchangeable, and a viewport coordinate pasted into `mouse_click` will land somewhere else entirely.
+**One coordinate space, inside the tab.** `page_click`/`page_drag` take **viewport** coordinates inside one tab and are dispatched through CDP — no cursor movement, no window focus, `foreground_changed: false` in the reply. There is no desktop-coordinate tool to confuse them with any more: the ones that took physical screen pixels were removed in 0.6.0.
 
-**Three pixel units, and screenshots do not use the one you click with.** Viewport coordinates are **CSS pixels** — the space `getBoundingClientRect` reports. Desktop coordinates are **physical screen pixels**. A page screenshot comes back in **device pixels**, which is CSS × `devicePixelRatio`, so at 125% display scaling a point read off the picture is 25% too large for `page_click`; `capture_page_screenshot` reports `image_width`/`image_height` and `pixel_space: "device"` so the factor is visible instead of assumed. A desktop screenshot is not resized, so `pixel_space: "physical"` and its pixels are already `mouse_click`'s coordinates. Reading a point off a picture is the one path with no hit test — prefer a `scan_page` selector, which is checked against the page before anything is dispatched.
+**Two pixel units, and the screenshot does not use the one you click with.** Viewport coordinates are **CSS pixels** — the space `getBoundingClientRect` reports. A page screenshot comes back in **device pixels**, which is CSS × `devicePixelRatio`, so at 125% display scaling a point read off the picture is 25% too large for `page_click`; `capture_page_screenshot` reports `image_width`/`image_height` and `pixel_space: "device"` so the factor is visible instead of assumed. Reading a point off a picture is the one path with no hit test — prefer a `scan_page` selector, which is checked against the page before anything is dispatched.
 
 **Automation profiles.** With `BROWSERTAP_MODE` unset, BTAP defaults to `lab` with `BROWSERTAP_LAB_NO_ELICIT=1` semantics: physical input and site `allow` proceed without elicitation. `safe` prompts for every action. Both profiles keep the cross-process lock, quiet-input gate, target activation, ownership protection, and `on_screen` check, so higher authority never means stale or misdirected input. The quiet gate's reach is bounded by what the OS exposes rather than by the profile; `input_quiet.enforced` in the result says whether it could observe this machine at all.
 
@@ -460,7 +460,7 @@ Expected interruptions come back as a `status` field, not an exception:
 
 This server drives your real browser and your real desktop. Anything it can do, you can do — and it inherits every session you are logged into.
 
-- Mouse moves, clicks, typing, and hotkeys are real OS-level input, not synthetic page events. `safe` prompts per call; `lab` can reuse or disable prompts. Once allowed, it drives your actual desktop. These tools are deprecated and go away in v0.6.0; the `page_*` tools carry none of this exposure.
+- One physical-input path is left after 0.6.0: `resolve_leave_dialog`'s Enter fallback, `lab` only, and only after two protocol-level attempts fail. It is real OS-level input rather than a synthetic page event, so it lands on whatever is on screen; `safe` refuses to send it at all. The `page_*` tools carry none of this exposure.
 - Page content is untrusted input. A page your agent reads can attempt prompt injection, and the tools available make that consequential.
 - This is **not** a security boundary. See [MCP Security Best Practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices).
 - Avoid pointing it at sensitive accounts you would not want an MCP client to see, and prefer not to run it on shared or production machines.
@@ -620,29 +620,48 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 
 - **capture_page_screenshot** — page capture via CDP with viewport, `full_page`, or explicit `clip` modes. PNG, JPEG, and WebP are supported; `quality` is valid only for JPEG/WebP. Returns text metadata plus attached MCP image content; `save_path` only adds a disk copy, and it is **relative** — it resolves under `~/Downloads/browsertap`, with absolute paths and `..` escapes rejected. Base64 is omitted unless explicitly requested. The metadata names its own units: `image_width`/`image_height` parsed from the returned bytes and `pixel_space: "device"` (CSS × `devicePixelRatio`), so a point read off the picture is not fed straight to `page_click`. A header it cannot parse reports `null` dimensions plus a `dimensions_note` rather than a guess — `size` is the byte count, not a dimension.
   - `session_id` (string, optional), `tab_id` (integer, optional), `format` (string, optional): default `png`, `full_page` (boolean, optional): default `false`, `clip` (object, optional): `x`,`y`,`width`,`height`, optional `scale`, `quality` (integer, optional): 0–100 for JPEG/WebP, `save_path` (string, optional), `return_base64` (boolean, optional): default `false`, `timeout` (number, optional): default `20`
-- **capture_desktop_screenshot** — captures the currently visible OS virtual desktop across all displays and returns metadata plus MCP image content. **Deprecated, removed in v0.6.0 — use `capture_page_screenshot`.** This is not a selected/background-tab capture; it may include other applications. `save_path` only adds a disk copy and is **relative**, resolving under `~/Downloads/browsertap`. `width`/`height`/`left`/`top` and the image itself are **physical screen pixels** (`pixel_space: "physical"`), unscaled, so they are the same space `mouse_click` takes.
-  - `save_path` (string, optional), `return_base64` (boolean, optional): default `false`
 </details>
 
 <details>
-<summary><b>Physical input (deprecated, removed in v0.6.0)</b></summary>
+<summary><b>Removed in 0.6.0: OS-level input and desktop capture</b></summary>
 
-**These six tools are deprecated and will be removed in v0.6.0.** Every call logs a warning naming its replacement: `mouse_click` → `page_click`, `mouse_move` → not needed (`page_click` positions itself), `mouse_drag` → `page_drag`, `type_text` → `page_type`, `hotkey` → `page_press`, `pointer_info` → `execute_js` to read element geometry. They are documented here because they still ship, not because they are a recommended path.
+`mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`, `pointer_info`
+and `capture_desktop_screenshot` no longer exist. They drove the whole desktop
+rather than one tab, so they acted on whatever happened to be on screen. What to
+call instead:
 
-Real OS-level input at **desktop screen** coordinates, in **physical pixels** on the virtual desktop (not CSS pixels, not device pixels). It moves your actual cursor and types into whatever has focus — which is why it is going away: the blast radius is the whole desktop, not one tab. Use the `page_*` tools: they are precise, do not interrupt you, and work on a background tab. The remaining cases these were kept for — browser chrome, native file pickers, extension popups, OS dialogs — are outside what a page-level protocol event can reach at all, so treat them as unsupported rather than as a fallback to reach for when a `page_*` call fails.
+| Removed | Use |
+| --- | --- |
+| `mouse_click` | `page_click` |
+| `mouse_move` | not needed — `page_click` positions itself |
+| `mouse_drag` | `page_drag` |
+| `type_text` | `page_type` |
+| `hotkey` | `page_press` |
+| `pointer_info` | `execute_js` to read element geometry |
+| `capture_desktop_screenshot` | `capture_page_screenshot` |
 
-In `safe`, each of these five direct tools asks through MCP elicitation. Default `lab` uses `BROWSERTAP_LAB_NO_ELICIT=1` semantics and does not prompt; setting it false restores session-level lab approval. Decline, cancel, or unavailable elicitation returns `requires_user_action`; every profile still enforces the lock, quiet window, ownership, activation, and foreground check. `resolve_leave_dialog` is a sixth physical-input path, limited to a final Enter fallback after two protocol-level attempts and subject to the same gate.
+A failing `page_*` call is a targeting problem, not a reason to look for a
+screen-coordinate fallback — re-read the page with `scan_page` and fix the
+locator. Browser chrome, native file pickers, extension popups and OS dialogs
+are outside what a page-level protocol event can reach, and are unsupported
+rather than served by a desktop path.
 
-After approval the sequence is fixed: take the cross-process lock (contended → `busy`, returned immediately, never queued), check the coordinates against the real display geometry, wait out a short quiet window (you touched the mouse or keyboard → `input_activity_detected`, nothing sent), then raise the target tab, then act. What that window can actually detect depends on the OS: only Windows exposes a last-input timestamp, and the pointer position is unavailable under Wayland, in a headless container, and on macOS without the accessibility permission. With no signal at all the window still elapses but has nothing to compare, so every result carries an `input_quiet` block naming the markers it sampled, with `enforced: false` when there were none — on such a machine read a pass as unverified rather than as an idle desktop. All five direct tools take `session_id` — the same one you pass every other tool — and raise that tab; without one they fall back to the shared global target, which another task may have changed. Use `activate_session="none"` only for intentional input to the already-visible desktop or native UI. If the tab cannot be confirmed on screen the result is `activation_failed` and no input is sent, so a minimised window produces an error rather than a click into the wrong place.
+One physical path survives: `resolve_leave_dialog` sends Enter after two
+protocol accepts fail, in `lab` only. `safe` asks through MCP elicitation, and a
+declined, cancelled, or unavailable prompt returns `requires_user_action`. Either
+way the gate is unchanged — cross-process lock (contended → `busy`, returned
+immediately, never queued), a short quiet window (you touched the mouse or
+keyboard → `input_activity_detected`, nothing sent), then raise the target tab,
+then act. What that window can detect depends on the OS: only Windows exposes a
+last-input timestamp, and the pointer position is unavailable under Wayland, in a
+headless container, and on macOS without the accessibility permission. With no
+signal at all the window still elapses but has nothing to compare, so the result
+carries an `input_quiet` block naming the markers it sampled, with
+`enforced: false` when there were none — read a pass on such a machine as
+unverified rather than as an idle desktop. If the tab cannot be confirmed on
+screen the result is `activation_failed` and nothing is sent, so a minimised
+window produces an error rather than an Enter into the wrong place.
 
-A point on no display at all is refused with `coordinates_off_screen`, before the tab is raised and before anything is dispatched: `SetCursorPos` silently *clamps* an out-of-range point and reports success, so `(2400, 1300)` on a 1920×1080 panel becomes a click at `(1919, 1079)` — the hot corner that can minimise every window — and nothing in the reply would have said so. The rectangle it checks against is the virtual desktop across all displays, reported as `screen_bounds` on every physical result and by `pointer_info`. Where the geometry cannot be read the call proceeds with `screen_bounds.enforced: false` and a note, the same way the quiet gate reports a vacuous pass rather than taking physical input away from a machine where it works.
-
-- **mouse_move** — `x` (integer), `y` (integer), `duration` (number, optional): glide time in seconds, default `0` (jumps straight to the point), `session_id` (string, optional): tab to raise, `activate_session` (string, optional): default `current` (raise the target tab first), a session id to raise a different tab, or `none`
-- **mouse_click** — `x` (integer, optional), `y` (integer, optional): provide both together or omit both to click wherever the cursor already is; a half-specified pair is rejected, `button` (string, optional): default `left`, also `right` or `middle`, `clicks` (integer, optional): default `1`, `interval` (number, optional): seconds between clicks, default `0.1`, `session_id` (string, optional): the tab to raise, and what you should normally pass, `activate_session` (string, optional): default `current`, a session id, or `none`
-- **mouse_drag** — `x1` (integer), `y1` (integer), `x2` (integer), `y2` (integer), `duration` (number, optional): seconds spent moving with the button held, default `0.3`, `button` (string, optional): default `left`, `session_id` (string, optional): tab to raise, `activate_session` (string, optional): default `current`, a session id, or `none`
-- **type_text** — `text` (string), `interval` (number, optional): seconds per keystroke, default `0.01`, `click_x` (integer, optional), `click_y` (integer, optional): provide both together or omit both; when provided, click there first to focus the field, and a half-specified pair is rejected, `session_id` (string, optional): the tab to raise, and what you should normally pass, `activate_session` (string, optional): default `current`, a session id, or `none`
-- **hotkey** — `keys_csv` (string): comma-separated, e.g. `ctrl,c`, `session_id` (string, optional): tab to raise, `activate_session` (string, optional): default `current`, a session id, or `none`
-- **pointer_info** — current cursor position, primary-display size, and the `screen_bounds` rectangle spanning every display (with the probe that answered in `source`, or `null` when the geometry cannot be read). Read-only, no approval needed. No parameters.
 </details>
 
 ## Troubleshooting

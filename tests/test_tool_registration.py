@@ -37,11 +37,8 @@ EXPECTED = {
     "execute_js", "get_execute_js_result", "handle_dialog", "resolve_leave_dialog",
     "cdp_command", "cdp_batch", "debugger_targets",
     # data
-    "get_cookies", "capture_page_screenshot", "capture_desktop_screenshot",
+    "get_cookies", "capture_page_screenshot",
     "upload_files",
-    # physical input
-    "mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey",
-    "pointer_info",
     # background page input
     "page_click", "page_type", "page_press", "page_drag",
     # cookies / storage
@@ -89,7 +86,7 @@ def test_expected_tool_set(by_name):
 
 
 def test_behavior_manifest_matches_exact_registered_set(by_name):
-    assert len(by_name) == len(TOOL_COVERAGE) == 56
+    assert len(by_name) == len(TOOL_COVERAGE) == 49
     assert set(TOOL_COVERAGE) == set(by_name)
 
 
@@ -223,36 +220,6 @@ class TestNewToolSchemas:
             "save_path", "session_id", "landscape", "print_background",
             "prefer_css_page_size", "scale", "page_ranges", "timeout",
         } <= set(by_name["save_pdf"].inputSchema["properties"])
-
-    def test_physical_input_can_activate_a_tab(self, by_name):
-        """Screen-coordinate input lands on whatever is visible, so the tools
-        that move the mouse or type must be able to raise the target first."""
-        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
-            props = by_name[name].inputSchema["properties"]
-            assert "activate_session" in props, name
-            assert "session_id" in props, name
-
-    def test_physical_input_raises_the_tab_by_default(self, by_name):
-        """Raising must be the DEFAULT, not opt-in. When it was opt-in, an agent
-        doing switch_tab + mouse_click clicked the previously visible tab, and
-        nothing reported it: the coordinates are valid and pyautogui says ok."""
-        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
-            props = by_name[name].inputSchema["properties"]
-            assert props["activate_session"]["default"] == "current", name
-
-    def test_physical_tools_hide_injected_context(self, by_name):
-        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
-            props = by_name[name].inputSchema["properties"]
-            assert "ctx" not in props, name
-            assert "ctx" not in by_name[name].inputSchema.get("required", []), name
-
-    def test_physical_descriptions_warn_about_target_and_foreground_approval(self, by_name):
-        for name in ("mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey"):
-            description = by_name[name].description.lower()
-            assert "session_id" in description, name
-            assert "prefer" in description or "preferred" in description, name
-            assert "approval" in description, name
-            assert "foreground" in description, name
 
     def test_switch_tab_is_background_by_default(self, by_name):
         props = by_name["switch_tab"].inputSchema["properties"]

@@ -165,7 +165,7 @@ offline JUnit、覆盖率、工具证据，以及各一份 wheel/source archive�
 
 工具名称、参数、默认值或行为发生变化时，必须在同一个改动中同步：
 
-1. `README.md` 与 `README.zh-CN.md` 中作为权威列表的 56 个工具说明；
+1. `README.md` 与 `README.zh-CN.md` 中作为权威列表的 49 个工具说明；
 2. 工具自身的 MCP `description=` 文本；
 3. 调用方契约 `src/browsertap_mcp/skills/browsertap-default/SKILL.md`
    （先调哪个工具、什么时候必须带 `session_id`）；

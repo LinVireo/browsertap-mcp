@@ -195,9 +195,7 @@ EXPECTED_TOOLS = {
     "scan_page", "wait_for", "scroll_page", "execute_js", "get_execute_js_result",
     "handle_dialog", "resolve_leave_dialog",
     "cdp_command", "debugger_targets", "cdp_batch", "upload_files",
-    "get_cookies", "capture_page_screenshot", "capture_desktop_screenshot",
-    "mouse_move", "mouse_click", "mouse_drag", "type_text", "hotkey",
-    "pointer_info",
+    "get_cookies", "capture_page_screenshot",
     # background page input
     "page_click", "page_type", "page_press", "page_drag",
     # cookies / storage
@@ -1524,10 +1522,6 @@ def test_page_click_requires_exactly_one_target_mode():
     ("scroll_page", {"to", "session_id", "timeout"}),
     ("activate_tab", {"session_id"}),
     ("upload_files", {"selector", "paths", "session_id", "timeout"}),
-    ("mouse_click", {"x", "y", "button", "clicks", "interval", "session_id",
-                     "activate_session"}),
-    ("type_text", {"text", "interval", "click_x", "click_y", "session_id",
-                   "activate_session"}),
     ("switch_tab", {"session_id", "url_pattern", "browser", "activate"}),
 ])
 def test_tool_schema(name, params):
@@ -2225,8 +2219,8 @@ async def test_read_only_diagnostics_answer_while_the_serial_gate_is_held(monkey
     """A wedged tool must not take the diagnostics down with it.
 
     The gate is held for the whole of a serialized call, so a 120-second
-    scan_page used to make `get_setup_status`, `list_tabs` and `pointer_info`
-    unavailable for 120 seconds -- the one question worth asking became the one
+    scan_page used to make `get_setup_status` and `list_tabs` unavailable for 120
+    seconds -- the one question worth asking became the one
     that could not be asked. `browsertap doctor` reaches the bridge over HTTP
     and kept answering, which is exactly what hid this: the documented
     workaround bypassed the defect instead of surfacing it.

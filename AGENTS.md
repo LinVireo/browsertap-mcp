@@ -5,7 +5,7 @@ show on its own -- the traps that cost someone an afternoon. General coding
 style, the gate commands and the release flow live in
 [CONTRIBUTING.md](CONTRIBUTING.md) ([简体中文](CONTRIBUTING.zh-CN.md)).
 
-**What each tool does is not in this file.** The full parameter table for all 56
+**What each tool does is not in this file.** The full parameter table for all 49
 tools is the `## Tools` section of [README.md](README.md)
 ([简体中文](README.zh-CN.md)). That table is the single authoritative list; do
 not copy it here, it will go stale.
@@ -226,18 +226,20 @@ offline.
 In tests, never hardcode a real id. The sentinel is
 `chrome_nonexistent:999999`.
 
-## 4. Screen-coordinate tools act on the *visible* tab
+## 4. Physical input acts on the *visible* tab
 
-`mouse_click`, `type_text` and `capture_desktop_screenshot` drive the real mouse
-and keyboard. They land on whatever is actually visible on screen, which is a
-different thing from the "target tab" that `switch_tab` selected.
+The seven OS-level tools that drove the real mouse and keyboard were removed in
+0.6.0. One physical path is left: `resolve_leave_dialog`'s lab-only Enter
+fallback, sent only after a protocol accept has actually failed. It lands on
+whatever is visible on screen, which is a different thing from the "target tab"
+that `switch_tab` selected.
 
-These tools once made "raise the window first" **opt-in**, so `switch_tab` +
-`mouse_click` silently clicked the wrong tab: the coordinates were valid,
-pyautogui reported success, and nothing anywhere reported a problem. Raising the
-target is now the **default** and opting out is explicit
-(`activate_session="none"`). Think that failure mode through before changing
-these defaults.
+The removed tools once made "raise the window first" **opt-in**, so a
+`switch_tab` + click pair silently acted on the wrong tab: the coordinates were
+valid, pyautogui reported success, and nothing anywhere reported a problem.
+Raising the target is the **default** for every physical dispatch and opting out
+is explicit (`activate_session="none"`). Think that failure mode through before
+changing these defaults.
 
 A Windows-specific trap on top of it: when the window is **minimised**,
 `chrome.tabs.update({active: true})` succeeds and
