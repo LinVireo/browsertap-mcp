@@ -35,7 +35,7 @@ MCP 客户端配置中填写可执行文件的绝对路径。Windows 通常为
 `<repo>\.venv\Scripts\browsertap.exe`，Linux/macOS 为
 `<repo>/.venv/bin/browsertap`。
 
-若操作系统级输入或桌面截图报告依赖缺失，应安装 desktop extra：
+若仅限 lab 的 `resolve_leave_dialog` 物理兜底报告依赖缺失，应安装 desktop extra：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -U "browsertap-mcp[desktop]"
@@ -72,13 +72,17 @@ switch_tab and retry.
 用 `switch_tab` 选定真正要操作的标签页，或原样传入列表中的 `session_id`，然后重试。
 若消息很短且没有候选列表，说明当前没有任何标签页连接，参见上面的"没有已连接的标签页"。
 
+只有一个有证据支持的例外：Chrome 明确报告同一个原生标签页被替换时，BTAP 可能返回
+`rebound_from`、`replacement_session_id` 和 `tab_identity`，而不是拒绝。此时采用返回的新
+session id，并在重复状态变更操作前确认页面；没有这些字段时，显式过期 session 永远不会被替换。
+
 ### 返回结果里带 `switched_session`
 
 你没有传 `session_id`，共享的默认目标已经失效，BTAP 为这次未指定目标的调用重新选了同一浏览器
 里一个存活的标签页，而不是直接失败。调用**已经执行**，落在 `switched_session` 指向的标签页上，
 `switched_from` 是失效的那个。重复任何有副作用的操作之前，先用 `list_tabs` 或 `scan_page`
-确认它落在你预期的页面上。明确传入的 `session_id` 永远不会被静默替换，那种情况返回的是上面
-那条拒绝。
+确认它落在你预期的页面上。显式指定的 session 只有在结果同时带有有证据的
+`rebound_from` / `replacement_session_id` / `tab_identity` 时才会重绑定；否则仍返回上面的拒绝。
 
 ### 调用返回 `no_response` 或 `bridge_error`
 
@@ -214,11 +218,12 @@ MCP 客户端可能未实现 elicitation，或用户拒绝了该操作。应优�
 BTAP 无法确认目标已显示在屏幕上，因此未发送输入。仅当任务确实需要桌面输入时，才恢复浏览器
 窗口并显式激活目标标签页。
 
-### macOS 上的物理输入不生效
+### macOS 上的剩余物理兜底不生效
 
-应为终端或 MCP 客户端授予辅助功能权限。桌面截图还需要屏幕录制权限。
+若确实需要 `resolve_leave_dialog` 的 Enter 兜底，应为终端或 MCP 客户端授予辅助功能权限。
+`capture_page_screenshot` 通过 CDP 截取页面，不需要 macOS 屏幕录制权限。
 
-### 物理输入报告桌面会话无法初始化
+### 剩余物理兜底报告桌面会话无法初始化
 
 `desktop` extra 已安装，但这台机器没有可用桌面：无头服务器、没有 X11 display 的 SSH 会话，
 或已锁屏、无人值守的控制台。`pyautogui` 在 import 阶段绑定 display，`mss` 在 `mss.mss()`

@@ -257,8 +257,8 @@ token 不一致，不是扩展坏了**：
 
 桥支持 Chrome / Edge / 多 profile 同时接入。要点：
 
-- **session id 是 `client_id:tab_id`**（如 `edge_a1b2c3:456`），不是裸 tab 整数。`client_id` 按
-  浏览器/profile 隔离持久化，两边永不撞号、互不清对方 tab（断开扫描按 `client_id` 隔离）。
+- **session id 是当前 `client_id:tab_id` 句柄**（如 `edge_a1b2c3:456`），不是裸 tab 整数，也不是永远不变的 tab 身份。`client_id` 按
+  浏览器/profile 隔离持久化，两边永不撞号、互不清对方 tab（断开扫描按 `client_id` 隔离）；稳定 `tab_identity` 只在 Chrome 明确报告 `tabs.onReplaced` 时用于确认同一 tab。
 - **按浏览器名选目标**：`switch_tab(browser="edge")` / `switch_tab(browser="chrome")`，可叠加
   `url_pattern` 缩小；`list_tabs` 每 tab 带 `browser` 字段（`chrome`/`edge`/`opera`）看归属。
 - 报 `No connected tab for browser 'edge'`：Edge 侧扩展没连上——去 `edge://extensions` Reload 并
@@ -270,11 +270,11 @@ token 不一致，不是扩展坏了**：
   （已自动重试 1 次）或已送达但超时（勿盲目重试有副作用脚本，先 `scan_page` 核实）；
   `switched_session`/`switched_from` 表示原会话断了、已自动切到**同浏览器**的活会话（不会静默跳
   浏览器）。见到这些字段：`list_tabs` → `switch_tab` → 只重试无副作用操作。
-- **显式 session / 新 tab 语义**：显式 `session_id` 会贯穿 `execute_js` 的
+- **显式 session / 新 tab 语义**：显式 `session_id` 是当前句柄，会贯穿 `execute_js` 的
   baseline/diff/transient/重试/落点读取，期间共享默认不会被停在目标 tab；新 tab 同时按
   `client:tabId + generation` 等待注册，`ready=true` 不会命中同数字 id 的旧生命周期。若
   `open_new_tab` 返回无 `generation`，说明扩展是旧构建，去手动 Reload；若 generation 已有但桥的
-  `list_tabs` 不上报，说明 daemon 未重启。
+  `list_tabs` 不上报，说明 daemon 未重启。若 tab 被 Chrome `tabs.onReplaced` 换发且稳定 `tab_identity` 匹配，结果会带 `rebound_from`、`replacement_session_id` 和 `tab_identity`，后续操作改用 replacement；没有直接证据时，显式旧句柄仍拒绝，不能按 URL/title 猜测。
 - **xterm 输入不是桥故障**：`page_type` 会把 `.xterm` 容器/后代自动改投 `.xterm-helper-textarea`。
   终端无输入先确认扩展已 Reload 到当前版本，再显式传该页的 `session_id`；清当前 shell 行用
   `page_press("ctrl,u")`，不要因 `clear=true` 不符合终端行编辑语义就重启桥。
@@ -288,8 +288,19 @@ token 不一致，不是扩展坏了**：
   滚动后仍在视口外则是 `outside_viewport`。桥、扩展、CDP 都是好的，是页面挡住了：关掉遮挡物、
   `scroll_page`、或换一个 locator 再重试。不要因此重启桥或改走物理输入 —— 旧行为是照点并报成功，
   那才是真正的静默失败。成功的点击带 `hit_verified: true`；坐标模式不做这项判定。**页面截图上量到的
-  坐标不能直接当 `page_click` 的 `x`/`y`**：截图是设备像素（`pixel_space: "device"`，CSS ×
-  `devicePixelRatio`），125% 缩放下会偏 25%，而坐标模式不做命中判定、不会报出打偏。
+   坐标不能直接当 `page_click` 的 `x`/`y`**：截图是设备像素（`pixel_space: "device"`，CSS ×
+   `devicePixelRatio`），125% 缩放下会偏 25%，而坐标模式不做命中判定、不会报出打偏。
+- **iframe 内部点位不是裸坐标故障**：没有可定位的内部元素时，使用
+  `page_click(selector={"frame":[...],"x":20,"y":30}, session_id=...)`；BTAP 会在同一解析批次中
+  进入同源 frame 并累加 client offset。跨域 frame 会返回结构化 `cross_origin_frame`，CSS 变换 frame
+  返回 `unsupported_frame_transform`，两者都不会派发输入。locator 内的 `selector` 是 `css` 别名；
+  非法旧 CSS 返回 `invalid_selector`，不要按裸 `SyntaxError` 重启桥。
+- **`page_type` 的焦点身份**：输入结果带 `active_element` 和 `focus_confirmed`，省略 selector 时先核对
+  这两个字段；它们是页面 resolver 的证据，不是浏览器前台状态，不能用来推断 tab 是否可见。
+- **多阶段破坏性确认不是桥故障**：删除仓库、支付、注销等弹窗可能在每一步替换 DOM、复用同一个
+  按钮 id，或同时保留隐藏模板。每次阶段点击后重新 `scan_page`；`ambiguous` / `not_interactable`
+  时按当前可见候选重新定位。确认文本使用 `page_type`，不要用 `execute_js` 写 `.value` 或调用
+  `.click()`；`page_type` / `page_click` 的 CDP 事件在页面侧是 trusted。
 - **对话框/验证码/权限不是桥故障**：`blocked_by_dialog`/`blocked_by_beforeunload` →
   `handle_dialog`；`challenge_stalled` → 把同一 tab 交还用户；`busy` → 稍后重试，别循环。
   `set_site_permission` 返回 `unsupported` 表示浏览器无法提供可精确恢复的 API（如 clipboard/托管/

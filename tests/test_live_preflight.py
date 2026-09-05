@@ -455,6 +455,25 @@ def test_components_that_match_the_checkout_do_not_stop_the_live_layer():
     assert P.stale_component_reason(_HEALTHY) is None
 
 
+def test_starting_bridge_is_not_mislabeled_as_a_stale_extension():
+    reason = P.stale_component_reason(
+        dict(
+            _HEALTHY,
+            status="starting",
+            action="wait_for_extension",
+            bridge_version="0.4.20",
+            extension_version=None,
+            protocol_version=None,
+            reload_extension_required=True,
+        )
+    )
+
+    assert reason is not None
+    assert "waiting for the extension handshake" in reason
+    assert "do not reload" in reason
+    assert "chrome://extensions" not in reason
+
+
 def test_a_stale_extension_is_refused_and_named_with_the_click_that_fixes_it():
     """This is the case that went unnoticed for a whole release round.
 

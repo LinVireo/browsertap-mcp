@@ -35,6 +35,80 @@ def test_switch_session_rejects_ambiguous_url_matches(monkeypatch):
     assert driver.default_session_id == "client:old"
 
 
+def test_switch_session_accepts_bridge_confirmed_replacement(monkeypatch):
+    driver = SimpleNamespace(default_session_id="client:old")
+    driver.resolve_session_target = lambda sid: {
+        "session_id": "client:new",
+        "rebound_from": sid,
+        "replacement_session_id": "client:new",
+        "tab_identity": "tab-a",
+        "reason": "chrome.tabs.onReplaced",
+    } if sid == "client:old" else None
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(
+        S,
+        "active_sessions",
+        lambda *args, **kwargs: [{"id": "client:new", "tab_identity": "tab-a"}],
+    )
+
+    assert S.switch_session(session_id="client:old") == "client:new"
+    assert driver.default_session_id == "client:new"
+
+
+def test_execute_js_uses_replacement_for_policy_but_reports_rebound(monkeypatch):
+    driver = SimpleNamespace(default_session_id="client:11", calls=[])
+    old_sid = "client:11"
+    new_sid = "client:12"
+    driver.resolve_session_target = lambda sid: {
+        "session_id": new_sid,
+        "rebound_from": old_sid,
+        "replacement_session_id": new_sid,
+        "tab_identity": "tab-a",
+        "reason": "chrome.tabs.onReplaced",
+    } if sid == old_sid else {"session_id": str(sid)}
+
+    def ext_cmd(payload, *, client_id=None, timeout=15.0):
+        driver.calls.append((payload, client_id))
+        if payload["cmd"] == "set_dialog_policy":
+            return {"data": {"token": "scope-ready"}}
+        return {"data": {"ok": True}}
+
+    driver.ext_cmd = ext_cmd
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(
+        S,
+        "ensure_sessions",
+        lambda *args, **kwargs: [{"id": new_sid, "url": "https://example.test/"}],
+    )
+    execute_calls = []
+
+    def execute(*args, **kwargs):
+        execute_calls.append(kwargs)
+        return {
+            "status": "success",
+            "js_return": 2,
+            "tab_id": 12,
+            "rebound_from": old_sid,
+            "replacement_session_id": new_sid,
+            "tab_identity": "tab-a",
+            "rebind_reason": "chrome.tabs.onReplaced",
+        }
+
+    monkeypatch.setattr(S.simphtml, "execute_js_rich", execute)
+
+    result = S.execute_js("1 + 1", session_id=old_sid, no_monitor=True)
+
+    assert result["status"] == "success"
+    assert [call[0]["cmd"] for call in driver.calls] == [
+        "set_dialog_policy",
+        "clear_dialog_policy",
+    ]
+    assert [call[0]["tabId"] for call in driver.calls] == [12, 12]
+    assert execute_calls[0]["session_id"] == old_sid
+    assert result["tab_id"] == 12
+    assert result["rebound_from"] == old_sid
+
+
 def test_switch_session_browser_url_pattern_requires_a_match(monkeypatch):
     driver = SimpleNamespace(default_session_id="client:old")
     monkeypatch.setattr(S, "require_driver", lambda: driver)
@@ -215,7 +289,9 @@ def test_scan_page_returns_links_and_background_visibility_hint(monkeypatch):
     assert result["status"] == "success"
     assert result["links"] == {"r1": "https://example.test/long/path"}
     assert result["offscreen"]["viewport_height"] == 0
-    assert "activate_tab" in result["hint"]
+    assert "text_only=true" in result["hint"]
+    assert "execute_js" in result["hint"]
+    assert "Only call activate_tab when" in result["hint"]
     assert driver.default_session_id == "client:old"
 
 
@@ -236,6 +312,29 @@ def test_scan_page_text_only_pins_implicit_session_and_reports_scrolling_hint(mo
     assert "links" not in result
     assert seen["link_refs"] is None
     assert driver.default_session_id == "client:1"
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected_state", "expected_ready"),
+    [
+        ({"ready_state": "complete", "has_body": True, "text_chars": 0, "html_chars": 317000, "loading": False}, "shell_only", False),
+        ({"ready_state": "complete", "has_body": True, "text_chars": 8, "html_chars": 317000, "loading": False}, "shell_only", False),
+        ({"ready_state": "complete", "has_body": True, "text_chars": 4, "html_chars": 20, "loading": True}, "hydrating", False),
+        ({"ready_state": "complete", "has_body": True, "text_chars": 42, "html_chars": 120, "loading": False}, "content", True),
+    ],
+)
+def test_scan_page_reports_spa_render_readiness(monkeypatch, probe, expected_state, expected_ready):
+    driver = _install_page_driver(monkeypatch)
+    monkeypatch.setattr(S.simphtml, "get_html", lambda *_args, **_kwargs: "<main></main>")
+    driver.execute_js = lambda *_args, **_kwargs: {"data": probe}
+
+    result = S.scan_page(session_id="client:1")
+
+    assert result["render_state"] == expected_state
+    assert result["content_ready"] is expected_ready
+    assert result["render"]["html_chars"] == probe["html_chars"]
+    if not expected_ready:
+        assert "Retry scan_page" in result["hint"]
 
 
 def test_scan_page_classifies_page_unavailable_and_restores_target(monkeypatch):
@@ -719,6 +818,29 @@ def test_page_location_and_document_cookie_parse_string_or_object(monkeypatch):
     assert S._page_location()["host"] == "example.test"
     assert S._cookie_via_document({"name": "sid", "value": "1"}, None, 2) == {"ok": True}
     assert S._cookie_via_document({"name": "sid", "value": "1"}, None, 2) == {}
+
+
+def test_get_cookies_uses_extension_command_channel(monkeypatch):
+    calls = []
+    driver = SimpleNamespace(default_session_id="chrome:old:7")
+
+    def ext_cmd(payload, **kwargs):
+        calls.append((payload, kwargs))
+        return {"data": {"ok": True, "data": [{"name": "sid", "value": "v1"}]}}
+
+    driver.ext_cmd = ext_cmd
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+
+    result = S.get_cookies(session_id="chrome:profile:9")
+
+    assert result["ok"] is True
+    assert result["data"] == [{"name": "sid", "value": "v1"}]
+    assert calls == [
+        (
+            {"cmd": "cookies", "tabId": 9},
+            {"client_id": "chrome:profile", "timeout": 15.0},
+        )
+    ]
 
 
 def test_set_cookies_success_partial_and_page_scope(monkeypatch):

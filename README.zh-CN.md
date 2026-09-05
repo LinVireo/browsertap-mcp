@@ -61,6 +61,7 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **页面读取**：将页面转换为长度可控的简化 HTML 或纯文本。长链接以 `#r1` 等短引用表示，并同时返回真实 URL。
 - **JavaScript 执行**：在指定页面上下文中执行 JavaScript。
 - **后台页面输入**：`page_click`、`page_type`、`page_press` 和 `page_drag` 在指定标签页内按视口坐标派发受信任的 CDP 输入事件，不移动桌面光标或改变可见标签页。
+- **破坏性确认表单**：删除仓库、支付、注销账号等多阶段对话框，每次推进阶段后都要重新 `scan_page`，因为站点可能替换 DOM 并复用按钮 id。确认文本用 `page_type` 输入，最终按钮用 `page_click`；不要用 `execute_js` 写 `.value` 或调用 `.click()`。定位器会跳过隐藏模板，只在可见、可交互候选中继续。CDP 输入在页面侧是受信任事件（`isTrusted=true`），不需要物理键鼠。
 - **等待与滚动**：等待选择器、文本、URL 或 JavaScript 条件；滚动后可继续读取长页面。`scan_page` 会报告未包含在结果中的视区外内容。
 - **显式对话框策略**：`alert`、`confirm`、`prompt` 和 `beforeunload` 支持 `dismiss`、`accept`、`manual` 策略；保留的对话框由 `handle_dialog` 处理。
 - **临时站点权限**：为单个 origin 设置 60–600 秒的 notifications、geolocation、camera 或 microphone 权限，并在租约结束后恢复原设置。
@@ -68,8 +69,28 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 - **使用现有登录态的原生下载**：通过 Chrome 下载管理器和当前浏览器 profile 的 Cookies 下载附件，并返回已验证的本地路径。
 - **零标签页操作**：扩展管理、CDP 目标列表、标签页列表和关闭操作通过扩展 service worker 通道执行，在没有普通标签页时仍可使用。
 - **页面截图**：CDP 页面截图作为 MCP 图片内容返回，也可保存到文件，默认写在 `~/Downloads/browsertap` 下。不支持图片输入的模型应改用 `scan_page`、页面 API 或 OCR。
-- **向后台标签页派发受信任输入**：`page_click`、`page_type`、`page_press`、`page_drag` 按视口坐标把 CDP 输入事件派发进你指定的标签页，不抬窗口，你的光标一动不动。操作系统级输入工具已在 0.5.0 移除，这里就是输入的正路。
 - **多浏览器共存**：Chrome、Edge 和 Opera 可同时连接同一个 bridge，各会话相互隔离。
+
+## 能力分层
+
+BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接口：
+
+- **Page 能力**：页面 DOM、JavaScript、等待、滚动、截图，以及指定标签页内的
+  `page_*` CDP 输入。普通网页工作默认走这一层，不使用操作系统鼠标或键盘。
+- **Browser 能力**：真实 Chromium profile 及其浏览器原生能力，包括标签页、下载、Cookies、
+  storage、站点权限、书签、扩展、service worker 消息和原生 CDP；很多操作不需要前台标签页。
+- **Desktop 能力**：不是通用的公开能力。当前唯一的显式 opt-in 是仅限 lab、用于页面离开
+  对话框的 `resolve_leave_dialog` 末尾 Enter 兜底；浏览器 chrome、原生文件选择器、扩展 UI、
+  打印/保存对话框及其他页面层缺口仍然不支持。0.5.0 移除的七个全局 OS 键鼠/桌面截图工具不会
+  作为普通网页失败后的兜底回来。
+
+`resolve_leave_dialog` 仍是页面范围内、仅限 `lab` 的恢复流程；末尾的 Enter 兜底是受限例外，
+不是通用桌面能力。实际注册表可从 `get_setup_status().capability_registry` 查看，客户端不必
+根据包 extras 或文档猜测当前工具面。每个条目还会说明 target 是 none、optional 还是
+required，操作是 read、write 还是 mixed，以及是否涉及 desktop opt-in。所有公开工具现在都在
+不改工具名的前提下返回 `btap.result.v1` envelope：成功的操作数据放在 `data`，明确的旧版失败
+payload 保留在 `legacy`，`error`/`error_code`、`retryable`、`target` 和 `diagnostics` 提供稳定的
+机器可读状态；既有操作字段仍会投影在顶层以保持兼容。
 
 ## 什么时候该用别的
 
@@ -102,16 +123,18 @@ Windows 上同样三步，只是换成 `.\.venv\Scripts\python.exe` 和
 
 - Python 3.10+
 - Chrome、Edge 或 Opera
-- Linux、macOS 或 Windows；Linux 的操作系统级输入需要 X11 桌面
-- 需要桌面会话，不能跑在容器里。**故意不提供 Docker 镜像**：服务接的是**你自己**已登录的
-  Chrome，扩展要人手动加载一次，容器里没有可驱动的浏览器
+- Linux、macOS 或 Windows。普通页面、浏览器和 CDP 工具不需要操作系统级输入；只有
+  仅限 lab 的 `resolve_leave_dialog` 物理兜底需要可用的桌面会话
+- 运行中的 Chromium 用户会话，而不是隔离的 headless 容器。**故意不提供 Docker 镜像**：
+  服务接的是**你自己**已登录的 Chrome，扩展要人手动加载一次
 - Claude Code 或其他 MCP 客户端
 
 ## 快速开始
 
 ### 1. 安装
 
-创建虚拟环境，安装推荐的桌面能力依赖。
+创建虚拟环境并安装软件包。只有需要剩余的、仅限 lab 的物理兜底时，才需要可选的 `desktop`
+extra：
 
 **Windows PowerShell**
 
@@ -129,8 +152,9 @@ python -m venv .venv
 ./.venv/bin/browsertap extension-path
 ```
 
-核心安装 `pip install browsertap-mcp` 不包含操作系统级鼠标、键盘和桌面截图依赖，仅适用于
-明确不使用这些工具的环境。
+核心安装 `pip install browsertap-mcp` 已足够支持页面、浏览器和 CDP 工具。它不包含
+`pyautogui`、`mss`、`pillow`，这些依赖仅用于 `resolve_leave_dialog` 的 lab Enter 兜底及其
+屏幕/输入检查；只有需要这条兜底时才加装 `[desktop]`。
 
 要改这个项目本身（而不只是用它），改成 editable 安装：extras 一样，扩展目录和 skill
 直接从工作树里读。
@@ -253,7 +277,7 @@ mcp_servers:
 若标签页列表为空，运行 `browsertap doctor`。
 
 需要减少对用户操作的影响时，请先阅读 [`docs/USAGE.zh-CN.md`](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md)。其中说明
-后台标签页、前台页面和桌面截图的区别，以及多模态模型的适用场景。
+后台标签页、前台激活、剩余物理兜底的闸门，以及多模态模型的适用场景。
 
 ## 配置
 
@@ -286,9 +310,10 @@ browsertap print-hermes-config  # 打印 Hermes 配置片段
 ```
 
 `doctor` 会报告扩展路径、端口状态和已连接标签页数量，并返回结构化判定。`cause` 的取值为
-`healthy`、`ext_never_registered`、`sw_slept_or_dropped`、`registering` 或
-`bridge_unreachable`；`advice` 提供对应恢复建议。`registering` 表示扩展已连接，但尚无正常的
-`http(s)` 内容标签页完成注册。
+`healthy`、`starting`、`ext_never_registered`、`sw_slept_or_dropped`、`registering` 或
+`bridge_unreachable`；`advice` 提供对应恢复建议。`starting` 表示 bridge 刚启动，正在等待扩展
+握手；此时 `action` 为 `wait_for_extension`，等待几秒后再次运行 `doctor`。`registering` 表示
+扩展已连接，但尚无正常的 `http(s)` 内容标签页完成注册。
 
 BTAP 首次使用时创建 `~/.browsertap/bridge-token`，bridge 和所有 MCP 进程均读取该文件。
 关闭浏览器或编辑器不会轮换 token。卸载扩展或重装 Python 包时会保留该文件，因此重装后可以
@@ -350,7 +375,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 1. **Chrome 扩展**（MV3）：注入真实页面，并通过 Chrome API 访问 `tabs`、`cookies`、`debugger` 和 `management`。
 2. **BrowserBridge**：本地守护进程，监听 `127.0.0.1:18765`（WebSocket）和 `:18766`（HTTP），
    负责维护扩展连接、会话状态和结果转发。该进程独立于 MCP 实例运行，缺失时由 MCP 服务按需启动，
-   且不创建可见窗口。会话以 `clientId:tabId` 标识，支持多个浏览器和 profile 并存。
+    且不创建可见窗口。`session_id` 是当前的 `clientId:tabId` 句柄，不是永久 tab 身份；连接条目还可能带有稳定的 `tab_identity`，支持多个浏览器和 profile 并存。
 3. **MCP 服务**：将上述能力公开为 MCP 工具。
 
 浏览器连接包含两条通道：按标签页的会话通道，以及直接连接扩展 service worker 的通道。第二条
@@ -404,8 +429,9 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 `close_tabs(..., owner_id=...)`。**B（借用标签页）**是临时使用的 U；使用前记录
 `original_url`，任务结束时在标签页仍存在的情况下恢复 URL，且不得关闭。
 
-推荐顺序为：调用 `list_tabs`；只在只读或轻量操作中借用匹配标签页；导航、表单和其他明显状态
-变更使用 A；没有匹配标签页时创建 A；任务结束后仅关闭 A。不得将初始标签页集合登记为 owned，
+推荐顺序为：调用 `list_tabs`；只在只读或轻量操作中借用匹配标签页；搜索、筛选、排序、翻页、滚动、
+展开/折叠、导航、表单和其他会改变页面视图或状态的操作使用 A；没有匹配标签页时创建 A；任务结束后仅关闭 A。
+不得将初始标签页集合登记为 owned，
 不得关闭 U/B、依赖共享默认 session、复用旧原生标签页 ID、绕过 generation 检查或遗漏 A 的清理。
 并行任务应分别使用独立的 A。
 
@@ -432,7 +458,7 @@ MCP 会话或客户端。扩展源文件变更需要在 `chrome://extensions` �
 | `no_response` | 脚本未送达或调用超时；存在副作用的操作不应直接重试 |
 | `not_found` | 选择器没有匹配到任何元素;没有派发输入 |
 | `bridge_error` | Bridge 调用失败。它可能出现在 `error_code` 或诊断字段，而非顶层 `status`；重试前先运行 `list_tabs`/`doctor`。 |
-| `switched_session` | 补充字段，表示仅在隐式默认目标失效时自动换到另一个活动标签页。继续前应核对新目标；显式指定的失效 session 不会被替换。 |
+| `switched_session` | 补充字段，表示仅在隐式默认目标失效时自动换到另一个活动标签页。另有 `rebound_from` / `replacement_session_id` 时，表示 Chrome 明确报告同一 tab 被替换，BTAP 已换发当前句柄；没有该证据时显式失效 session 不会被替换。 |
 
 ## 风险提示
 
@@ -476,16 +502,16 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
   - `url`(string)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`、`beforeunload`(string,可选):默认 `dismiss`、`intent_leave`(boolean,可选):`false` 强制保留页面
 - **download_file** —— 通过 Chrome 原生下载管理器下载 HTTP(S) URL，并使用该浏览器 profile 的 Cookies 和登录态。默认等待完成，返回 `status="completed"` 和已验证的绝对 `path`；中断返回 `failed`，超时或 `wait=false` 返回带 `download_id` 的 `in_progress`。显式 `session_id` 必须仍然有效，失效时不会改用其他 profile。附件下载应使用本工具，不应在页面内调用 `fetch`
   - `url`(string)、`filename`(string,可选):相对下载名称、`directory`(string,可选):任意绝对目标目录并自动建父目录;要求 `wait=true`、`wait`(boolean,可选):默认 `true`、`timeout`(number,可选):默认 60 秒,最大 1800、`session_id`(string,可选):选择浏览器 profile、`overwrite`(boolean,可选):默认 `false`,最终目标已存在时拒绝,只有显式 `true` 才替换。带 `directory` 的调用若超时会返回 `directory_applied=false`:后续搬移不再受跟踪,Chrome 可能继续下载到浏览器默认目录
-- **open_new_tab** —— 默认在后台创建标签页，为本次创建生成唯一 `operation_id`，并在限定时间内等待准确的 session/generation 注册；仅在确需前台操作时传入 `active=true`。返回 `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`。扩展会对相同 operation ID 去重；只有包含准确 `client_id+tab_id+generation` 的 completed 记录才登记 ownership，即使 `ready=false`；`ready` 仅表示 session 工具是否可立即使用。创建投递前 registry 状态不确定时返回 `status="unknown",may_have_created=false,retry_safe=true`；创建已投递但 ACK/对账仍不确定时返回 `status="unknown",may_have_created=true,retry_safe=false`。保留返回的 `owner_id`，只用于该任务清理。对于已投递但结果仍不确定的创建，再次调用 `open_new_tab` 时必须传回相同的 `operation_id`、`client_id` 和 `owner_id`；这个恢复调用只读取持久化 operation 记录，绝不会再次发送 `tabs/create`。记录不存在时不得按 URL 猜测或创建替代标签页
+- **open_new_tab** —— 默认在后台创建标签页，为本次创建生成唯一 `operation_id`，并在限定时间内等待准确的 session/generation 注册；仅在确需前台操作时传入 `active=true`。返回 `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`。扩展会对相同 operation ID 去重；只有包含准确 `client_id+tab_id+generation` 的 completed 记录才登记 ownership，即使 `ready=false`；`ready` 仅表示 session 工具是否可立即使用。创建投递前 registry 状态不确定时返回 `status="unknown",may_have_created=false,retry_safe=true`；创建已投递但 ACK/对账仍不确定时返回 `status="unknown",may_have_created=true,retry_safe=false`。保留返回的 `owner_id`，只用于该任务清理。对于已投递但结果仍不确定的创建，再次调用 `open_new_tab` 时必须传回相同的 `operation_id`、`client_id` 和 `owner_id`；这个恢复调用只读取持久化 operation 记录，绝不会再次发送 `tabs/create`。记录不存在时不得按 URL 猜测或创建替代标签页。页面内 `window.open()` 或锚点 click 没有用户手势时可能被 Chrome 静默拦截；需要可靠开页时使用这个原生 API，不要把 JS 返回值当成新标签页已存在
   - `url`(string)、`timeout`(number,可选):默认 `15`、`active`(boolean,可选):默认 `false`、`session_id`(string,可选):选择浏览器/profile、`owner_id`(string,可选):让同一任务的多个新 tab 共用一个 owner、`operation_id`(string,可选):恢复句柄、`client_id`(string,可选):恢复时锁定浏览器 client
-- **close_tabs** —— *(零标签页可用)* 接受原生数字 tab ID 或完整 `client:tabId` session ID，对 `chrome-extension://` 页面同样有效。默认 `only_if_agent_owned=true`，必须传入 `open_new_tab` 返回的 `owner_id`，并在关闭前核对当前 lifecycle generation；用户预存标签页、其他 Agent 的标签页和复用 ID 的新生命周期均会被拒绝。若用户已关闭 owned 标签页，清理返回 `status=already_gone, closed_by=user`，不会使用旧原生 ID 关闭其他标签页；实际关闭 owned 标签页时返回 `closed_by=agent`；显式关闭非 owned/U 标签页时返回 `closed_by=none`，且不计入本任务 owned 清理。仅当用户明确要求关闭非 owned/U 标签页时，才可设置 `only_if_agent_owned=false`
+- **close_tabs** —— *(零标签页可用)* 接受原生数字 tab ID 或完整 `client:tabId` session ID，对 `chrome-extension://` 页面同样有效。默认 `only_if_agent_owned=true`，必须传入 `open_new_tab` 返回的 `owner_id`，并在关闭前核对当前 lifecycle generation；用户预存标签页、其他 Agent 的标签页和复用 ID 的新生命周期均会被拒绝。若用户已关闭 owned 标签页，清理返回 `status=already_gone, closed_by=user`，不会使用旧原生 ID 关闭其他标签页；实际关闭 owned 标签页时返回 `closed_by=agent`；显式关闭非 owned/U 标签页时返回 `closed_by=none`，且不计入本任务 owned 清理。若返回 `already_gone` 但浏览器里仍有同一工作页面，先 `list_all_tabs` 核对 URL/title，再决定是否按新的 session/generation 关闭；BTAP 不会按 URL 自动转移 ownership。只有 Chrome 明确报告 `tabs.onReplaced` 且稳定 tab 身份匹配时，才会安全换发当前 session 句柄并迁移 ownership。仅当用户明确要求关闭非 owned/U 标签页时，才可设置 `only_if_agent_owned=false`
   - `tab_id`(integer/string 或数组)、`session_id`(string,可选)、`owner_id`(string,安全默认下必填)、`only_if_agent_owned`(boolean,默认 `true`)
 </details>
 
 <details>
 <summary><b>页面读取与执行</b></summary>
 
-- **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`;`cutlist`（默认开）会折叠重复的长列表，并为每个被折叠的容器返回一个由该容器自身结构推导出来的 CSS selector。本工具**不修改页面** —— 不写属性、不写 id、不写 `window` 全局变量，所以一次扫描对页面自己的脚本是不可见的
+- **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`。后台标签页可能报告 viewport 高度为 0；普通 DOM/文本/API 工作仍可继续，只有明确需要视觉/布局保真时才调用 `activate_tab`;页面可探测时还会返回 `render_state`/`content_ready`，区分真实正文与 loading、hydrating、shell-only 的 SPA；空壳结果应先重试或使用 `wait_for`。`cutlist`（默认开）会折叠重复的长列表，并为每个被折叠的容器返回一个由该容器自身结构推导出来的 CSS selector。本工具**不修改页面** —— 不写属性、不写 id、不写 `window` 全局变量，所以一次扫描对页面自己的脚本是不可见的
   - `session_id`(string,可选)、`text_only`(boolean,可选):默认 `false`、`cutlist`(boolean,可选):默认 `true`,把重复列表裁成少量样本、`maxchars`(integer,可选):默认 `35000`、`instruction`(string,可选)、`extra_js`(string,可选)、`timeout`(number,可选):默认 `15`
 - **wait_for** —— 等待指定条件成立后返回。与轮询 `scan_page` 相比，该工具避免重复序列化完整 DOM。四个条件必须且只能提供一个；`selector` 接受 CSS 字符串或“后台页面输入”一节所述的结构化 locator
   - `selector`(string/object,可选):CSS 或结构化 locator、`text`(string,可选)、`url_pattern`(string,可选)、`js`(string,可选)、`gone`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`session_id`(string,可选)
@@ -494,6 +520,7 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 - **scroll_page** —— 滚动并报告新位置,长页面可以分几屏读完
   - `to`(string,可选):默认 `bottom`,也可传 `top`、像素偏移或要滚到可见的 CSS 选择器、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
 - **execute_js** —— 在页面中执行 JavaScript 并返回结果。`timeout` 是覆盖对话框策略设置、monitor 快照、投递/重试、导航检查和清理的单一总 deadline；显式 `session_id` 在这些浏览器往返中保持不变，不依赖共享默认目标。真正的长任务可设 `wait=false`：扩展确认收到后，BTAP 立即返回 `status="in_progress"` 和 `operation_id`，后续用 `get_execute_js_result` 领取结果，不得重放脚本；后台模式有意不支持 `dialog_policy="manual"`。脚本导致页面导航时返回 `status="navigated"` 和 `landed_url`，而不是 `success`，且脚本返回值不可用。`dialog_policy` 控制 `alert`/`confirm`/`prompt`：`dismiss`（默认）和 `accept` 直接应答并记录到 `dialogs`；`manual` 只用于同步调用，保持原生对话框打开、暂停脚本并返回 `blocked_by_dialog`，后续由 `handle_dialog` 处理。标签页已有 manual 执行暂停时立即返回 `busy`。等待页面状态应使用 `wait_for`/`wait_for_url`，不要在 `execute_js` 中嵌入延迟 `setTimeout` 或 sleep Promise。JSON 编码后的 `js_return` 超过 24 KiB UTF-8 内联上限时，BTAP 会把完整值写入私有临时 JSON 文件，并返回 `result_file`、`result_bytes`、`result_sha256` 和 `result_format`，不再返回会被截断的半截内容
+  - 遇到 `Cannot access contents of the page` 先分流再重试：如果脚本尝试了 `window.open` 或导航，使用 `open_new_tab`（Chrome 没有用户手势时可能拦截）；如果是当前 tab 本身不允许注入，换可脚本化的普通 `http/https` tab 或使用支持的 CDP 路径。不要把这句错误直接理解成“当前页面读不到”。
   - `script`(string)、`session_id`(string,可选)、`no_monitor`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`dialog_policy`(string,可选):`dismiss`(默认)、`accept` 或 `manual`、`wait`(boolean,可选):默认 `true`
 - **get_execute_js_result** —— 按 `operation_id` 读取或短暂等待一次 `execute_js` 的结果。它只领取结果，绝不重放脚本；完成结果只消费一次，进行中和未知/过期句柄会返回明确状态。结果保留 10 分钟；大值沿用 `execute_js` 的无损 `result_file` 元数据
   - `operation_id`(string)、`timeout`(number,可选):默认 `0`,范围 `0`–`120`
@@ -526,11 +553,11 @@ worker 通道执行，在普通标签页全部关闭时仍可使用。
 应显式传入 `session_id`。调用期间，驱动绑定到该标签页，并在结束后恢复共享默认目标，因此定向调用
 不会改变其他任务的目标。显式指定已失效的标签页时，调用会被拒绝，不会自动改用其他标签页。
 
-`selector` 保持兼容 CSS 字符串,也可传结构化 locator 对象,主定位键必须且只能有一个:`css`、`role`(可带 `name`)、`text` 或 `label`;`exact` 控制 role/name 或 text 精确匹配;`frame` 逐层进入同源 iframe;`shadow` 逐层进入开放 Shadow DOM。零匹配返回 `not_found`,多匹配返回 `ambiguous`,跨域 iframe/关闭 shadow root 会明确上报且不派发输入。
+`selector` 保持兼容 CSS 字符串,也可传结构化 locator 对象,主定位键必须且只能有一个:`css`、`role`(可带 `name`)、`text` 或 `label`;在 locator 对象内部,`selector` 是兼容旧调用的 CSS 别名。`exact` 控制 role/name 或 text 精确匹配;`frame` 逐层进入同源 iframe;`shadow` 逐层进入开放 Shadow DOM。仅点击支持 frame 内点位形状 `{"frame":[...],"x":20,"y":30}`,其中 x/y 是最终同源 iframe 视口内的 CSS 坐标,执行前会累加 frame 偏移。零匹配返回 `not_found`,多匹配返回 `ambiguous`,跨域 iframe/关闭 shadow root 会明确上报且不派发输入。selector 点击若穿过带非恒等 CSS transform 的 iframe 链,会返回 `unsupported_frame_transform` 并保持零派发;查询/输入路径不受影响。
 
-- **page_click** —— 点 CSS/结构化 `selector` 或视口坐标。定位方式二选一。selector 模式中,未提供 offset 的轴取元素中心;显式提供的 `offset_x`/`offset_y` 则从元素左上角按对应轴计算。缺失、歧义、不可交互、跨域 iframe 或关闭 shadow root 都返回结构化状态且不派发。selector 模式还会在派发前在页面里做一次命中判定:在折叠线以下就先滚动进视口(`scrolled_into_view`),那个像素属于别的元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者,滚动后仍不在屏幕上返回 `outside_viewport` —— 这两种情况都不点,因为派发出去的点击会落在别的元素上并报成功。命中通过的点击带 `hit_verified: true`。坐标模式不做命中判定:坐标指的是像素,不是元素——而且从 `capture_page_screenshot` 上量到的像素是*设备*像素,得先除以 `devicePixelRatio`。验证码仍有 `challenge_detected`、`attempts` 与 `challenge_stalled` 上限
+- **page_click** —— 点 CSS/结构化 `selector` 或视口坐标。定位方式二选一。selector 模式中,未提供 offset 的轴取元素中心;显式提供的 `offset_x`/`offset_y` 则从元素左上角按对应轴计算。`{"frame":[...],"x":20,"y":30}` 是 frame 内点位模式:进入列出的同源 iframe,累加偏移后按顶层文档 CSS 坐标派发;它指向像素而非元素,因此不做命中判定。缺失、歧义、不可交互、跨域 iframe、关闭 shadow root 或带 CSS transform 的 iframe 都返回结构化状态且不派发;后者状态为 `unsupported_frame_transform`。selector 模式还会在派发前在页面里做一次命中判定:在折叠线以下就先滚动进视口(`scrolled_into_view`),那个像素属于别的元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者,滚动后仍不在屏幕上返回 `outside_viewport` —— 这两种情况都不点,因为派发出去的点击会落在别的元素上并报成功。命中通过的点击带 `hit_verified: true`。坐标模式不做命中判定:坐标指的是像素,不是元素——而且从 `capture_page_screenshot` 上量到的像素是*设备*像素,得先除以 `devicePixelRatio`。验证码仍有 `challenge_detected`、`attempts` 与 `challenge_stalled` 上限
   - `selector`(string/object,可选)、`x`(number,可选)、`y`(number,可选)、`offset_x`(number,可选)、`offset_y`(number,可选)、`button`(string,可选):默认 `left`、`clicks`(integer,可选):默认 `1`、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
-- **page_type** —— 往 CSS/结构化 locator 选中的字段输入;省略 `selector` 时使用当前焦点。Xterm.js 自动改投 helper textarea;缺失、歧义、只读或不可输入目标不会收到文本/按键。`clear=true` 先选中已有内容,`submit_key` 事后按键
+- **page_type** —— 往 CSS/结构化 locator 选中的字段输入;省略 `selector` 时使用当前焦点。Xterm.js 自动改投 helper textarea;缺失、歧义、只读或不可输入目标不会收到文本/按键;旧 CSS 字符串非法时返回 `status="invalid_selector"`,不再裸抛 `SyntaxError`。定位结果带脱敏的 `active_element` 身份,并在尝试聚焦时带 `focus_confirmed`,所以省略 selector 的输入也可审计。`clear=true` 先选中已有内容,`submit_key` 事后按键
   - `text`(string)、`selector`(string/object,可选)、`clear`(boolean,可选):默认 `false`、`submit_key`(string,可选)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
 - **page_press** —— 在标签页里按一个键或逗号分隔的修饰键组合,如 `enter` 或 `ctrl,shift,k`
   - `keys_csv`(string)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`

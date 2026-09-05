@@ -163,10 +163,16 @@ def cmd_doctor() -> int:
             "Chrome does not need restarting.",
             file=sys.stderr,
         )
+    elif payload.get("action") == "wait_for_extension":
+        print(
+            "\n[..] starting: the bridge is waiting for the extension handshake; "
+            "wait a few seconds and run doctor again.",
+            file=sys.stderr,
+        )
     elif isinstance(final_diag, dict) and final_diag.get("advice"):
         mark = "OK" if final_diag.get("ok") else "!!"
         print(f"\n[{mark}] {final_diag.get('cause')}: {final_diag.get('advice')}", file=sys.stderr)
-    return 0 if payload.get("status") == "healthy" else 1
+    return 0 if payload.get("status") in {"healthy", "starting"} else 1
 
 
 def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:

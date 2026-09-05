@@ -33,6 +33,7 @@ import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image as MCPImage
+from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field, StrictBool
 
@@ -335,6 +336,333 @@ _LAB_SITE_PERMISSION_APPROVALS: set[str] = set()
 _XTERM_SUBMIT_DELAY_MS = 75
 
 
+# --- MCP result envelope ----------------------------------------------------
+# Python callers keep receiving the operation-specific dictionaries below.
+# The registered FastMCP functions pass through this adapter, which gives MCP
+# clients one stable shape without forcing a breaking rewrite of every tool.
+_RESULT_ENVELOPE_VERSION = 1
+_RESULT_RESERVED_KEYS = frozenset({
+    "ok", "data", "error", "error_code", "retryable", "target",
+    "diagnostics", "legacy", "result_contract", "version",
+})
+_RESULT_FAILURE_STATUSES = frozenset({
+    "error", "failed", "failure", "timeout", "busy", "requires_user_action",
+    "activation_failed", "input_activity_detected", "coordinates_off_screen",
+    "obscured", "outside_viewport", "not_found", "cancelled", "rejected",
+    "no_response", "navigation_timeout", "navigation_failed", "dialog_handle_failed",
+    "blocked_by_beforeunload", "blocked_by_dialog", "challenge_stalled", "unknown",
+    "unsupported", "unsupported_frame_transform", "partial", "bridge_unreachable", "stale_bridge", "stale_extension",
+    "stale_package",
+})
+_SETUP_DIAGNOSTIC_STATUSES = frozenset({
+    "healthy", "starting", "stale_bridge", "stale_extension", "stale_package",
+})
+_RESULT_RETRYABLE_CODES = frozenset({
+    "bridge_unreachable", "extension_not_connected", "session_not_connected",
+    "session_disconnected", "transport_error",
+})
+
+
+def _result_target(payload: Any) -> Optional[dict[str, Any]]:
+    """Extract target identity without inventing a target for tab-less calls."""
+    if not isinstance(payload, dict):
+        return None
+    session_id = (
+        payload.get("session_id")
+        or payload.get("executed_session_id")
+        or payload.get("active_session_id")
+        or payload.get("activated_session_id")
+    )
+    tab_id = payload.get("executed_tab_id")
+    if tab_id is None:
+        tab_id = payload.get("tab_id")
+    client_id = payload.get("client_id")
+    generation = payload.get("generation")
+    if session_id is not None:
+        session_text = str(session_id)
+        if client_id is None and ":" in session_text:
+            client_id = session_text.rsplit(":", 1)[0]
+        if tab_id is None and ":" in session_text:
+            maybe_tab = session_text.rsplit(":", 1)[-1]
+            if maybe_tab.isdigit():
+                tab_id = int(maybe_tab)
+    if session_id is None and tab_id is None and client_id is None and generation is None:
+        return None
+    target: dict[str, Any] = {}
+    if session_id is not None:
+        target["session_id"] = str(session_id)
+    if client_id is not None:
+        target["client_id"] = str(client_id)
+    if tab_id is not None:
+        target["tab_id"] = tab_id
+    if generation is not None:
+        target["generation"] = str(generation)
+    for key in ("browser", "url"):
+        if payload.get(key) is not None:
+            target[key] = payload[key]
+    return target or None
+
+
+def _result_diagnostics(payload: Any, *, tool: str) -> dict[str, Any]:
+    """Keep actionable routing and delivery facts out of the operation data."""
+    diagnostics: dict[str, Any] = {"tool": tool}
+    if not isinstance(payload, dict):
+        return diagnostics
+    for key in (
+        "delivery_state", "switched_session", "switched_from", "closed",
+        "retry_safe", "operation_id", "may_have_created", "on_screen",
+        "input_quiet", "input_reachability", "screen_bounds", "ownership",
+        "owner_id", "generation", "extension_build_verdict", "status", "code",
+        "hint", "directory_applied", "requested_directory", "render_state",
+        "content_ready", "render", "recheck_required", "recheck_action",
+    ):
+        if key in payload:
+            diagnostics[key] = payload[key]
+    if isinstance(payload.get("newTabs"), list):
+        diagnostics["new_tabs_count"] = len(payload["newTabs"])
+    return diagnostics
+
+
+class SessionTargetNotFoundError(RuntimeError):
+    """An explicitly named tab disappeared without authorising failover."""
+
+    error_code = "session_not_connected"
+    retry_safe = False
+
+    def __init__(self, session_id: str, sessions: Optional[list[dict[str, Any]]] = None) -> None:
+        sid = str(session_id)
+        candidates: list[dict[str, Any]] = []
+        if isinstance(sessions, list):
+            native_id = sid.rsplit(":", 1)[-1]
+            for item in sessions:
+                if not isinstance(item, dict):
+                    continue
+                candidate_id = str(item.get("id", ""))
+                if candidate_id and candidate_id != sid and candidate_id.rsplit(":", 1)[-1] == native_id:
+                    candidates.append({
+                        key: item[key]
+                        for key in ("id", "url", "title", "generation")
+                        if item.get(key) is not None
+                    })
+        self.diagnostics = {
+            "stale_session_id": sid,
+            "replacement_candidates": candidates,
+            "next_action": "list_tabs_then_retry",
+        }
+        suffix = ""
+        if candidates:
+            suffix = " Possible replacement session(s): " + ", ".join(
+                str(item.get("id")) for item in candidates[:8]
+            ) + "."
+        super().__init__(
+            f"Session {sid} not found: the explicitly requested tab session is stale; "
+            "BTAP refused to use a different tab. Run list_tabs (or list_all_tabs), "
+            "verify the URL/title, then retry with the replacement session_id."
+            + suffix
+        )
+
+
+def _session_target_not_found(
+    session_id: str,
+    sessions: Optional[list[dict[str, Any]]] = None,
+) -> SessionTargetNotFoundError:
+    """Build one actionable stale-target error for every server-side resolver."""
+    if sessions is None:
+        try:
+            sessions = active_sessions(fresh=True)
+        except Exception:
+            sessions = []
+    return SessionTargetNotFoundError(str(session_id), sessions)
+
+
+def _resolve_session_target(driver: BrowserBridge, session_id: str) -> Optional[dict[str, Any]]:
+    """Ask the bridge for exact or evidence-backed replacement resolution."""
+    resolver = getattr(driver, "resolve_session_target", None)
+    if not callable(resolver):
+        return None
+    result = resolver(str(session_id))
+    if not isinstance(result, dict) or not result.get("session_id"):
+        return None
+    return result
+
+
+def _legacy_failure(
+    payload: Any, *, tool: Optional[str] = None,
+) -> Optional[tuple[str, str, bool]]:
+    """Classify explicit operation failures that did not raise an exception."""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("ok") is False:
+        code = str(payload.get("code") or payload.get("error_code") or "operation_failed")
+        message = str(payload.get("error") or payload.get("message") or f"{code} failed")
+        return code, message, bool(payload.get("retryable") or payload.get("retry_safe"))
+    status = str(payload.get("status") or "").strip().lower()
+    # Setup diagnostics report the health of their dependencies in `status`.
+    # A stale component is actionable data from a successful diagnostic call,
+    # not a failure to produce the report. Keep this exception tool-local so
+    # ordinary operations with the same status remain failures.
+    if tool == "get_setup_status" and status in _SETUP_DIAGNOSTIC_STATUSES:
+        return None
+    if status in _RESULT_FAILURE_STATUSES:
+        code = str(payload.get("code") or payload.get("error_code") or status)
+        message = str(payload.get("error") or payload.get("message") or status)
+        return code, message, bool(payload.get("retryable") or payload.get("retry_safe"))
+    if payload.get("error") and status not in {"ok", "success", "completed", "stopped"}:
+        code = str(payload.get("code") or payload.get("error_code") or "operation_failed")
+        retryable = bool(payload.get("retryable") or payload.get("retry_safe"))
+        return code, str(payload["error"]), retryable
+    return None
+
+
+def _exception_result_metadata(exc: Exception) -> tuple[str, str, bool, dict[str, Any]]:
+    code = str(getattr(exc, "error_code", "") or "")
+    message = str(exc)
+    if not code:
+        if isinstance(exc, TimeoutError):
+            code = "timeout"
+        elif isinstance(exc, PermissionError):
+            code = "permission_denied"
+        elif isinstance(exc, ValueError):
+            code = "invalid_request"
+        elif isinstance(exc, FileNotFoundError):
+            code = "not_found"
+        elif isinstance(exc, (ConnectionError, OSError)):
+            code = "transport_error"
+        else:
+            code = "internal_error"
+    # A few server-side resolvers predate the bridge's typed session errors and
+    # still raise RuntimeError("Session ... not found"). Normalize that message
+    # so an explicitly dead target has the same stable code in local and remote
+    # execution paths.
+    lower_message = message.lower()
+    if (
+        code == "internal_error"
+        and lower_message.startswith("session ")
+        and lower_message.endswith(" not found")
+    ):
+        code = "session_not_connected"
+    retryable = bool(getattr(exc, "retry_safe", False)) or code in _RESULT_RETRYABLE_CODES
+    diagnostics: dict[str, Any] = {}
+    delivery_state = getattr(exc, "delivery_state", None)
+    if delivery_state is not None:
+        diagnostics["delivery_state"] = delivery_state
+    retry_safe_value = exc.__dict__.get("retry_safe")
+    if retry_safe_value is not None:
+        diagnostics["retry_safe"] = bool(retry_safe_value)
+    extra_diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(extra_diagnostics, dict):
+        diagnostics.update(extra_diagnostics)
+    return code, message, retryable, diagnostics
+
+
+def _result_envelope(
+    tool: str,
+    payload: Any = None,
+    *,
+    exc: Optional[Exception] = None,
+    target: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build the v1 envelope and retain a shallow legacy compatibility view."""
+    payload_target = _result_target(payload)
+    if target is not None:
+        resolved_target = dict(payload_target or {})
+        resolved_target.update(target)
+    else:
+        resolved_target = payload_target
+    if exc is not None:
+        code, message, retryable, error_diagnostics = _exception_result_metadata(exc)
+        envelope: dict[str, Any] = {
+            "ok": False,
+            "result_contract": "btap.result.v1",
+            "version": _RESULT_ENVELOPE_VERSION,
+            "error": {"code": code, "message": message, "retryable": retryable},
+            "error_code": code,
+            "retryable": retryable,
+            "target": resolved_target,
+            "diagnostics": {"tool": tool, **error_diagnostics},
+        }
+        # These were part of the transport-specific failure shape before the
+        # common envelope. Keep them readable for callers that have not yet
+        # migrated while the canonical copy remains in diagnostics/error.
+        for key in ("delivery_state", "retry_safe"):
+            if key in error_diagnostics:
+                envelope[key] = error_diagnostics[key]
+        return envelope
+
+    failure = _legacy_failure(payload, tool=tool)
+    if failure is not None:
+        code, message, retryable = failure
+        envelope = {
+            "ok": False,
+            "result_contract": "btap.result.v1",
+            "version": _RESULT_ENVELOPE_VERSION,
+            "error": {"code": code, "message": message, "retryable": retryable},
+            "error_code": code,
+            "retryable": retryable,
+            "target": resolved_target,
+            "diagnostics": _result_diagnostics(payload, tool=tool),
+            "legacy": payload,
+        }
+    else:
+        envelope = {
+            "ok": True,
+            "result_contract": "btap.result.v1",
+            "version": _RESULT_ENVELOPE_VERSION,
+            "data": payload,
+            "error": None,
+            "error_code": None,
+            "retryable": False,
+            "target": resolved_target,
+            "diagnostics": _result_diagnostics(payload, tool=tool),
+        }
+
+    # Keep established operation keys readable at the top level. Reserved
+    # envelope fields remain authoritative; the full value is always in data
+    # (or legacy for a classified failure).
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key not in _RESULT_RESERVED_KEYS and key not in envelope:
+                envelope[key] = value
+    return envelope
+
+
+def _call_target(
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Extract only caller-supplied target identity for exception envelopes."""
+    try:
+        bound = inspect.signature(fn, eval_str=False).bind_partial(*args, **kwargs)
+    except (TypeError, ValueError):
+        bound = None
+    values = bound.arguments if bound is not None else kwargs
+    target_values = {
+        key: values[key]
+        for key in ("session_id", "tab_id", "client_id", "generation", "browser", "url")
+        if values.get(key) is not None
+    }
+    return _result_target(target_values)
+
+
+def _adapt_tool_result(
+    tool: str,
+    value: Any,
+    *,
+    target: Optional[dict[str, Any]] = None,
+) -> Any:
+    if isinstance(value, CallToolResult):
+        legacy = value.structuredContent
+        envelope = _result_envelope(tool, legacy, target=target)
+        return CallToolResult(
+            _meta=value.meta,
+            content=value.content,
+            structuredContent=envelope,
+            isError=bool(value.isError) or not envelope["ok"],
+        )
+    return _result_envelope(tool, value, target=target)
+
+
 # --- Tab ownership: which tabs this process opened ---------------------------
 class _TabOwnershipRegistry:
     """Process-local capabilities for tabs created by this MCP server.
@@ -437,6 +765,27 @@ class _TabOwnershipRegistry:
                         )
                 expected[str(_split_session_target(sid)[1])] = record["generation"]
         return expected
+
+    def rebind(self, old_session_id: str, new_session_id: str) -> Optional[dict[str, str]]:
+        """Move an ownership claim after bridge-confirmed tab replacement."""
+        old_sid = str(old_session_id)
+        new_sid = str(new_session_id)
+        if old_sid == new_sid:
+            return None
+        with self._lock:
+            record = self._records.get(old_sid)
+            if record is None:
+                return None
+            existing = self._records.get(new_sid)
+            if existing is not None and existing != record:
+                raise PermissionError(
+                    f"tab ownership conflict while rebinding {old_sid} to {new_sid}"
+                )
+            moved = dict(record)
+            moved["session_id"] = new_sid
+            self._records.pop(old_sid, None)
+            self._records[new_sid] = moved
+            return dict(moved)
 
     def release(self, session_ids: list[str], *, owner_id: str) -> None:
         with self._lock:
@@ -628,14 +977,37 @@ def _threaded_tool(*d_args: Any, **d_kwargs: Any):
     decorator = _mcp_tool(*d_args, **d_kwargs)
 
     def wrap(fn):
+        def invoke_sync(*args: Any, **kwargs: Any) -> Any:
+            target = _call_target(fn, args, kwargs)
+            try:
+                value = fn(*args, **kwargs)
+            except UrlElicitationRequiredError:
+                raise
+            except Exception as exc:
+                return _result_envelope(fn.__name__, exc=exc, target=target)
+            return _adapt_tool_result(fn.__name__, value, target=target)
+
         if inspect.iscoroutinefunction(fn):
             @functools.wraps(fn)
             async def async_runner(*args: Any, **kwargs: Any):
+                target = _call_target(fn, args, kwargs)
                 if not serialize:
-                    return await fn(*args, **kwargs)
+                    try:
+                        value = await fn(*args, **kwargs)
+                    except UrlElicitationRequiredError:
+                        raise
+                    except Exception as exc:
+                        return _result_envelope(fn.__name__, exc=exc, target=target)
+                    return _adapt_tool_result(fn.__name__, value, target=target)
                 await _acquire_tool_lock()
                 try:
-                    return await fn(*args, **kwargs)
+                    try:
+                        value = await fn(*args, **kwargs)
+                    except UrlElicitationRequiredError:
+                        raise
+                    except Exception as exc:
+                        return _result_envelope(fn.__name__, exc=exc, target=target)
+                    return _adapt_tool_result(fn.__name__, value, target=target)
                 finally:
                     _TOOL_LOCK.release()
 
@@ -658,9 +1030,9 @@ def _threaded_tool(*d_args: Any, **d_kwargs: Any):
         async def runner(*args: Any, **kwargs: Any):
             def _run():
                 if not serialize:
-                    return fn(*args, **kwargs)
+                    return invoke_sync(*args, **kwargs)
                 with _TOOL_LOCK:
-                    return fn(*args, **kwargs)
+                    return invoke_sync(*args, **kwargs)
 
             return await anyio.to_thread.run_sync(_run)
 
@@ -1026,6 +1398,13 @@ def prune_stale_default() -> Optional[str]:
     cur = driver.default_session_id
     if not cur:
         return None
+    resolved = _resolve_session_target(driver, str(cur))
+    if resolved:
+        selected = str(resolved["session_id"])
+        if selected != str(cur):
+            _TAB_OWNERSHIP.rebind(str(cur), selected)
+            driver.default_session_id = selected
+        return selected
     if any(str(s.get("id")) == str(cur) for s in active_sessions()):
         return str(cur)
     # The session cache can simply be out of date; confirm against the bridge
@@ -1044,9 +1423,16 @@ def switch_session(
     driver = require_driver()
     if session_id is not None:
         sid = str(session_id)
+        resolved = _resolve_session_target(driver, sid)
+        if resolved:
+            current_sid = str(resolved["session_id"])
+            if current_sid != sid:
+                _TAB_OWNERSHIP.rebind(sid, current_sid)
+            driver.default_session_id = current_sid
+            return current_sid
         found = next((s for s in active_sessions() if str(s.get("id")) == sid), None)
         if not found:
-            raise RuntimeError(f"Session {sid} not found")
+            raise _session_target_not_found(sid)
         driver.default_session_id = sid
         return sid
     if browser is not None:
@@ -1171,6 +1557,136 @@ _EXTENSION_PROTOCOL_VERSION = 3
 _REQUIRED_EXTENSION_CAPABILITIES = {"content_command_channel_removed"}
 
 
+# The capability registry is deliberately kept beside the public tool surface.
+# It is the server's agent-facing inventory: page work is the normal path,
+# browser operations use the real profile, and desktop is an explicit escape
+# hatch rather than an automatic fallback.  Keep every registered tool in
+# exactly one group; the completeness check below turns a forgotten entry into
+# a diagnostic/test failure instead of an undocumented capability.
+_PAGE_TOOLS = frozenset({
+    "open_url", "scan_page", "wait_for", "wait_for_url", "scroll_page",
+    "execute_js", "get_execute_js_result", "handle_dialog",
+    "resolve_leave_dialog", "page_click", "page_type", "page_press",
+    "page_drag", "capture_page_screenshot", "upload_files",
+})
+_BROWSER_TOOLS = frozenset({
+    "get_setup_status", "get_automation_profile", "set_automation_profile",
+    "list_tabs", "list_all_tabs", "extension_path", "open_new_tab",
+    "close_tabs", "switch_tab", "activate_tab", "list_extensions",
+    "set_extension_enabled", "uninstall_extension", "get_bookmarks",
+    "create_bookmark", "remove_bookmark", "call_extension", "download_file",
+    "network_capture_start", "network_capture_stop", "console_capture_start",
+    "get_console_messages", "console_capture_stop", "cdp_command",
+    "cdp_batch", "debugger_targets", "get_cookies", "set_cookies",
+    "delete_cookies", "storage_get", "storage_set", "set_site_permission",
+    "reset_site_permissions", "save_pdf",
+})
+_DESKTOP_TOOLS = frozenset()
+_CAPABILITY_GROUPS = ("page", "browser", "desktop")
+
+# Targeting is intentionally coarse in S1: it describes whether a caller must
+# provide a page/tab target, not the full session-resolution policy.  The latter
+# remains in the individual tool contracts and is covered by the target tests.
+_NO_TARGET_TOOLS = frozenset({
+    "get_setup_status", "get_automation_profile", "set_automation_profile",
+    "list_tabs", "list_all_tabs", "extension_path", "list_extensions",
+    "set_extension_enabled", "uninstall_extension", "get_bookmarks",
+    "create_bookmark", "remove_bookmark", "call_extension",
+})
+_REQUIRED_TARGET_TOOLS = frozenset({
+    "close_tabs",
+})
+
+_WRITE_TOOLS = frozenset({
+    "open_url", "open_new_tab", "close_tabs", "switch_tab", "activate_tab",
+    "set_automation_profile", "set_extension_enabled", "uninstall_extension",
+    "create_bookmark", "remove_bookmark", "download_file",
+    "network_capture_start", "network_capture_stop", "console_capture_start",
+    "console_capture_stop", "set_cookies", "delete_cookies", "storage_set",
+    "set_site_permission", "reset_site_permissions", "scroll_page", "page_click",
+    "page_type", "page_press", "page_drag", "upload_files", "handle_dialog",
+    "resolve_leave_dialog", "save_pdf",
+})
+_MIXED_EFFECT_TOOLS = frozenset({
+    "execute_js", "cdp_command", "cdp_batch", "call_extension",
+})
+
+def _build_tool_capabilities() -> dict[str, dict[str, Any]]:
+    """Build the immutable-by-convention agent capability inventory."""
+    result: dict[str, dict[str, Any]] = {}
+    for name in sorted(_PAGE_TOOLS):
+        result[name] = {
+            "capability": "page",
+            "target": (
+                "required" if name in _REQUIRED_TARGET_TOOLS
+                else "none" if name in _NO_TARGET_TOOLS
+                else "optional"
+            ),
+            "side_effect": "read",
+            "result_contract": "btap.result.v1",
+            "desktop_opt_in": False,
+        }
+    for name in sorted(_BROWSER_TOOLS):
+        result[name] = {
+            "capability": "browser",
+            "target": (
+                "required" if name in _REQUIRED_TARGET_TOOLS
+                else "none" if name in _NO_TARGET_TOOLS
+                else "optional"
+            ),
+            "side_effect": "read",
+            "result_contract": "btap.result.v1",
+            "desktop_opt_in": False,
+        }
+    for name in sorted(_DESKTOP_TOOLS):
+        result[name] = {
+            "capability": "desktop",
+            "target": "optional",
+            "side_effect": "write",
+            "result_contract": "btap.result.v1",
+            "desktop_opt_in": True,
+        }
+    for name in _WRITE_TOOLS:
+        if name in result:
+            result[name]["side_effect"] = "write"
+    for name in _MIXED_EFFECT_TOOLS:
+        if name in result:
+            result[name]["side_effect"] = "mixed"
+    if "resolve_leave_dialog" in result:
+        result["resolve_leave_dialog"]["desktop_fallback"] = True
+        result["resolve_leave_dialog"]["desktop_opt_in"] = True
+    return result
+
+
+TOOL_CAPABILITIES = _build_tool_capabilities()
+
+
+def _capability_registry_status() -> dict[str, Any]:
+    """Return the registry and any mismatch with FastMCP's registered tools."""
+    manager = getattr(mcp, "_tool_manager", None)
+    registered_map = getattr(manager, "_tools", {})
+    registered = set(registered_map) if isinstance(registered_map, dict) else set()
+    declared = set(TOOL_CAPABILITIES)
+    missing = sorted(registered - declared)
+    unknown = sorted(declared - registered)
+    groups = {
+        group: sorted(
+            name for name, metadata in TOOL_CAPABILITIES.items()
+            if metadata.get("capability") == group
+        )
+        for group in _CAPABILITY_GROUPS
+    }
+    return {
+        "version": 1,
+        "groups": groups,
+        "tool_count": len(registered),
+        "declared_tool_count": len(declared),
+        "missing_tools": missing,
+        "unknown_tools": unknown,
+        "complete": not missing and not unknown,
+    }
+
+
 # --- Version comparison for the setup report ---------------------------------
 def _version_order(value: Any) -> tuple[int, ...] | None:
     """Parse a dotted version for ordering, or None when it cannot be ordered.
@@ -1247,7 +1763,10 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
         "version equality is not. extension_build_enforced=false means no comparison "
         "happened, so treat it as unknown rather than as a pass. Answers while another tool "
         "is still running, which is when it is usually wanted; default_session_settled=false "
-        "then means default_session_id may be that call's temporary value rather than yours."
+        "then means default_session_id may be that call's temporary value rather than yours. "
+        "capability_registry is the runtime page/browser/desktop inventory; each entry includes "
+        "target (none/optional/required), side_effect (read/write/mixed), result_contract, and "
+        "desktop_opt_in."
     ),
     serialize=False,
 )
@@ -1409,6 +1928,9 @@ def get_setup_status() -> dict[str, Any]:
     if bridge_error or diagnosis.get("cause") == "bridge_unreachable":
         component_status = "bridge_unreachable"
         component_action = "restart_bridge"
+    elif diagnosis.get("cause") == "starting":
+        component_status = "starting"
+        component_action = "wait_for_extension"
     elif package_is_stale:
         component_status = "stale_package"
         component_action = "restart_mcp_session"
@@ -1424,6 +1946,7 @@ def get_setup_status() -> dict[str, Any]:
     status: dict[str, Any] = {
         "status": component_status,
         "action": component_action,
+        "capability_registry": _capability_registry_status(),
         "package_version": __version__,
         "bridge_version": bridge_version,
         "extension_version": extension_version,
@@ -1459,7 +1982,18 @@ def get_setup_status() -> dict[str, Any]:
             "The bridge runs as a detached daemon; this MCP server auto-starts it when missing.",
         ],
     }
-    if extension_build_verdict == "unverifiable" and recorded_build_stamp is not None:
+    if component_status == "starting":
+        status["notes"].insert(
+            0,
+            "The bridge is up but the extension handshake has not completed yet. "
+            "Wait a few seconds and retry doctor or the browser tool; do not reload "
+            "the extension unless the next diagnosis says stale_extension.",
+        )
+    if (
+        component_status != "starting"
+        and extension_build_verdict == "unverifiable"
+        and recorded_build_stamp is not None
+    ):
         # This tree can be verified -- it carries a stamp the sources agree with --
         # and the worker still reported none, so the strongest of the four checks was
         # skipped while the other three passed. Measured here: versions equal,
@@ -1592,6 +2126,19 @@ def close_tabs(
     only_if_agent_owned: bool = True,
 ) -> dict[str, Any]:
     driver = require_driver()
+    rebound: Optional[dict[str, Any]] = None
+    if session_id is not None:
+        requested_session_id = str(session_id)
+        rebound = _resolve_session_target(driver, requested_session_id)
+        if rebound and str(rebound.get("session_id")) != requested_session_id:
+            replacement_session_id = str(rebound["session_id"])
+            _TAB_OWNERSHIP.rebind(requested_session_id, replacement_session_id)
+            tab_id = _replace_rebound_tab_target(
+                tab_id,
+                old_session_id=requested_session_id,
+                new_session_id=replacement_session_id,
+            )
+            session_id = replacement_session_id
     native_ids, client_id = _normalize_tab_targets(tab_id, session_id=session_id)
     session_ids = [f"{client_id}:{native_id}" for native_id in native_ids]
     expected_generations: dict[str, str] = {}
@@ -1624,6 +2171,14 @@ def close_tabs(
         raise RuntimeError(info.get("error") or "the browser refused to close the tab")
     raw_closed = info.get("closed")
     raw_already_gone = info.get("alreadyGone", info.get("already_gone"))
+    if only_if_agent_owned and (
+        not isinstance(raw_closed, list)
+        or not isinstance(raw_already_gone, list)
+    ):
+        raise RuntimeError(
+            "close_tabs refused: the extension response omitted explicit closed and "
+            "alreadyGone lists; ownership was retained"
+        )
     closed_ids = (
         [int(value) for value in raw_closed]
         if isinstance(raw_closed, list)
@@ -1652,7 +2207,7 @@ def close_tabs(
         else "agent" if only_if_agent_owned and closed_ids
         else "none"
     )
-    return {
+    out = {
         "status": status,
         "requested": requested,
         "closed": closed,
@@ -1662,6 +2217,27 @@ def close_tabs(
         "only_if_agent_owned": bool(only_if_agent_owned),
         "result": result,
     }
+    if rebound and rebound.get("rebound_from"):
+        out.update({
+            "rebound_from": rebound.get("rebound_from"),
+            "replacement_session_id": rebound.get("replacement_session_id"),
+            "tab_identity": rebound.get("tab_identity"),
+            "rebind_reason": rebound.get("reason"),
+        })
+    if already_gone_ids:
+        # A generation-safe close can prove only that the owned native tab is
+        # gone. It must not infer that a newly registered tab is its successor
+        # and close that tab on the agent's behalf.
+        out.update({
+            "recheck_required": True,
+            "recheck_action": "list_all_tabs",
+            "recheck_hint": (
+                "The owned native tab disappeared before close. Re-run list_all_tabs and "
+                "verify URL/title before deciding whether a replacement should be closed; "
+                "ownership is not transferred automatically."
+            ),
+        })
+    return out
 
 
 # --- Tools: switch and activate a tab ----------------------------------------
@@ -1679,8 +2255,20 @@ def switch_tab(
     browser: Optional[str] = None,
     activate: bool = False,
 ) -> dict[str, Any]:
+    requested_sid = str(session_id) if session_id is not None else None
     sid = switch_session(session_id=session_id, url_pattern=url_pattern, browser=browser)
     out: dict[str, Any] = {"active_session_id": sid}
+    if requested_sid is not None and requested_sid != sid:
+        current = next(
+            (item for item in active_sessions(fresh=True) if str(item.get("id")) == sid),
+            {},
+        )
+        out.update({
+            "rebound_from": requested_sid,
+            "replacement_session_id": sid,
+            "tab_identity": current.get("tab_identity"),
+            "rebind_reason": "chrome.tabs.onReplaced",
+        })
     if activate:
         try:
             out["activated"] = _activate(sid)
@@ -1808,7 +2396,7 @@ def open_url(
             None,
         )
         if target_session is None:
-            raise RuntimeError(f"Session {requested_sid} not found")
+            raise _session_target_not_found(requested_sid, sessions)
         target_sid = requested_sid
         driver.default_session_id = target_sid
     else:
@@ -2045,6 +2633,11 @@ def _normalize_tab_targets(
             raise ValueError(f"invalid tab identifier: {raw!r}")
         if isinstance(raw, str) and ":" in raw:
             item_client, tab = _split_session_target(raw)
+            resolved = _resolve_session_target(require_driver(), str(raw))
+            if resolved and str(resolved.get("session_id")) != str(raw):
+                replacement = str(resolved["session_id"])
+                _TAB_OWNERSHIP.rebind(str(raw), replacement)
+                item_client, tab = _split_session_target(replacement)
         else:
             try:
                 tab = int(raw)
@@ -2062,6 +2655,40 @@ def _normalize_tab_targets(
     if client_id is None:
         client_id = _implicit_client_id()
     return native_ids, client_id
+
+
+def _replace_rebound_tab_target(
+    value: int | str | list[int | str],
+    *,
+    old_session_id: str,
+    new_session_id: str,
+) -> int | str | list[int | str]:
+    """Carry a close request across an evidence-backed native tab replacement.
+
+    A caller may supply either the composite session handle or its numeric tab
+    id.  Only the old handle/native id belonging to this exact replacement is
+    rewritten; unrelated numeric targets remain untouched and are validated by
+    ``_normalize_tab_targets`` afterward.
+    """
+    old_native = _split_session_target(str(old_session_id))[1]
+    new_native = _split_session_target(str(new_session_id))[1]
+
+    def replace_one(raw: int | str) -> int | str:
+        if isinstance(raw, str) and raw == old_session_id:
+            return new_session_id
+        if isinstance(raw, bool):
+            return raw
+        try:
+            numeric = int(raw)
+        except (TypeError, ValueError):
+            return raw
+        if numeric == old_native:
+            return new_native
+        return raw
+
+    if isinstance(value, list):
+        return [replace_one(item) for item in value]
+    return replace_one(value)
 
 
 def _unknown_command_error(error: BaseException | str) -> bool:
@@ -2905,14 +3532,13 @@ def _extension_operation_result(
 ) -> dict[str, Any]:
     result = _extension_data(response)
     if result.get("ok") is False:
-        return {
-            "status": "error",
-            "operation": operation,
-            "code": result.get("code") or "extension_operation_failed",
-            "error": result.get("error") or f"{operation} failed",
-            **({"hint": result["hint"]} if result.get("hint") else {}),
-            **context,
-        }
+        failure = dict(result)
+        failure.setdefault("status", "error")
+        failure.setdefault("code", result.get("code") or "extension_operation_failed")
+        failure.setdefault("error", result.get("error") or f"{operation} failed")
+        failure["operation"] = operation
+        failure.update(context)
+        return failure
     # The in-process/fake route commonly returns an explicit extension
     # envelope: {data: {ok: true, data: <payload>}}.  The real remote bridge,
     # however, has already removed that inner envelope in BrowserBridge.ext_cmd
@@ -2926,6 +3552,18 @@ def _extension_operation_result(
         }
     else:
         payload = result
+    failure = _legacy_failure(payload)
+    if failure is not None:
+        code, message, retryable = failure
+        failed = dict(payload) if isinstance(payload, dict) else {}
+        failed.setdefault("status", "error")
+        failed.setdefault("code", code)
+        failed.setdefault("error", message)
+        if retryable and "retryable" not in failed:
+            failed["retryable"] = True
+        failed["operation"] = operation
+        failed.update(context)
+        return failed
     return {
         "status": "ok",
         "operation": operation,
@@ -3060,7 +3698,7 @@ def download_file(
         client_id, _ = _split_session_target(explicit_session_id)
         sessions = active_sessions(fresh=True)
         if not any(str(item.get("id")) == explicit_session_id for item in sessions):
-            raise RuntimeError(f"Session {explicit_session_id} not found")
+            raise _session_target_not_found(explicit_session_id, sessions)
     else:
         # Pin the implicit browser while other serialized tools have their
         # temporary default-session mutations restored. Release immediately:
@@ -3486,6 +4124,83 @@ def console_capture_stop(
     )
 
 
+# A scan is intentionally a read-only operation, but a SPA can answer with a
+# fully formed HTML shell while its application is still hydrating. Keep that
+# distinction visible to the agent without waiting, polling, or foregrounding
+# the tab. The probe is small enough to be safe on every ordinary page.
+_RENDER_PROBE_JS = """
+(() => {
+  const body = document.body;
+  const text = body ? String(body.innerText || '').trim() : '';
+  const html = body ? String(body.innerHTML || '') : '';
+  const loading = !!document.querySelector(
+    '[aria-busy="true"], [data-loading="true"], [data-testid*="loading" i]'
+  );
+  return {
+    ready_state: document.readyState,
+    has_body: !!body,
+    text_chars: text.length,
+    html_chars: html.length,
+    loading,
+    fonts: document.fonts ? document.fonts.status : null,
+  };
+})()
+"""
+
+
+def _page_render_state(driver: Any, session_id: Optional[str], timeout: float) -> Optional[dict[str, Any]]:
+    """Read a best-effort render readiness snapshot without changing the page."""
+    execute = getattr(driver, "execute_js", None)
+    if not callable(execute):
+        return None
+    try:
+        response = execute(_RENDER_PROBE_JS, timeout=timeout, session_id=session_id)
+    except Exception:
+        # scan_page's primary contract is the page content. An optional probe
+        # must never turn a successful read into a transport failure.
+        return None
+    value = response.get("data") if isinstance(response, dict) else response
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(value, dict):
+        return None
+    ready_state = str(value.get("ready_state") or "").lower()
+    has_body = bool(value.get("has_body"))
+    text_chars = int(value.get("text_chars") or 0)
+    html_chars = int(value.get("html_chars") or 0)
+    loading = bool(value.get("loading"))
+    if not has_body:
+        state, content_ready = "no_body", False
+    elif ready_state != "complete":
+        state, content_ready = "loading", False
+    elif loading:
+        state, content_ready = "hydrating", False
+    elif (
+        html_chars >= 10_000
+        and text_chars <= 16
+    ):
+        # A hydrated SPA shell can expose a large React/Vue tree while its
+        # actual content is still absent.  The observed failure mode was
+        # innerText=8 with hundreds of kilobytes of HTML, so zero text alone
+        # is too weak a readiness test.
+        state, content_ready = "shell_only", False
+    else:
+        state, content_ready = "content", True
+    return {
+        "state": state,
+        "content_ready": content_ready,
+        "ready_state": ready_state or None,
+        "has_body": has_body,
+        "text_chars": text_chars,
+        "html_chars": html_chars,
+        "loading": loading,
+        "fonts": value.get("fonts"),
+    }
+
+
 # --- Tool: scan_page ---------------------------------------------------------
 @mcp.tool(
     description=(
@@ -3494,6 +4209,11 @@ def console_capture_stop(
         "container it collapsed, derived from that container's own structure. This tool does not "
         "modify the page -- no attribute, no id, no window global -- so a scan is invisible to "
         "the page's own scripts. "
+        "Background tabs may report viewport height zero; ordinary DOM/text/API work still works "
+        "there, and only visual/layout fidelity requires explicit activate_tab. "
+        "The result also includes render_state/content_ready when the page can be probed: "
+        "shell_only or hydrating means the SPA has not produced reliable content yet; retry "
+        "scan_page or wait_for before treating an empty result as a real empty page. "
         "Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
     )
 )
@@ -3555,6 +4275,22 @@ def scan_page(
         "tabs": compact_tabs(),
         "content": content,
     }
+    try:
+        probe_timeout = min(1.5, max(0.25, _positive_timeout(timeout) / 4.0))
+    except (TypeError, ValueError):
+        probe_timeout = 1.0
+    render = _page_render_state(driver, active, probe_timeout)
+    if render is not None:
+        out["render"] = render
+        out["render_state"] = render["state"]
+        out["content_ready"] = render["content_ready"]
+        if not render["content_ready"]:
+            render_hint = (
+                f"The page currently reports render_state={render['state']} "
+                "(ready content is not confirmed). Retry scan_page or wait_for before "
+                "acting on an empty/shell response."
+            )
+            out["hint"] = f"{out['hint']} {render_hint}" if out.get("hint") else render_hint
     # Long hrefs in `content` were shortened to '#r1'-style refs; hand back the
     # real URLs so links stay usable (open_url) instead of being unreachable.
     if link_refs:
@@ -3567,8 +4303,9 @@ def scan_page(
             # as "offscreen" and the numbers mean nothing. Say so rather than
             # reporting a bogus count as fact.
             out["hint"] = (
-                "This tab is not currently visible (viewport height is zero), so visibility results are unreliable. "
-                "Run activate_tab before scan_page."
+                "This tab is in the background (viewport height is zero), so visibility/layout measurements are "
+                "unreliable. Ordinary DOM/text/API work can continue without foregrounding it; use text_only=true "
+                "or execute_js for content. Only call activate_tab when you explicitly need visual/layout fidelity."
             )
         else:
             out["hint"] = (
@@ -4223,17 +4960,32 @@ def execute_js(
     # the default parked on this tab and steal another task's session.
     prev_default = driver.default_session_id
     target_sid: Optional[str] = None
+    dispatch_sid: Optional[str] = None
     if session_id is not None:
         requested_sid = str(session_id)
-        if not any(str(session.get("id")) == requested_sid for session in sessions):
-            raise RuntimeError(f"Session {requested_sid} not found")
-        target_sid = requested_sid
+        resolved = _resolve_session_target(driver, requested_sid)
+        if resolved:
+            current_sid = str(resolved["session_id"])
+            if current_sid != requested_sid:
+                _TAB_OWNERSHIP.rebind(requested_sid, current_sid)
+            # Keep the caller's old handle in the per-call target. The bridge
+            # then returns rebound_from/replacement_session_id, so the agent
+            # learns the new handle instead of silently losing the transition.
+            target_sid = requested_sid
+            dispatch_sid = current_sid
+            driver.default_session_id = current_sid
+        elif not any(str(session.get("id")) == requested_sid for session in sessions):
+            raise _session_target_not_found(requested_sid, sessions)
+        else:
+            target_sid = requested_sid
+            dispatch_sid = requested_sid
     else:
         # Resolve once from the bounded snapshot. A stale implicit default may
         # be repicked; a caller-named dead session above is still refused.
         current = str(prev_default) if prev_default is not None else None
         if current and any(str(session.get("id")) == current for session in sessions):
             target_sid = current
+            dispatch_sid = current
         else:
             candidates = sessions
             preferred_browser = os.environ.get(
@@ -4247,6 +4999,7 @@ def execute_js(
                 if preferred:
                     candidates = preferred
             target_sid = str(candidates[0]["id"])
+            dispatch_sid = target_sid
             driver.default_session_id = target_sid
     scope_token: Optional[str] = None
     client_id: Optional[str] = None
@@ -4254,8 +5007,8 @@ def execute_js(
     ext_cmd = getattr(driver, "ext_cmd", None)
     primary_error: Optional[BaseException] = None
     try:
-        if target_sid is not None and callable(ext_cmd):
-            client_id, tab_id = _split_session_target(target_sid)
+        if dispatch_sid is not None and callable(ext_cmd):
+            client_id, tab_id = _split_session_target(dispatch_sid)
             policy_timeout = remaining()
             policy_request: dict[str, Any] = {
                 "cmd": "set_dialog_policy",
@@ -4764,7 +5517,7 @@ def _resolve_page_input_session(
         sessions = fetch(fresh=True)
         if any(str(item.get("id")) == requested for item in sessions):
             return requested
-        raise RuntimeError(f"Session {requested} not found")
+        raise _session_target_not_found(requested, sessions)
 
     current = (
         str(driver.default_session_id)
@@ -4961,12 +5714,14 @@ def _page_selector_info(
     ``verify_hit`` costs nothing extra: the proof runs inside the resolver's own
     round trip, before any ``Input.*`` command exists. ``center_x``/``center_y``
     say that the caller omitted that offset, so the point under test is the
-    element centre. Structured locators also return ``dispatchX``/``dispatchY``
-    when frame geometry is involved; those coordinates are the exact point
-    that was hit-tested and must be preferred over reconstructing a point from
-    the transformed bounding box.
+    element centre. Structured locators return top-document ``x``/``y``
+    coordinates. For same-origin frames the resolver accumulates each frame's
+    client offset. Selector click verification refuses a non-identity CSS
+    transform on any traversed iframe instead of pretending its axis-aligned
+    rectangle proves a safe dispatch point; query/type resolution is unaffected.
     """
     normalized = normalize_locator(selector)
+    point_mode = isinstance(normalized, dict) and "x" in normalized and "y" in normalized
     script = (
         resolve_selector_script(
             normalized,
@@ -4983,9 +5738,9 @@ def _page_selector_info(
             purpose="click",
             offset_x=offset_x,
             offset_y=offset_y,
-            verify_hit=verify_hit,
-            center_x=center_x,
-            center_y=center_y,
+            verify_hit=False if point_mode else verify_hit,
+            center_x=False if point_mode else center_x,
+            center_y=False if point_mode else center_y,
         )
     )
     response = exec_js(
@@ -5050,10 +5805,16 @@ def _page_type_target_info(
         "nothing; the tab "
         "is not activated and the desktop cursor does not move. Selector offsets are measured "
         "from the element's top-left corner; an omitted axis uses the element centre. In selector "
-        "mode the point is hit-tested before anything is dispatched: an element below the fold is "
+        "mode, duplicate CSS/structured matches are reduced to visible, interactable candidates "
+        "so hidden modal templates do not win, then the point is hit-tested before anything is "
+        "dispatched: an element below the fold is "
         "scrolled into view, and a point owned by another element returns status 'obscured' (with "
         "occluded_by) or 'outside_viewport' having clicked nothing. Coordinate mode is not "
-        "hit-tested -- coordinates name a pixel, not an element."
+        "hit-tested -- coordinates name a pixel, not an element. A selector click crossing a "
+        "non-identity CSS-transformed iframe returns status 'unsupported_frame_transform' without "
+        "dispatch; query/type paths remain available. A structured selector may use "
+        "{'selector': '#pay', 'frame': [...]} as a CSS alias, or {'frame': [...], 'x': 20, 'y': 30} "
+        "to click a point inside the final same-origin frame; frame-point mode is not hit-tested."
     )
 )
 def page_click(
@@ -5072,6 +5833,15 @@ def page_click(
     both_coordinates = x is not None and y is not None
     if any_coordinate and not both_coordinates:
         raise InputValidationError("coordinate mode requires both x and y")
+    point_mode = isinstance(selector, dict) and ("x" in selector or "y" in selector)
+    if point_mode and (x is not None or y is not None):
+        raise InputValidationError(
+            "frame-relative point locators carry x and y inside selector; do not also pass top-level coordinates"
+        )
+    if point_mode and (offset_x is not None or offset_y is not None):
+        raise InputValidationError(
+            "frame-relative point locators cannot use offset_x or offset_y"
+        )
     if selector_mode == both_coordinates:
         raise InputValidationError(
             "page_click requires exactly one targeting mode: selector, or both x and y"
@@ -5128,6 +5898,11 @@ def page_click(
                 "target": {"selector": selector},
                 **({"matches": before["matches"]} if before.get("matches") is not None else {}),
                 **({"stage": before["stage"]} if before.get("stage") else {}),
+                **(
+                    {"frame_transform": before["frameTransform"]}
+                    if before.get("frameTransform")
+                    else {}
+                ),
                 **({"occluded_by": before["occludedBy"]} if before.get("occludedBy") else {}),
                 **(
                     {"scrolled_into_view": True}
@@ -5145,25 +5920,24 @@ def page_click(
                     if before.get("status") in {"obscured", "outside_viewport"}
                     else {}
                 ),
+                **(
+                    {
+                        "next_action": (
+                            "Nothing was dispatched: the locator crosses an iframe with a CSS transform. "
+                            "Use an untransformed same-origin frame or target the transformed frame explicitly."
+                        )
+                    }
+                    if before.get("status") == "unsupported_frame_transform"
+                    else {}
+                ),
             }
 
-        dispatch_x = before.get("dispatchX")
-        dispatch_y = before.get("dispatchY")
-        if dispatch_x is not None and dispatch_y is not None:
-            # Structured frame resolution has already mapped the exact point
-            # used by the browser's hit test. Re-adding half of its AABB is
-            # wrong for rotation/skew and can dispatch to a different target.
-            resolved_x = dispatch_x
-            resolved_y = dispatch_y
-        else:
-            # Legacy CSS resolver replies do not carry dispatch coordinates;
-            # preserve their established top-left/centre contract.
-            resolved_x = before.get("x")
-            resolved_y = before.get("y")
-            if offset_x is None:
-                resolved_x += before.get("width", 0) / 2
-            if offset_y is None:
-                resolved_y += before.get("height", 0) / 2
+        resolved_x = before.get("x")
+        resolved_y = before.get("y")
+        if offset_x is None:
+            resolved_x += before.get("width", 0) / 2
+        if offset_y is None:
+            resolved_y += before.get("height", 0) / 2
         before_marker = before.get("challengeMarker")
         if before_marker is not None:
             blocked_attempts = _blocked_page_challenge_attempts(
@@ -5278,7 +6052,10 @@ def page_click(
     description=(
         "Insert text into the focused element or a CSS/structured-locator field in a specific tab "
         "using background CDP input; xterm containers automatically retarget their helper textarea. "
-        "Optionally clear and submit a key. Missing, ambiguous, or unusable targets dispatch nothing."
+        "Optionally clear and submit a key. Missing, ambiguous, or unusable targets dispatch nothing. "
+        "CSS/structured matches are reduced to visible, interactable candidates so hidden templates "
+        "do not win; the resulting input event is trusted in the page. "
+        "The result includes active_element and focus_confirmed so omitted-selector input is auditable."
     )
 )
 def page_type(
@@ -5320,7 +6097,7 @@ def page_type(
             if not any(
                 str(session.get("id")) == requested_sid for session in sessions
             ):
-                raise RuntimeError(f"Session {requested_sid} not found")
+                raise _session_target_not_found(requested_sid, sessions)
             target_session = requested_sid
         else:
             current = (
@@ -5355,6 +6132,13 @@ def page_type(
             resolution_budget,
         )
         target = {"selector": selector} if selector else {"focused_element": True}
+        focus_info = {}
+        if "activeElement" in target_info:
+            focus_info["active_element"] = target_info.get("activeElement")
+        if "focusConfirmed" in target_info:
+            focus_info["focus_confirmed"] = bool(target_info.get("focusConfirmed"))
+        if "previousActiveElement" in target_info:
+            focus_info["previous_active_element"] = target_info.get("previousActiveElement")
         if not target_info.get("found"):
             return {
                 "status": target_info.get("status", "not_found"),
@@ -5364,6 +6148,7 @@ def page_type(
                 "target": target,
                 "target_kind": target_info.get("targetKind", "missing"),
                 "typed_chars": 0,
+                **focus_info,
                 **({"matches": target_info["matches"]} if target_info.get("matches") is not None else {}),
                 **({"stage": target_info["stage"]} if target_info.get("stage") else {}),
             }
@@ -5401,6 +6186,7 @@ def page_type(
         out["target"] = target
         out["target_kind"] = target_kind
         out["typed_chars"] = len(text)
+        out.update(focus_info)
         return out
     finally:
         if directed:
@@ -5527,10 +6313,26 @@ def upload_files(
 # --- Cookies: read through the extension, write through CDP ------------------
 @mcp.tool(description="Get cookies for the current page or specified tab via the Chrome extension bridge.")
 def get_cookies(session_id: Optional[str] = None, tab_id: Optional[int] = None) -> dict[str, Any]:
+    client_id = _extension_client_id(session_id)
     payload: dict[str, Any] = {"cmd": "cookies"}
+    # `session_id` names both the extension namespace and its native tab. Keep
+    # that identity when the caller did not provide a separate tab_id; sending
+    # the JSON command through execute_js would make the page evaluator parse
+    # {"cmd": ...} as JavaScript, which is precisely the protocol split this
+    # command channel exists to avoid.
+    if session_id is not None and tab_id is None:
+        client_id, tab_id = _split_session_target(session_id)
     if tab_id is not None:
         payload["tabId"] = tab_id
-    return exec_js(json.dumps(payload), session_id=session_id, timeout=15.0)
+    response = require_driver().ext_cmd(
+        payload,
+        client_id=client_id,
+        timeout=15.0,
+    )
+    result = _extension_data(response)
+    if result.get("ok") is False:
+        raise RuntimeError(result.get("error") or "the browser refused to read cookies")
+    return result
 
 
 # --- cookie 写入 -------------------------------------------------------------

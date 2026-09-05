@@ -1,9 +1,9 @@
 # Security Policy
 
 `browsertap-mcp` controls a real browser profile and may expose logged-in
-page content, cookies, downloads, screenshots, and OS-level input to an MCP
-client. Treat the client, its model, and every enabled tool as part of the same
-trust boundary.
+page content, cookies, downloads, screenshots, and the lab-only physical Enter
+fallback to an MCP client. Treat the client, its model, and every enabled tool
+as part of the same trust boundary.
 
 ## Supported versions
 
@@ -126,7 +126,7 @@ physical input.
   `BROWSERTAP_LAB_NO_ELICIT=0` to keep `lab` but restore prompts. Both modes
   retain ownership checks, the physical-input lock, the quiet-input gate,
   activation checks, and temporary permission cleanup.
-- Physical input disables pyautogui's corner failsafe
+- The remaining physical Enter fallback disables pyautogui's corner failsafe
   (`pyautogui.FAILSAFE = False`) so a pointer that happens to pass a screen
   corner cannot abort automation mid-sequence. The tradeoff is explicit: moving
   the mouse to a corner is not an escape hatch. Stop the MCP client, or use
@@ -141,8 +141,8 @@ physical input.
   prevents arbitrary filesystem writes through path traversal attacks. The
   validation applies to the `save_path` parameter; when that parameter is
   omitted the file is not written to disk and no path validation occurs.
-- A page screenshot is scoped to a browser tab; a desktop screenshot may
-  include any visible application. Review screenshots before sharing them.
+- `capture_page_screenshot` is scoped to a browser tab; the removed desktop
+  screenshot surface is not available. Review screenshots before sharing them.
 
 BTAP is an automation tool, not a sandbox or security boundary. Use a browser
 profile and accounts appropriate for the MCP client, and avoid shared or

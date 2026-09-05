@@ -63,6 +63,13 @@ def _tab_generation_source() -> str:
     return source[prefix_start:prefix_end] + "\n" + source[body_start:body_end]
 
 
+def _tab_identity_source() -> str:
+    source = BACKGROUND.read_text(encoding="utf-8")
+    start = source.index("const TAB_IDENTITIES_KEY")
+    end = source.index("\nasync function validateTabCloseGenerations", start)
+    return source[start:end]
+
+
 def _run_generation_harness(script: str) -> dict:
     """Run one generation scenario, keeping the module's own logging off stdout.
 
@@ -80,6 +87,19 @@ def _run_generation_harness(script: str) -> dict:
     )
     if completed.returncode:
         raise AssertionError(f"node harness failed: {completed.stderr.strip()}")
+    return json.loads(completed.stdout)
+
+
+def _run_identity_harness(script: str) -> dict:
+    full = (
+        "const logs = [];\nconsole.log = (...args) => logs.push(args.join(' '));\n"
+        + script.replace("__SOURCE__", _tab_identity_source())
+    )
+    completed = subprocess.run(
+        ["node", "-e", full], capture_output=True, text=True
+    )
+    if completed.returncode:
+        raise AssertionError(f"node identity harness failed: {completed.stderr.strip()}")
     return json.loads(completed.stdout)
 
 
@@ -318,15 +338,21 @@ async def test_execute_timeout_does_not_close_fastmcp_before_followup_list_tabs(
     driver = _Driver([TimeoutError("policy transport timed out")])
     _install(monkeypatch, driver)
 
-    with pytest.raises(Exception, match="policy setup"):
-        await S.mcp.call_tool(
-            "execute_js",
-            {
-                "script": "return new Promise(() => {})",
-                "session_id": "chrome:profile:7",
-                "timeout": 0.01,
-            },
-        )
+    _, structured = await S.mcp.call_tool(
+        "execute_js",
+        {
+            "script": "return new Promise(() => {})",
+            "session_id": "chrome:profile:7",
+            "timeout": 0.01,
+        },
+    )
+
+    assert structured["ok"] is False
+    assert structured["result_contract"] == "btap.result.v1"
+    assert structured["version"] == 1
+    assert structured["error_code"] == "timeout"
+    assert "policy setup" in structured["error"]["message"]
+    assert structured["target"]["session_id"] == "chrome:profile:7"
 
     _, structured = await S.mcp.call_tool("list_tabs", {})
     assert structured["tabs"][0]["id"] == "chrome:profile:7"
@@ -1304,7 +1330,7 @@ def test_open_new_tab_registers_generation_bound_agent_ownership(monkeypatch):
                 "client_id": client_id,
             }
 
-    driver = NewTabDriver(responses=[{"data": {"ok": True}}])
+    driver = NewTabDriver(responses=[{"data": {"closed": [9], "alreadyGone": []}}])
     _fresh_tab_ownership(monkeypatch)
     sessions = [
         {
@@ -1461,7 +1487,7 @@ def test_close_tabs_without_owner_refuses_before_snapshot_or_mutation(monkeypatc
 
 
 def test_two_agent_owner_capabilities_cannot_close_each_other_tabs(monkeypatch):
-    driver = _Driver([{"data": {"ok": True}}])
+    driver = _Driver([{"data": {"closed": [9], "alreadyGone": []}}])
     sessions = [
         {
             "id": "chrome:profile:9",
@@ -1488,6 +1514,40 @@ def test_two_agent_owner_capabilities_cannot_close_each_other_tabs(monkeypatch):
     assert len(driver.calls) == 1
 
 
+def test_owned_close_rejects_ambiguous_success_without_releasing_ownership(monkeypatch):
+    driver = _Driver([{"data": {"ok": True}}])
+    sessions = [
+        {
+            "id": "chrome:profile:9",
+            "url": "https://agent-a.test/",
+            "browser": "chrome",
+            "generation": "generation-a",
+        }
+    ]
+    _install(monkeypatch, driver, sessions)
+    registry = _fresh_tab_ownership(monkeypatch)
+    record = registry.register(
+        "chrome:profile:9", "generation-a", owner_id="agent-a-owner"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="omitted explicit closed and alreadyGone lists",
+    ):
+        S.close_tabs("chrome:profile:9", owner_id=record["owner_id"])
+
+    assert registry.outstanding() == [
+        {
+            "session_id": "chrome:profile:9",
+            "tab_id": 9,
+            "generation": "generation-a",
+            "opener": "agent",
+        }
+    ]
+    assert registry.counters()["released"] == 0
+    assert len(driver.calls) == 1
+
+
 def test_close_tabs_refuses_reused_native_id_with_new_generation(monkeypatch):
     driver = _Driver()
     sessions = [
@@ -1508,6 +1568,50 @@ def test_close_tabs_refuses_reused_native_id_with_new_generation(monkeypatch):
         S.close_tabs("chrome:profile:9", owner_id="agent-owner")
 
     assert driver.calls == []
+
+
+def test_close_tabs_rebinds_owned_target_after_confirmed_tab_replacement(monkeypatch):
+    driver = _Driver([{"data": {"closed": [12], "alreadyGone": []}}])
+    old_sid = "chrome:profile:9"
+    new_sid = "chrome:profile:12"
+    sessions = [
+        {
+            "id": new_sid,
+            "url": "https://replacement.test/",
+            "browser": "chrome",
+            "generation": "generation-agent",
+        }
+    ]
+    _install(monkeypatch, driver, sessions)
+    driver.resolve_session_target = lambda sid: (
+        {
+            "session_id": new_sid,
+            "rebound_from": old_sid,
+            "replacement_session_id": new_sid,
+            "tab_identity": "tab_identity_1",
+            "reason": "chrome.tabs.onReplaced",
+        }
+        if str(sid) == old_sid
+        else {"session_id": str(sid)}
+    )
+    registry = _fresh_tab_ownership(monkeypatch)
+    registry.register(old_sid, "generation-agent", owner_id="agent-owner")
+
+    result = S.close_tabs(
+        old_sid,
+        session_id=old_sid,
+        owner_id="agent-owner",
+    )
+
+    assert result["closed"] == 12
+    assert result["rebound_from"] == old_sid
+    assert result["replacement_session_id"] == new_sid
+    assert result["tab_identity"] == "tab_identity_1"
+    assert driver.calls[0][0]["tabId"] == 12
+    assert driver.calls[0][0]["expectedGenerations"] == {
+        "12": "generation-agent"
+    }
+    assert registry.outstanding() == []
 
 
 def test_close_tabs_treats_owned_session_that_is_already_gone_as_user_closed(monkeypatch):
@@ -5790,6 +5894,45 @@ eval(source.slice(captureStart, captureEnd));
 # `nextTabGeneration`. Nothing had been restored, everything had been re-minted,
 # and the damaged map had been written back as the truth -- so two tabs the live
 # suite owned could not be closed again and leaked into a real person's browser.
+
+
+def test_tab_identity_snapshot_survives_extension_reload_in_local_storage():
+    """Logical identity must outlive the worker, including a manual Reload.
+
+    `storage.session` is intentionally used for lifecycle generations, but it
+    is cleared by an extension reload. Reading identities from it would make an
+    otherwise unchanged tab look unrelated and defeat evidence-backed rebinding.
+    """
+    outcome = _run_identity_harness(
+        """
+const localStored = {btapTabIdentitiesV1: {'7': 'tab-persisted'}};
+const sessionStored = {btapTabIdentitiesV1: {'7': 'tab-wrong-session'}};
+const calls = [];
+const chrome = {
+  storage: {
+    local: {
+      get: async key => { calls.push(['local.get', key]); return {[key]: localStored[key]}; },
+      set: async value => { calls.push(['local.set', value]); Object.assign(localStored, value); },
+    },
+    session: {
+      get: async key => { calls.push(['session.get', key]); return {[key]: sessionStored[key]}; },
+      set: async value => { calls.push(['session.set', value]); Object.assign(sessionStored, value); },
+    },
+  },
+  tabs: {query: async () => [{id: 7}]},
+};
+__SOURCE__
+(async () => {
+  const identity = await tabIdentityFor(7);
+  process.stdout.write(JSON.stringify({identity, localStored, sessionStored, calls, logs}));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+
+    assert outcome["identity"] == "tab-persisted"
+    assert outcome["localStored"]["btapTabIdentitiesV1"]["7"] == "tab-persisted"
+    assert outcome["sessionStored"]["btapTabIdentitiesV1"]["7"] == "tab-wrong-session"
+    assert [call[0] for call in outcome["calls"]] == ["local.get", "local.set"]
 
 _GENERATION_TAIL = """
 (async () => {

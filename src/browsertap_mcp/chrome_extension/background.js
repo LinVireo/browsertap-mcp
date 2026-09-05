@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = 'b90e576660fa9984';
+const BTAP_BUILD = '2f6f84299dab0ec2';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -336,6 +336,124 @@ async function forgetTabGeneration(tabId) {
   provisionalTabGenerations.delete(tabId);
   // A load that failed makes this write a no-op, which is harmless: the tab is
   // gone, so the next successful load drops its stored entry as not-live.
+  await persistTabGenerations();
+}
+
+// --- Stable tab identities: evidence-backed rebinding across native ids -----
+// `chrome.tabs` ids are handles, not identities. Chrome's onReplaced event is
+// the one browser-provided fact that says a new native tab replaced an old one;
+// this map carries that fact across service-worker eviction and a manual
+// extension reload so the bridge can safely hand an agent the current handle
+// without guessing from URL/title. The value contains only an opaque identity
+// keyed by the current native id; it does not persist page data or credentials.
+const TAB_IDENTITIES_KEY = 'btapTabIdentitiesV1'; // gitleaks:allow - storage key, not a credential
+const tabIdentities = new Map();
+const provisionalTabIdentities = new Set();
+let tabIdentitiesLoadPromise = null;
+let tabIdentityWriteQueue = Promise.resolve();
+let tabIdentitiesLoaded = false;
+let tabIdentityLoadFailures = 0;
+
+function newTabIdentity() {
+  const random = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+  return `btap_tab_${random}`;
+}
+
+function persistTabIdentities() {
+  // Unlike generations, identities must survive a full extension reload. A
+  // reload is exactly when an old session handle may need to be rebound.
+  const area = chrome.storage?.local || chrome.storage?.session;
+  if (!area || !tabIdentitiesLoaded) return Promise.resolve();
+  const snapshot = Object.fromEntries(tabIdentities);
+  tabIdentityWriteQueue = tabIdentityWriteQueue
+    .then(() => area.set({ [TAB_IDENTITIES_KEY]: snapshot }))
+    .catch(error => console.log('[BTAP-WS] tab identity persistence unavailable', error));
+  return tabIdentityWriteQueue;
+}
+
+async function loadTabIdentities() {
+  if (tabIdentitiesLoadPromise) return await tabIdentitiesLoadPromise;
+  const attempt = (async () => {
+    const area = chrome.storage?.local || chrome.storage?.session;
+    const storedRead = area
+      ? Promise.resolve()
+        .then(() => area.get(TAB_IDENTITIES_KEY))
+        .then(value => value[TAB_IDENTITIES_KEY] || {})
+        .catch(() => null)
+      : Promise.resolve({});
+    const tabsRead = Promise.resolve()
+      .then(() => chrome.tabs.query({}))
+      .catch(() => null);
+    const [stored, tabs] = await Promise.all([storedRead, tabsRead]);
+    if (stored === null || tabs === null) {
+      tabIdentityLoadFailures += 1;
+      if (tabIdentitiesLoadPromise === attempt) tabIdentitiesLoadPromise = null;
+      console.log(
+        '[BTAP-WS] tab identities unreadable; keeping the stored snapshot',
+        `(failures=${tabIdentityLoadFailures})`,
+      );
+      return;
+    }
+    const live = new Set(tabs.map(tab => String(tab.id)));
+    for (const [rawId, identity] of Object.entries(stored)) {
+      if (live.has(String(rawId)) && typeof identity === 'string' && identity) {
+        tabIdentities.set(String(rawId), identity);
+        provisionalTabIdentities.delete(String(rawId));
+      }
+    }
+    tabIdentitiesLoaded = true;
+    for (const tab of tabs) {
+      const key = String(tab.id);
+      if (!tabIdentities.has(key)) tabIdentities.set(key, newTabIdentity());
+    }
+    provisionalTabIdentities.clear();
+    await persistTabIdentities();
+  })();
+  tabIdentitiesLoadPromise = attempt;
+  let succeeded = false;
+  try {
+    await attempt;
+    succeeded = true;
+  } finally {
+    if (tabIdentitiesLoadPromise === attempt && !succeeded) tabIdentitiesLoadPromise = null;
+  }
+}
+
+async function tabIdentityFor(tabId) {
+  const key = String(tabId);
+  await loadTabIdentities();
+  if (!tabIdentities.has(key)) {
+    tabIdentities.set(key, newTabIdentity());
+    if (!tabIdentitiesLoaded) provisionalTabIdentities.add(key);
+    await persistTabIdentities();
+  }
+  return tabIdentities.get(key);
+}
+
+async function forgetTabIdentity(tabId) {
+  await loadTabIdentities();
+  const key = String(tabId);
+  tabIdentities.delete(key);
+  provisionalTabIdentities.delete(key);
+  await persistTabIdentities();
+}
+
+async function transferTabIdentity(addedTabId, removedTabId) {
+  const oldKey = String(removedTabId);
+  const newKey = String(addedTabId);
+  await loadTabIdentities();
+  const identity = tabIdentities.get(oldKey) || newTabIdentity();
+  tabIdentities.set(newKey, identity);
+  tabIdentities.delete(oldKey);
+  provisionalTabIdentities.delete(oldKey);
+  await persistTabIdentities();
+
+  // Preserve the lifecycle fence too. A replacement is the same logical tab,
+  // so an agent-owned close may continue using the generation it received.
+  await loadTabGenerations();
+  const generation = tabGenerations.get(removedTabId) || await tabGenerationFor(addedTabId);
+  tabGenerations.set(addedTabId, generation);
+  tabGenerations.delete(removedTabId);
   await persistTabGenerations();
 }
 
@@ -4671,7 +4789,8 @@ async function handleWsExec(data) {
       try {
         const t = await chrome.tabs.get(id);
         const generation = await tabGenerationFor(t.id);
-        return { id: t.id, url: t.url, title: t.title, generation };
+        const tab_identity = await tabIdentityFor(t.id);
+        return { id: t.id, url: t.url, title: t.title, generation, tab_identity };
       } catch (_) {
         return null;
       }
@@ -4752,6 +4871,7 @@ function connectWS() {
           url: t.url,
           title: t.title,
           generation: await tabGenerationFor(t.id),
+          tab_identity: await tabIdentityFor(t.id),
         })))
       }));
       console.log('[BTAP-WS] Sent ext_ready with', tabs.length, 'tabs as', clientId);
@@ -4931,12 +5051,18 @@ async function sendTabsUpdateOnce() {
     ]);
     const tabs = queriedTabs.filter(t => isScriptable(t.url));
     if (sock !== ws || sock.readyState !== WebSocket.OPEN) return;
-    const snapshot = await Promise.all(tabs.map(async t => ({
+      const snapshot = await Promise.all(tabs.map(async t => {
+        const tab_identity = typeof tabIdentityFor === 'function'
+          ? await tabIdentityFor(t.id)
+          : null;
+        return {
       id: t.id,
       url: t.url,
       title: t.title,
       generation: await tabGenerationFor(t.id),
-    })));
+          ...(tab_identity ? { tab_identity } : {}),
+        };
+      }));
     // Generations can require storage recovery on a cold worker, so the socket
     // must be checked once more after that await. Never publish on a superseded
     // connection merely because the old WebSocket has not closed yet.
@@ -4985,12 +5111,21 @@ chrome.tabs.onUpdated.addListener((_, changeInfo) => {
   if (changeInfo.status === 'complete' || changeInfo.url) sendTabsUpdate();
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  void forgetTabGeneration(tabId).finally(() => sendTabsUpdate());
+  void Promise.all([
+    forgetTabGeneration(tabId),
+    forgetTabIdentity(tabId),
+  ]).finally(() => sendTabsUpdate());
 });
 chrome.tabs.onCreated.addListener((tab) => {
   void (async () => {
     await loadTabGenerations();
     if (!tabGenerations.has(tab.id)) await scheduleNewTabGeneration(tab.id);
+    await tabIdentityFor(tab.id);
   })().finally(() => sendTabsUpdate());
 });
+if (chrome.tabs.onReplaced?.addListener) {
+  chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    void transferTabIdentity(addedTabId, removedTabId).finally(() => sendTabsUpdate());
+  });
+}
 chrome.tabs.onActivated.addListener(() => ensureConnected('tab-activated'));

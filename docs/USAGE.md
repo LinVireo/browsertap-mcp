@@ -7,15 +7,19 @@ an existing Chrome, Edge, or Opera session. The full 49-tool contract and every
 parameter remain in the root [README](../README.md); this document defines the
 recommended workflows and operation boundaries.
 
+Every public tool uses the `btap.result.v1` result envelope. Read operation data
+from `data`, inspect `error`/`error_code` and `retryable` on failures, and use
+`target`/`diagnostics` when deciding whether a retry is safe. Established fields
+may still appear at the top level for compatibility.
+
 ## 1. Operation levels
 
-BTAP operations are divided into three levels:
+BTAP operations are divided into two levels:
 
 | Mode | What it touches | Does it change the visible browser? |
 |---|---|---|
 | Background page work | A named tab through CDP or the extension | No. `switch_tab` only retargets later calls. |
 | Foreground tab work | The selected tab and its browser window | Yes. Use `activate_tab` or `switch_tab(activate=true)` explicitly. |
-| Desktop work *(deprecated, removed in v0.5.0)* | The OS screen, cursor, and keyboard | Yes. Physical input can affect whatever is on screen — which is why it is going away; see §5. |
 
 Use background page work by default. A tab being selected by `switch_tab` does
 not make it visible, focused, or active in the browser window.
@@ -46,6 +50,10 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 If a read-only operation would navigate or substantially change state, open an
 agent-owned tab instead of borrowing a user tab.
 
+If `scan_page` returns `render_state` as `loading`, `hydrating`, or `shell_only`,
+or `content_ready=false`, the page is not confirmed ready. Retry `scan_page` or
+use `wait_for` before treating an empty result as the page's real content.
+
 ## 3. State changes and tab ownership
 
 `open_new_tab` is the normal workspace for navigation, forms, downloads, and
@@ -60,6 +68,12 @@ Keep the tab in the background while possible, and pass the same session on
 every call. At the end, close only tabs created by this task, using the matching
 `owner_id` and generation-aware cleanup. If the user closes one first, report
 it as already gone; never recreate an old tab id just to close it.
+
+Chrome can explicitly report that the same native tab was replaced. In that
+case a result may include `rebound_from`, `replacement_session_id`, and
+`tab_identity`; adopt the returned session handle and verify the page before a
+side effect. An ordinary stale explicit session without those fields is still
+refused and must be selected again with `list_tabs`/`switch_tab`.
 
 ## 4. Screenshots and model capabilities
 
@@ -144,9 +158,11 @@ Check `get_setup_status` for package, bridge, extension, and protocol versions.
 The bridge is a detached process. A missing listener starts automatically when
 spawning is enabled; an older bridge that still owns the port requires
 `browsertap bridge --restart`, which does not change the visible browser.
-An unpacked extension file change still requires a manual **Reload** from
-`chrome://extensions` (or the corresponding Edge/Opera page). Restart the MCP
-client after tool schema changes so it reads the new descriptions.
+Immediately after a start, `get_setup_status` may report `status="starting"` and
+`action="wait_for_extension"`; wait for the extension handshake and run the
+diagnostic again. An unpacked extension file change still requires a manual
+**Reload** from `chrome://extensions` (or the corresponding Edge/Opera page).
+Restart the MCP client after tool schema changes so it reads the new descriptions.
 
 If `BROWSERTAP_BRIDGE_PORT` is changed from `18765`, tell the extension the
 same WebSocket port once from its service-worker console (see

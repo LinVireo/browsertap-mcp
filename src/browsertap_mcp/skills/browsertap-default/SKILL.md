@@ -13,6 +13,18 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 - 默认部署面向单操作员；多 Agent 通过显式 session 与 owner 契约隔离。
 - 桥故障时走 **browsertap-bridge-recovery** / `browsertap doctor`，不换别的 browser 产品。
 
+## 运行时能力边界
+
+先把普通网页任务留在 **page** 能力：`scan_page`、`execute_js`、`wait_for*`、
+`page_*` 和页面截图。需要真实 profile、标签页生命周期、下载、Cookies、权限、书签、
+扩展消息或原生 CDP 时使用 **browser** 能力；这些操作不要求把标签页抬到前台。
+**desktop** 只能由任务明确要求时使用，用于浏览器 chrome、原生文件选择器、扩展 UI、
+打印/保存对话框等页面层无法覆盖的缺口，绝不能因为 page 调用失败就自动升级。用
+`get_setup_status` 查看 `capability_registry` 的实际分组、target、side_effect、
+`result_contract` 和 `desktop_opt_in`；当前 registry 没有通用 desktop 工具。
+`resolve_leave_dialog` 虽归在 page，但标有受限 `desktop_fallback`，只按它自己的 lab/协议
+失败规则处理，不把它当普通桌面入口。
+
 ## 固定套路（照抄执行，禁止临场发挥）
 
 模型翻车基本都发生在"自己解释错误语义"上。下面两类表是**唯一正确响应**，见到即做，不推理、不换路、不重试第二次。
@@ -22,6 +34,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 | 场景 | 固定链路 |
 |---|---|
 | 只读抓取 | `list_tabs` → 借 U（记 `original_url`）或 `open_new_tab` → `scan_page(session_id=...)` → 需要数据再 `execute_js(session_id=...)` → 借用的还原 URL；owned 的带 `owner_id` 关 |
+| 搜索/筛选/排序/翻页 | `list_tabs` → `open_new_tab(active=false)` 创建 A（记 session+generation+owner）→ `scan_page` → `page_type`/`page_click`（每次带 session_id）→ 读取结果 → `close_tabs(session_id, owner_id=...)`；不要把用户正在浏览的 U tab 当搜索工作区 |
 | 表单交互 | `list_tabs` → `open_new_tab`（记 session+generation+owner）→ `wait_for_url` → `scan_page` → `page_type`/`page_click`（每次带 session_id）→ `wait_for_url` → `close_tabs(session_id, owner_id=...)` |
 | 下载附件 | `download_file(url=..., session_id=...)`。禁 `?dl=1`、禁页面 fetch、禁裸 `Page.navigate` 猜目录 |
 | 验证码页 | 同 tab `page_click` 一次 → `challenge_stalled` → **立刻交还用户，停手报告**。不另起浏览器、不跑长 `execute_js` |
@@ -40,6 +53,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 | `debugger_conflict` | 让用户关 DevTools/竞争 debugger，再原调用重试 |
 | `401` / `unauthorized` | 转 [[browsertap-bridge-recovery]] 成因 6（token 文件不一致），不重启浏览器不重装扩展 |
 | `Unknown command: downloads` | 目标浏览器扩展旧了：`chrome://extensions` 手动 Reload，不重启桥 |
+| `Cannot access contents of the page` | 先判断发生在注入还是 `window.open`/导航：后者是弹窗/导航权限或无用户手势，改用 `open_new_tab`；只有当前 tab 本身不可脚本化时才换可访问的普通页面或走支持的 CDP 路径 |
 
 ### 硬禁止（以前能跑、现在必炸）
 
@@ -51,9 +65,9 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 ## 标准动手流程
 
 1. **先定位目标 tab**：`list_tabs`（每个 tab 带 `browser` 字段 chrome/edge/opera + 一个 session id）。
-2. **选中目标**：`switch_tab(browser="chrome")` 或 `switch_tab(url_pattern="linux.do")` 或 `switch_tab(session_id="chrome_xxx:123")`（session id 原样传，形如 `client_id:tab_id`，别拆）。**它只改后续调用的目标，不会把 tab 提到前台**（`activate` 默认 `false`）——改目标永远不打扰用户正在看的东西。真需要标签页到前面才传 `activate=true` 或调 `activate_tab`。
+2. **选中目标**：`switch_tab(browser="chrome")` 或 `switch_tab(url_pattern="linux.do")` 或 `switch_tab(session_id="chrome_xxx:123")`（session id 原样传，形如 `client_id:tab_id`，别拆）。**它只改后续调用的目标，不会把 tab 提到前台**（`activate` 默认 `false`）。改目标不会自动打扰用户正在看的东西；但搜索、筛选、排序、翻页、滚动、展开/折叠等会改变页面视图的动作，不要借用 U tab，先用 `open_new_tab(active=false)` 建 A tab。真需要标签页到前面才传 `activate=true` 或调 `activate_tab`。
 3. **读页面**：`scan_page`（简化 HTML/文本，保留登录态）。
-4. **执行/交互**：普通点击/输入优先 `page_click` / `page_type` 的结构化 locator（`css` / `role+name` / `text` / `label`，可进同源 `frame` 和开放 `shadow`）；页面数据/API 才优先 `execute_js(script=...)`。`page_press` / `page_drag` 同样走后台 CDP，不抢用户鼠标；需要视觉核对时用 `capture_page_screenshot(session_id=...)`；开页 `open_url` / `open_new_tab`，其中 `open_new_tab` 默认 `active=false` 在后台创建；cookie `get_cookies`。
+4. **执行/交互**：普通点击/输入优先 `page_click` / `page_type` 的结构化 locator（`css` / `role+name` / `text` / `label`，可进同源 `frame` 和开放 `shadow`）；locator 内的 `selector` 是 CSS 别名。需要点 iframe 内没有可定位元素的像素时，`page_click(selector={"frame":[...],"x":20,"y":30}, session_id=...)` 使用最终同源 frame 的 CSS 视口坐标；跨域 frame 会结构化拒绝。页面数据/API 才优先 `execute_js(script=...)`。`page_press` / `page_drag` 同样走后台 CDP，不抢用户鼠标；需要视觉核对时用 `capture_page_screenshot(session_id=...)`；开页 `open_url` / `open_new_tab`，其中 `open_new_tab` 默认 `active=false` 在后台创建；cookie `get_cookies`。
 5. **没有物理输入工具（0.5.0 已移除）**：`page_*` 是唯一的输入路径。`page_click` 失败是定位问题，不存在屏幕坐标兜底——按返回的 `obscured` / `outside_viewport` / `not_found` 处理再重试。唯一剩下的物理动作是 `resolve_leave_dialog` 的 Enter 兜底（仅 `lab`，且只在两次协议 accept 失败后），跨进程锁、安静窗口、ownership 和前台确认对它同样生效。
 6. **等待与滚动**：`wait_for(selector=/text=/url_pattern=/js=)`（四个条件互斥，只传一个；`gone=True` 等元素消失）、**`wait_for_url(url_pattern=...)`**（等**导航落定**：URL 匹配 + `document.readyState === 'complete'`，正则或纯子串都试。点击跳转或 `open_url` 之后用它，别用 `wait_for(url_pattern=...)` —— 它只查 URL，新文档还是空白就可能返回）、`scroll_page(to="bottom"/"top"/像素数)`。别用 `execute_js` 里 sleep 硬等。
 7. **上传文件**：`upload_files(selector="input[type=file]", paths=[...])`。
@@ -62,7 +76,7 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 ## 工具选择优先级（物理输入已废弃，不进入选择）
 
 1. **页面读取/JS/页面 API**：`scan_page`、`execute_js`、`wait_for*`、`scroll_page`、`get_cookies`、`storage_get` —— 不打扰用户、不需要批准。
-2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。`page_click` 的 selector 模式在派发前还会命中判定那个像素：被遮挡返回 `obscured`（带 `occluded_by`），滚动后仍不在视口返回 `outside_viewport`，两者都没点。坐标是**视口 CSS 像素**（相对页面区域），既不是桌面物理像素，也不是页面截图返回的设备像素。
+2. **后台页面输入**：`page_click`、`page_type`、`page_press`、`page_drag` —— 显式 `session_id` 下对指定 tab 派发 CDP 输入，不移动光标、不提前台、不需要批准。`page_click` / `page_type` / `wait_for` 的 `selector` 可传旧 CSS 或结构化 locator；locator 内 `selector` 等价于 `css`，`{"frame":[...],"x":20,"y":30}` 是仅 `page_click` 支持的 frame-relative point。歧义、不可交互、跨域 frame、关闭 shadow root 都拒绝派发。selector click 若穿过带非恒等 CSS transform 的 iframe 链，也以 `unsupported_frame_transform` 拒绝且零派发；query/type 路径不受影响。`page_click` 的 selector 模式在派发前还会命中判定那个像素：被遮挡返回 `obscured`（带 `occluded_by`），滚动后仍不在视口返回 `outside_viewport`，两者都没点。点位模式只做坐标换算，不做元素命中判定。坐标是**视口 CSS 像素**（相对页面区域），既不是桌面物理像素，也不是页面截图返回的设备像素。
 3. **结构化中断**：对话框用 `handle_dialog`（配 `execute_js(dialog_policy="manual")` / `open_url(beforeunload="manual")`）；站点权限用 `set_site_permission` / `reset_site_permissions`（租约 60–600 秒，到期自动恢复）。
 4. **物理输入 —— 0.5.0 已移除，只剩一条**：`mouse_move` / `mouse_click` / `mouse_drag` / `type_text` / `hotkey` / `pointer_info` / `capture_desktop_screenshot` 已不存在，调用会直接报「无此工具」。它们影响的是整个桌面而不是一个标签页，这就是移除的原因。原先为它们保留的场景（浏览器 chrome、原生文件选择器、扩展弹窗、OS 对话框）按**不支持**上报，不要绕成"页面点不到就动桌面"。桌面截图改用 `capture_page_screenshot`，读几何改用 `execute_js`。仅剩 `resolve_leave_dialog` 会在两次协议处理失败后发一次 Enter：`safe` 直接拒发，默认 `lab` 免询问，显式把 `BROWSERTAP_LAB_NO_ELICIT` 设为 false 才恢复会话级批准。
 
@@ -70,14 +84,16 @@ description: 浏览器自动化默认入口。任何打开网页、填表、点�
 
 `page_click` / `page_type` / `page_press` / `page_drag` 在指定 tab 内派发**受信任的 CDP 输入事件**（不是合成 JS 事件），但**不会**激活标签页、聚焦窗口或移动桌面光标。它们工作在后台 tab 上，是"点登录按钮/填表单/按回车"的默认选择，优先级高于物理输入。
 
-- **必须显式传 `session_id`**：调用期间驱动绑定到该 tab，结束后把共享默认还原。指名死 tab 会被拒绝，不会偷偷换 tab 执行。
+- **必须显式传 `session_id`**：调用期间驱动绑定到该 tab，结束后把共享默认还原。它是当前可调用的 `client_id:tab_id` 句柄，不是永远不变的 tab 身份；若 Chrome 明确报告 `tabs.onReplaced` 且稳定 `tab_identity` 匹配，结果会带 `rebound_from` 和 `replacement_session_id`，后续改用新句柄。没有这份证据时，指名死 tab 会被拒绝，不会偷偷换 tab 执行。
 - **`execute_js` 全链路定向**：baseline/diff/transient monitor、无 ACK 安全重试、导航落点读取都继续使用同一个显式 `session_id`，不会在中间步骤掉回共享默认；`timeout` 是覆盖策略设置、执行、重试、monitor 与清理的单一总 deadline，不要再为各阶段额外叠加等待。
 - **Xterm/ttyd 输入**：`page_type(selector=".xterm", ...)`、传 xterm 后代，或在页面只有一个 `.xterm-helper-textarea` 时省略 selector，都会自动聚焦 helper textarea 后派发受信任输入。要清当前 shell 行时先 `page_press("ctrl,u", session_id=...)`，不要把表单语义的 `clear=true` 当作终端清行。
-- **坐标**：`page_click`/`page_drag` 的 `x`/`y` 是**视口 CSS 像素**（`getBoundingClientRect` 报告的空间）。优先用 `selector`（点元素中心，可加 `offset_x`/`offset_y` 偏移）—— 跨域 iframe 里的 Cloudflare Turnstile 复选框可以点，不需要伸进 iframe 的 DOM。
+- **焦点可审计**：`page_type` 返回 `active_element`（只含 tag/id/name/type/role/aria-label/placeholder/class 等身份字段，不含值）和 `focus_confirmed`；省略 selector 的输入若身份不符合预期，先停下检查页面，不要盲目重放。
+- **破坏性确认表单**：GitHub 删除仓库、支付确认、账号注销等页面经常是多阶段对话框，阶段切换会替换 DOM，甚至复用同一个按钮 id。每次 `page_click` 后都重新 `scan_page`，按当前阶段的可见按钮继续，不要假设一次点击就已经出现最终输入框。确认文本必须用 `page_type` 输入，不要用 `execute_js` 改 `.value` 或调用 `.click()`；前者只改属性状态，后者不是页面收到的真实 CDP 点击。`page_type` / `page_click` 会过滤隐藏模板，只在可见、可交互候选中继续；结果里的 `active_element`、`focus_confirmed`、`ambiguous`、`not_interactable` 是下一步依据。`input_mode: "cdp"` 的事件在页面侧是 `isTrusted=true`，不需要物理键鼠或把标签页提到前台。最终不可逆按钮只有在任务本身明确授权删除/提交时才点击。
+- **坐标**：普通 `page_click`/`page_drag` 的 `x`/`y` 是**顶层视口 CSS 像素**（`getBoundingClientRect` 报告的空间）。优先用 `selector`（点元素中心，可加 `offset_x`/`offset_y` 偏移）；需要 iframe 内部像素时使用 `selector={"frame":[...],"x":...,"y":...}`，它只接受同源且不做命中判定。跨域 iframe 里的 Cloudflare Turnstile 复选框仍应定位 iframe 元素本身并用 selector click，不要猜内部 DOM。
 - **两种像素单位别混**：视口 = CSS 像素（`page_*` 吃这个）；页面截图回来的是**设备像素** = CSS × `devicePixelRatio`，`capture_page_screenshot` 用 `image_width`/`image_height` 和 `pixel_space: "device"` 报出来。125% 缩放下从图上量到的点比 `page_click` 需要的大 25%，直接喂进去会点到页面背景上，而坐标模式没有命中判定、不会告诉你打偏了。吃物理屏幕像素的桌面工具已在 0.5.0 移除，所以不再有第三种单位。
 - **`page_click` 的命中判定（只在 selector 模式）**：派发前先问页面那个坐标上到底是谁。折叠线以下会先滚进视口（结果带 `scrolled_into_view`）；那个像素属于 cookie 横幅、遮罩层或别的覆盖元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者，滚动后仍在视口外返回 `outside_viewport` —— **这两种情况一个事件都没派发**，先处理遮挡（关横幅 / `scroll_page` / 点别的 locator）再重试，不要当作点过了。命中通过的结果带 `hit_verified: true`。坐标模式不做这项判定：坐标指的是像素，落在谁身上由页面决定。
 - **验证码（Turnstile 等）留在用户的浏览器里**：在同一个已连接 tab 里用 `page_click` 处理，尝试次数有上限（回复带 `challenge_detected` 和 `attempts`）；验证码不再推进时结果是 `challenge_stalled`，**停下来把 tab 交还给用户自己处理**。绝不另起 Playwright / headless 浏览器 / 独立自动化 profile 兜底。
-- **选择器没匹配**：返回 `not_found`，什么都没派发。
+- **选择器没匹配**：返回 `not_found`，什么都没派发；非法旧 CSS 返回 `invalid_selector`，不要把原始 `SyntaxError` 当作桥故障。
 
 ## 唯一剩下的物理动作：`resolve_leave_dialog` 的 Enter 兜底
 
@@ -149,10 +165,10 @@ BTAP 默认使用 `lab`（`BROWSERTAP_MODE` 未设也视为 lab），并按 `BRO
 - **动手前必 `list_tabs`，然后按 U/A/B 归属决定——别把"已有匹配 URL"等同于"可以随意改这个 tab"**：
   - **目标站已经开着**（`list_tabs` 里有 `url` 匹配的 U）→ 仅读/轻操作可借用 B；会导航、重表单或明显改变页面时优先 `open_new_tab` 开 A。借用前记 `original_url`，结束仍存活时恢复，绝不 close。
   - **目标站没开过**（`list_tabs` 里没有匹配的 tab）→ **直接 `open_new_tab("https://目标站")` 在后台开一个，这是正常且正确的操作，不要犹豫、不要卡在"确认 session"、更不要反过来问用户"要不要我打开"**。用户让你操作某个站，就默认授权你去开它。BTAP 开新 tab 默认 `active=false`，不抢前台；只有确实需要用户看见页面或使用物理键鼠时才显式传 `active=true`。
-  - `open_new_tab` 返回的 `generation` 是该原生 tab 生命周期标识；create ACK 有 `tab_id+generation` 时即返回 `owned=true` 和随机 `owner_id`，即使 session 尚未注册、`ready=false`。调用方必须保存 `session_id + generation + owner_id`；`ready=false` 只表示暂不能用 session 工具，不影响用 owner capability 安全清理。同一任务需开多个 A 时，把第一个 `owner_id` 传给后续 `open_new_tab(owner_id=...)`，便于统一安全收尾。
+  - `open_new_tab` 返回的 `generation` 是该原生 tab 生命周期标识；create ACK 有 `tab_id+generation` 时即返回 `owned=true` 和随机 `owner_id`，即使 session 尚未注册、`ready=false`。调用方必须保存 `session_id + generation + owner_id`；`ready=false` 只表示暂不能用 session 工具，不影响用 owner capability 安全清理。同一任务需开多个 A 时，把第一个 `owner_id` 传给后续 `open_new_tab(owner_id=...)`，便于统一安全收尾。页面内 `window.open()` 或锚点 click 没有用户手势时可能被 Chrome 静默拦截；需要可靠开页时用 `open_new_tab`（原生 `tabs.create`），不要把 JS 返回值当成新 tab 已存在。
   - 一句话：**只读可借 U；会改状态优先开 A；A 用完必带 owner_id 关闭。**
 - **每次页面操作都显式带 `session_id`，不要吃全局默认**。`list_tabs` 拿到目标 tab 的 session id 后，`scan_page(session_id=...)` / `execute_js(session_id=..., script=...)` / `capture_page_screenshot(session_id=...)` / `page_click(session_id=...)` 全都把它带上。原因：全局默认 session 是所有任务共享的单例，另一个任务一 `switch_tab`/`open_url` 就会把它改掉；如果你依赖默认，下一步就可能打到别人刚切过去的 tab 上，把正在用的 tab"顶掉"。**显式 session_id = 你的操作永远落在你锁定的那个 tab，不受其它任务干扰。**（`scan_page`/`execute_js` 内部已做 save/restore，带 session_id 调用后会把全局默认还原，不再永久污染；但你自己每步都带上才最稳。）
-- **一句话**：先看有没有现成 tab（有则复用），锁定它的 session_id，之后每一步都带着这个 id。
+- **一句话**：先看有没有现成 tab（有则复用），锁定它的 session_id，之后每一步都带着这个当前句柄；若结果明确换发句柄，就从下一步开始使用 `replacement_session_id`。
 
 ## ⚠️ 多对话/多 agent 并行：Tab 归属（硬规则）
 
@@ -180,6 +196,7 @@ BTAP 默认使用 `lab`（`BROWSERTAP_MODE` 未设也视为 lab），并按 `BRO
 - `close_tabs` 默认 `only_if_agent_owned=true`：不带正确 `owner_id` 会拒绝；不得为省事把它关掉。只有用户明确说要关闭某个 U/非 owned tab 时，才可设 `only_if_agent_owned=false`
 - 批量 close 前所有目标必须属于同一个 `owner_id`；混入 U 或别的 Agent A 时整批不应执行
 - 用户若已手动关掉你开的 tab（含**误点到你的 tab 再关掉**）：当作 `already_gone` / `closed_by=user`，清掉该 owned；**不要**用旧 tab_id 补关，**不要**默认连环重开；任务还需要该站时再 `open_new_tab` 拿**新的** A（或先问用户）
+- `close_tabs` 返回 `already_gone` 时若页面仍出现在浏览器里，先 `list_all_tabs` 重新核对 URL/title，再决定是否按新 session/generation 关闭；BTAP 不会自动按 URL 接管替代 tab。
 - **用户自己开、且从未被你 `open_new_tab` 进 owned 的站，用户自己关了**：只是 list 少了一项——**不要当成你关的**，不要写进「本任务已关闭」、不要因此去 close/补枪
 - 只有你对 **owned** tab **主动调用了 close/release 并且成功**，才能说是你关的
 - 借用后不还原 URL（tab 还在时）
@@ -204,7 +221,7 @@ BTAP 默认使用 `lab`（`BROWSERTAP_MODE` 未设也视为 lab），并按 `BRO
   - `requires_user_action` —— 物理输入或 `set_site_permission(allow)` 的批准被拒绝/取消/不可用，什么都没做。
   - `input_activity_detected` / `activation_failed` —— 物理输入批准后因用户动了鼠标键盘、或 tab 无法确认在屏上而**没有发出**。
   - `challenge_stalled` —— 验证码在尝试上限内没进展，把 tab 交还给用户。
-  - `redirected` / `navigated` —— 导航落点与请求不同 / `execute_js` 把页面导航走了（返回值确实丢了，看 `landed_url`）。
+  - `redirected` / `navigated` —— 导航落点与请求不同 / `execute_js` 把页面导航走了（返回值确实丢了，看 `landed_url`）。页面脚本里的 `window.open` 或锚点点击没有用户手势时可能静默被拦截；需要可靠新 tab 用 `open_new_tab`，不要把这类权限错误当成“读不到当前页面”。
   - `type="download", status="triggered"` —— `open_url` 被浏览器下载取代；只有同时有 `isDownload=true` 时 `ERR_ABORTED` 才是正常下载语义。要完成/失败和最终路径，改用 `download_file`。
   - `closed_by="agent"|"user"` —— 只有 `agent` 才能计入本任务主动关闭；`status="already_gone", closed_by="user"` 表示 owned tab 在收尾前已被用户关闭，禁止补关旧 id。
 
@@ -212,7 +229,7 @@ BTAP 默认使用 `lab`（`BROWSERTAP_MODE` 未设也视为 lab），并按 `BRO
 
 **没有任何工具把 `session_id` 设成必填** —— 冷启动直接 `scan_page` 就能读当前 tab，
 不必先 `list_tabs` + `switch_tab`。默认目标死了（tab 关了、浏览器重启、扩展 reload）
-会自动重选活的；但**你明确指名的死 tab 会被拒绝**，不会偷偷换 tab 执行。
+会自动重选活的；但**你明确指名的死 tab 会被拒绝**，不会偷偷换 tab 执行。唯一例外是桥拿到 Chrome `tabs.onReplaced` 加稳定 `tab_identity` 的直接证据：这时会返回 `rebound_from`/`replacement_session_id`，调用方必须改用新句柄；不能用 URL、title 或“看起来像同一页”猜测。
 多任务并行时仍然按上面的规则显式带 id。
 
 | 类别 | 工具 |

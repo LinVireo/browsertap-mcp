@@ -90,6 +90,26 @@ def test_behavior_manifest_matches_exact_registered_set(by_name):
     assert set(TOOL_COVERAGE) == set(by_name)
 
 
+def test_capability_registry_covers_exactly_the_registered_tools(by_name):
+    registered = set(by_name)
+    declared = set(S.TOOL_CAPABILITIES)
+
+    assert declared == registered
+    assert set(S._CAPABILITY_GROUPS) == {"page", "browser", "desktop"}
+    status = S._capability_registry_status()
+    assert status["complete"] is True
+    assert status["tool_count"] == status["declared_tool_count"] == len(registered)
+    assert not status["missing_tools"]
+    assert not status["unknown_tools"]
+    assert S.TOOL_CAPABILITIES["resolve_leave_dialog"]["capability"] == "page"
+    assert S.TOOL_CAPABILITIES["resolve_leave_dialog"]["desktop_fallback"] is True
+    assert S.TOOL_CAPABILITIES["resolve_leave_dialog"]["desktop_opt_in"] is True
+    for metadata in S.TOOL_CAPABILITIES.values():
+        assert metadata["target"] in {"none", "optional", "required"}
+        assert metadata["side_effect"] in {"read", "write", "mixed"}
+        assert metadata["result_contract"] == "btap.result.v1"
+
+
 def test_behavior_evidence_nodes_are_unique_and_tool_bound():
     report = build_tool_coverage_report(execute=False)
     assert report["contract_valid_tools"] == report["registered"]

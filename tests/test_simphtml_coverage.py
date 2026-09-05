@@ -433,6 +433,59 @@ def test_execute_js_rich_handles_monitor_session_and_execution_failures(monkeypa
     assert result["transients"] == []
 
 
+def test_execute_js_rich_classifies_page_access_failure_without_replay(monkeypatch):
+    driver = QueueDriver([
+        Exception({
+            "message": "Cannot access contents of the page",
+            "dispatched": False,
+            "may_have_executed": False,
+            "retryable": False,
+        })
+    ])
+    monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("snapshot down")))
+
+    result = S.execute_js_rich(
+        "document.body.innerText",
+        driver,
+        no_monitor=True,
+        timeout=2,
+        before_sids=set(),
+        session_id="c:7",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "page_access_denied"
+    assert result["retryable"] is False
+    assert result["diagnostics"]["dispatched"] is False
+    assert result["diagnostics"]["next_action"] == "list_tabs_then_retry_or_use_supported_cdp"
+    assert "open_new_tab" in result["hint"]
+
+
+def test_execute_js_rich_marks_new_tab_intent_without_claiming_popup_cause():
+    driver = QueueDriver([
+        Exception({
+            "message": "Popup blocked by browser policy",
+            "dispatched": True,
+            "may_have_executed": True,
+        })
+    ])
+
+    result = S.execute_js_rich(
+        "window.open('https://example.test')",
+        driver,
+        no_monitor=True,
+        timeout=2,
+        before_sids=set(),
+        session_id="c:7",
+    )
+
+    assert result["error_code"] == "page_execution_failed"
+    assert result["diagnostics"]["script_intent"] == "new_tab_or_navigation"
+    assert result["diagnostics"]["policy_constraint"] == "popup_or_user_gesture"
+    assert result["diagnostics"]["next_action"] == "open_new_tab"
+    assert result["retry_safe"] is False
+
+
 def test_execute_js_rich_expired_deadline_never_calls_driver(monkeypatch):
     driver = QueueDriver([], default_session_id="no-colon")
     monkeypatch.setattr(S.time, "monotonic", lambda: 10.0)

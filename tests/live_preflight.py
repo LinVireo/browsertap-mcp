@@ -421,6 +421,21 @@ def stale_component_reason(status: Mapping[str, Any] | None) -> str | None:
     # reader to the one thing that cannot help.
     if status.get("status") == "bridge_unreachable":
         return None
+    if status.get("status") == "starting":
+        # A just-spawned bridge has no extension version or capability snapshot
+        # yet.  Its diagnostic flags may therefore look stale even though no
+        # reload can help; fail with the startup action instead of blaming Chrome.
+        return "\n".join(
+            [
+                "the live layer cannot start yet: the bridge is waiting for the extension handshake.",
+                f"  package {status.get('package_version')}"
+                f" / bridge {status.get('bridge_version')}"
+                f" / extension {status.get('extension_version')}"
+                f" (protocol {status.get('protocol_version')},"
+                f" expected {status.get('expected_protocol_version')})",
+                "  action: wait a few seconds and run doctor again; do not reload the extension for this snapshot.",
+            ]
+        )
     stale = [
         (label, fix) for flag, label, fix in _STALE_COMPONENTS if status.get(flag) is True
     ]

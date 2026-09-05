@@ -57,6 +57,32 @@ def test_setup_status_reports_all_equal_components_as_healthy(monkeypatch):
     assert result["extension_name"] == "BrowserTap Bridge"
     assert result["restart_bridge_required"] is False
     assert result["reload_extension_required"] is False
+    registry = result["capability_registry"]
+    assert registry["complete"] is True
+    assert set(registry["groups"]) == {"page", "browser", "desktop"}
+    assert registry["tool_count"] == registry["declared_tool_count"] == 49
+    assert registry["groups"]["desktop"] == []
+
+
+def test_setup_status_surfaces_bridge_startup_without_requesting_reload(monkeypatch):
+    result = _status(
+        monkeypatch,
+        {
+            "cause": "starting",
+            "ok": False,
+            "bridge_version": __version__,
+            "extension_version": __version__,
+            "protocol_version": 3,
+            "extension_capabilities": {"content_command_channel_removed": True},
+            "bridge_uptime_seconds": 2.0,
+            "startup_grace_seconds": 10.0,
+        },
+    )
+
+    assert result["status"] == "starting"
+    assert result["action"] == "wait_for_extension"
+    assert result["reload_extension_required"] is False
+    assert "handshake" in result["notes"][0]
 
 
 def test_setup_status_classifies_old_bridge_before_extension(monkeypatch):
@@ -768,4 +794,3 @@ def test_a_matching_stamp_does_not_excuse_a_protocol_or_capability_gap(monkeypat
     assert capability["missing_extension_capabilities"] != []
     assert capability["reload_extension_required"] is True
     assert capability["action"] == "reload_extension"
-

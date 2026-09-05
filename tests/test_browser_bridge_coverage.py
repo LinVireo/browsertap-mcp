@@ -337,6 +337,49 @@ def test_extension_tab_snapshot_isolates_clients_and_replaces_generation():
     assert other.is_active() is True
 
 
+def test_extension_tab_replacement_rebinds_only_with_stable_tab_identity():
+    driver = driver_stub()
+    client = FakeSocket()
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 1, "url": "https://same.test", "generation": "g1", "tab_identity": "tab-a"}],
+        client,
+    )
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 2, "url": "https://same.test", "generation": "g1", "tab_identity": "tab-a"}],
+        client,
+    )
+    assert driver.sessions["one:2"].info["tab_identity"] == "tab-a"
+    assert driver.resolve_session_target("one:1") == {
+        "session_id": "one:2",
+        "rebound_from": "one:1",
+        "replacement_session_id": "one:2",
+        "tab_identity": "tab-a",
+        "reason": "chrome.tabs.onReplaced",
+    }
+
+
+def test_same_url_different_tab_identity_is_not_rebound():
+    driver = driver_stub()
+    client = FakeSocket()
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 1, "url": "https://same.test", "generation": "g1", "tab_identity": "tab-a"}],
+        client,
+    )
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 2, "url": "https://same.test", "generation": "g2", "tab_identity": "tab-b"}],
+        client,
+    )
+    assert driver.resolve_session_target("one:1") is None
+
+
 def test_a_closed_tab_is_reported_once_and_can_still_be_reaped(caplog):
     """The snapshot sweep must not keep a dead session looking freshly dead.
 
@@ -505,6 +548,24 @@ def test_remote_execute_js_maps_errors_and_echoed_tab(monkeypatch, capsys):
     with pytest.raises(Exception, match="other error"):
         driver.execute_js("x", session_id="c:7")
     assert capsys.readouterr().out == ""
+
+
+def test_remote_execute_js_preserves_page_error_diagnostics():
+    driver = driver_stub(remote=True)
+    driver._remote_cmd = lambda *args, **kwargs: {
+        "r": {
+            "error": "Cannot access contents of the page",
+            "error_code": "page_access_denied",
+            "diagnostics": {"dispatched": False, "may_have_executed": False},
+        }
+    }
+
+    with pytest.raises(T.PageExecutionError) as caught:
+        driver.execute_js("document.body.innerText", timeout=2, session_id="c:7")
+
+    assert caught.value.error_code == "page_access_denied"
+    assert caught.value.diagnostics["dispatched"] is False
+    assert caught.value.retry_safe is False
 
 
 def test_remote_ext_cmd_maps_timeout_and_other_errors():
@@ -787,6 +848,17 @@ def test_http_link_ext_cmd_success_and_error(http_app):
     assert body["r"]["error"] == "ext failed"
 
 
+def test_http_link_ext_cmd_rejects_missing_payload_with_actionable_shape(http_app):
+    calls = []
+    http_app.ext_cmd = lambda *args, **kwargs: calls.append((args, kwargs))
+    command = {"cmd": "ext_cmd", "payload": {"method": "tabs"}}
+    body = json.loads(wsgi_post(http_app.app, "/link", command)["body"])
+    assert body["r"]["error_code"] == "invalid_payload"
+    assert "payload" in body["r"]["error"]
+    assert "Do not put" in body["r"]["hint"]
+    assert calls == []
+
+
 def test_http_link_execute_js_success_and_error(http_app):
     calls = []
     http_app.execute_js = lambda code, **kwargs: calls.append((code, kwargs)) or {"data": 7}
@@ -1032,6 +1104,20 @@ def test_local_diagnose_classifies_every_lifecycle_state(
     assert result["clients"]["c"]["seconds_ago"] == 10.0
 
 
+def test_local_diagnose_reports_startup_handshake_window(monkeypatch):
+    driver = driver_stub()
+    driver.started_at = 995.0
+    driver.clean_sessions = lambda: None
+    driver.ext_cmd = lambda *args, **kwargs: {"data": {}}
+    monkeypatch.setattr(T.time, "time", lambda: 1000.0)
+    result = driver.diagnose(timeout=2)
+    assert result["cause"] == "starting"
+    assert result["ok"] is False
+    assert result["bridge_uptime_seconds"] == 5.0
+    assert result["startup_grace_seconds"] == T.BRIDGE_STARTUP_GRACE_SECONDS
+    assert "wait" in result["advice"].lower()
+
+
 def test_local_diagnose_reports_the_paths_the_daemon_itself_resolved():
     """The daemon is the process whose answer matters for a 401.
 
@@ -1244,6 +1330,31 @@ def test_execute_js_local_http_queue_and_extension_error(monkeypatch):
     monkeypatch.setattr(T.uuid, "uuid4", lambda: "exec-http")
     with pytest.raises(Exception, match="script failed"):
         driver.execute_js("bad()", session_id="http:1")
+
+
+def test_execute_js_local_page_error_has_a_non_replayable_classification():
+    driver = driver_stub()
+
+    class ReplySocket(FakeSocket):
+        def send_message(self, message):
+            payload = json.loads(message)
+            driver.results[payload["id"]] = {
+                "success": False,
+                "data": {
+                    "message": "Cannot access contents of the page",
+                    "dispatched": False,
+                    "may_have_executed": False,
+                    "retryable": False,
+                },
+            }
+
+    _install_exec_session(driver, socket=ReplySocket())
+    with pytest.raises(T.PageExecutionError) as caught:
+        driver.execute_js("document.body.innerText", session_id="c:7")
+
+    assert caught.value.error_code == "page_access_denied"
+    assert caught.value.diagnostics["access_kind"] == "script_injection"
+    assert caught.value.retry_safe is False
 
 
 def test_execute_js_local_marks_broken_socket_disconnected():

@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import queue
+import re
 import secrets
 import socket
 import threading
@@ -111,6 +112,147 @@ class ExtensionNotConnectedError(ValueError):
     error_code = "extension_not_connected"
 
 
+_PAGE_ACCESS_ERROR_PATTERNS = (
+    "cannot access contents of the page",
+    "extensions gallery cannot be scripted",
+    "cannot access a chrome:// url",
+    "cannot access contents of a chrome-extension",
+)
+_PAGE_POPUP_ERROR_PATTERNS = (
+    "popup",
+    "user gesture",
+    "not allowed to open",
+)
+
+
+def _page_error_source(detail: Any) -> tuple[str, dict[str, Any]]:
+    """Return a browser error message and its structured source fields."""
+    if isinstance(detail, dict):
+        nested = detail.get("error")
+        source = nested if isinstance(nested, dict) else detail
+        message = source.get("message")
+        if not isinstance(message, str) or not message:
+            message = detail.get("message")
+        if not isinstance(message, str) or not message:
+            message = nested if isinstance(nested, str) else detail.get("error")
+        return str(message or detail), source
+    return str(detail), {}
+
+
+def _page_script_intent(script: str) -> Optional[str]:
+    if not isinstance(script, str):
+        return None
+    if re.search(
+        r"(?:window\.open\s*\(|(?:window\.)?location(?:\.assign|\.replace)?\s*=|target\s*=\s*['\"]_blank)",
+        script,
+        re.IGNORECASE,
+    ):
+        return "new_tab_or_navigation"
+    return None
+
+
+def _page_execution_metadata(
+    detail: Any,
+    *,
+    script: str = "",
+    explicit_code: Optional[str] = None,
+    explicit_diagnostics: Optional[dict[str, Any]] = None,
+) -> tuple[str, bool, dict[str, Any]]:
+    """Classify a page-side failure without pretending to know its root cause."""
+    message, source = _page_error_source(detail)
+    lower = message.lower()
+    container = detail if isinstance(detail, dict) else {}
+    diagnostics = dict(explicit_diagnostics or {})
+
+    def field(name: str) -> Any:
+        if name in container:
+            return container[name]
+        return source.get(name)
+
+    dispatched = field("dispatched")
+    may_have_executed = field("may_have_executed")
+    retryable = field("retryable")
+    csp = bool(field("csp"))
+    if dispatched is not None:
+        diagnostics["dispatched"] = bool(dispatched)
+    if may_have_executed is not None:
+        diagnostics["may_have_executed"] = bool(may_have_executed)
+    if retryable is not None:
+        diagnostics["retryable"] = bool(retryable)
+    if csp:
+        diagnostics["csp"] = True
+
+    code = explicit_code
+    if not code or code == "internal_error":
+        code = container.get("error_code") or source.get("error_code")
+    if not code:
+        code = container.get("code") or source.get("code")
+    access_denied = any(pattern in lower for pattern in _PAGE_ACCESS_ERROR_PATTERNS)
+    if not code:
+        code = "page_access_denied" if access_denied else "page_execution_failed"
+
+    intent = _page_script_intent(script)
+    if intent:
+        diagnostics["script_intent"] = intent
+        if any(pattern in lower for pattern in _PAGE_POPUP_ERROR_PATTERNS):
+            diagnostics["policy_constraint"] = "popup_or_user_gesture"
+            diagnostics["next_action"] = "open_new_tab"
+        elif access_denied:
+            diagnostics["next_action"] = "open_new_tab_or_choose_scriptable_tab"
+
+    if access_denied:
+        diagnostics.setdefault("access_kind", "script_injection")
+        diagnostics.setdefault(
+            "next_action",
+            "list_tabs_then_retry_or_use_supported_cdp",
+        )
+
+    # A browser error that reached the page route is not safe to replay unless
+    # the browser explicitly proved that it never dispatched it.
+    if retryable is not None:
+        retry_safe = bool(retryable)
+    else:
+        retry_safe = dispatched is False and may_have_executed is False and not access_denied
+    diagnostics.setdefault("retry_safe", retry_safe)
+    return str(code), retry_safe, diagnostics
+
+
+def _is_page_execution_error(detail: Any, error_code: Optional[str] = None) -> bool:
+    if isinstance(error_code, str) and error_code in {
+        "page_access_denied", "page_execution_failed", "page_injection_blocked",
+        "debugger_detached", "cdp_error",
+    }:
+        return True
+    message, _ = _page_error_source(detail)
+    lower = message.lower()
+    return any(pattern in lower for pattern in _PAGE_ACCESS_ERROR_PATTERNS)
+
+
+class PageExecutionError(RuntimeError):
+    """A page-side execution failure with delivery and retry facts attached."""
+
+    error_code = "page_execution_failed"
+
+    def __init__(
+        self,
+        detail: Any,
+        *,
+        script: str = "",
+        error_code: Optional[str] = None,
+        diagnostics: Optional[dict[str, Any]] = None,
+    ) -> None:
+        code, retry_safe, facts = _page_execution_metadata(
+            detail,
+            script=script,
+            explicit_code=error_code,
+            explicit_diagnostics=diagnostics,
+        )
+        super().__init__(detail)
+        self.error_code = code
+        self.retry_safe = retry_safe
+        self.diagnostics = facts
+
+
 # Delivery states a caller may retry without risking a duplicate side effect.
 #
 # 'undelivered' is provable from the bridge's own bookkeeping: the payload never
@@ -132,6 +274,11 @@ RETRY_SAFE_DELIVERY_STATES = frozenset({'undelivered', 'sent_unconfirmed'})
 # so a session that appeared a moment ago names a tab that is probably still
 # loading. See BrowserBridge._pick_failover_session for what that broke.
 FAILOVER_SETTLE_SECONDS = 2.0
+
+# A newly spawned daemon can answer before the MV3 worker has completed its
+# first handshake. Keep that normal startup window distinct from a broken
+# extension so doctor tells the caller to wait instead of reload.
+BRIDGE_STARTUP_GRACE_SECONDS = 10.0
 
 # How long the socket owning a clientId namespace may say nothing before another
 # socket is allowed to take it over. The extension pings every 20s (KEEPALIVE_MS
@@ -226,12 +373,16 @@ def _no_response_result(
     return result
 
 
-def _error_payload(exc: Exception, *, prefix: str = "") -> dict[str, str]:
+def _error_payload(exc: Exception, *, prefix: str = "") -> dict[str, Any]:
     message = f"{prefix}: {exc}" if prefix else str(exc)
-    return {
+    payload: dict[str, Any] = {
         "error": message,
         "error_code": str(getattr(exc, "error_code", "internal_error")),
     }
+    diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(diagnostics, dict):
+        payload["diagnostics"] = diagnostics
+    return payload
 
 # --- /link 鉴权 --------------------------------------------------------------
 # WS 口靠 origin 前缀挡住网页（扩展读不到磁盘上的密钥，只能这么做）；但 /link 是
@@ -596,7 +747,12 @@ class BrowserBridge:
 
     def __init__(self, host: str = '127.0.0.1', port: int = 18765):
         self.host, self.port = host, port
+        self.started_at = time.time()
         self.sessions, self.results, self.acks = {}, {}, {}
+        # Old session handles remain useful only when the extension provided
+        # explicit replacement evidence (`tabs.onReplaced`). Never infer this
+        # map from URL/title or from a reused native id.
+        self._rebindings = {}
         # Commands are completed by the HTTP/WS server threads. A condition lets
         # the waiting caller resume as soon as one of those threads records a
         # result, ACK or session lifecycle change instead of paying the old
@@ -846,11 +1002,34 @@ class BrowserBridge:
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e, prefix='find_session failed')},
                                       ensure_ascii=False)
+            if cmd == 'resolve_session':
+                try:
+                    session_id = data.get('sessionId')
+                    if session_id is None:
+                        return json.dumps({'r': None}, ensure_ascii=False)
+                    return json.dumps(
+                        {'r': self._resolve_local_session_target(str(session_id))},
+                        ensure_ascii=False,
+                    )
+                except Exception as e:
+                    return json.dumps({'r': _error_payload(e, prefix='resolve_session failed')},
+                                      ensure_ascii=False)
             if cmd == 'ext_cmd':
                 try:
                     payload = data.get('payload')
-                    if payload is None:
-                        payload = {}
+                    if (
+                        not isinstance(payload, dict)
+                        or not isinstance(payload.get('cmd'), str)
+                        or not payload.get('cmd').strip()
+                    ):
+                        return json.dumps({'r': {
+                            'error': (
+                                'ext_cmd requires payload to be a JSON object with a non-empty string cmd field; '
+                                'send {"cmd":"ext_cmd","payload":{"cmd":"tabs",...}}'
+                            ),
+                            'error_code': 'invalid_payload',
+                            'hint': 'Do not put the extension command at the /link top level.',
+                        }}, ensure_ascii=False)
                     timeout = _positive_timeout(data.get('timeout', 15.0))
                     result = self.ext_cmd(payload,
                                           client_id=data.get('clientId'),
@@ -959,6 +1138,13 @@ class BrowserBridge:
             if not session.is_active() and session.disconnect_at is not None \
                     and now - session.disconnect_at > 600:
                 self.sessions.pop(sid, None)
+        for old_sid, binding in list(getattr(self, '_rebindings', {}).items()):
+            replacement = str(binding.get('replacement_session_id', ''))
+            if (not replacement
+                    or now - float(binding.get('ts', now)) > 600
+                    or not (self.sessions.get(replacement)
+                            and self.sessions[replacement].is_active())):
+                self._rebindings.pop(old_sid, None)
         # Results/acks that arrive after their caller already timed out would
         # otherwise accumulate forever in a long-lived daemon.
         for r_id in list(self.results.keys()):
@@ -1109,6 +1295,23 @@ class BrowserBridge:
 
         current_tab_ids = {_sid(tab['id']) for tab in tabs}
         logger.debug("Received tabs update from %s (%s): %s", client_id, browser, current_tab_ids)
+        rebindings = getattr(self, '_rebindings', None)
+        if rebindings is None:
+            rebindings = self._rebindings = {}
+        prior_by_identity = {}
+        current_identity_counts = {}
+        for tab in tabs:
+            identity = tab.get('tab_identity')
+            if identity:
+                key = str(identity)
+                current_identity_counts[key] = current_identity_counts.get(key, 0) + 1
+        for sid, sess in list(self.sessions.items()):
+            if (sess.type == 'ext_ws'
+                    and sess.info.get('client_id') == client_id
+                    and sid not in current_tab_ids):
+                identity = sess.info.get('tab_identity')
+                if identity:
+                    prior_by_identity.setdefault(str(identity), []).append(sid)
         # Only sweep sessions belonging to THIS client; another browser's
         # update must not disconnect this browser's tabs.
         lifecycle_changed = False
@@ -1132,9 +1335,28 @@ class BrowserBridge:
                 'browser': browser,
                 'tab_id': tab['id'],
             }
+            if tab.get('tab_identity'):
+                session_info['tab_identity'] = str(tab['tab_identity'])
             if tab.get('generation') is not None:
                 session_info['generation'] = str(tab['generation'])
             sess = self.sessions.get(session_id)
+            identity = session_info.get('tab_identity')
+            prior = prior_by_identity.get(identity, []) if identity else []
+            if (not sess and identity and current_identity_counts.get(identity) == 1
+                    and len(prior) == 1 and prior[0] != session_id):
+                old_sid = prior[0]
+                rebindings[old_sid] = {
+                    'replacement_session_id': session_id,
+                    'tab_identity': identity,
+                    'reason': 'chrome.tabs.onReplaced',
+                    'ts': time.time(),
+                }
+                logger.info(
+                    "Tab handle rebound for identity %s: %s -> %s",
+                    identity,
+                    old_sid,
+                    session_id,
+                )
             old_generation = sess.info.get('generation') if sess else None
             new_generation = session_info.get('generation')
             if (sess and sess.is_active() and old_generation is not None
@@ -1163,6 +1385,50 @@ class BrowserBridge:
                 self._register_client(session_id, client, session_info)
         if lifecycle_changed:
             self._notify_activity()
+
+    def _resolve_local_session_target(self, session_id: str) -> Optional[dict[str, Any]]:
+        sid = str(session_id)
+        session = self.sessions.get(sid)
+        if session is not None and not hasattr(session, 'disconnect_at'):
+            return None
+        if session and getattr(session, 'disconnect_at', None) is None:
+            # WebSocket sessions have an explicit disconnect transition. Avoid
+            # calling is_active() here: it is stateful for HTTP expiry and an
+            # extra probe would consume a transport's lifecycle edge before
+            # execute_js gets to classify it.
+            if getattr(session, 'type', None) != _QUEUE_TYPE or session.is_active():
+                return {'session_id': sid}
+        binding = getattr(self, '_rebindings', {}).get(sid)
+        if not isinstance(binding, dict):
+            return None
+        replacement = str(binding.get('replacement_session_id', ''))
+        current = self.sessions.get(replacement)
+        if not replacement or not current or getattr(current, 'disconnect_at', None) is not None:
+            getattr(self, '_rebindings', {}).pop(sid, None)
+            return None
+        return {
+            'session_id': replacement,
+            'rebound_from': sid,
+            'replacement_session_id': replacement,
+            'tab_identity': binding.get('tab_identity'),
+            'reason': binding.get('reason', 'chrome.tabs.onReplaced'),
+        }
+
+    def resolve_session_target(self, session_id: str, timeout: Optional[float] = None) -> Optional[dict[str, Any]]:
+        """Resolve a current session handle, rebinding only with tab identity evidence."""
+        sid = str(session_id)
+        if self.is_remote:
+            envelope = self._remote_cmd(
+                {'cmd': 'resolve_session', 'sessionId': sid},
+                timeout=_timeout_or_default(timeout, 5),
+            )
+            result = envelope.get('r')
+            if result is None:
+                return None
+            if not isinstance(result, dict):
+                raise RuntimeError('Bridge returned a malformed session resolution')
+            return result
+        return self._resolve_local_session_target(sid)
 
     def _register_client(self, session_id: str, client: WebSocket, session_info) -> None:
         # One lookup, and the two branches now differ only in what they say:
@@ -1280,9 +1546,19 @@ class BrowserBridge:
         """
         cur = self.default_session_id
         if cur:
-            session = self.sessions.get(cur)
-            if session and session.is_active():
-                return cur
+            current = self.sessions.get(cur)
+            # Lightweight test/compatibility session objects predate the
+            # disconnect_at field; retain their explicit is_active contract.
+            if current is not None and not hasattr(current, 'disconnect_at'):
+                if current.is_active():
+                    return cur
+            resolved = self._resolve_local_session_target(str(cur))
+            if resolved:
+                selected = str(resolved['session_id'])
+                if selected != str(cur):
+                    logger.info("Default session %s rebound to %s", cur, selected)
+                    self.default_session_id = selected
+                return selected
         # Snapshot before iterating: the WS thread may insert/remove sessions
         # (tabs_update) while this runs — clean_sessions already snapshots for
         # exactly that reason; missing the snapshot here raises RuntimeError.
@@ -1349,6 +1625,11 @@ class BrowserBridge:
         # must still be refused below; an implicit one the driver supplied from
         # its own memory must not be, since the caller never chose it.
         caller_named_target = session_id is not None
+        rebound = None
+        if session_id is not None and not self.is_remote:
+            rebound = self.resolve_session_target(str(session_id))
+            if rebound and rebound.get('session_id'):
+                session_id = str(rebound['session_id'])
         if session_id is None:
             session_id = self._live_default_session_id()
         if self.is_remote:
@@ -1374,9 +1655,19 @@ class BrowserBridge:
                 # bridge flattens everything to a string over HTTP, so a caller
                 # catching ValueError locally would miss it in remote mode.
                 if error_code == SessionNotConnectedError.error_code:
-                    raise SessionNotConnectedError(err)
+                    exc = SessionNotConnectedError(err)
+                    if isinstance(response.get("diagnostics"), dict):
+                        exc.diagnostics = dict(response["diagnostics"])
+                    raise exc
                 if error_code == SessionDisconnectedError.error_code:
                     raise SessionDisconnectedError(err)
+                if _is_page_execution_error(err, error_code):
+                    raise PageExecutionError(
+                        err,
+                        script=code,
+                        error_code=error_code,
+                        diagnostics=response.get("diagnostics"),
+                    )
                 raise Exception(err)
             if isinstance(response, dict) and response.get('tabId') is not None:
                 # The executor (extension/bridge) names the tab it used; surface
@@ -1428,14 +1719,44 @@ class BrowserBridge:
                 if not session or not session.is_active():
                     if alive_sessions:
                         cands = ', '.join(str(s.id) for s in alive_sessions[:8])
-                        raise SessionNotConnectedError(
+                        exc = SessionNotConnectedError(
                             f"Session {session_id} is not connected. BTAP refused to execute on a "
                             f"different tab. Active sessions: {cands}. Select the intended target "
                             "with switch_tab and retry."
                         )
-                    raise SessionNotConnectedError(f"Session {session_id} is not connected")
+                        exc.diagnostics = {
+                            "stale_session_id": str(session_id),
+                            "replacement_candidates": [
+                                {
+                                    "id": str(s.id),
+                                    "url": s.info.get("url"),
+                                    "title": s.info.get("title"),
+                                    "generation": s.info.get("generation"),
+                                }
+                                for s in alive_sessions[:8]
+                            ],
+                            "next_action": "list_tabs_then_retry",
+                        }
+                        raise exc
+                    exc = SessionNotConnectedError(
+                        f"Session {session_id} is not connected. The explicitly requested tab is stale; "
+                        "run list_tabs and retry with a live session_id."
+                    )
+                    exc.diagnostics = {
+                        "stale_session_id": str(session_id),
+                        "replacement_candidates": [],
+                        "next_action": "list_tabs_then_retry",
+                    }
+                    raise exc
         # Callers (and the AI driving them) must learn their target changed.
         extra = {'switched_session': session_id, 'switched_from': switched_from} if switched_from else {}
+        if rebound and rebound.get('rebound_from'):
+            extra.update({
+                'rebound_from': rebound.get('rebound_from'),
+                'replacement_session_id': rebound.get('replacement_session_id', session_id),
+                'tab_identity': rebound.get('tab_identity'),
+                'rebind_reason': rebound.get('reason', 'chrome.tabs.onReplaced'),
+            })
 
         tp = session.type
         # Not an assert: python -O strips those, and what it guards is not a
@@ -1591,7 +1912,8 @@ class BrowserBridge:
         if result is missing_result:
             raise RuntimeError("execute_js completed without a result")
         if exec_id in self.acks: self.acks.pop(exec_id)
-        if not result['success']: raise Exception(result['data'])
+        if not result['success']:
+            raise PageExecutionError(result.get('data'), script=code)
         rr = {'data': result['data'], **extra}
         # Prefer the tab the executor echoed back (covers failover and remote
         # transports); fall back to the session we resolved locally.
@@ -1614,6 +1936,11 @@ class BrowserBridge:
         if not isinstance(cmd, dict):
             raise ValueError("cmd must be a JSON object")
         timeout = _positive_timeout(timeout)
+        if not isinstance(cmd.get("cmd"), str) or not cmd["cmd"].strip():
+            raise ValueError(
+                'ext_cmd payload requires a non-empty string cmd field; '
+                'for /link use {"cmd":"ext_cmd","payload":{"cmd":"tabs",...}}'
+            )
         deadline = time.monotonic() + timeout
 
         def remaining():
@@ -1790,6 +2117,8 @@ class BrowserBridge:
         active = [s for s in list(self.sessions.values()) if s.is_active()]
         ever = self.last_ext_seen is not None
         stale = ever and (now - self.last_ext_seen) > 90
+        started_at = getattr(self, "started_at", None)
+        uptime = (now - started_at) if isinstance(started_at, (int, float)) else None
         # Snapshot, and never index a heartbeat entry directly: the WS thread
         # writes client_last_seen while doctor reads it, and diagnose is the tool
         # people run *because* something is already wrong — it must not be the
@@ -1800,6 +2129,11 @@ class BrowserBridge:
                       if isinstance(v, dict)}
         if active:
             cause, ok, advice = "healthy", True, f"{len(active)} tab(s) registered; bridge and extension are connected."
+        elif not ever and uptime is not None and uptime < BRIDGE_STARTUP_GRACE_SECONDS:
+            cause, ok, advice = "starting", False, (
+                f"The bridge started {round(max(0.0, uptime), 1)}s ago and is waiting for the "
+                "extension handshake. Wait a few seconds and run doctor again before reloading."
+            )
         elif not ever:
             cause, ok, advice = "ext_never_registered", False, (
                 "The extension has never connected. Check chrome://extensions for errors or a disabled "
@@ -1832,6 +2166,9 @@ class BrowserBridge:
             "active_tabs": len(active),
             "ever_registered": ever,
             "last_ext_seen_seconds_ago": round(now - self.last_ext_seen, 1) if ever else None,
+            "bridge_started_at": started_at,
+            "bridge_uptime_seconds": round(max(0.0, uptime), 1) if uptime is not None else None,
+            "startup_grace_seconds": BRIDGE_STARTUP_GRACE_SECONDS,
             "clients": per_client,
             # Zero unless something spoke the extension's protocol while the
             # real extension still held the namespace; see _claim_ext_client.

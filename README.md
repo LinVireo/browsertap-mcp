@@ -61,6 +61,7 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - **Page reading** — scan any page into simplified HTML or text, sized for a model's context. Long links are shortened to `#r1` refs and the real URLs come back alongside, so a results page stays both small and navigable.
 - **JavaScript execution** — run arbitrary JS in the page.
 - **Background page input** — `page_click`, `page_type`, `page_press`, and `page_drag` dispatch trusted CDP input events at *viewport* coordinates inside one named tab, without moving your cursor or changing which tab is visible.
+- **Destructive confirmation forms** — For repository deletion, payment, account closure, and similar multi-stage dialogs, re-scan after every stage click because sites may replace the DOM and reuse button ids. Enter exact confirmation text with `page_type` and finish with `page_click`; do not set `.value` or call `.click()` through `execute_js`. Locators skip hidden template matches and require a visible, interactable candidate. The CDP input is trusted in-page (`isTrusted=true`), so OS-level keyboard or mouse is not required.
 - **Waiting and scrolling** — wait for a selector, text, URL, or JS condition; scroll and re-scan long pages. `scan_page` reports how much it left outside the viewport instead of dropping it silently.
 - **Explicit dialog policies** — `alert`, `confirm`, `prompt`, and `beforeunload` each get a per-call `dismiss`/`accept`/`manual` policy and are reported truthfully; `handle_dialog` resolves one that is left open.
 - **Temporary site permissions** — grant notifications, geolocation, camera, or microphone to one origin for 60–600 seconds; the prior setting is restored automatically.
@@ -68,8 +69,39 @@ Then ask your agent *what tabs do I have open?* If the list comes back empty, ru
 - **Authenticated native downloads** — download attachments through Chrome's download manager with the active browser profile's cookies, wait for completion, and receive the verified local path.
 - **Tab-less operation** — extension management, CDP target listing, and tab listing/closing go straight to the extension's service worker, so they work even with zero tabs open.
 - Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk, under `~/Downloads/browsertap` by default. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
-- **Trusted input into a background tab** — `page_click`, `page_type`, `page_press`, and `page_drag` dispatch CDP input events at viewport coordinates in the tab you name, so nothing is raised and your cursor never moves. The OS-level input tools were removed in 0.5.0; this is the input path.
 - **Multi-browser** — Chrome, Edge, and Opera can all connect to one bridge at the same time without clobbering each other's sessions.
+
+## Capability model
+
+BTAP exposes three capability layers so an agent can choose the narrowest
+interface that matches the task:
+
+- **Page capability** — DOM inspection, JavaScript, waiting, scrolling, screenshots, and
+  `page_*` CDP input inside a named tab. This is the default path for ordinary
+  web workflows and does not use the operating system mouse or keyboard.
+- **Browser capability** — the real Chromium profile and its browser-native surface:
+  tabs, downloads, cookies, storage, permissions, bookmarks, extensions,
+  service-worker messaging, and raw CDP. These operations can work without a
+  foreground tab.
+- **Desktop capability** — not a general public surface. The only current opt-in
+  is the lab-only `resolve_leave_dialog` final Enter fallback for a page leave
+  dialog; browser chrome, native file pickers, extension UI, print/save dialogs,
+  and other page-layer gaps remain unsupported. The seven global OS
+  input/screenshot tools removed in 0.5.0 are not coming back as an ordinary
+  web-workflow fallback.
+
+`resolve_leave_dialog` remains a page-scoped, lab-only recovery workflow; its
+final Enter fallback is a restricted exception, not a general desktop surface.
+The live registry is returned by `get_setup_status().capability_registry`, so a
+client can inspect the actual tool inventory instead of guessing from package
+extras or documentation. Each entry also reports whether a target is none,
+optional, or required, whether the operation reads, writes, or may do either,
+and whether desktop opt-in is involved. Every public tool now returns the
+`btap.result.v1` envelope without renaming tools: successful operation data is
+in `data`, explicit legacy failure payloads remain in `legacy`, and
+`error`/`error_code`, `retryable`, `target`, and `diagnostics` provide stable
+machine-readable status. Established operation keys are still projected at
+the top level for compatibility.
 
 ## When to use something else
 
@@ -116,17 +148,20 @@ What is left, and what this project is actually for:
 
 - Python 3.10+
 - Chrome, Edge, or Opera
-- Linux, macOS, or Windows. OS-level input on Linux requires an X11 desktop.
-- A desktop session, not a container. There is no Docker image on purpose: the
-  server attaches to the Chrome *you* are signed into, through an extension a
-  human loads once, so an isolated container has no browser to drive.
+- Linux, macOS, or Windows. The ordinary page, browser, and CDP tools do not
+  require OS-level input; only the lab-only `resolve_leave_dialog` fallback
+  needs a usable desktop session.
+- A running Chromium user session rather than an isolated headless container.
+  There is no Docker image on purpose: the server attaches to the Chrome *you*
+  are signed into, through an extension a human loads once.
 - Claude Code, or any other MCP client
 
 ## Getting started
 
 ### 1. Install
 
-Create a virtual environment and install the recommended desktop feature set:
+Create a virtual environment and install the package. The optional `desktop`
+extra is only needed for the remaining lab-only physical fallback:
 
 **Windows PowerShell**
 
@@ -144,9 +179,10 @@ python -m venv .venv
 ./.venv/bin/browsertap extension-path
 ```
 
-The core install (`pip install browsertap-mcp`) omits OS-level mouse/keyboard and
-desktop capture dependencies. Use it only when those tools are intentionally
-disabled.
+The core install (`pip install browsertap-mcp`) is sufficient for page, browser,
+and CDP tools. It omits `pyautogui`, `mss`, and `pillow`, which are used by the
+lab-only `resolve_leave_dialog` Enter fallback and its screen/input checks. Add
+`[desktop]` only when you need that fallback.
 
 To work on the project rather than only use it, install the checkout as editable
 instead. Same extras; the extension directory and the skills are then read
@@ -287,7 +323,7 @@ Once the extension is loaded and a normal page is open, try:
 
 If tabs come back empty, run `browsertap doctor`.
 
-For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md): it explains which operations stay in a background tab, when a desktop screenshot really means the monitor, and when an image-capable model is useful.
+For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md): it explains which operations stay in a background tab, when foreground activation is needed, how the remaining physical fallback is gated, and when an image-capable model is useful.
 
 ## Configuration
 
@@ -323,17 +359,20 @@ browsertap print-hermes-config  # print a Hermes config snippet
 ```
 
 `doctor` reports the extension path, port state, and connected tab count. It also
-returns a structured verdict: `cause` is one of `healthy`,
+returns a structured verdict: `cause` is one of `healthy`, `starting`,
 `ext_never_registered`, `sw_slept_or_dropped`, `registering`, or
-`bridge_unreachable`, and `advice` is the matching one-line fix. `registering`
-means the extension is connected but no normal `http(s)` content tab is ready.
+`bridge_unreachable`, and `advice` is the matching one-line fix. `starting`
+means the bridge has just started and is waiting for the extension handshake;
+its `action` is `wait_for_extension`, so wait a few seconds and run `doctor`
+again. `registering` means the extension is connected but no normal `http(s)`
+content tab is ready.
 
 It always prints JSON on stdout, including when the configuration itself is
 wrong. An unparseable `BROWSERTAP_BRIDGE_PORT` or a `BROWSERTAP_BRIDGE_HOST`
 that does not resolve fails before any bridge call, and is reported as
 `status: "initialization_failed"` with `action: "check_config"` plus the
 offending `error` and `error_type` — not as a traceback. Exit status is `0` only
-when `status` is `healthy`.
+when `status` is `healthy` or `starting`.
 
 BTAP creates `~/.browsertap/bridge-token` on first use and every bridge/MCP
 process reads that same file. Closing browsers or editors does not rotate it. Removing
@@ -402,7 +441,7 @@ The other two will not help, so read the field rather than doing all three.
 Three layers:
 
 1. **Chrome extension** (MV3) — injected into real pages, reaches `tabs`, `cookies`, `debugger`, and `management` through Chrome APIs.
-2. **BrowserBridge** — a local daemon on `127.0.0.1:18765` (WebSocket) and `:18766` (HTTP). It owns the extension connections, tracks sessions, and relays results. It runs detached from any MCP instance, and the MCP server starts it on demand with no console window. Sessions are keyed `clientId:tabId`, so several browsers and profiles coexist.
+2. **BrowserBridge** — a local daemon on `127.0.0.1:18765` (WebSocket) and `:18766` (HTTP). It owns the extension connections, tracks sessions, and relays results. It runs detached from any MCP instance, and the MCP server starts it on demand with no console window. A `session_id` is the current `clientId:tabId` handle, not a permanent tab identity; connected rows may also carry `tab_identity`. Several browsers and profiles coexist.
 3. **MCP server** — exposes the whole thing as MCP tools.
 
 Two channels reach the browser: a per-tab session channel, and a direct channel to the extension's service worker. The second one is why some tools keep working when every tab is closed.
@@ -429,7 +468,7 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 Classify every tab before using it. A **U (user) tab** existed in the first `list_tabs` snapshot; do not close it or navigate it by default. An **A (agent) tab** is created by this task's `open_new_tab`; save its `session_id`, `generation`, and `owner_id`, pass that explicit session to every operation, and call `close_tabs(..., owner_id=...)` in cleanup. A **B (borrowed) tab** is a temporarily used U tab; record its `original_url`, restore that URL when the tab still exists, and never close it.
 
-Decision order: run `list_tabs`; borrow an existing match only for read-only/light work; open an A tab for navigation, forms, or other state changes; open an A tab when no match exists; finally close only A tabs. Never register the initial tab snapshot as owned, close a U/B tab, depend on the shared default session, reuse an old native tab id, omit generation-aware cleanup, or leak an A tab. Separate concurrent tasks should use separate A tabs instead of competing for the same U tab.
+Decision order: run `list_tabs`; borrow an existing match only for read-only/light work; open an A tab for searches, filters, sorting, pagination, scrolling, expand/collapse, navigation, forms, or other actions that change the page view or state; open an A tab when no match exists; finally close only A tabs. Never register the initial tab snapshot as owned, close a U/B tab, depend on the shared default session, reuse an old native tab id, omit generation-aware cleanup, or leak an A tab. Separate concurrent tasks should use separate A tabs instead of competing for the same U tab.
 
 ### Structured statuses and recovery fields
 
@@ -476,7 +515,7 @@ permission and loopback threat model.
 
 ## Tools
 
-Most tools accept an optional `session_id` to target one specific tab; omitting it uses the current target. Pass it explicitly for anything that changes state — the shared default is a single value every task on this bridge sees, and another task retargeting it is exactly how a click lands on the wrong page. Session ids look like `chrome_a1b2c3:456`; pass them verbatim and never split them. Tools marked **no tab needed** talk to the extension's service worker and work with zero tabs open.
+Most tools accept an optional `session_id` to target one specific tab; omitting it uses the current target. Pass it explicitly for anything that changes state — the shared default is a single value every task on this bridge sees, and another task retargeting it is exactly how a click lands on the wrong page. Session ids look like `chrome_a1b2c3:456`; they are current handles, so pass them verbatim and never split them. If Chrome reports an evidence-backed replacement for that same tab, BTAP returns `rebound_from`, `replacement_session_id`, and `tab_identity`; otherwise an explicit stale handle is refused. Tools marked **no tab needed** talk to the extension's service worker and work with zero tabs open.
 
 <details>
 <summary><b>Tabs and navigation</b></summary>
@@ -496,16 +535,16 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
   - `url` (string), `session_id` (string, optional), `timeout` (number, optional): default `15`, `beforeunload` (string, optional): default `dismiss`, `intent_leave` (boolean, optional): `false` forces page preservation
 - **download_file** — download an HTTP(S) URL through Chrome's native download manager, using that browser profile's cookies and authenticated session. It waits by default and returns `status="completed"` plus a verified absolute `path`; interrupted downloads return `failed`, while a timeout or `wait=false` returns `in_progress` with `download_id`. An explicit `session_id` must still be live and is never replaced with another profile. Use this for attachments instead of page `fetch`.
   - `url` (string), `filename` (string, optional): relative download name, `directory` (string, optional): arbitrary absolute destination directory; creates parents, `wait` (boolean, optional): default `true`; `directory` requires `true`, `timeout` (number, optional): default 60 seconds, maximum 1800, `session_id` (string, optional): selects the browser profile, `overwrite` (boolean, optional): default `false`; an existing final destination raises an error unless explicitly `true`. If a directory download times out, `directory_applied=false`: the move is no longer tracked and Chrome may finish into its default download directory.
-- **open_new_tab** — open a background tab by default with a unique `operation_id` and wait a bounded time for exact session/generation registration; pass `active=true` only when foreground work is genuinely required. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates repeated requests with the same operation id. Ownership is registered only from a completed record containing the exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only says whether session-scoped tools can be used immediately. A pre-create registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after create dispatch, an unresolved ACK/reconciliation returns `status="unknown",may_have_created=true,retry_safe=false`. Keep the returned `owner_id` capability and use it only for that task's cleanup. For an unresolved dispatched create, call `open_new_tab` again with the same `operation_id`, the returned `client_id`, and the same `owner_id`; that recovery call only reads the durable operation record and never replays `tabs/create`. If the record is not found, do not guess by URL or issue a replacement create.
+- **open_new_tab** — open a background tab by default with a unique `operation_id` and wait a bounded time for exact session/generation registration; pass `active=true` only when foreground work is genuinely required. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates repeated requests with the same operation id. Ownership is registered only from a completed record containing the exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only says whether session-scoped tools can be used immediately. A pre-create registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after create dispatch, an unresolved ACK/reconciliation returns `status="unknown",may_have_created=true,retry_safe=false`. Keep the returned `owner_id` capability and use it only for that task's cleanup. For an unresolved dispatched create, call `open_new_tab` again with the same `operation_id`, the returned `client_id`, and the same `owner_id`; that recovery call only reads the durable operation record and never replays `tabs/create`. If the record is not found, do not guess by URL or issue a replacement create. Page JavaScript such as `window.open()` or anchor clicks may be silently blocked without a user gesture; use this native tab API when a new tab must be reliable.
   - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner), `operation_id` (optional recovery handle), `client_id` (optional browser client selector for recovery)
-- **close_tabs** — *(no tab needed)* accept native numeric tab ids or full `client:tabId` session ids, including `chrome-extension://` tabs. The default `only_if_agent_owned=true` requires the `owner_id` returned by `open_new_tab` and verifies the current lifecycle generation before closing, so pre-existing user tabs and another agent's tabs are refused. If the user already closed an owned tab, cleanup returns `status=already_gone, closed_by=user` without reusing its native id. An actual owned close returns `closed_by=agent`; an explicit unowned/operator override returns `closed_by=none` so it is not counted as task-owned cleanup. Set `only_if_agent_owned=false` only when the operator explicitly asked to close an unowned/user tab.
+- **close_tabs** — *(no tab needed)* accept native numeric tab ids or full `client:tabId` session ids, including `chrome-extension://` tabs. The default `only_if_agent_owned=true` requires the `owner_id` returned by `open_new_tab` and verifies the current lifecycle generation before closing, so pre-existing user tabs and another agent's tabs are refused. If the user already closed an owned tab, cleanup returns `status=already_gone, closed_by=user` without reusing its native id. An actual owned close returns `closed_by=agent`; an explicit unowned/operator override returns `closed_by=none` so it is not counted as task-owned cleanup. If `already_gone` is returned but a page with the same work is still visible, call `list_all_tabs` and verify URL/title before deciding whether a new session/generation should be closed; BTAP never auto-transfers ownership by URL. A Chrome `tabs.onReplaced` identity mapping is safe and also migrates the ownership claim. Set `only_if_agent_owned=false` only when the operator explicitly asked to close an unowned/user tab.
   - `tab_id`, `session_id` (optional browser constraint), `owner_id` (required by the safe default), `only_if_agent_owned` (boolean, default `true`)
 </details>
 
 <details>
 <summary><b>Page reading and execution</b></summary>
 
-- **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. This tool does not modify the page -- no attribute, no id, no `window` global -- so a scan is invisible to the page's own scripts.
+- **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. A background tab may report viewport height zero; ordinary DOM/text/API work still continues there, and only visual/layout fidelity requires explicit `activate_tab`. When the page can be probed, `render_state`/`content_ready` distinguish real content from a loading, hydrating, or shell-only SPA; retry or use `wait_for` before treating an empty shell as final content. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. This tool does not modify the page -- no attribute, no id, no `window` global -- so a scan is invisible to the page's own scripts.
   - `session_id` (string, optional), `text_only` (boolean, optional): default `false`, `cutlist` (boolean, optional): default `true`; collapse repetitive lists, `maxchars` (integer, optional): default `35000`, `instruction` (string, optional), `extra_js` (string, optional), `timeout` (number, optional): default `15`
 - **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. Polling happens inside the page, so a 30s wait still costs one bridge roundtrip. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input.
   - `selector` (string/object, optional): CSS or structured locator, `text` (string, optional): substring of body text, `url_pattern` (string, optional): regex on the URL, `js` (string, optional): expression to become truthy, `gone` (boolean, optional): wait for the condition to stop holding; default `false`, `timeout` (number, optional): default `15`, `session_id` (string, optional)
@@ -514,6 +553,7 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
 - **scroll_page** — scroll and report the new position, so a long page can be read in passes.
   - `to` (string, optional): default `bottom`; also accepts `top`, a pixel offset, or a CSS selector to bring into view, `session_id` (string, optional), `timeout` (number, optional): default `15`
 - **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the shared default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
+  - A `Cannot access contents of the page` error must be classified before retrying: if the script attempted `window.open` or navigation, use `open_new_tab` (Chrome may block it without a user gesture); if injection into the current tab is forbidden, choose a normal scriptable `http/https` tab or the supported CDP route. Do not treat the message as proof that reading the current page failed.
   - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`, `wait` (boolean, optional): default `true`
 - **get_execute_js_result** — read or briefly wait for one `execute_js` operation by `operation_id`. This is a read-only claim: it never replays the script. A completed result is consumed once; pending and unknown/expired handles return explicit statuses. Results are retained for 10 minutes. Large values use the same lossless `result_file` metadata as `execute_js`.
   - `operation_id` (string), `timeout` (number, optional): default `0`, range `0`–`120`
@@ -542,11 +582,11 @@ Trusted CDP input events delivered to one named tab. They do **not** activate th
 
 Pass `session_id` explicitly: the call binds the driver to that tab for its duration and restores the shared default afterwards, so a directed call cannot leave another task's target moved. A `session_id` naming a dead tab is refused rather than redirected to a live one.
 
-`selector` remains backward-compatible with CSS strings and also accepts a locator object with exactly one primary key: `css`, `role` (optional `name`), `text`, or `label`. `exact` applies to role/name or text matching; `frame` walks one or more same-origin iframe locators; `shadow` walks open Shadow DOM hosts. Zero matches return `not_found`, multiple matches return `ambiguous`, and cross-origin or closed roots are reported without dispatching input.
+`selector` remains backward-compatible with CSS strings and also accepts a locator object with exactly one primary key: `css`, `role` (optional `name`), `text`, or `label`. Inside a locator object, `selector` is accepted as a compatibility alias for the `css` primary key. `exact` applies to role/name or text matching; `frame` walks one or more same-origin iframe locators; `shadow` walks open Shadow DOM hosts. A click-only frame-relative point can use `{"frame": [...], "x": 20, "y": 30}`; `x`/`y` are CSS coordinates in the final same-origin frame's viewport and are converted to top-document coordinates before dispatch. Zero matches return `not_found`, multiple matches return `ambiguous`, and cross-origin or closed roots are reported without dispatching input. Selector clicks that cross an iframe chain with a non-identity CSS transform return `unsupported_frame_transform` for the same reason; query/type paths remain available.
 
-- **page_click** — click a CSS/structured `selector` or viewport coordinates. Exactly one targeting mode: either `selector`, or both `x` and `y`. With a selector, each omitted offset axis uses the element centre; a supplied `offset_x` or `offset_y` is measured from the element's top-left corner on that axis. Missing, ambiguous, non-interactable, cross-origin-frame, and closed-shadow targets return structured status without input dispatch. In selector mode the point is also hit-tested in the page before dispatch: a target below the fold is scrolled into view (`scrolled_into_view`), one whose pixel belongs to something else returns `obscured` with `occluded_by` naming the overlay, and one still off screen returns `outside_viewport` — in both cases nothing is clicked, because a dispatched click would have landed on the other element and reported success. A verified click carries `hit_verified: true`. Coordinate mode is not hit-tested: coordinates name a pixel, not an element — and a pixel read off `capture_page_screenshot` is a *device* pixel, so it needs dividing by `devicePixelRatio` first. Challenge replies keep the bounded `challenge_detected`/`attempts`/`challenge_stalled` behavior.
+- **page_click** — click a CSS/structured `selector` or viewport coordinates. Exactly one targeting mode: either `selector`, or both `x` and `y`. With a selector, each omitted offset axis uses the element centre; a supplied `offset_x` or `offset_y` is measured from the element's top-left corner on that axis. A structured selector of the form `{"frame": [...], "x": 20, "y": 30}` is a frame-relative point: it enters the listed same-origin frames, adds their client offsets, and dispatches at the resulting top-document CSS coordinates. Point mode is intentionally not hit-tested because the caller named a pixel, not an element. Missing, ambiguous, non-interactable, cross-origin-frame, closed-shadow, and CSS-transformed-frame targets return structured status without input dispatch; the transformed-frame status is `unsupported_frame_transform`. In selector mode the point is also hit-tested in the page before dispatch: a target below the fold is scrolled into view (`scrolled_into_view`), one whose pixel belongs to something else returns `obscured` with `occluded_by` naming the overlay, and one still off screen returns `outside_viewport` — in both cases nothing is clicked, because a dispatched click would have landed on the other element and reported success. A verified click carries `hit_verified: true`. Coordinate mode is not hit-tested: coordinates name a pixel, not an element — and a pixel read off `capture_page_screenshot` is a *device* pixel, so it needs dividing by `devicePixelRatio` first. Challenge replies keep the bounded `challenge_detected`/`attempts`/`challenge_stalled` behavior.
   - `selector` (string/object, optional), `x` (number, optional), `y` (number, optional), `offset_x` (number, optional), `offset_y` (number, optional), `button` (string, optional): default `left`, `clicks` (integer, optional): default `1`, `session_id` (string, optional), `timeout` (number, optional): default `15`
-- **page_type** — insert text into a CSS/structured-locator field, or into whatever already has focus when `selector` is omitted. Xterm.js containers/descendants retarget to `.xterm-helper-textarea`. Missing, ambiguous, read-only, or otherwise unusable targets return a structured status without dispatching text or keys. `clear=true` selects the existing value first; `submit_key` sends one key afterwards.
+- **page_type** — insert text into a CSS/structured-locator field, or into whatever already has focus when `selector` is omitted. Xterm.js containers/descendants retarget to `.xterm-helper-textarea`. Missing, ambiguous, read-only, or otherwise unusable targets return a structured status without dispatching text or keys; invalid legacy CSS returns `status="invalid_selector"` instead of a raw `SyntaxError`. Successful and failed target resolution includes a redacted `active_element` descriptor and `focus_confirmed` when focus was attempted, so omitted-selector input is auditable. `clear=true` selects the existing value first; `submit_key` sends one key afterwards.
   - `text` (string), `selector` (string/object, optional), `clear` (boolean, optional): default `false`, `submit_key` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `15`
 - **page_press** — press a key or a comma-separated modifier chord in the tab, e.g. `enter` or `ctrl,shift,k`.
   - `keys_csv` (string), `session_id` (string, optional), `timeout` (number, optional): default `15`

@@ -766,6 +766,91 @@ def undelivered_retry_split(left):
 # is routinely longer than the whole rest of the reply.
 _ERROR_NOISE = frozenset({'stack', 'stackTrace'})
 
+_PAGE_ACCESS_ERROR_PATTERNS = (
+    "cannot access contents of the page",
+    "extensions gallery cannot be scripted",
+    "cannot access a chrome:// url",
+    "cannot access contents of a chrome-extension",
+)
+_PAGE_POPUP_ERROR_PATTERNS = ("popup", "user gesture", "not allowed to open")
+
+
+def _execution_error_metadata(exc, script):
+    """Extract actionable page-execution facts without inventing a cause."""
+    detail = exc.args[0] if exc.args else str(exc)
+    if isinstance(detail, dict):
+        nested = detail.get('error')
+        source = nested if isinstance(nested, dict) else detail
+        message = source.get('message')
+        if not isinstance(message, str) or not message:
+            message = nested if isinstance(nested, str) else detail.get('error')
+        message = str(message or detail)
+    else:
+        source = {}
+        message = str(detail)
+    container = detail if isinstance(detail, dict) else {}
+    lower = message.lower()
+
+    def field(name):
+        if name in container:
+            return container[name]
+        return source.get(name)
+
+    dispatched = field('dispatched')
+    may_have_executed = field('may_have_executed')
+    retryable = field('retryable')
+    code = getattr(exc, 'error_code', None)
+    if not code or code == 'internal_error':
+        code = container.get('error_code') or source.get('error_code')
+    if not code:
+        code = container.get('code') or source.get('code')
+    access_denied = any(pattern in lower for pattern in _PAGE_ACCESS_ERROR_PATTERNS)
+    if not code:
+        code = 'page_access_denied' if access_denied else 'page_execution_failed'
+
+    diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+    if dispatched is not None:
+        diagnostics['dispatched'] = bool(dispatched)
+    if may_have_executed is not None:
+        diagnostics['may_have_executed'] = bool(may_have_executed)
+    if retryable is not None:
+        retry_safe = bool(retryable)
+        diagnostics['retryable'] = retry_safe
+    elif hasattr(exc, 'retry_safe'):
+        retry_safe = bool(exc.retry_safe)
+    else:
+        retry_safe = dispatched is False and may_have_executed is False and not access_denied
+    diagnostics.setdefault('retry_safe', retry_safe)
+
+    hint = None
+    if access_denied:
+        diagnostics.setdefault('access_kind', 'script_injection')
+        diagnostics.setdefault(
+            'next_action', 'list_tabs_then_retry_or_use_supported_cdp'
+        )
+        hint = (
+            'The target page refused script injection. Run list_tabs and retry on a '
+            'scriptable page or use the supported CDP path. If the intent was to '
+            'open a new tab or navigate, use open_new_tab instead of window.open.'
+        )
+    if isinstance(script, str) and re.search(
+        r"(?:window\.open\s*\(|(?:window\.)?location(?:\.assign|\.replace)?\s*=|target\s*=\s*['\"]_blank)",
+        script,
+        re.IGNORECASE,
+    ):
+        diagnostics['script_intent'] = 'new_tab_or_navigation'
+        if any(pattern in lower for pattern in _PAGE_POPUP_ERROR_PATTERNS):
+            diagnostics['policy_constraint'] = 'popup_or_user_gesture'
+            diagnostics['next_action'] = 'open_new_tab'
+            hint = (
+                'The script attempted a new tab or navigation. Page window.open is '
+                'subject to popup/user-gesture policy; use open_new_tab for a '
+                'reliable browser operation.'
+            )
+        elif hint is None and access_denied:
+            diagnostics['next_action'] = 'open_new_tab_or_choose_scriptable_tab'
+    return str(code), retry_safe, diagnostics, hint
+
 
 def _error_text(exc):
     """Flatten whatever the driver raised into one line an agent can read.
@@ -846,6 +931,10 @@ def execute_js_rich(
     response = {}
     blocked_dialog = False
     retried = False
+    error_code = None
+    error_retryable = False
+    error_diagnostics = {}
+    error_hint = None
     try:
         logger.debug("Executing browser script (%d chars)", len(script))
         # Hold back part of the budget so the undelivered retry below is
@@ -888,6 +977,12 @@ def execute_js_rich(
             time.sleep(min(1.0, _remaining(deadline)))
     except Exception as e:
         error_msg = _error_text(e)
+        (
+            error_code,
+            error_retryable,
+            error_diagnostics,
+            error_hint,
+        ) = _execution_error_metadata(e, script)
         logger.warning("Browser script execution failed: %s", error_msg)
 
     etab = response.get('executed_tab_id')
@@ -907,11 +1002,24 @@ def execute_js_rich(
         "js_return": result,
         "tab_id": tab_id_field,
     }
+    if error_code:
+        rr['error_code'] = error_code
+        rr['retryable'] = bool(error_retryable)
+        rr['retry_safe'] = bool(error_retryable)
+    if error_diagnostics:
+        rr['diagnostics'] = error_diagnostics
+    if error_hint:
+        rr['hint'] = error_hint
     if reloaded: rr['reloaded'] = reloaded
     if response.get('switched_session'):
         rr['switched_session'] = response['switched_session']
         rr['switched_from'] = response.get('switched_from')
         rr['switch_note'] = "The original session disconnected, so this ran in another session from the same browser. Verify with list_tabs and switch_tab if needed."
+    if response.get('rebound_from'):
+        rr['rebound_from'] = response['rebound_from']
+        rr['replacement_session_id'] = response.get('replacement_session_id')
+        rr['tab_identity'] = response.get('tab_identity')
+        rr['rebind_reason'] = response.get('rebind_reason', 'chrome.tabs.onReplaced')
     kind = no_response_kind(response)
     if kind == 'navigated' and not error_msg:
         rr['status'] = 'navigated'

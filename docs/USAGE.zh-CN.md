@@ -7,15 +7,18 @@
 参数以根目录的 [README 中文版](../README.zh-CN.md)为权威参考；本文档仅说明操作流程和
 边界选择。
 
+所有公开工具都返回 `btap.result.v1` 结果 envelope。成功时从 `data` 读取操作结果，失败时检查
+`error` / `error_code` / `retryable`，并结合 `target` / `diagnostics` 判断是否可以安全重试。
+为保持兼容，既有操作字段仍可能投影在顶层。
+
 ## 1. 操作层级
 
-BTAP 的操作分为三个层级：
+BTAP 的操作分为两个层级：
 
 | 层级 | 操作对象 | 对可见界面的影响 |
 |---|---|---|
 | 后台标签页操作 | 通过 CDP 或扩展操作指定标签页 | 不改变。`switch_tab` 仅修改后续调用目标 |
 | 前台标签页操作 | 可见标签页及其浏览器窗口 | 会改变。仅由 `activate_tab` 或 `switch_tab(activate=true)` 显式触发 |
-| 桌面级操作 *(已废弃，v0.5.0 移除)* | 操作系统屏幕、真实鼠标和键盘 | 会改变。物理输入作用于屏幕上实际可见的对象——这正是要移除它的原因，见 §5 |
 
 默认采用后台标签页操作。`switch_tab` 选定标签页后，该标签页不会自动变为可见、获得窗口
 焦点或成为浏览器当前活动页。
@@ -43,6 +46,10 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 
 需要导航、填写表单或执行其他明显状态变更时，应创建 Agent 自有标签页，不应修改用户标签页。
 
+如果 `scan_page` 返回 `render_state` 为 `loading`、`hydrating` 或 `shell_only`，或
+`content_ready=false`，就还不能确认页面已准备好。先重试 `scan_page` 或使用 `wait_for`，
+不要把空壳结果当成页面确实为空。
+
 ## 3. 状态变更与标签页所有权
 
 导航、表单、下载等状态变更操作通常使用 `open_new_tab` 创建工作标签页。新标签页默认在后台
@@ -55,6 +62,11 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 操作期间应保持同一 `session_id`，并在可行时持续使用后台方式。任务结束后，只关闭本任务
 创建且 `owner_id` 匹配的标签页。若用户已提前关闭该标签页，清理结果为 `already_gone`；不得
 为完成清理而重新创建标签页或复用旧标签页 ID。
+
+Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `rebound_from`、
+`replacement_session_id` 和 `tab_identity`。此时应采用返回的新 session 句柄，并在副作用操作前
+重新确认页面；没有这些字段的普通过期显式 session 仍会被拒绝，应通过 `list_tabs` / `switch_tab`
+重新选定目标。
 
 ## 4. 截图与模型能力
 
@@ -125,6 +137,9 @@ browsertap doctor
 `browsertap bridge --restart`，该操作不会改变浏览器前台状态。未打包扩展的源文件发生
 变化后，仍需在 `chrome://extensions` 或 Edge、Opera 对应页面中手动执行 **Reload**。工具
 schema 变化后，需重启 MCP 会话或客户端以重新读取工具描述。
+
+刚启动时，`get_setup_status` 可能返回 `status="starting"`、`action="wait_for_extension"`；
+等待扩展握手后再次运行诊断即可。
 
 若将 `BROWSERTAP_BRIDGE_PORT` 从 `18765` 改为其他值，还需在扩展的 Service Worker 控制台
 告知一次相同的 WebSocket 端口（见[故障排查](TROUBLESHOOTING.zh-CN.md)）。Python 环境变量
