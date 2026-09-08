@@ -35,6 +35,80 @@ def test_switch_session_rejects_ambiguous_url_matches(monkeypatch):
     assert driver.default_session_id == "client:old"
 
 
+def test_switch_session_accepts_bridge_confirmed_replacement(monkeypatch):
+    driver = SimpleNamespace(default_session_id="client:old")
+    driver.resolve_session_target = lambda sid: {
+        "session_id": "client:new",
+        "rebound_from": sid,
+        "replacement_session_id": "client:new",
+        "tab_identity": "tab-a",
+        "reason": "chrome.tabs.onReplaced",
+    } if sid == "client:old" else None
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(
+        S,
+        "active_sessions",
+        lambda *args, **kwargs: [{"id": "client:new", "tab_identity": "tab-a"}],
+    )
+
+    assert S.switch_session(session_id="client:old") == "client:new"
+    assert driver.default_session_id == "client:new"
+
+
+def test_execute_js_uses_replacement_for_policy_but_reports_rebound(monkeypatch):
+    driver = SimpleNamespace(default_session_id="client:11", calls=[])
+    old_sid = "client:11"
+    new_sid = "client:12"
+    driver.resolve_session_target = lambda sid: {
+        "session_id": new_sid,
+        "rebound_from": old_sid,
+        "replacement_session_id": new_sid,
+        "tab_identity": "tab-a",
+        "reason": "chrome.tabs.onReplaced",
+    } if sid == old_sid else {"session_id": str(sid)}
+
+    def ext_cmd(payload, *, client_id=None, timeout=15.0):
+        driver.calls.append((payload, client_id))
+        if payload["cmd"] == "set_dialog_policy":
+            return {"data": {"token": "scope-ready"}}
+        return {"data": {"ok": True}}
+
+    driver.ext_cmd = ext_cmd
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(
+        S,
+        "ensure_sessions",
+        lambda *args, **kwargs: [{"id": new_sid, "url": "https://example.test/"}],
+    )
+    execute_calls = []
+
+    def execute(*args, **kwargs):
+        execute_calls.append(kwargs)
+        return {
+            "status": "success",
+            "js_return": 2,
+            "tab_id": 12,
+            "rebound_from": old_sid,
+            "replacement_session_id": new_sid,
+            "tab_identity": "tab-a",
+            "rebind_reason": "chrome.tabs.onReplaced",
+        }
+
+    monkeypatch.setattr(S.simphtml, "execute_js_rich", execute)
+
+    result = S.execute_js("1 + 1", session_id=old_sid, no_monitor=True)
+
+    assert result["status"] == "success"
+    assert [call[0]["cmd"] for call in driver.calls] == [
+        "set_dialog_policy",
+        "clear_dialog_policy",
+    ]
+    assert [call[0]["tabId"] for call in driver.calls] == [12, 12]
+    assert execute_calls[0]["session_id"] == old_sid
+    assert result["tab_id"] == 12
+    assert result["rebound_from"] == old_sid
+
+
 def test_switch_session_browser_url_pattern_requires_a_match(monkeypatch):
     driver = SimpleNamespace(default_session_id="client:old")
     monkeypatch.setattr(S, "require_driver", lambda: driver)
@@ -72,7 +146,7 @@ def _install_page_driver(monkeypatch, *, default_session_id="client:old"):
 
 def _monotonic(monkeypatch, values):
     timeline = iter(values)
-    monkeypatch.setattr(S.time, "monotonic", lambda: next(timeline))
+    monkeypatch.setattr(S.time, "monotonic", lambda: next(timeline, values[-1]))
 
 
 @pytest.mark.parametrize("error", [PermissionError("denied"), OSError("read-only")])
@@ -215,7 +289,9 @@ def test_scan_page_returns_links_and_background_visibility_hint(monkeypatch):
     assert result["status"] == "success"
     assert result["links"] == {"r1": "https://example.test/long/path"}
     assert result["offscreen"]["viewport_height"] == 0
-    assert "activate_tab" in result["hint"]
+    assert "text_only=true" in result["hint"]
+    assert "execute_js" in result["hint"]
+    assert "Only call activate_tab when" in result["hint"]
     assert driver.default_session_id == "client:old"
 
 
@@ -236,6 +312,29 @@ def test_scan_page_text_only_pins_implicit_session_and_reports_scrolling_hint(mo
     assert "links" not in result
     assert seen["link_refs"] is None
     assert driver.default_session_id == "client:1"
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected_state", "expected_ready"),
+    [
+        ({"ready_state": "complete", "has_body": True, "text_chars": 0, "html_chars": 317000, "loading": False}, "shell_only", False),
+        ({"ready_state": "complete", "has_body": True, "text_chars": 8, "html_chars": 317000, "loading": False}, "shell_only", False),
+        ({"ready_state": "complete", "has_body": True, "text_chars": 4, "html_chars": 20, "loading": True}, "hydrating", False),
+        ({"ready_state": "complete", "has_body": True, "text_chars": 42, "html_chars": 120, "loading": False}, "content", True),
+    ],
+)
+def test_scan_page_reports_spa_render_readiness(monkeypatch, probe, expected_state, expected_ready):
+    driver = _install_page_driver(monkeypatch)
+    monkeypatch.setattr(S.simphtml, "get_html", lambda *_args, **_kwargs: "<main></main>")
+    driver.execute_js = lambda *_args, **_kwargs: {"data": probe}
+
+    result = S.scan_page(session_id="client:1")
+
+    assert result["render_state"] == expected_state
+    assert result["content_ready"] is expected_ready
+    assert result["render"]["html_chars"] == probe["html_chars"]
+    if not expected_ready:
+        assert "Retry scan_page" in result["hint"]
 
 
 def test_scan_page_classifies_page_unavailable_and_restores_target(monkeypatch):
@@ -279,7 +378,7 @@ def test_wait_for_condition_success_paths(monkeypatch, condition, gone, needle):
     assert result["status"] == "success"
     assert result["condition"].endswith(" gone") is gone
     assert needle in scripts[0][0]
-    assert scripts[0][1]["session_id"] is None
+    assert scripts[0][1]["session_id"] == "client:1"
     assert driver.default_session_id == "client:old"
 
 
@@ -319,12 +418,14 @@ def test_wait_for_structured_locator_preserves_timeout_details(monkeypatch):
 
 
 def test_wait_for_retries_page_unload_then_succeeds(monkeypatch):
-    _install_page_driver(monkeypatch)
-    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3])
+    driver = _install_page_driver(monkeypatch)
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3, 0.3])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     responses = iter([RuntimeError("page unloaded"), {"data": {"met": True, "url": "u"}}])
+    sessions = []
 
-    def exec_js(*_args, **_kwargs):
+    def exec_js(*_args, **kwargs):
+        sessions.append(kwargs["session_id"])
         value = next(responses)
         if isinstance(value, Exception):
             raise value
@@ -332,12 +433,14 @@ def test_wait_for_retries_page_unload_then_succeeds(monkeypatch):
 
     monkeypatch.setattr(S, "exec_js", exec_js)
 
-    assert S.wait_for(text="ready", timeout=1)["status"] == "success"
+    assert S.wait_for(text="ready", timeout=1, session_id="client:1")["status"] == "success"
+    assert sessions == ["client:1", "client:1"]
+    assert driver.default_session_id == "client:old"
 
 
 def test_wait_for_timeout_reports_repeated_page_failure(monkeypatch):
     _install_page_driver(monkeypatch)
-    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0])
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         S,
@@ -350,6 +453,67 @@ def test_wait_for_timeout_reports_repeated_page_failure(monkeypatch):
     assert result["status"] == "timeout"
     assert "page unavailable" in result["error"]
     assert "hint" in result
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_wait_for_rejects_non_positive_or_non_finite_timeout(timeout):
+    with pytest.raises(ValueError, match="finite.*greater than zero"):
+        S.wait_for(text="ready", timeout=timeout)
+
+
+def test_wait_for_retry_sleep_and_bridge_budget_stay_inside_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    sleeps = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    def exec_js(_script, **kwargs):
+        calls.append(kwargs["timeout"])
+        clock.now += 0.8
+        raise RuntimeError("page unavailable")
+
+    monkeypatch.setattr(S.time, "sleep", sleep)
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for(text="ready", timeout=1.0)
+
+    assert result["status"] == "timeout"
+    assert calls == [pytest.approx(1.0)]
+    assert sleeps == [pytest.approx(0.2)]
+    assert clock.now == pytest.approx(1.0)
+
+
+def test_wait_for_caps_a_lost_page_chunk_and_retries_within_the_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    scripts = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(S.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
+
+    def exec_js(script, **kwargs):
+        scripts.append(script)
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            clock.now += kwargs["timeout"]
+            raise RuntimeError("page unloaded after ACK")
+        return {"data": {"met": True, "url": "https://example.test/"}}
+
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for(text="ready", timeout=30)
+
+    assert result["status"] == "success"
+    assert calls == [pytest.approx(6.0), pytest.approx(6.0)]
+    assert "new Promise" not in scripts[0]
+    assert clock.now == pytest.approx(6.3)
 
 
 def test_wait_for_url_rejects_empty_pattern():
@@ -384,8 +548,8 @@ def test_wait_for_url_success_and_ready_policy(monkeypatch, wait_ready):
     _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.1])
     scripts = []
 
-    def exec_js(script, **_kwargs):
-        scripts.append(script)
+    def exec_js(script, **kwargs):
+        scripts.append((script, kwargs))
         return {
             "data": json.dumps(
                 {"met": True, "url": "https://example.test/done", "title": "Done", "ready": "complete"}
@@ -398,8 +562,70 @@ def test_wait_for_url_success_and_ready_policy(monkeypatch, wait_ready):
 
     assert result["status"] == "success"
     assert result["waited_for_ready"] is wait_ready
-    assert ("document.readyState === 'complete'" in scripts[0]) is wait_ready
+    assert ("document.readyState === 'complete'" in scripts[0][0]) is wait_ready
+    assert scripts[0][1]["session_id"] == "client:1"
     assert driver.default_session_id == "client:old"
+
+
+def test_wait_for_url_retries_page_unload_on_the_explicit_session(monkeypatch):
+    driver = _install_page_driver(monkeypatch)
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 0.2, 0.3, 0.3])
+    monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
+    responses = iter(
+        [
+            RuntimeError("page unloaded"),
+            {"data": {"met": True, "url": "https://example.test/done", "ready": "complete"}},
+        ]
+    )
+    sessions = []
+
+    def exec_js(*_args, **kwargs):
+        sessions.append(kwargs["session_id"])
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for_url("example.test/done", timeout=1, session_id="client:1")
+
+    assert result["status"] == "success"
+    assert sessions == ["client:1", "client:1"]
+    assert driver.default_session_id == "client:old"
+
+
+def test_wait_for_url_caps_a_lost_page_chunk_and_retries_within_the_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    scripts = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(S.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
+
+    def exec_js(script, **kwargs):
+        scripts.append(script)
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            clock.now += kwargs["timeout"]
+            raise RuntimeError("page unloaded after ACK")
+        return {
+            "data": {
+                "met": True,
+                "url": "https://example.test/done",
+                "ready": "complete",
+            }
+        }
+
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for_url("example.test/done", timeout=30)
+
+    assert result["status"] == "success"
+    assert calls == [pytest.approx(6.0), pytest.approx(6.0)]
+    assert "new Promise" not in scripts[0]
+    assert clock.now == pytest.approx(6.3)
 
 
 @pytest.mark.parametrize(
@@ -424,7 +650,7 @@ def test_wait_for_url_timeout_hints(monkeypatch, info, expected_hint):
 
 def test_wait_for_url_retries_unload_and_reports_last_error(monkeypatch):
     _install_page_driver(monkeypatch)
-    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0])
+    _monotonic(monkeypatch, [0.0, 0.0, 0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         S,
@@ -436,6 +662,40 @@ def test_wait_for_url_retries_unload_and_reports_last_error(monkeypatch):
 
     assert result["status"] == "timeout"
     assert "navigation blink" in result["error"]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_wait_for_url_rejects_non_positive_or_non_finite_timeout(timeout):
+    with pytest.raises(ValueError, match="finite.*greater than zero"):
+        S.wait_for_url("target", timeout=timeout)
+
+
+def test_wait_for_url_retry_sleep_and_bridge_budget_stay_inside_total_deadline(monkeypatch):
+    _install_page_driver(monkeypatch)
+    clock = SimpleNamespace(now=0.0)
+    calls = []
+    sleeps = []
+
+    monkeypatch.setattr(S.time, "monotonic", lambda: clock.now)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    def exec_js(_script, **kwargs):
+        calls.append(kwargs["timeout"])
+        clock.now += 0.8
+        raise RuntimeError("navigation blink")
+
+    monkeypatch.setattr(S.time, "sleep", sleep)
+    monkeypatch.setattr(S, "exec_js", exec_js)
+
+    result = S.wait_for_url("target", timeout=1.0)
+
+    assert result["status"] == "timeout"
+    assert calls == [pytest.approx(1.0)]
+    assert sleeps == [pytest.approx(0.2)]
+    assert clock.now == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(
@@ -558,6 +818,29 @@ def test_page_location_and_document_cookie_parse_string_or_object(monkeypatch):
     assert S._page_location()["host"] == "example.test"
     assert S._cookie_via_document({"name": "sid", "value": "1"}, None, 2) == {"ok": True}
     assert S._cookie_via_document({"name": "sid", "value": "1"}, None, 2) == {}
+
+
+def test_get_cookies_uses_extension_command_channel(monkeypatch):
+    calls = []
+    driver = SimpleNamespace(default_session_id="chrome:old:7")
+
+    def ext_cmd(payload, **kwargs):
+        calls.append((payload, kwargs))
+        return {"data": {"ok": True, "data": [{"name": "sid", "value": "v1"}]}}
+
+    driver.ext_cmd = ext_cmd
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+
+    result = S.get_cookies(session_id="chrome:profile:9")
+
+    assert result["ok"] is True
+    assert result["data"] == [{"name": "sid", "value": "v1"}]
+    assert calls == [
+        (
+            {"cmd": "cookies", "tabId": 9},
+            {"client_id": "chrome:profile", "timeout": 15.0},
+        )
+    ]
 
 
 def test_set_cookies_success_partial_and_page_scope(monkeypatch):

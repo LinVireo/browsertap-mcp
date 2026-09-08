@@ -113,6 +113,41 @@ def test_doctor_healthy_returns_zero_and_prints_details(monkeypatch, capsys):
     assert "[OK] healthy: ready" in captured.err
 
 
+def test_doctor_reuses_sessions_and_diagnosis_from_setup_status(monkeypatch, capsys):
+    driver = FakeDriver()
+    calls = {"sessions": 0, "diagnosis": 0}
+
+    def get_all_sessions():
+        calls["sessions"] += 1
+        return [{"id": "should-not-be-used"}]
+
+    def diagnose():
+        calls["diagnosis"] += 1
+        return {"cause": "wrong-fallback", "ok": False}
+
+    driver.get_all_sessions = get_all_sessions
+    driver.diagnose = diagnose
+    setup_tabs = [{"id": "chrome:test:9", "url": "https://example.test/"}]
+    setup_diagnosis = {"cause": "healthy", "ok": True, "advice": "ready"}
+    _install_doctor_fakes(
+        monkeypatch,
+        driver,
+        {
+            "status": "healthy",
+            "action": "none",
+            "tabs": setup_tabs,
+            "diagnosis": setup_diagnosis,
+        },
+    )
+
+    assert cli.cmd_doctor() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert calls == {"sessions": 0, "diagnosis": 0}
+    assert payload["tabs"] == setup_tabs
+    assert payload["diagnosis"] == setup_diagnosis
+    assert payload["connected_tabs"] == 1
+
+
 def test_doctor_passes_the_resolved_state_paths_through(monkeypatch, capsys):
     # cmd_doctor rewrites parts of the payload; the state directory and token
     # file have to survive that, because "which file did each side read?" is the
@@ -198,6 +233,64 @@ def test_doctor_prints_nonhealthy_diagnosis_advice(monkeypatch, capsys):
 
     assert cli.cmd_doctor() == 1
     assert "[!!] registering: wait" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "failure, expected_type",
+    [
+        (ValueError("BROWSERTAP_BRIDGE_PORT must be an integer, got: 'not_a_number'"), "ValueError"),
+        (OSError("[Errno 11001] getaddrinfo failed"), "OSError"),
+    ],
+)
+def test_doctor_reports_initialization_failure_as_json(
+    monkeypatch, tmp_path, capsys, failure, expected_type
+):
+    """A misconfigured environment must still produce a parseable diagnosis.
+
+    doctor is what a user is told to run when nothing works, and the two ways
+    the configuration itself can be wrong -- an unparseable port, a host that
+    does not resolve -- both fail inside get_driver(), before any bridge call.
+    Without this branch the command exits on a traceback, which no tooling and
+    no bug report template can read.
+    """
+    def explode():
+        raise failure
+
+    monkeypatch.setattr(cli, "get_driver", explode)
+    monkeypatch.setattr(cli, "chrome_extension_dir", lambda: tmp_path)
+
+    assert cli.cmd_doctor() == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "initialization_failed"
+    assert payload["action"] == "check_config"
+    assert payload["error"] == str(failure)
+    assert payload["error_type"] == expected_type
+    assert payload["extension_path"] == str(tmp_path)
+    # The human-readable verdict goes to stderr so stdout stays pure JSON.
+    assert "initialization_failed" in captured.err
+    assert expected_type in captured.err
+
+
+def test_doctor_does_not_touch_the_bridge_when_initialization_fails(monkeypatch, tmp_path, capsys):
+    """The failure is local, so doctor must not probe ports or ask for status."""
+    calls: list[str] = []
+
+    def explode():
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(cli, "get_driver", explode)
+    monkeypatch.setattr(cli, "chrome_extension_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        cli, "get_setup_status", lambda: calls.append("get_setup_status") or {}
+    )
+    monkeypatch.setattr(
+        cli, "_port_open", lambda host, port: calls.append(f"_port_open:{port}") or False
+    )
+
+    assert cli.cmd_doctor() == 1
+    assert calls == []
+    assert json.loads(capsys.readouterr().out)["status"] == "initialization_failed"
 
 
 @pytest.mark.parametrize(

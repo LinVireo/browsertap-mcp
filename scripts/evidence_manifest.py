@@ -22,6 +22,12 @@ OFFLINE_ARTIFACTS = (
     "artifacts/coverage.json",
     "artifacts/offline-junit.xml",
     "artifacts/tool-coverage-offline.json",
+    # Lint was the one gate with no evidence behind it: CI ran ruff, the seal
+    # recorded nothing about it, so `release_ready: true` said nothing either way
+    # about the check that was about to fail on the same commit. Binding the
+    # artifact is what turns "ruff was run" into "ruff reported clean over this
+    # exact tree", since the hash and `content_sha256` are taken together.
+    "artifacts/lint.json",
 )
 LIVE_ARTIFACTS = (
     "artifacts/live-junit.xml",

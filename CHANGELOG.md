@@ -5,6 +5,391 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- `PRIVACY.md`, the privacy policy the Chrome Web Store listing serves. It
+  states what the extension can reach, that its only network destination is
+  `127.0.0.1`, and what persists on disk. Two disclosures go beyond the
+  permission names: the extension holds all-sites access (`<all_urls>`) rather
+  than a per-site grant, and it strips a tab's Content-Security-Policy header
+  while a script runs in that tab. A contract test derives the required
+  disclosures from `manifest.json`, so adding a permission that reads user data
+  now fails offline until the policy covers it.
+- `get_execute_js_result` tool for retrieving results from
+  `execute_js(wait=false)` operations. Acknowledged operations can be polled or
+  claimed without replaying side effects; completed results are consumed once
+  and retained for 10 minutes.
+
+### Removed
+
+- **BREAKING: the seven OS-level tools are gone.** A caller that invokes one now
+  gets "no such tool" rather than a deprecation warning. `mcp.list_tools()`
+  reports **49** tools, down from 56.
+  - `mouse_click` → use `page_click` instead (browser-safe element clicking)
+  - `mouse_move` → use `page_click` (no separate move needed)
+  - `mouse_drag` → use `page_drag` (drag within the page)
+  - `type_text` → use `page_type` (type in browser inputs)
+  - `hotkey` → use `page_press` (send keyboard events to page)
+  - `pointer_info` → use `execute_js` to query element positions
+  - `capture_desktop_screenshot` → use `capture_page_screenshot` (safer, browser-only)
+
+  **Rationale:** they controlled the OS desktop rather than one tab, so they acted
+  on whatever happened to be on screen -- a security boundary problem and a
+  maintenance burden both. The page-level tools cover the same ground under
+  tighter constraints. They were announced as deprecated earlier in this same
+  unreleased cycle, so nothing shipped with the warning stage.
+
+  **`resolve_leave_dialog` is unaffected** and keeps its lab-only Enter fallback,
+  which is why the approval gate, the cross-process lock, the quiet-input window,
+  target activation, and the `on_screen` check all remain. Their internals are
+  unchanged; what went away is every caller that took screen coordinates. The
+  `desktop` extra still carries `pyautogui` for that one path.
+
+### Changed
+
+- **Documentation no longer presents OS-level input as a capability.** Warning at
+  call time was the weakest layer available: every piece of prose a reader or an
+  agent sees *first* still opened with "five tools send real OS-level mouse and
+  keyboard input", which is the opposite of the migration advice logged one layer
+  down, and an agent acts on the handshake text rather than on a log line emitted
+  after the call. Rewritten in both READMEs (lede, key features, "what this
+  project is actually for", the folded tool sections), the FastMCP `instructions`
+  the agent reads at handshake, `docs/USAGE.md` §4/§5/§8 and its Chinese
+  counterpart, `AGENTS.md` §4, `SECURITY.md`, both bundled skills, the
+  `browsertap` CLI `--help` description, and the PyPI summary in `pyproject.toml`.
+  The `page_*` tools are named as *the* input path, and the cases the desktop
+  tools were once kept for (browser chrome, native file pickers, extension popups,
+  OS dialogs) are reported as unsupported rather than as a reason to escalate from
+  a failed `page_click`. Each README keeps one folded section listing the removed
+  names against their replacements, so a caller arriving from an older version
+  finds the migration rather than silence.
+- The tool table in the `browsertap-default` skill said "工具全表（55 个）" while
+  56 were registered, so the one line a caller reads to decide whether the table
+  is complete was the line that was wrong. It now says 49 and is verified
+  mechanically against `list_tools()` rather than by eye.
+- The physical-input gate no longer has a caller that passes coordinates.
+  `check_screen_bounds`, `screen_bounds`, and the `points=` argument to the
+  internal dispatch helper are kept -- they are the gate, not a removed tool --
+  but they are now exercised by tests against the helper directly instead of
+  through a shipped tool.
+
+### Fixed
+
+- **Documented the write sandbox for the file-writing tools.** `save_pdf` and
+  `capture_page_screenshot` route `save_path` through `_validate_safe_path`, which takes a *relative* path under
+  `~/Downloads/browsertap` and rejects absolute paths and `..` escapes — but the
+  docs described `save_path` as a path the caller chooses ("atomically writes
+  `save_path`", "only adds a disk copy"). A caller following them passed an
+  absolute path and got a `ValueError` that read like a bug. The tool
+  descriptions, both READMEs, and `docs/USAGE.md` §4 plus its Chinese
+  counterpart now state the sandbox and that it is not configurable by
+  environment variable.
+
+### Security
+
+- **Path traversal protection** for file-writing tools. `save_pdf` and
+  `capture_page_screenshot` validate that user-supplied `save_path` parameters
+  stay within `~/Downloads/browsertap` by default. Absolute paths (`/etc/passwd`, `C:\Windows\...`), parent directory
+  traversal (`../../outside`), and symlink escape attempts are rejected with a
+  `ValueError`. This prevents arbitrary filesystem writes through malicious path
+  manipulation. The validation is implemented by the internal `_validate_safe_path`
+  function and is covered by comprehensive unit and integration tests in
+  `tests/test_path_traversal_protection.py`.
+- **Atomic file writes** for `capture_page_screenshot`, which now uses the
+  temporary file + fsync + atomic rename pattern (via `_atomic_write_bytes`),
+  ensuring saved files are never left in a partially-written state. Write failures clean up temporary files and provide
+  user-friendly error messages for common issues (disk full, permission denied).
+- **File size limit** for `capture_page_screenshot`. A screenshot exceeding 50MB
+  is rejected before any write occurs, preventing resource exhaustion through an
+  oversized image payload.
+- `execute_js` no longer reaches the extension's internal command router. A
+  string script that happened to parse as JSON was coerced into a command
+  envelope, so passing `{"cmd":"site_permission",...}` as a *script* called
+  `setSitePermission` directly and skipped the `ctx.elicit` approval that
+  `set_site_permission` requires in `safe` mode -- the approval `SECURITY.md`
+  promises for every site-allow action. Caller scripts are now marked on the
+  wire so they cannot parse as JSON, and the extension coerces only the three
+  envelopes the server still sends as text (`cookies`, `cdp`, `batch`). As a
+  side effect, `execute_js('[1,2,3]')` returns its array instead of failing as
+  an unknown command.
+
+### Changed
+
+- `execute_js(wait=false)` now returns an acknowledged `operation_id` for
+  genuinely long-running scripts. `get_execute_js_result` can wait briefly for
+  or claim the late result without replaying side effects; completed results are
+  consumed once and retained for 10 minutes.
+- `execute_js` now preserves the final expression in multi-statement scripts
+  that use top-level `await` (for example, `const value = await read(); value`).
+  The extension previously evaluated the declaration successfully but returned
+  `undefined`, which crossed the bridge as a silent missing `js_return`.
+- Large `execute_js` return values are now lossless across bounded MCP text
+  channels. When the JSON-encoded `js_return` exceeds 24 KiB UTF-8, the
+  complete value is written to a private temporary JSON file and the response
+  carries `result_file`, `result_bytes`, `result_sha256`, and `result_format`
+  instead of a silently truncated inline payload.
+- The toast `disable_dialogs.js` draws on the user's own page follows the page's
+  colour scheme instead of being a fixed dark panel. It hardcoded `#222` on
+  `#fff`, which is wrong on a light theme and cannot follow a theme switch; it
+  now sets `color-scheme: light dark` and paints with the `Canvas` /
+  `CanvasText` system colours, the same mechanism `popup.html` already uses. It
+  also resets inherited styling (`all: initial`) so a host page's CSS cannot
+  restyle it, and uses `inset-inline-end` so it stays out of the way on
+  right-to-left pages.
+- `test_no_published_document_repeats_a_section` asserts that every document on
+  its roster was reachable, instead of a literal floor of nine against a list of
+  eleven. The literal tolerated two unreadable documents, and removing an entry
+  from the list widened that gap without failing anything.
+
+## [0.4.20] - 2026-08-29
+
+### Added
+
+- The packaged extension now ships its own icons (16, 32, 48 and 128 px) and
+  declares them in `manifest.json` for both the extension list and the toolbar
+  action. Chrome previously drew a generated placeholder, and the Chrome Web
+  Store requires a 128x128 icon inside the package, so this was the one code
+  prerequisite left for a store listing. The artwork is original; upstream
+  ships no image of any kind.
+
+## [0.4.19] - 2026-08-29
+
+### Fixed
+
+- Bumping the release version no longer asks you to reload the Chrome
+  extension. `get_setup_status` compares the extension's compiled build stamp
+  against the source tree, and when that comparison says `matches_tree` the
+  worker is running this code -- the only difference left is the version string
+  Chrome parsed when the extension was loaded, which Chrome does not re-parse
+  without a reload. That number was still being OR-ed into
+  `reload_extension_required` beside the stamp verdict, so every release left
+  the extension permanently one version behind and demanded a manual reload
+  whose only effect was on the number the check was complaining about. The live
+  suite reads that flag and has no override, so the click stood between a
+  version bump and any live evidence at all. The version number is now the
+  fallback used when the stamp cannot judge, and a mismatch the stamp overrules
+  is still reported as a note rather than hidden. A protocol-version or missing
+  capability gap still requires a reload, matching stamp or not.
+
+## [0.4.18] - 2026-08-29
+
+### Added
+
+- The release seal now proves that the live suite was answered by the extension
+  build in the sealed source tree. `live-preflight.json` records
+  `extension_build_verdict`, `extension_build_enforced` and both build stamps,
+  and the acceptance report reads them: a live run answered by a stale service
+  worker, or one whose verdict could not be established, no longer counts as
+  live evidence. A stamp that was never regenerated names its own fix.
+
+### Changed
+
+- Both READMEs now state plainly that reusing an already-logged-in browser is
+  not unique to this project, and name the cases where
+  [playwright-mcp](https://github.com/microsoft/playwright-mcp) is the better
+  choice: one-step Chrome Web Store install, headless, Docker, CI, Firefox or
+  WebKit, accessibility-tree snapshots with stable handles, and a smaller
+  default tool surface. What remains specific to this server — guarded
+  OS-level input, retargeting without raising a window, the whole `chrome.*`
+  surface, and working with zero tabs open — is stated in the same place.
+
+## [0.4.17] - 2026-08-26
+
+### Changed
+
+- The live suite now records user browser activity as `tab_activity` context
+  instead of skipping because a user opened, closed, navigated, or focused a
+  tab. It fails only when a tab owned by the suite remains open, and reports
+  whether the cause was a missing cleanup call or a lifecycle-generation
+  mismatch.
+- The release workflow now runs the shared Python and extension JavaScript lint
+  gate before tests and distribution builds, so a publish cannot pass on Python
+  checks while shipping invalid extension code.
+- Distribution validation now compares the installable package-file sets in the
+  wheel and source archive, rejecting stale build output that would make the two
+  release artifacts disagree.
+
+### Fixed
+
+- A failed or unsupported popup cookie refresh now clears the previous result,
+  so `Copy` cannot reuse credentials read from an earlier tab or page.
+- `mouse_click` requires `x` and `y` together, and `type_text` requires
+  `click_x` and `click_y` together. Half-specified pairs are rejected before
+  approval, activation, or input dispatch.
+- Desktop capture and virtual-screen probing use the supported `mss.mss()` factory,
+  keeping the desktop path compatible with current `mss` releases.
+
+## [0.4.16] - 2026-08-26
+
+### Fixed
+
+- **`execute_js` no longer loses a collection it was not told about by name.** The
+  converter that turns a script's return value into something the extension
+  boundary can carry had one branch each for jQuery, `NodeList` and
+  `HTMLCollection`, so a `Set` of elements, a `Map`, a generator's output or any
+  other wrapper fell through to `JSON.stringify` and arrived as `{}` with nothing
+  reporting the loss. It asks `Object.prototype.toString` and the iteration
+  protocol instead -- one question the engine already answers for every
+  collection. Five more silent losses go with it: the 100-item cap sat only on
+  the branch least likely to be large, so `querySelectorAll('div')` on a big page
+  serialised every element (the cap is now 200 across every collection, and says
+  how many it dropped rather than truncating quietly); a collection whose first
+  slot was empty was not recognised as one; a text node, comment or document
+  became `{}` and a nested `window` became the string `[Object]`, which a real
+  object can also produce; one cycle anywhere in the value discarded the *entire*
+  result; and a `BigInt`, a function, an `Error` or a throwing getter each took
+  more with it than itself.
+- **The extension popup follows the browser's theme.** It had a dark palette
+  written into it, which rendered a dark popup for anyone reading everything else
+  in light and could not follow a theme switch at all. It now opts into
+  `color-scheme: light dark` and takes its colours from CSS system keywords,
+  which is the browser's own answer to the question.
+
+## [0.4.15] - 2026-08-25
+
+### Changed
+
+- **`scan_page` no longer modifies the page it reads.** With `cutlist` on -- the
+  default -- reading a page used to write a `data-btap-list` attribute onto every
+  container it collapsed and leave two `window.__btap*` counters behind, because
+  the CSS selector it reports had to survive into a second roundtrip. That
+  selector is now derived from the container's own structure, so there is nothing
+  to mark: a scan is invisible to the page's own scripts, to `#id` and
+  attribute rules in its stylesheet, and to anything that serialises the
+  document. The tool description and both README tool tables used to disclose
+  what it wrote; they now state that it writes nothing, and the offline suite
+  fails if either claim outlives the code -- in both directions, so a stale
+  disclosure is a failure too.
+- The two injected page scripts were replaced rather than edited.
+  `page_scripts/opt_html.js` and `find_main_list.js` are now `page_outline.js`
+  and `list_groups.js`, and they decide what the model sees of a page by asking
+  the browser instead of restating the answer: `Element.checkVisibility()` for
+  whether an element renders, and a structural signature (tag plus sorted class
+  list) for which block is a repeated list, in place of a hand-rolled
+  `display`/`visibility`/`opacity` walk and a scored search over tuned constants.
+  Measured against one real page, the simplified copy came out 18% smaller in 27%
+  less time, carrying the same extracted text.
+- The extension declares `minimum_chrome_version: 121`, up from 111, because that
+  is what the visibility call above needs. `Element.checkVisibility()` has existed
+  since Chrome 105, but the three option names passed to it were renamed in 121,
+  and unknown members of a WebIDL dictionary are dropped without an error -- so an
+  older engine would have returned a verdict computed without the opacity and
+  visibility checks, putting hidden text back in front of the model with nothing
+  reporting a problem. An install-time refusal naming the browser is the audible
+  version of that. The gate that derives this floor from the code now reads
+  `page_scripts/` as well as the extension directory, which is what caught the
+  stale 111.
+
+### Fixed
+
+- Hidden text no longer reaches the model. Text under a `display:none` block
+  clones fine, so counting *any* surviving child made the hidden parent look as
+  though it still held content and the whole block was kept. Only a surviving
+  child *element* counts now.
+- The selector `cutlist` reports resolves against the copy it is meant for. The
+  attribute the old marker wrote was itself pruned out of the simplifying clone
+  it had to cross into, so on a real page the reported selector could match
+  nothing at all: measured on one news front page,
+  `[data-btap-list="1"] > tr.athing` selected **zero** rows where the structural
+  selector selects all 30.
+- Five kinds of state the previous pass dropped now survive into the simplified
+  copy: a checked checkbox, a `<select>`'s current value, the links inside a
+  `<nav>`, a form's submit button, and a button in an overlay.
+## [0.4.14] - 2026-08-24
+
+### Added
+
+- `server._TAB_OWNERSHIP.outstanding()` and `.counters()` expose, read-only, which
+  tabs this process opened and has not closed. `release` runs only after a close
+  actually succeeded, so what is left is exactly "opened by this task, never
+  cleaned up" -- the one claim about a browser that can be made without inspecting
+  anybody else's tabs. `outstanding()` deliberately withholds the `owner_id`: it
+  feeds a report, and a capability that is never handed out cannot leak into a
+  published artifact.
+- The counters are lifetime totals that are never decremented, and
+  `artifacts/live-preflight.json` publishes them next to `own_tabs.enforced`.
+  `outstanding()` alone cannot tell "nothing was leaked" from "nothing was ever
+  opened", and those two readings are not interchangeable for anybody auditing a
+  run -- the same trade already made by `input_quiet.enforced` and `on_screen`.
+
+### Changed
+
+- The live preflight now fails a run over one thing only: a tab the suite opened
+  and did not close, read from that registry. The previous rule required the tab
+  inventory to come out the way it went in, which made a claim about tabs the
+  suite never touched. A user opening a tab, a user closing one, and the suite
+  leaking its own scratch tab all produced the *same* verdict, so the verdict
+  attributed nothing -- and the two people it accused were mostly the browser's
+  owner. What the browser did during a run is still recorded, as `tab_activity`,
+  as context.
+- A leak message names both causes, because they need different fixes: a missing
+  `close_tabs(..., owner_id=...)`, or Chrome discarding and restoring the suite's
+  own tab so that the close was refused with `lifecycle generation changed`.
+- The busy-browser sample is a note rather than a gate. It used to skip the whole
+  live layer, which is wrong twice over: it let the user's tabs decide whether the
+  suite may run at all, and on a machine whose browser is never idle it meant the
+  live layer stopped running. It is kept because a browser in use makes
+  timing-sensitive cases flakier, so it is the first thing to read when one fails
+  oddly.
+
+### Removed
+
+- `BTAP_LIVE_ALLOW_BUSY_BROWSER`. It existed to bypass the busy-browser skip and
+  the inventory check, and both of those are gone -- leaving the variable would
+  have left a knob that no longer does anything, which is worse than no knob.
+
+### Fixed
+
+- `scan_page` no longer injects an `id` into the caller's page. With `cutlist`
+  (the default) it marked the container it had picked so the second roundtrip
+  could find it again, and an injected `id` is visible to
+  `document.getElementById`, to the page's own `#id` CSS rules, to `:target` and
+  to anything that serialises the document. It now reuses the element's existing
+  `id` when it has one -- writing nothing at all -- and otherwise sets a
+  `data-btap-list` counter, which collides with nothing and is idempotent per
+  container, so repeated scans do not accumulate marks. The write that remains is
+  now stated in the tool's own description and in both README tool tables: a tool
+  documented as reading a page had been modifying it.
+- `execute_js` no longer leaves a timer running on the page after it returns. To
+  report `transients` it starts a 450ms interval that walks every text node in
+  the document, and three of its return paths never stopped it: an early return
+  when the tab gave no response, an exhausted deadline, and a failed read. On
+  those paths a full-document `TreeWalker` kept running for as long as the
+  document lived. The script now carries its own expiry and stops itself without
+  needing another roundtrip -- which is the only cleanup that can work, because
+  those are exactly the states in which the page can no longer be reached -- and
+  the no-response path sends an explicit stop while a channel may still exist.
+  The global it parks on is namespaced (`window.__btap_tm`) rather than
+  `window._tm`, and a superseded interval now clears itself instead of the
+  monitor that replaced it.
+
+### Security
+
+- The extension popup no longer copies cookies to the clipboard when it opens.
+  Opening it ran `fetchCookies()` unconditionally, and the tail of that function
+  wrote every cookie of the active tab -- including the `HttpOnly` ones that page
+  JavaScript cannot read -- into the system clipboard as `name=value; ...`. So an
+  access whose visible purpose was to check the page indicator silently replaced
+  the clipboard contents with session credentials. Both halves are now gestures:
+  `Refresh` renders the list, a new `Copy` button copies it, and a clipboard
+  failure is reported on the button instead of overwriting the rendered list.
+  `SECURITY.md` said "refreshed" where the code copied, and now describes what
+  the code does.
+
+## [0.4.13] - 2026-08-24
+
+### Added
+
+- `scripts/lint_report.py`: lint is now a scored acceptance gate with sealed
+  evidence behind it. `.github/workflows/test.yml` ran `ruff check src tests
+  scripts` and the release finalizer did not run ruff at all, so a sealed
+  `release_ready: true` and a red CI run on the very same commit could both be
+  correct, and the sealed one was what the release notes quoted. CI and
+### Fixed
+
+- Removed a duplicated `## Listing on the MCP Registry` section from
+  `CONTRIBUTING.md`. The two copies were identical, so a later edit to one of them
+  would have left the file contradicting itself with no diff to show why.
 
 ## [0.4.12] - 2026-08-23
 
@@ -61,32 +446,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   or changes this process's awareness level.
 
 ## [0.4.11] - 2026-08-23
-
-### Added
-
-- `THIRD-PARTY-NOTICES.md`, carrying upstream GenericAgent's MIT notice in full.
-  Part of the browser layer is still upstream's code -- measured line-for-line,
-  780 of `simphtml.py`'s 873 upstream lines are unchanged here, longest identical
-  run 192 -- and MIT puts its notice obligation on every copy, not on the
-  repository. `LICENSE` did not discharge it: its body is upstream's word for
-  word with only the copyright line swapped, so a reader of `LICENSE` alone was
-  told the wrong holder, and the README credit is prose attribution rather than
-  the notice. The file ships inside the wheel and the sdist, not only in the
-  tree: `license-files` is now explicit so both land in `.dist-info/licenses/`,
-  and `check_distribution` requires them there -- a wheel is the copy most
-  people receive, and one without them distributes upstream's code with its
-  notice stripped. `tests/test_documentation_contract.py` compares the
-  reproduced grant against `LICENSE`'s own body, so a paraphrase of either
-  fails, and requires every file the notice credits to still exist under that
-  name.
-
-### Changed
-
-- Corrected the credit in both READMEs. It said the derived files "have each
-  been substantially rewritten since", which does not hold for `simphtml.py` at
-  89% unchanged; it now says what is still upstream's and points at the measured
-  table. Both READMEs also now name the notice file, and the credit asks a
-  redistributor to keep both notices rather than the attribution alone.
 
 ### Fixed
 
@@ -659,9 +1018,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Both READMEs link with absolute URLs. They are the package's long description
   on an index page, where a relative link resolves against the index host and
   404s, taking the usage guide, the security policy and the licence with it.
-- The fork-divergence paragraph in both READMEs no longer quotes exact commit and
-  line counts that went stale within a release; it names the command that prints
-  the current figure instead.
 - Every GitHub reference now points at `LinVireo/agent-browser-mcp`. The account
   was renamed from `0xlinn`; GitHub redirects the old paths, but the canonical
   URL in the metadata an index renders should be the current one.
@@ -917,9 +1273,23 @@ Only v0.3.12 exists as a tag: 0.2.0 through 0.3.11 were developed before this
 history was published, so there is no commit for any of them and a comparison
 link for those versions could never resolve. Their sections stay for the record,
 without links. Releases from 0.3.13 on get the usual compare links.
+
+v0.4.13 and v0.4.14 are tags with no published artifact. Both rounds were sealed
+with full evidence, and both times the next round of work landed before the
+upload, so their changes reach PyPI inside a later release instead. The tags
+exist so that every compare link spans one version rather than several; there is
+no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...HEAD
+[0.4.20]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...v0.4.20
+[0.4.19]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...v0.4.19
+[0.4.18]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...v0.4.18
+[0.4.17]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.16...v0.4.17
+[0.4.16]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.15...v0.4.16
+[0.4.15]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.14...v0.4.15
+[0.4.14]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.13...v0.4.14
+[0.4.13]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.9...v0.4.11
 [0.4.9]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.8...v0.4.9

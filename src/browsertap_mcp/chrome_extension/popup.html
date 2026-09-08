@@ -3,14 +3,21 @@
 <head>
 <meta charset="utf-8">
 <style>
-body{width:420px;max-height:520px;margin:0;padding:8px;font:12px monospace;background:#1e1e1e;color:#d4d4d4;overflow-y:auto}
-h3{margin:4px 0;color:#569cd6}
-button{background:#264f78;color:#fff;border:none;padding:4px 12px;cursor:pointer;border-radius:3px;margin-bottom:6px}
-button:hover{background:#37699e}
+/* No palette is declared here. The browser already knows which theme the user
+   chose, so `color-scheme` opts this popup into both and every colour below is a
+   CSS system colour it resolves for us -- a hardcoded dark palette rendered a
+   dark popup at a user reading everything else in light, and could not follow a
+   theme switch at all. Buttons carry no colour rule on purpose: unstyled, Chrome
+   draws its own, which is also the only way their hover and active states match
+   the platform without being restated here. */
+:root{color-scheme:light dark}
+body{width:420px;max-height:520px;margin:0;padding:8px;font:12px monospace;background:Canvas;color:CanvasText;overflow-y:auto}
+h3{font-size:13px;margin:0 0 6px}
+button{font:inherit;margin:0 6px 6px 0}
 label{display:block;margin:8px 0 4px}
 .toggle{display:flex;align-items:center;gap:6px;margin:8px 0}
 .toggle input{margin:0}
-pre{white-space:pre-wrap;word-break:break-all;margin:0;padding:6px;background:#252526;border-radius:3px;max-height:420px;overflow-y:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:6px;background:Field;color:FieldText;border:1px solid ButtonBorder;max-height:420px;overflow-y:auto}
 </style>
 </head>
 <body>
@@ -21,6 +28,7 @@ pre{white-space:pre-wrap;word-break:break-all;margin:0;padding:6px;background:#2
 </label>
 <div data-i18n="cookieViewerTitle"></div>
 <button id="refresh" data-i18n="refreshButton"></button>
+<button id="copy" data-i18n="copyButton"></button>
 <pre id="out" data-i18n="cookieViewerInitial"></pre>
 <script src="popup.js"></script>
 </body>

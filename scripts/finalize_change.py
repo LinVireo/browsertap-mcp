@@ -83,7 +83,13 @@ def _run_gates(skip_live: bool) -> None:
     _run(sys.executable, "-m", "compileall", "-q", "src")
     _require_module("pytest_cov")
     _require_module("build")
+    _require_module("ruff")
     (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
+    # First because it is the cheapest: a lint error found here costs a second,
+    # and found after the live suite costs four minutes. It also used to be found
+    # by nobody -- CI ran ruff, this chain did not, so a sealed `release_ready:
+    # true` and a red CI run on the same commit were both correct at once.
+    _run(sys.executable, "-m", "scripts.lint_report")
     _run(
         sys.executable,
         "-m",
@@ -91,7 +97,7 @@ def _run_gates(skip_live: bool) -> None:
         "tests",
         "-q",
         "--cov=browsertap_mcp",
-        "--cov-fail-under=85",
+        "--cov-fail-under=95",
         "--cov-report=term-missing",
         "--cov-report=json:artifacts/coverage.json",
         "--junitxml=artifacts/offline-junit.xml",

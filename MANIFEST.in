@@ -1,11 +1,13 @@
 recursive-include src/browsertap_mcp/chrome_extension *
 exclude src/browsertap_mcp/chrome_extension/config.js
+recursive-include src/browsertap_mcp/page_scripts *.js
 include .gitignore
 include README.md
 include README.zh-CN.md
 include LICENSE
-include THIRD-PARTY-NOTICES.md
 include SECURITY.md
+include PRIVACY.md
+include CODE_OF_CONDUCT.md
 include CONTRIBUTING.md
 include CONTRIBUTING.zh-CN.md
 include CHANGELOG.md

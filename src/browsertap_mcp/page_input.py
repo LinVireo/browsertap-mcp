@@ -40,7 +40,12 @@ _NAMED_KEYS = {
 }
 _BUTTONS = {"left", "middle", "right"}
 _BUTTON_BITS = {"left": 1, "right": 2, "middle": 4}
-_LOCATOR_KEYS = frozenset({"css", "role", "name", "text", "exact", "label", "frame", "shadow"})
+_LOCATOR_KEYS = frozenset({
+    "css", "role", "name", "text", "exact", "label", "frame", "shadow",
+    # ``selector`` is the public compatibility spelling for a CSS primary key.
+    # ``x``/``y`` form a frame-relative point locator accepted by page_click.
+    "selector", "x", "y",
+})
 _LOCATOR_PRIMARY_KEYS = ("css", "role", "text", "label")
 
 
@@ -90,6 +95,43 @@ _HIT_TEST_JS = r"""
       classes ? '.' + classes.split(/\s+/).slice(0, 3).join('.') : ''
     ].join('');
     return {ok:false, status:'obscured', occludedBy:label};
+  };
+"""
+
+
+_TYPE_TARGET_HELPERS_JS = r"""
+  const deepActiveElement = root => {
+    let active = root && root.activeElement;
+    for (let depth = 0; depth < 64 && active; depth += 1) {
+      let nested = active.shadowRoot && active.shadowRoot.activeElement;
+      if (!nested && /^(IFRAME|FRAME)$/.test(active.tagName || '')) {
+        try { nested = active.contentDocument && active.contentDocument.activeElement; }
+        catch (_) {}
+      }
+      if (!nested || nested === active) break;
+      active = nested;
+    }
+    return active || null;
+  };
+  const typingTarget = node => {
+    let helper = node && node.matches && node.matches('.xterm-helper-textarea') ? node : null;
+    const terminal = node && node.matches && node.matches('.xterm')
+      ? node : (node && node.closest && node.closest('.xterm'));
+    if (!helper && terminal) helper = terminal.querySelector('.xterm-helper-textarea');
+    return {element: helper || node, helper: !!helper};
+  };
+  const editableTarget = node => {
+    if (!node || node.disabled || node.readOnly) return false;
+    const ariaDisabled = String(node.getAttribute && node.getAttribute('aria-disabled') || '').trim().toLowerCase();
+    if (ariaDisabled === 'true') return false;
+    try { if (node.matches && node.matches(':disabled')) return false; }
+    catch (_) {}
+    if (node.isContentEditable) return true;
+    const tag = String(node.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    const type = String(node.type || (node.getAttribute && node.getAttribute('type')) || 'text').toLowerCase();
+    return ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(type);
   };
 """
 
@@ -192,11 +234,20 @@ def _key_details(key: str) -> tuple[str, str, int]:
     if named:
         return named
     if len(key) == 1 and key.isprintable():
-        if key.isalpha():
-            return key, f"Key{key.upper()}", ord(key.upper())
-        if key.isdigit():
+        # ``str.isalpha()``/``str.isdigit()`` cover far more than the
+        # standardized DOM ``code`` names.  In particular, ``"ß".upper()``
+        # is ``"SS"`` (two code points), which used to leak a ``TypeError``
+        # out of ``ord`` even though the public contract accepts one printable
+        # character.  Keep the fast, conventional VK/code mapping for ASCII;
+        # for other printable Unicode characters let CDP carry the character
+        # in ``key`` and use the neutral virtual-key value instead of inventing
+        # an invalid ``Key…``/``Digit…`` name.
+        if "a" <= key <= "z" or "A" <= key <= "Z":
+            upper = key.upper()
+            return key, f"Key{upper}", ord(upper)
+        if "0" <= key <= "9":
             return key, f"Digit{key}", ord(key)
-        return key, "", ord(key)
+        return key, "", ord(key) if ord(key) <= 0x7F else 0
     raise InputValidationError(f"unsupported key: {key}")
 
 
@@ -333,9 +384,48 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
     select_all_json = json.dumps(select_all)
     return f"""(() => {{
   const selector = {selector_json};
-  const selectAll = {select_all_json};
-  let el = selector ? document.querySelector(selector) : document.activeElement;
-  if (selector && !el) return {{found:false, targetKind:'missing'}};
+  const selectAll = {select_all_json};{_TYPE_TARGET_HELPERS_JS}
+  const describe = node => node ? {{
+    tagName: node.tagName || '',
+    id: node.id || '',
+    name: node.getAttribute ? (node.getAttribute('name') || '') : '',
+    type: node.getAttribute ? (node.getAttribute('type') || '') : '',
+    role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+    ariaLabel: node.getAttribute ? (node.getAttribute('aria-label') || '') : '',
+    placeholder: node.getAttribute ? (node.getAttribute('placeholder') || '') : '',
+    className: String(node.className || ''),
+    contentEditable: !!node.isContentEditable,
+  }} : null;
+  const activeBefore = describe(deepActiveElement(document));
+  let el = null;
+  if (selector) {{
+    try {{
+      const candidates = [...document.querySelectorAll(selector)];
+      const isRendered = node => {{
+        if (!node || !node.getBoundingClientRect) return false;
+        const rect = node.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) return false;
+        const view = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+        let style = null;
+        try {{ style = view.getComputedStyle ? view.getComputedStyle(node) : null; }}
+        catch (_) {{}}
+        if (!style) return true;
+        return style.display !== 'none' && style.visibility !== 'hidden' &&
+          style.visibility !== 'collapse' && style.opacity !== '0';
+      }};
+      const rendered = candidates.filter(node => {{
+        const target = typingTarget(node);
+        return editableTarget(target.element) && (target.helper || isRendered(node));
+      }});
+      if (rendered.length > 1) return {{found:false, status:'ambiguous', matches:rendered.length, activeElement:activeBefore}};
+      if (rendered.length) el = rendered[0];
+      else if (candidates.length) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:activeBefore}};
+    }}
+    catch (error) {{
+      return {{found:false, status:'invalid_selector', error:String(error && error.message || error), stage:'selector', activeElement:activeBefore}};
+    }}
+  }} else el = deepActiveElement(document);
+  if (selector && !el) return {{found:false, targetKind:'missing', activeElement:activeBefore}};
   const helpers = [...document.querySelectorAll('.xterm-helper-textarea')];
   let xtermRoot = null;
   if (el && el.matches && el.matches('.xterm')) xtermRoot = el;
@@ -348,23 +438,29 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
   if (!selector && !textCapable && helpers.length === 1) helper = helpers[0];
   if (helper) el = helper;
   if (!el || el === document.body || el === document.documentElement) {{
-    return {{found:false, targetKind:'missing'}};
+    return {{found:false, targetKind:'missing', activeElement:activeBefore}};
   }}
+  if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:activeBefore}};
   try {{ el.focus({{preventScroll:true}}); }} catch (_) {{ el.focus(); }}
   if (selectAll) {{
     if (typeof el.select === 'function') el.select();
     else if (el.isContentEditable) {{
-      const range = document.createRange();
+      const range = el.ownerDocument.createRange();
       range.selectNodeContents(el);
-      const selection = window.getSelection();
+      const selection = el.ownerDocument.defaultView.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
     }}
   }}
+  const activeAfter = deepActiveElement(document);
+  if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
+  if (activeAfter !== el) return {{found:false, status:'focus_failed', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
   return {{
     found:true,
     targetKind: helper ? 'xterm' : 'element',
     tagName: el.tagName || '',
+    activeElement: describe(activeAfter),
+    focusConfirmed: activeAfter === el,
   }};
 }})()"""
 
@@ -380,24 +476,50 @@ def normalize_locator(locator: str | dict[str, Any], *, nested: bool = False) ->
     unknown = sorted(set(locator) - _LOCATOR_KEYS)
     if unknown:
         raise InputValidationError(f"unknown locator field(s): {', '.join(unknown)}")
-    primary = [key for key in _LOCATOR_PRIMARY_KEYS if locator.get(key) not in (None, "")]
-    if len(primary) != 1:
-        raise InputValidationError(
-            "locator requires exactly one of css, role, text, or label"
-        )
-    if locator.get("name") not in (None, "") and primary[0] != "role":
+    selector_alias = locator.get("selector")
+    point_keys = {key for key in ("x", "y") if key in locator}
+    is_point = bool(point_keys)
+    if is_point:
+        if nested:
+            raise InputValidationError("frame-relative point locators cannot be nested")
+        if point_keys != {"x", "y"}:
+            raise InputValidationError("frame-relative point locator requires both x and y")
+        if (
+            any(locator.get(key) not in (None, "") for key in _LOCATOR_PRIMARY_KEYS)
+            or selector_alias not in (None, "")
+            or any(key in locator for key in ("name", "exact"))
+        ):
+            raise InputValidationError("frame-relative point locator cannot include a primary selector")
+        if "shadow" in locator:
+            raise InputValidationError("frame-relative point locator cannot use shadow")
+        if "frame" not in locator:
+            raise InputValidationError("frame-relative point locator requires frame")
+        point_x = _number(locator["x"], "locator x")
+        point_y = _number(locator["y"], "locator y")
+        primary = []
+    elif selector_alias not in (None, ""):
+        if any(locator.get(key) not in (None, "") for key in _LOCATOR_PRIMARY_KEYS):
+            raise InputValidationError("locator selector is an alias for css and cannot be combined")
+        primary = ["css"]
+    else:
+        primary = [key for key in _LOCATOR_PRIMARY_KEYS if locator.get(key) not in (None, "")]
+    if not is_point and len(primary) != 1:
+        raise InputValidationError("locator requires exactly one of css, role, text, or label")
+    if not is_point and locator.get("name") not in (None, "") and primary[0] != "role":
         raise InputValidationError("locator name is only valid with role")
-    if "exact" in locator and not isinstance(locator["exact"], bool):
+    if not is_point and "exact" in locator and not isinstance(locator["exact"], bool):
         raise InputValidationError("locator exact must be a boolean")
-    if primary[0] not in {"role", "text"} and "exact" in locator:
+    if not is_point and primary[0] not in {"role", "text"} and "exact" in locator:
         raise InputValidationError("locator exact is only valid with role/name or text")
-    normalized: dict[str, Any] = {primary[0]: str(locator[primary[0]])}
-    if not normalized[primary[0]]:
-        raise InputValidationError(f"locator {primary[0]} must be non-empty")
-    if primary[0] == "role" and locator.get("name") not in (None, ""):
-        normalized["name"] = str(locator["name"])
-    if "exact" in locator:
-        normalized["exact"] = locator["exact"]
+    normalized: dict[str, Any] = {}
+    if not is_point:
+        normalized[primary[0]] = str(selector_alias if selector_alias not in (None, "") else locator[primary[0]])
+        if not normalized[primary[0]]:
+            raise InputValidationError(f"locator {primary[0]} must be non-empty")
+        if primary[0] == "role" and locator.get("name") not in (None, ""):
+            normalized["name"] = str(locator["name"])
+        if "exact" in locator:
+            normalized["exact"] = locator["exact"]
 
     if "frame" in locator:
         if nested:
@@ -414,6 +536,10 @@ def normalize_locator(locator: str | dict[str, Any], *, nested: bool = False) ->
                 else normalized_frame
             )
         normalized["frame"] = normalized_frames
+    if is_point:
+        normalized["x"] = point_x
+        normalized["y"] = point_y
+        return normalized
     if "shadow" in locator:
         shadows = locator["shadow"]
         if isinstance(shadows, str):
@@ -443,6 +569,11 @@ def structured_locator_script(
         raise InputValidationError("structured locator must be an object")
     if purpose not in {"query", "click", "type"}:
         raise InputValidationError("locator purpose must be query, click, or type")
+    if "x" in locator or "y" in locator:
+        if purpose != "click":
+            raise InputValidationError("frame-relative point locators are only valid for page_click")
+        if verify_hit or offset_x or offset_y or center_x or center_y:
+            raise InputValidationError("frame-relative point locators cannot use offsets or hit verification")
     offset_x = _number(offset_x, "offset_x")
     offset_y = _number(offset_y, "offset_y")
     for name, flag in (
@@ -462,9 +593,17 @@ def structured_locator_script(
   const verifyHit = {json.dumps(verify_hit)};
   const centerX = {json.dumps(center_x)};
   const centerY = {json.dumps(center_y)};
-  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS}
+  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS}{_TYPE_TARGET_HELPERS_JS if purpose == "type" else ""}
   const clean = value => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
   const same = (actual, expected, exact) => exact ? clean(actual) === clean(expected) : clean(actual).includes(clean(expected));
+  const accessibleText = node => {{
+    if (!node) return '';
+    if (node.nodeType === 1 && clean(node.getAttribute && node.getAttribute('aria-hidden')).toLowerCase() === 'true') return '';
+    if (node.nodeType === 3) return String(node.nodeValue || '');
+    const children = node.childNodes;
+    if (!children || !children.length) return String(node.textContent || '');
+    return [...children].map(accessibleText).join(' ');
+  }};
   const implicitRole = el => {{
     const tag = (el.tagName || '').toLowerCase();
     if (tag === 'button') return 'button';
@@ -486,15 +625,42 @@ def structured_locator_script(
     const labelled = clean(el.getAttribute && el.getAttribute('aria-labelledby'));
     if (labelled) {{
       const text = labelled.split(/\\s+/).map(id => el.ownerDocument.getElementById(id)).filter(Boolean)
-        .map(node => clean(node.textContent)).join(' ');
+        .map(node => accessibleText(node)).join(' ');
       if (text) return text;
     }}
     const aria = clean(el.getAttribute && el.getAttribute('aria-label'));
     if (aria) return aria;
-    if (el.labels && el.labels.length) return clean([...el.labels].map(label => label.textContent).join(' '));
-    return clean((el.getAttribute && (el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('value'))) || el.textContent);
+    if (el.labels && el.labels.length) return clean([...el.labels].map(label => accessibleText(label)).join(' '));
+    return clean((el.getAttribute && (el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('value'))) || accessibleText(el));
   }};
   const allElements = root => [...root.querySelectorAll('*')];
+  const transformIsIdentity = value => {{
+    const text = String(value == null ? '' : value).trim().toLowerCase();
+    if (!text || text === 'none') return true;
+    const match = text.match(/^matrix(3d)?\\(([^)]+)\\)$/);
+    if (!match) return false;
+    const values = match[2].split(',').map(item => Number(item.trim()));
+    const identity = match[1]
+      ? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+      : [1, 0, 0, 1, 0, 0];
+    return values.length === identity.length && values.every((item, index) =>
+      Number.isFinite(item) && Math.abs(item - identity[index]) <= 1e-9
+    );
+  }};
+  const unsupportedFrameTransform = frame => {{
+    let node = frame;
+    for (let depth = 0; depth < 64 && node; depth += 1) {{
+      const ownerWindow = node.ownerDocument && node.ownerDocument.defaultView;
+      let style = null;
+      try {{
+        if (ownerWindow && ownerWindow.getComputedStyle) style = ownerWindow.getComputedStyle(node);
+      }} catch (_) {{}}
+      const transform = style && style.transform;
+      if (transform != null && !transformIsIdentity(transform)) return String(transform);
+      node = node.parentElement || null;
+    }}
+    return null;
+  }};
   const find = (root, spec) => {{
     let matches = [];
     if (spec.css) {{
@@ -507,7 +673,7 @@ def structured_locator_script(
       matches = allElements(root).filter(el => same(el.textContent, spec.text, !!spec.exact));
       matches = matches.filter(el => ![...el.children].some(child => same(child.textContent, spec.text, !!spec.exact)));
     }} else if (spec.label) {{
-      const labels = allElements(root).filter(el => (el.tagName || '').toLowerCase() === 'label' && same(el.textContent, spec.label, true));
+      const labels = allElements(root).filter(el => (el.tagName || '').toLowerCase() === 'label' && same(accessibleText(el), spec.label, true));
       matches = labels.map(label => label.control || (label.htmlFor && label.ownerDocument.getElementById(label.htmlFor)) || label.querySelector('input,textarea,select,button')).filter(Boolean);
     }}
     return {{matches}};
@@ -521,6 +687,10 @@ def structured_locator_script(
     if (found.matches.length === 0) return {{found:false, status:'not_found', stage:'frame'}};
     if (found.matches.length > 1) return {{found:false, status:'ambiguous', matches:found.matches.length, stage:'frame'}};
     const frame = found.matches[0];
+    if (purpose === 'click' && (verifyHit || (locator.x != null && locator.y != null))) {{
+      const frameTransform = unsupportedFrameTransform(frame);
+      if (frameTransform) return {{found:false, status:'unsupported_frame_transform', stage:'frame', frameTransform}};
+    }}
     const frameRect = frame.getBoundingClientRect();
     let doc = null;
     try {{ doc = frame.contentDocument; }} catch (_) {{}}
@@ -528,6 +698,10 @@ def structured_locator_script(
     frameOffsetX += frameRect.left + (frame.clientLeft || 0);
     frameOffsetY += frameRect.top + (frame.clientTop || 0);
     root = doc;
+  }}
+  if (locator.x != null && locator.y != null) {{
+    return {{found:true, status:'found', x:frameOffsetX + locator.x, y:frameOffsetY + locator.y,
+      width:0, height:0, hitVerified:false, scrolledIntoView:false, framePoint:true}};
   }}
   for (const hostSelector of (locator.shadow || [])) {{
     let hosts = [];
@@ -541,6 +715,30 @@ def structured_locator_script(
   const found = find(root, locator);
   if (found.error) return {{found:false, status:found.error, error:found.message}};
   if (found.matches.length === 0) return {{found:false, status:'not_found'}};
+  if (purpose !== 'query') {{
+    const isRendered = node => {{
+      if (!node || !node.getBoundingClientRect) return false;
+      const rect = node.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return false;
+      const view = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+      let style = null;
+      try {{ style = view.getComputedStyle ? view.getComputedStyle(node) : null; }}
+      catch (_) {{}}
+      if (!style) return true;
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        style.visibility !== 'collapse' && style.opacity !== '0';
+    }};
+    const usable = found.matches.filter(node => {{
+      if (purpose === 'type') {{
+        const target = typingTarget(node);
+        return editableTarget(target.element) && (target.helper || isRendered(node));
+      }}
+      const ariaDisabled = clean(node.getAttribute && node.getAttribute('aria-disabled')).toLowerCase() === 'true';
+      return isRendered(node) && !node.disabled && !ariaDisabled;
+    }});
+    if (usable.length === 0) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
+    found.matches = usable;
+  }}
   if (found.matches.length > 1) return {{found:false, status:'ambiguous', matches:found.matches.length}};
   let el = found.matches[0];
   if (purpose === 'type') {{
@@ -548,9 +746,8 @@ def structured_locator_script(
     const xtermRoot = el.matches && el.matches('.xterm') ? el : (el.closest && el.closest('.xterm'));
     if (!helper && xtermRoot) helper = xtermRoot.querySelector('.xterm-helper-textarea');
     if (helper) el = helper;
-    const textCapable = /^(INPUT|TEXTAREA)$/.test(el.tagName || '') || el.isContentEditable || !!helper;
-    const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
-    if (!textCapable || el.disabled || el.readOnly || ariaDisabled) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
+    if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
+    const activeBefore = deepActiveElement(document);
     try {{ el.focus({{preventScroll:true}}); }} catch (_) {{ el.focus(); }}
     if (selectAll) {{
       if (typeof el.select === 'function') el.select();
@@ -559,7 +756,21 @@ def structured_locator_script(
         const selection = el.ownerDocument.defaultView.getSelection(); selection.removeAllRanges(); selection.addRange(range);
       }}
     }}
-    return {{found:true, status:'found', targetKind:helper ? 'xterm' : 'element', tagName:el.tagName || ''}};
+    const activeAfter = deepActiveElement(document);
+    const describe = node => node ? {{
+      tagName: node.tagName || '', id: node.id || '',
+      name: node.getAttribute ? (node.getAttribute('name') || '') : '',
+      type: node.getAttribute ? (node.getAttribute('type') || '') : '',
+      role: node.getAttribute ? (node.getAttribute('role') || '') : '',
+      ariaLabel: node.getAttribute ? (node.getAttribute('aria-label') || '') : '',
+      placeholder: node.getAttribute ? (node.getAttribute('placeholder') || '') : '',
+      className: String(node.className || ''), contentEditable: !!node.isContentEditable,
+    }} : null;
+    if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
+    if (activeAfter !== el) return {{found:false, status:'focus_failed', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
+    return {{found:true, status:'found', targetKind:helper ? 'xterm' : 'element', tagName:el.tagName || '',
+      activeElement:describe(activeAfter), focusConfirmed:activeAfter === el,
+      previousActiveElement:describe(activeBefore)}};
   }}
   let rect = el.getBoundingClientRect();
   const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
@@ -634,7 +845,35 @@ def resolve_selector_script(
   const verifyHit = %s;
   const centerX = %s;
   const centerY = %s;%s
-  const element = document.querySelector(selector);
+  let element = null;
+  try {
+    const candidates = [...document.querySelectorAll(selector)];
+    if (requireInteractable || verifyHit) {
+      const isRendered = node => {
+        if (!node || !node.getBoundingClientRect) return false;
+        const rect = node.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) return false;
+        const view = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+        let style = null;
+        try { style = view.getComputedStyle ? view.getComputedStyle(node) : null; }
+        catch (_) {}
+        if (!style) return true;
+        return style.display !== 'none' && style.visibility !== 'hidden' &&
+          style.visibility !== 'collapse' && style.opacity !== '0';
+      };
+      const usable = candidates.filter(node => {
+        const ariaDisabled = String(node.getAttribute('aria-disabled') || '').trim().toLowerCase() === 'true';
+        return isRendered(node) && !node.disabled && !ariaDisabled;
+      });
+      if (usable.length > 1) return {found:false, status:'ambiguous', matches:usable.length};
+      if (usable.length === 1) element = usable[0];
+      else if (candidates.length) return {found:false, status:'not_interactable'};
+    } else {
+      element = candidates[0] || null;
+    }
+  } catch (error) {
+    return {found:false, status:'invalid_selector', error:String(error && error.message || error), stage:'selector'};
+  }
   if (!element) return {found:false};
   let rect = element.getBoundingClientRect();
   const ariaDisabled = String(element.getAttribute('aria-disabled') || '').trim().toLowerCase() === 'true';

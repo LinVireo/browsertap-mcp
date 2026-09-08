@@ -2,15 +2,17 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import queue
+import re
 import secrets
 import socket
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypeGuard
 from urllib.parse import urlsplit
 
 import bottle
@@ -19,14 +21,56 @@ from bottle import request
 from simple_websocket_server import WebSocket, WebSocketServer
 
 from ._version import __version__
+from .capture_ownership import CaptureOperation, CaptureOwnershipRegistry
+from .command_scope import guard_targets, has_command_scope, mark_dispatched
 from .paths import (
     DEFAULT_STATE_DIR_NAME,
     LEGACY_STATE_DIR_NAME,
     STATE_DIR_ENV,
     state_dir,
 )
+from .pending_operations import PendingOperations
+from .requester_liveness import process_requester_id, requester_liveness
 
 logger = logging.getLogger(__name__)
+_DRIVER_STATE_LOCK = threading.RLock()
+_UNSET_DEFAULT = object()
+MAX_TAB_SNAPSHOT_SIZE = 4096
+
+
+def _valid_protocol_id(value: Any) -> TypeGuard[str]:
+    return isinstance(value, str) and 0 < len(value) <= 512 and bool(value.strip())
+
+
+def _valid_tab_id(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= 2147483647
+
+
+def _valid_page_fields(value: dict) -> bool:
+    return all(value.get(key) is None or isinstance(value[key], str)
+               for key in ('url', 'title', 'generation', 'tab_identity'))
+
+
+def _valid_tab_snapshot(tabs: Any) -> bool:
+    if not isinstance(tabs, list) or len(tabs) > MAX_TAB_SNAPSHOT_SIZE:
+        return False
+    seen = set()
+    for tab in tabs:
+        if (not isinstance(tab, dict) or not _valid_tab_id(tab.get('id'))
+                or tab['id'] in seen or not _valid_page_fields(tab)):
+            return False
+        seen.add(tab['id'])
+    return True
+
+
+def _timestamp(value: Any) -> Optional[float]:
+    if type(value) not in (int, float):
+        return None
+    try:
+        stamp = float(value)
+    except OverflowError:
+        return None
+    return stamp if math.isfinite(stamp) else None
 
 
 #: Longest path kept in a log line. Enough to tell two pages of one site apart.
@@ -100,14 +144,179 @@ def redact_pattern(pattern: Any, *, limit: int = LOG_URL_PATH_LIMIT) -> str:
 
 class SessionNotConnectedError(ValueError):
     error_code = "session_not_connected"
+    retry_safe = False
+    diagnostics: dict[str, Any]
 
 
 class SessionDisconnectedError(ValueError):
     error_code = "session_disconnected"
+    retry_safe = False
+    delivery_state = "sent_unconfirmed"
 
 
 class ExtensionNotConnectedError(ValueError):
     error_code = "extension_not_connected"
+    retry_safe = True
+    delivery_state = "undelivered"
+
+
+class AmbiguousBrowserError(ValueError):
+    error_code = "ambiguous_browser"
+    retry_safe = False
+    delivery_state = "undelivered"
+
+    def __init__(self, clients: list[str]) -> None:
+        clients = sorted(set(clients))
+        super().__init__(
+            f"Multiple browser clients match: {', '.join(clients)}. "
+            "Pass a composite session_id or client_id from list_tabs/get_setup_status."
+        )
+        self.diagnostics = {"candidate_client_ids": clients, "next_action": "select_browser_client"}
+
+
+_PAGE_ACCESS_ERROR_PATTERNS = (
+    "cannot access contents of the page",
+    "extensions gallery cannot be scripted",
+    "cannot access a chrome:// url",
+    "cannot access contents of a chrome-extension",
+)
+_PAGE_POPUP_ERROR_PATTERNS = (
+    "popup",
+    "user gesture",
+    "not allowed to open",
+)
+
+
+def _page_error_source(detail: Any) -> tuple[str, dict[str, Any]]:
+    """Return a browser error message and its structured source fields."""
+    if isinstance(detail, dict):
+        nested = detail.get("error")
+        source = nested if isinstance(nested, dict) else detail
+        message = source.get("message")
+        if not isinstance(message, str) or not message:
+            message = detail.get("message")
+        if not isinstance(message, str) or not message:
+            message = nested if isinstance(nested, str) else detail.get("error")
+        return str(message or detail), source
+    return str(detail), {}
+
+
+def _page_script_intent(script: str) -> Optional[str]:
+    if not isinstance(script, str):
+        return None
+    if re.search(
+        r"(?:window\.open\s*\(|(?:window\.)?location(?:\.assign|\.replace)?\s*=|target\s*=\s*['\"]_blank)",
+        script,
+        re.IGNORECASE,
+    ):
+        return "new_tab_or_navigation"
+    return None
+
+
+def _page_execution_metadata(
+    detail: Any,
+    *,
+    script: str = "",
+    explicit_code: Optional[str] = None,
+    explicit_diagnostics: Optional[dict[str, Any]] = None,
+) -> tuple[str, bool, dict[str, Any]]:
+    """Classify a page-side failure without pretending to know its root cause."""
+    message, source = _page_error_source(detail)
+    lower = message.lower()
+    container = detail if isinstance(detail, dict) else {}
+    diagnostics = dict(explicit_diagnostics or {})
+
+    def field(name: str) -> Any:
+        if name in container:
+            return container[name]
+        return source.get(name)
+
+    dispatched = field("dispatched")
+    may_have_executed = field("may_have_executed")
+    retryable = field("retryable")
+    csp = bool(field("csp"))
+    if dispatched is not None:
+        diagnostics["dispatched"] = bool(dispatched)
+    if may_have_executed is not None:
+        diagnostics["may_have_executed"] = bool(may_have_executed)
+    if retryable is not None:
+        diagnostics["retryable"] = bool(retryable)
+    if csp:
+        diagnostics["csp"] = True
+    for name in ("failed_command_index", "commands_dispatched", "commands_completed", "input_dispatched"):
+        if field(name) is not None:
+            diagnostics[name] = field(name)
+
+    code = explicit_code
+    if not code or code == "internal_error":
+        code = container.get("error_code") or source.get("error_code")
+    if not code:
+        code = container.get("code") or source.get("code")
+    access_denied = any(pattern in lower for pattern in _PAGE_ACCESS_ERROR_PATTERNS)
+    if not code:
+        code = "page_access_denied" if access_denied else "page_execution_failed"
+
+    intent = _page_script_intent(script)
+    if intent:
+        diagnostics["script_intent"] = intent
+        if any(pattern in lower for pattern in _PAGE_POPUP_ERROR_PATTERNS):
+            diagnostics["policy_constraint"] = "popup_or_user_gesture"
+            diagnostics["next_action"] = "open_new_tab"
+        elif access_denied:
+            diagnostics["next_action"] = "open_new_tab_or_choose_scriptable_tab"
+
+    if access_denied:
+        diagnostics.setdefault("access_kind", "script_injection")
+        diagnostics.setdefault(
+            "next_action",
+            "list_tabs_then_retry_or_use_supported_cdp",
+        )
+
+    # A browser error that reached the page route is not safe to replay unless
+    # the browser explicitly proved that it never dispatched it.
+    if retryable is not None:
+        retry_safe = bool(retryable)
+    else:
+        retry_safe = dispatched is False and may_have_executed is False and not access_denied
+    diagnostics.setdefault("retry_safe", retry_safe)
+    return str(code), retry_safe, diagnostics
+
+
+def _is_page_execution_error(detail: Any, error_code: Optional[str] = None) -> bool:
+    if isinstance(error_code, str) and error_code in {
+        "page_access_denied", "page_execution_failed", "page_injection_blocked",
+        "debugger_detached", "cdp_error",
+        "batch_guard_failed", "capture_busy",
+    }:
+        return True
+    message, _ = _page_error_source(detail)
+    lower = message.lower()
+    return any(pattern in lower for pattern in _PAGE_ACCESS_ERROR_PATTERNS)
+
+
+class PageExecutionError(RuntimeError):
+    """A page-side execution failure with delivery and retry facts attached."""
+
+    error_code = "page_execution_failed"
+
+    def __init__(
+        self,
+        detail: Any,
+        *,
+        script: str = "",
+        error_code: Optional[str] = None,
+        diagnostics: Optional[dict[str, Any]] = None,
+    ) -> None:
+        code, retry_safe, facts = _page_execution_metadata(
+            detail,
+            script=script,
+            explicit_code=error_code,
+            explicit_diagnostics=diagnostics,
+        )
+        super().__init__(detail)
+        self.error_code = code
+        self.retry_safe = retry_safe
+        self.diagnostics = facts
 
 
 # Delivery states a caller may retry without risking a duplicate side effect.
@@ -116,21 +325,20 @@ class ExtensionNotConnectedError(ValueError):
 # left this process (the total deadline was gone before dispatch, or an http
 # session's queue was never polled).
 #
-# 'sent_unconfirmed' is weaker — protocol-derived, not proven. The frame was
-# written to a live extension socket and no ACK came back. background.js ACKs
-# *before* it executes and skips execution outright when that ACK cannot be
-# sent, so no ACK normally means nothing ran. The residual window is an ACK that
-# was sent and then lost (socket death, or the WS server rebuilding between the
-# extension's write and ours), in which case the script did run. Callers doing
-# irreversible work should branch on delivery_state instead of trusting
-# retry_safe, and 'delivered_no_result'/'navigated' are never retry-safe.
-RETRY_SAFE_DELIVERY_STATES = frozenset({'undelivered', 'sent_unconfirmed'})
+# An ACK can be lost after execution starts. Missing confirmation never proves
+# that replaying a click, navigation or arbitrary script is safe.
+RETRY_SAFE_DELIVERY_STATES = frozenset({'undelivered'})
 
 # How long a tab must have been registered before failover will prefer it. A
 # content script connects around document_idle, i.e. before the page has settled,
 # so a session that appeared a moment ago names a tab that is probably still
 # loading. See BrowserBridge._pick_failover_session for what that broke.
 FAILOVER_SETTLE_SECONDS = 2.0
+
+# A newly spawned daemon can answer before the MV3 worker has completed its
+# first handshake. Keep that normal startup window distinct from a broken
+# extension so doctor tells the caller to wait instead of reload.
+BRIDGE_STARTUP_GRACE_SECONDS = 10.0
 
 # How long the socket owning a clientId namespace may say nothing before another
 # socket is allowed to take it over. The extension pings every 20s (KEEPALIVE_MS
@@ -197,11 +405,23 @@ class BridgeNoResponseError(RuntimeError):
         error_code: str = "no_response",
         delivery_state: str,
         retry_safe: bool,
+        operation_id: Optional[str] = None,
+        reservation_held: Optional[bool] = None,
+        poll_with: Optional[str] = None,
+        diagnostics: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.delivery_state = delivery_state
         self.retry_safe = bool(retry_safe)
+        if operation_id is not None:
+            self.operation_id = str(operation_id)
+        if reservation_held is not None:
+            self.reservation_held = bool(reservation_held)
+        if poll_with is not None:
+            self.poll_with = str(poll_with)
+        if isinstance(diagnostics, dict):
+            self.diagnostics = dict(diagnostics)
 
 
 def _no_response_result(
@@ -225,20 +445,116 @@ def _no_response_result(
     return result
 
 
-def _error_payload(exc: Exception, *, prefix: str = "") -> dict[str, str]:
+def _error_payload(exc: Exception, *, prefix: str = "") -> dict[str, Any]:
     message = f"{prefix}: {exc}" if prefix else str(exc)
-    return {
+    payload: dict[str, Any] = {
         "error": message,
-        "error_code": str(getattr(exc, "error_code", "internal_error")),
+        "error_code": str(getattr(exc, "error_code", "timeout" if isinstance(exc, TimeoutError) else "internal_error")),
     }
+    diagnostics = getattr(exc, "diagnostics", None)
+    if isinstance(diagnostics, dict):
+        payload["diagnostics"] = diagnostics
+    for name in (
+        "delivery_state", "retry_safe", "operation_id", "reservation_held",
+        "poll_with",
+    ):
+        value = getattr(exc, name, None)
+        if value is not None:
+            payload[name] = value
+    return payload
+
+
+def _attach_operation(
+    exc: Any, operation_id: str, *, outcome_unknown: bool = False,
+    reservation_held: Optional[bool] = True,
+) -> None:
+    exc.operation_id = operation_id
+    exc.poll_with = 'get_execute_js_result'
+    diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+    diagnostics.update({
+        'operation_id': operation_id, 'poll_with': 'get_execute_js_result',
+    })
+    # Only the daemon knows whether the operation still reserves its target.
+    if reservation_held is not None:
+        diagnostics['reservation_held'] = reservation_held
+    if outcome_unknown:
+        diagnostics['operation_status'] = 'outcome_unknown'
+        exc.delivery_state = 'delivered_no_result'
+        exc.retry_safe = False
+    exc.diagnostics = diagnostics
+
+
+def _execution_may_continue(result: dict[str, Any]) -> bool:
+    """A protocol watchdog detaches its debugger without cancelling page JS."""
+    if result.get('success') is not False:
+        return False
+    detail = result.get('data')
+    message, source = _page_error_source(detail)
+    container = detail if isinstance(detail, dict) else {}
+    if container.get('dispatched', source.get('dispatched')) is False:
+        return False
+    lower = message.lower()
+    if 'debugger attach exceeded' in lower:
+        return False
+    code = container.get('code') or source.get('code') or ''
+    return str(code) in {'cdp_timeout', 'debugger_detached'} or any(
+        marker in lower for marker in (
+            'cdp_timeout:', 'debugger_detached:', 'detached while handling command',
+            'csp-relaxed injection timed out',
+            'manual dialog ownership expired while waiting for an outcome',
+        )
+    )
+
+
+def _raise_remote_error(response: dict[str, Any], *, script: str = "") -> None:
+    code = response.get("error_code")
+    message = response.get("error")
+    exc: Any
+    if code == "timeout" or (code == "internal_error" and 'did not respond within' in str(message)):
+        exc = TimeoutError(message)
+    elif response.get("delivery_state") is not None and code not in {
+        "session_not_connected", "session_disconnected", "extension_not_connected", "ambiguous_browser",
+    }:
+        exc = BridgeNoResponseError(
+            str(message), error_code=str(code or "transport_error"),
+            delivery_state=str(response["delivery_state"]),
+            retry_safe=bool(response.get("retry_safe", False)),
+            operation_id=response.get("operation_id"),
+            reservation_held=response.get("reservation_held"),
+            poll_with=response.get("poll_with"),
+            diagnostics=response.get("diagnostics"),
+        )
+    elif code == "ambiguous_browser":
+        exc = AmbiguousBrowserError(response.get("diagnostics", {}).get("candidate_client_ids", []))
+    elif code == "session_not_connected":
+        exc = SessionNotConnectedError(message)
+    elif code == "session_disconnected":
+        exc = SessionDisconnectedError(message)
+    elif code == "extension_not_connected":
+        exc = ExtensionNotConnectedError(message)
+    elif _is_page_execution_error(message, code) or isinstance(message, dict):
+        exc = PageExecutionError(message, script=script, error_code=code, diagnostics=response.get("diagnostics"))
+    else:
+        exc = RuntimeError(message)
+        exc.error_code = code or "internal_error"
+        exc.retry_safe = bool(response.get("retry_safe", False))
+    if isinstance(response.get("diagnostics"), dict):
+        exc.diagnostics = dict(response["diagnostics"])
+    for name in (
+        "delivery_state", "retry_safe", "operation_id", "reservation_held",
+        "poll_with",
+    ):
+        if name in response:
+            setattr(exc, name, response[name])
+    raise exc
 
 # --- /link 鉴权 --------------------------------------------------------------
 # WS 口靠 origin 前缀挡住网页（扩展读不到磁盘上的密钥，只能这么做）；但 /link 是
 # 命令通道，本机任意进程都能 POST 一条 execute_js 在用户登录态的 Chrome 里跑任意
 # JS。BTAP 默认用用户目录中的持久 token 鉴权；旧环境变量只用于一次迁移。
-TOKEN_ENV = 'BROWSERTAP_BRIDGE_TOKEN'
-TOKEN_FILE_ENV = 'BROWSERTAP_BRIDGE_TOKEN_FILE'
-TOKEN_AUTH_ENV = 'BROWSERTAP_BRIDGE_AUTH'
+TOKEN_ENV = 'BROWSERTAP_BRIDGE_TOKEN'  # noqa: S105 - environment variable name
+TOKEN_FILE_ENV = 'BROWSERTAP_BRIDGE_TOKEN_FILE'  # noqa: S105 - environment variable name
+TOKEN_AUTH_ENV = 'BROWSERTAP_BRIDGE_AUTH'  # noqa: S105 - environment variable name
 
 # Extra socket budget a remote (is_remote=True) client grants itself on top of
 # the command timeout it hands the daemon. Without it the HTTP read deadline and
@@ -251,6 +567,23 @@ TOKEN_AUTH_ENV = 'BROWSERTAP_BRIDGE_AUTH'
 # misbehaving daemon can overrun the caller's total deadline by at most this
 # margin; loopback HTTP needs only milliseconds of it.
 REMOTE_TRANSPORT_MARGIN = 2.0
+
+
+def _positive_timeout(value: Any, *, name: str = "timeout") -> float:
+    """Normalize one timeout without allowing an unbounded/non-running wait."""
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be a finite number greater than zero"
+        ) from None
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(f"{name} must be a finite number greater than zero")
+    return normalized
+
+
+def _timeout_or_default(value: Any, default: float) -> float:
+    return _positive_timeout(default if value is None else value)
 
 
 def bridge_token_path() -> Path:
@@ -273,7 +606,12 @@ def _persist_token(path: Path, token: str) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            os.write(fd, (token + '\n').encode('utf-8'))
+            pending = memoryview((token + '\n').encode('utf-8'))
+            while pending:
+                written = os.write(fd, pending)
+                if written <= 0 or written > len(pending):
+                    raise OSError(f'invalid token write count: {written}')
+                pending = pending[written:]
         finally:
             os.close(fd)
         try:
@@ -290,7 +628,7 @@ def _persist_token(path: Path, token: str) -> str:
             if stored:
                 return stored
             time.sleep(0.01)
-        raise RuntimeError(f'BTAP bridge token file is empty: {path}')
+        raise RuntimeError(f'BTAP bridge token file is empty: {path}') from None
     except OSError as exc:
         raise RuntimeError(f'BTAP cannot persist its bridge token at {path}: {exc}') from exc
 
@@ -374,7 +712,7 @@ def state_paths_report(*, enforced_token: Any = None) -> dict[str, Any]:
     if isinstance(enforced_token, str) and enforced_token:
         report["enforced_token_fingerprint"] = token_fingerprint(enforced_token)
         report["token_matches_file"] = bool(
-            stored and hmac.compare_digest(stored, enforced_token)
+            stored and hmac.compare_digest(stored.encode('utf-8'), enforced_token.encode('utf-8'))
         )
     return report
 
@@ -385,10 +723,14 @@ def header_token(headers) -> str:
     两个头都收：Authorization 是常规写法，X-Bridge-Token 留给设不了
     Authorization 的调用方（某些 userscript / 反代）。
     """
-    auth = (headers.get('Authorization', '') or '').strip()
-    if auth[:7].lower() == 'bearer ':
-        return auth[7:].strip()
-    return (headers.get('X-Bridge-Token', '') or '').strip()
+    try:
+        auth = (headers.get('Authorization', '') or '').strip()
+        if auth[:7].lower() == 'bearer ':
+            return auth[7:].strip()
+        return (headers.get('X-Bridge-Token', '') or '').strip()
+    except UnicodeError:
+        # Bottle decodes WSGI headers as UTF-8; malformed bytes are not credentials.
+        return ''
 
 
 def check_link_token(headers, want: str) -> None:
@@ -397,29 +739,43 @@ def check_link_token(headers, want: str) -> None:
         return
     got = header_token(headers)
     # compare_digest 而非 ==：避免按字节提前返回泄露前缀。
-    if not got or not hmac.compare_digest(got, want):
+    if not got or not hmac.compare_digest(got.encode('utf-8'), want.encode('utf-8')):
         raise bottle.HTTPResponse(
             status=401, body='unauthorized: missing or bad bridge token')
+
+
+def drain_request_body() -> None:
+    """Consume whatever the current request still has unread.
+
+    Bottle reads a body only for the content types it parses, so a request this
+    server declines to act on can leave its bytes in the socket -- and wsgiref on
+    Windows then resets the connection instead of delivering the response, which
+    reads to the caller as a dead bridge rather than as the error it actually
+    was. Measured on this server: a small refused POST aborts a few percent of
+    the time, one larger than the socket buffer aborts every time. Reading past
+    MEMFILE_MAX covers a body big enough that bottle spilled it to disk.
+
+    Every route that can answer without parsing the body needs this, which is why
+    it is one function and not an idiom repeated per route -- a refusal that
+    forgets it does not fail, it turns into a transport error somewhere else.
+    """
+    try:
+        request.body.read(request.MEMFILE_MAX + 1)
+    except Exception:  # noqa: S110 - body draining is best-effort during refusal
+        pass
 
 
 def check_link_token_drained(headers, want: str) -> None:
     """check_link_token，但被拒的请求不会把自己的 body 留在 socket 里。
 
-    wsgiref on Windows resets the connection when a rejected request leaves its
-    Content-Length bytes unread, so the caller sees WSAECONNABORTED instead of
-    the 401 — indistinguishable from a crashed bridge. Measured on this server:
-    a small rejected POST aborts a few percent of the time, one larger than the
-    socket buffer aborts every time. Touching request.body consumes the stream;
-    read past MEMFILE_MAX so nothing is left even for a body bottle spills to
-    disk. The response object is preserved, and the route body never runs.
+    The 401 has to survive the body it just refused to read; see
+    `drain_request_body`. The response object is preserved, and the route body
+    never runs.
     """
     try:
         check_link_token(headers, want)
     except bottle.HTTPResponse:
-        try:
-            request.body.read(request.MEMFILE_MAX + 1)
-        except Exception:
-            pass
+        drain_request_body()
         raise
 
 
@@ -429,31 +785,113 @@ def require_link_token(headers) -> None:
     check_link_token(headers, bridge_token())
 
 
+def json_object_body():
+    """The request's JSON object, or None if the client did not send one.
+
+    Draining is the whole point, and it is the same trap
+    ``check_link_token_drained`` exists for one step later. ``request.json`` is
+    None for a body bottle will not parse and raises for one that is malformed,
+    so reading a field off it raised ``AttributeError``, bottle turned that into
+    a 500, and the request's bytes were still unread in the socket -- where
+    wsgiref on Windows answers by resetting the connection. The caller then sees
+    a dropped connection and cannot tell a malformed request from a dead bridge.
+    Read past ``MEMFILE_MAX`` so nothing is left even for a body bottle spilled
+    to disk.
+
+    Returning None rather than raising leaves the answer to the route: these
+    three speak different protocols to different clients, and a shared error
+    shape would be wrong for at least two of them.
+    """
+    try:
+        data = request.json
+    except Exception:  # noqa: S110 - malformed request bodies are discarded
+        data = None
+    if isinstance(data, dict):
+        return data
+    try:
+        request.body.read(request.MEMFILE_MAX + 1)
+    except Exception:  # noqa: S110 - malformed request body discard is best-effort
+        pass
+    return None
+
+
+# How long an HTTP session may go without long-polling before it counts as gone.
+# That transport has no close event -- a WebSocket does -- so silence is the only
+# signal there is, and every answered poll refreshes `connect_at`.
+HTTP_SESSION_IDLE_SECONDS = 60
+
+# How long one poll waits for a command before answering "ask again". It has to
+# stay well under the idle timeout above: the clock the timeout measures only
+# advances when a poll returns, so a window as long as the timeout would let a
+# client that polls without pause still be counted as silent.
+HTTP_POLL_SECONDS = 5
+
+# The transports a client may register as: `ws` is a page's content script,
+# `ext_ws` the extension's own service worker, `http` a long-poll client that has
+# no socket at all.
+_SOCKET_TYPES = frozenset({'ws', 'ext_ws'})
+_QUEUE_TYPE = 'http'
+
+
 class Session:
+    """One connected tab, and the single channel that reaches it.
+
+    The channel is stored once. Two mutually exclusive slots -- a socket and a
+    queue -- meant the "exactly one is set" invariant was maintained by hand in
+    the constructor and again in `reconnect`, where a transport matching neither
+    branch left the *previous* one's handle in place: a client registering as
+    something this bridge does not serve inherited whatever socket or queue was
+    there before it. Deriving both names from one slot makes that unrepresentable
+    rather than merely fixed, and it is what lets `reconnect` *be* the
+    constructor's body instead of a second copy of it that can drift.
+
+    `type` is derived from `info` for the same reason. Copying it out at
+    construction meant the paths that refresh `info` alone left a session whose
+    declared transport and whose actual routing disagreed.
+    """
+
     def __init__(self, session_id, info, client=None):
         self.id = session_id
-        self.info = info
-        self.connect_at = time.time()
-        self.disconnect_at = None
-        self.type = info.get('type', 'ws')
-        self.ws_client = client if self.type in ('ws', 'ext_ws') else None
-        self.http_queue = client if self.type == 'http' else None
-    @property
-    def url(self): return self.info.get('url', '')
-    def is_active(self):
-        if self.type == 'http' and time.time() - self.connect_at > 60: self.mark_disconnected()
-        return self.disconnect_at is None
+        self.reconnect(client, info)
+
     def reconnect(self, client, info):
+        """Rebind to a new channel; connecting for the first time is the same act."""
         self.info = info
-        self.type = info.get('type', 'ws')
-        if self.type in ('ws', 'ext_ws'):
-            self.ws_client = client
-            self.http_queue = None
-        elif self.type == 'http':
-            self.ws_client = None
-            self.http_queue = client
+        self.client = client
         self.connect_at = time.time()
         self.disconnect_at = None
+
+    @property
+    def type(self):
+        return self.info.get('type', 'ws')
+
+    @property
+    def url(self):
+        return self.info.get('url', '')
+
+    @property
+    def ws_client(self):
+        """The socket, or None when this session is not reached over one."""
+        return self.client if self.type in _SOCKET_TYPES else None
+
+    @property
+    def http_queue(self):
+        """The long-poll queue, or None when this session is not reached over one."""
+        return self.client if self.type == _QUEUE_TYPE else None
+
+    def is_active(self):
+        """Whether this session can still be reached.
+
+        The expiry check *records* the transition rather than merely reporting it,
+        which is deliberate: `clean_sessions` reaps on `disconnect_at`, so an HTTP
+        session that timed out without ever being stamped would sit in the table
+        for the life of a daemon that outlives every MCP session.
+        """
+        if (self.type == _QUEUE_TYPE
+                and time.time() - self.connect_at > HTTP_SESSION_IDLE_SECONDS):
+            self.mark_disconnected()
+        return self.disconnect_at is None
+
     def mark_disconnected(self):
         # Records the transition, not the state: callers re-run this over the
         # whole table on every extension snapshot, so a tab that is already
@@ -474,23 +912,205 @@ class BrowserBridge:
     # ports, and remote mode skips half of it too.
     rejected_client_takeovers = 0
     last_rejected_takeover = None
+    rejected_operation_replies = 0
+    last_rejected_operation_reply = None
+
+    @property
+    def default_session_id(self):
+        from .command_scope import get_scoped_default_session
+
+        with _DRIVER_STATE_LOCK:
+            fallback = getattr(self, '_default_session_id', None)
+            revision = getattr(self, '_default_session_revision', 0)
+            return get_scoped_default_session(self, fallback, revision=revision)
+
+    @default_session_id.setter
+    def default_session_id(self, value):
+        from .command_scope import set_scoped_default_session
+
+        with _DRIVER_STATE_LOCK:
+            fallback = getattr(self, '_default_session_id', None)
+            revision = getattr(self, '_default_session_revision', 0)
+            if not set_scoped_default_session(self, value, fallback, revision=revision):
+                self._default_session_id = value
+                self._default_session_revision = revision + 1
+
+    def publish_default_session_id(
+        self, value, *, expected=_UNSET_DEFAULT, expected_revision=_UNSET_DEFAULT,
+    ) -> bool:
+        with _DRIVER_STATE_LOCK:
+            if expected is not _UNSET_DEFAULT and getattr(self, '_default_session_id', None) != expected:
+                return False
+            revision = getattr(self, '_default_session_revision', 0)
+            if expected_revision is not _UNSET_DEFAULT and revision != expected_revision:
+                return False
+            self._default_session_id = value
+            self._default_session_revision = revision + 1
+            return True
+
+    def _requester(self, requester_id=None) -> str:
+        if requester_id is not None:
+            return str(requester_id)
+        return process_requester_id()
+
+    def _operation_state(self) -> PendingOperations:
+        with _DRIVER_STATE_LOCK:
+            if not hasattr(self, '_pending_operations'):
+                self._pending_operations = PendingOperations(requester_liveness=requester_liveness)
+            return self._pending_operations
+
+    def _capture_state(self) -> CaptureOwnershipRegistry:
+        with _DRIVER_STATE_LOCK:
+            if not hasattr(self, '_capture_ownership'):
+                self._capture_ownership = CaptureOwnershipRegistry(requester_liveness=requester_liveness)
+                self._capture_commands: dict[str, CaptureOperation] = {}
+            return self._capture_ownership
+
+    def _complete_operation(self, operation_id: str, result: dict[str, Any]) -> bool:
+        uncertain = _execution_may_continue(result)
+        with _DRIVER_STATE_LOCK:
+            capture_commands = getattr(self, '_capture_commands', {})
+            capture_operation = capture_commands.get(operation_id)
+            data = result.get('data')
+            succeeded = result.get('success') is True and not (
+                isinstance(data, dict) and data.get('ok') is False
+            )
+            if capture_operation is not None:
+                self._capture_state().finish(capture_operation, success=succeeded)
+                if not uncertain:
+                    capture_commands.pop(operation_id, None)
+            operations = self._operation_state()
+            if succeeded and isinstance(data, dict) and data.get('pending_execution') is False:
+                operations.observe_manual_execution(operation_id)
+            # Capture state and dialog settlement must commit before the tab is
+            # available to a new start; duplicate reply observers share this lock.
+            return operations.complete(operation_id, result, outcome_unknown=uncertain)
+
+    def _sync_pending_operations(self) -> None:
+        with _DRIVER_STATE_LOCK:
+            operations = getattr(self, '_pending_operations', None)
+            if operations is None:
+                return
+            for operation_id in operations.pending_ids():
+                if operation_id in self.acks:
+                    operations.acknowledge(operation_id)
+                result = self.results.get(operation_id)
+                if isinstance(result, dict):
+                    self._complete_operation(operation_id, result)
+            retained = operations.retained_ids()
+            for cache in (self.results, self.acks):
+                for operation_id in list(cache):
+                    if operation_id not in retained:
+                        cache.pop(operation_id, None)
+
+    def _record_operation_reply(
+        self,
+        data: dict[str, Any],
+        *,
+        transport: str,
+        owner: Any = None,
+    ) -> bool:
+        """Publish one inbound ACK/result only for the operation that sent it."""
+        operation_id = data.get('id')
+        kind = data.get('type')
+        valid = (
+            kind in ('ack', 'result', 'error')
+            and (data.get('tabId') is None or _valid_tab_id(data['tabId']))
+            and _valid_tab_snapshot(data.get('newTabs', []))
+        )
+        # Lifecycle cleanup uses the same lock: it cannot end an operation
+        # between reply validation and publication.
+        with _DRIVER_STATE_LOCK:
+            operations = self._operation_state()
+            if (not _valid_protocol_id(operation_id) or not valid
+                    or not operations.accepts_reply(operation_id, transport, owner)):
+                self.rejected_operation_replies += 1
+                self.last_rejected_operation_reply = {
+                    'operation_id': operation_id[:64] if isinstance(operation_id, str) else '',
+                    'type': str(kind)[:32],
+                    'transport': transport,
+                    'ts': time.time(),
+                }
+                return False
+            if kind == 'ack':
+                self.acks[operation_id] = time.time()
+                operations.acknowledge(operation_id)
+            else:
+                self.results[operation_id] = {
+                    'success': kind == 'result',
+                    'data': data.get('result' if kind == 'result' else 'error'),
+                    'newTabs': data.get('newTabs', []),
+                    'tabId': data.get('tabId'),
+                    'ts': time.time(),
+                }
+                # Commit before releasing the publication lock, so a duplicate
+                # cannot replace a terminal reply before waiters are notified.
+                self._complete_operation(operation_id, self.results[operation_id])
+        self._notify_activity()
+        return True
+
+    def _finish_tab_operations(
+        self, session_id: str, reason: str, *, expected_generation: str | None = None,
+    ) -> None:
+        with _DRIVER_STATE_LOCK:
+            if ':' in str(session_id):
+                client_id, tab_id = str(session_id).rsplit(':', 1)
+                # A close reply can race the next tabs snapshot. If Chrome has
+                # already reused the native id for a replacement tab, the
+                # close must not settle operations that belong to that new
+                # generation. The snapshot path will settle the old session.
+                current = self.sessions.get(str(session_id))
+                if (expected_generation is not None and current is not None
+                        and str(current.info.get('generation')) != str(expected_generation)):
+                    return
+                # Session ids normally end in Chrome's numeric native tab id,
+                # but this cleanup path also sees stale/caller-supplied handles.
+                # A malformed suffix must not prevent the operation registry
+                # below from settling the target.
+                try:
+                    native_tab_id = int(tab_id)
+                except (TypeError, ValueError):
+                    native_tab_id = None
+                if native_tab_id is not None:
+                    self._capture_state().release_tab(client_id, native_tab_id)
+                    for key, capture in list(self._capture_commands.items()):
+                        if capture.client_id == client_id and capture.tab_id == native_tab_id:
+                            self._capture_commands.pop(key, None)
+            self._operation_state().finish_target(str(session_id), reason)
 
     def __init__(self, host: str = '127.0.0.1', port: int = 18765):
         self.host, self.port = host, port
-        self.sessions, self.results, self.acks = {}, {}, {}
-        self.default_session_id = None
-        self.latest_session_id = None
+        self.started_at = time.time()
+        self.sessions: dict[str, Session] = {}
+        self.results: dict[str, dict[str, Any]] = {}
+        self.acks: dict[str, float] = {}
+        self.rejected_client_takeovers = 0
+        self.last_rejected_takeover = None
+        self.rejected_operation_replies = 0
+        self.last_rejected_operation_reply = None
+        # Old session handles remain useful only when the extension provided
+        # explicit replacement evidence (`tabs.onReplaced`). Never infer this
+        # map from URL/title or from a reused native id.
+        self._rebindings: dict[str, dict[str, Any]] = {}
+        # Commands are completed by the HTTP/WS server threads. A condition lets
+        # the waiting caller resume as soon as one of those threads records a
+        # result, ACK or session lifecycle change instead of paying the old
+        # 50 ms polling slice on every successful bridge round trip.
+        self._activity_condition = threading.Condition()
+        self._activity_serial = 0
+        self.default_session_id: Optional[str] = None
+        self.latest_session_id: Optional[str] = None
         # Last time ANY extension pushed ext_ready/tabs_update. Lets `doctor`
         # tell "extension never registered" (0 or stale) from "registered but
         # just dropped" — the single most useful signal for classifying why
         # /link is empty. None until the first registration this daemon sees.
-        self.last_ext_seen = None
+        self.last_ext_seen: Optional[float] = None
         # Per-client last-seen: which browser is stale vs which just dropped.
-        self.client_last_seen = {}
+        self.client_last_seen: dict[str, dict[str, Any]] = {}
         # client_id -> {'ws','browser','ts'}: the extension's own socket, one per
         # browser, independent of how many tabs exist. Addresses the service
         # worker directly for tab-less commands; see ext_cmd().
-        self.ext_clients = {}
+        self.ext_clients: dict[str, dict[str, Any]] = {}
         with socket.socket() as _probe:
             _probe.settimeout(1)
             self.is_remote = _probe.connect_ex((host, port+1)) == 0
@@ -519,6 +1139,40 @@ class BrowserBridge:
             # also gives us connection pooling for repeated calls.
             self._http = requests.Session()
             self._http.trust_env = False
+
+    def _activity_snapshot(self) -> Optional[int]:
+        """Return the current activity generation, or None for legacy stubs."""
+        condition = getattr(self, '_activity_condition', None)
+        if condition is None:
+            return None
+        with condition:
+            return self._activity_serial
+
+    def _notify_activity(self) -> None:
+        """Wake command/session waiters after publishing their new state."""
+        self._sync_pending_operations()
+        condition = getattr(self, '_activity_condition', None)
+        if condition is None:
+            return
+        with condition:
+            self._activity_serial += 1
+            condition.notify_all()
+
+    def _wait_for_activity(self, seen: Optional[int], timeout: float) -> Optional[int]:
+        """Wait until activity advances, retaining sleep fallback for test stubs."""
+        if timeout <= 0:
+            return seen
+        condition = getattr(self, '_activity_condition', None)
+        if condition is None or seen is None:
+            time.sleep(timeout)
+            return None
+        with condition:
+            # The generation closes the check-then-wait race: if a result landed
+            # after the caller inspected `results` but before acquiring this
+            # lock, it observes the changed value and does not sleep.
+            if self._activity_serial == seen:
+                condition.wait(timeout)
+            return self._activity_serial
 
     def _acquire_host_lock(self):
         s = socket.socket()
@@ -549,12 +1203,17 @@ class BrowserBridge:
             # side effect of the parser, not a decision. Make it explicit, and
             # deliberately send no Access-Control-* headers so no browser ever
             # gets permission to read a response.
-            origin = request.headers.get('Origin', '') or ''
+            try:
+                origin = request.headers.get('Origin', '') or ''
+            except UnicodeError:
+                drain_request_body()
+                raise bottle.HTTPResponse(status=403, body='forbidden origin') from None
             if origin and not origin.startswith(
                     ('chrome-extension://', 'moz-extension://',
                      'safari-web-extension://', 'extension://')):
                 extra = os.environ.get('BROWSERTAP_WS_ALLOWED_ORIGINS', '')
                 if not any(origin == o.strip() for o in extra.split(',') if o.strip()):
+                    drain_request_body()
                     raise bottle.HTTPResponse(status=403, body='forbidden origin')
 
         @app.route('/api/longpoll', method=['GET', 'POST'])
@@ -564,39 +1223,88 @@ class BrowserBridge:
             # 显式关闭鉴权时保持旧版 userscript 轮询客户端兼容。被拒时按
             # check_link_token_drained 排空 body，401 才不会退化成连接中断。
             check_link_token_drained(request.headers, self.link_token)
-            data = request.json
-            session_id = data.get('sessionId')
-            session_info = {'url': data.get('url'), 'title': data.get('title', ''), 'type': 'http'}
-            if session_id not in self.sessions:
-                session = Session(session_id, session_info, queue.Queue())
-                logger.info("Browser HTTP connected: %s (session=%s)", redact_url(session.url), session_id)
-                self.sessions[session_id] = session
-            session = self.sessions[session_id]
-            if session.disconnect_at is not None and session.type != 'http': session.reconnect(queue.Queue(), session_info)
-            session.disconnect_at = None
-            if session.type == 'http': msgQ = session.http_queue
-            else: return json.dumps({"id": "", "ret": "use ws"})
-            session.connect_at = start_time = time.time()
-            while time.time() - start_time < 5:
-                try:
-                    msg = msgQ.get(timeout=0.2)
-                    try:
-                        self.acks[json.loads(msg).get('id', '')] = time.time()
-                    except Exception:
-                        logger.exception("Failed to record long-poll acknowledgement")
-                    return msg
-                except queue.Empty: continue
-            return json.dumps({"id": "", "ret": "next long-poll"})
+            data = json_object_body()
+            session_id = (data or {}).get('sessionId')
+            if not _valid_protocol_id(session_id) or not _valid_page_fields(data):
+                # Either a body this route could not read, or one naming no
+                # session. Both are unanswerable rather than merely empty, and
+                # both have the same fix: a session with no id cannot be named by
+                # `execute_js`, so it could never be handed a command and would
+                # poll forever while occupying a row in the table. `ret` is free
+                # text to this route's clients -- they compare against the two
+                # values below and poll again on anything else -- so an
+                # unfamiliar value is the in-protocol way to say this.
+                return json.dumps({"id": "", "ret": "invalid request"})
+            session_info = {'url': data.get('url'), 'title': data.get('title', ''),
+                            'type': _QUEUE_TYPE}
+            session = self.sessions.get(session_id)
+            if session is None:
+                session = self.sessions[session_id] = Session(
+                    session_id, session_info, queue.Queue())
+                logger.info("Browser HTTP connected: %s (session=%s)",
+                            redact_url(session.url), session_id)
+            elif session.type == _QUEUE_TYPE:
+                # The same client polling again, so rebind it to the queue it
+                # already has rather than a fresh one: a command handed over
+                # while it was between polls is sitting in there, and swapping
+                # the queue would drop it with nothing anywhere reporting a loss.
+                # Going through `reconnect` is also what refreshes `info` -- the
+                # three field writes this replaces left a resurrected session
+                # describing whichever URL the tab had on its first ever poll.
+                session.reconnect(session.client, session_info)
+            elif session.is_active():
+                # A live socket already reaches this tab. Refusing is what keeps
+                # a command from being handed to the weaker of two channels.
+                return json.dumps({"id": "", "ret": "use ws"})
+            else:
+                # The socket is gone and this client speaks for the tab now.
+                session.reconnect(queue.Queue(), session_info)
+            self._notify_activity()
+            try:
+                msg = session.http_queue.get(timeout=HTTP_POLL_SECONDS)
+            except queue.Empty:
+                return json.dumps({"id": "", "ret": "next long-poll"})
+            # Handing the payload over is the acknowledgement: this transport has
+            # no ack frame the way the socket does, so the moment the command
+            # leaves is the only evidence there is that it was delivered.
+            try:
+                exec_id = json.loads(msg).get('id')
+            except Exception:
+                # Everything on this queue was serialised by `_send_to_session`,
+                # so a payload that will not parse is this bridge's own bug, not
+                # a client's. Hand it over anyway -- refusing would strand a
+                # caller already waiting on its result -- but say so.
+                logger.exception("unparseable long-poll payload for session=%s", session_id)
+            else:
+                # An id-less payload acknowledges nothing. Recording it under the
+                # empty string, as this did, put a key in `acks` that no waiter
+                # ever looks up -- `exec_id` is a uuid4 -- so it sat there until
+                # the 600-second sweep collected it.
+                if exec_id:
+                    self._record_operation_reply(
+                        {'type': 'ack', 'id': exec_id},
+                        transport='http', owner=session_id,
+                    )
+            return msg
 
         @app.route('/api/result', method=['GET','POST'])
         def result():
             # 与 /api/longpoll 同理：token 已配置时伪造结果注入同样需要鉴权。
             check_link_token_drained(request.headers, self.link_token)
-            data = request.json
-            if data.get('type') == 'result':
-                self.results[data.get('id')] = {'success': True, 'data': data.get('result'), 'newTabs': data.get('newTabs', []), 'tabId': data.get('tabId'), 'ts': time.time()}
-            elif data.get('type') == 'error':
-                self.results[data.get('id')] = {'success': False, 'data': data.get('error'), 'newTabs': data.get('newTabs', []), 'tabId': data.get('tabId'), 'ts': time.time()}
+            data = json_object_body()
+            if data is None:
+                # Same unread-body trap as the poll route, and the same reason it
+                # cannot just let the exception out: this answers a client that is
+                # posting a result, so a 500 plus a reset connection would make it
+                # retry a delivery that was never wrong about anything but its
+                # framing.
+                return 'ok'
+            kind = data.get('type')
+            if kind not in ('result', 'error'):
+                return 'ok'
+            self._record_operation_reply(
+                data, transport='http', owner=data.get('sessionId'),
+            )
             return 'ok'
 
         @app.route('/link', method=['GET','POST'])
@@ -605,19 +1313,19 @@ class BrowserBridge:
             # 由 check_link_token_drained 排空 body，否则 Windows 上 401 会退化成
             # 连接重置。
             check_link_token_drained(request.headers, self.link_token)
-            data = request.json
-            if not isinstance(data, dict):
-                # Bottle only consumes the body for application/json.  A
-                # client that omits Content-Type would otherwise leave bytes
-                # unread; wsgiref can reset the socket on Windows before the
-                # structured error reaches the caller.
-                request.body.read(request.MEMFILE_MAX + 1)
+            data = json_object_body()
+            if data is None:
                 return json.dumps({'r': {
                     'error': 'body must be a JSON object containing cmd',
                     'error_code': 'invalid_request',
                 }},
                                   ensure_ascii=False)
             cmd = data.get('cmd')
+            if cmd == 'get_clients':
+                return json.dumps({'r': [
+                    {'client_id': cid, 'browser': entry.get('browser')}
+                    for cid, entry in list(self.ext_clients.items())
+                ]}, ensure_ascii=False)
             if cmd == 'get_all_sessions':
                 try:
                     return json.dumps({'r': self.get_all_sessions()}, ensure_ascii=False)
@@ -637,25 +1345,78 @@ class BrowserBridge:
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e, prefix='find_session failed')},
                                       ensure_ascii=False)
+            if cmd == 'resolve_session':
+                try:
+                    session_id = data.get('sessionId')
+                    if session_id is None:
+                        return json.dumps({'r': None}, ensure_ascii=False)
+                    return json.dumps(
+                        {'r': self._resolve_local_session_target(str(session_id))},
+                        ensure_ascii=False,
+                    )
+                except Exception as e:
+                    return json.dumps({'r': _error_payload(e, prefix='resolve_session failed')},
+                                      ensure_ascii=False)
             if cmd == 'ext_cmd':
                 try:
-                    result = self.ext_cmd(data.get('payload') or {},
-                                          client_id=data.get('clientId'),
-                                          timeout=float(data.get('timeout', 15.0)))
+                    payload = data.get('payload')
+                    if (
+                        not isinstance(payload, dict)
+                        or not isinstance(payload.get('cmd'), str)
+                        or not payload['cmd'].strip()
+                    ):
+                        return json.dumps({'r': {
+                            'error': (
+                                'ext_cmd requires payload to be a JSON object with a non-empty string cmd field; '
+                                'send {"cmd":"ext_cmd","payload":{"cmd":"tabs",...}}'
+                            ),
+                            'error_code': 'invalid_payload',
+                            'hint': 'Do not put the extension command at the /link top level.',
+                        }}, ensure_ascii=False)
+                    timeout = _positive_timeout(data.get('timeout', 15.0))
+                    caller_options = {}
+                    if data.get('requesterId') is not None:
+                        caller_options['requester_id'] = str(data['requesterId'])
+                    if data.get('operationId') is not None:
+                        caller_options['operation_id'] = str(data['operationId'])
+                    result = self.ext_cmd(payload,
+                                          client_id=self.select_client_id(data.get('clientId'), use_default=False),
+                                          timeout=timeout, **caller_options)
                     return json.dumps({'r': result}, ensure_ascii=False)
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e)}, ensure_ascii=False)
             if cmd == 'execute_js':
                 session_id = data.get('sessionId')
                 code = data.get('code')
-                timeout = float(data.get('timeout', 10.0))
                 # Absent means False: an older client that doesn't send the flag
                 # gets the safe behaviour (no substitute tab), not the old one.
                 allow_failover = str(data.get('allowFailover', '0')) == '1'
                 try:
+                    timeout = _positive_timeout(data.get('timeout', 10.0))
+                    if session_id is None:
+                        self.select_client_id(use_default=False)
+                    route_options: dict[str, Any] = {}
+                    if str(data.get('allowRebind', '1')) == '0':
+                        route_options['allow_rebind'] = False
+                    if data.get('requesterId') is not None:
+                        route_options['requester_id'] = str(data['requesterId'])
+                    if data.get('operationId') is not None:
+                        route_options['operation_id'] = str(data['operationId'])
+                    if str(data.get('wait', '1')) == '0':
+                        route_options['wait'] = False
                     result = self.execute_js(code, timeout=timeout, session_id=session_id,
-                                             allow_failover=allow_failover)
+                                              allow_failover=allow_failover, **route_options)
                     logger.debug("Remote execute_js completed (session=%s)", session_id)
+                    return json.dumps({'r': result}, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=False)
+            if cmd == 'get_execute_js_result':
+                try:
+                    result = self.get_execute_js_result(
+                        str(data.get('operationId', '')),
+                        timeout=float(data.get('timeout', 0)),
+                        requester_id=data.get('requesterId'),
+                    )
                     return json.dumps({'r': result}, ensure_ascii=False)
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e)}, ensure_ascii=False)
@@ -667,9 +1428,12 @@ class BrowserBridge:
                     'error_code': 'unknown_command',
                 }},
                 ensure_ascii=False)
+        from socketserver import ThreadingMixIn
+        from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
+
+        self.http_server: Optional[WSGIServer] = None
+
         def run():
-            from socketserver import ThreadingMixIn
-            from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
             class _T(ThreadingMixIn, WSGIServer):
                 # A request thread must never outlive shutdown: server_close()
                 # would otherwise join a long-poll that still has seconds to go.
@@ -680,10 +1444,10 @@ class BrowserBridge:
             # with its process — but a caller that owns the object rather than the
             # process (a test fixture) can then close the port instead of leaking
             # a listener that later steals requests aimed at its successor.
-            self.http_server = make_server(
+            server = make_server(
                 self.host, self.port + 1, app, server_class=_T, handler_class=_H)
-            self.http_server.serve_forever()
-        self.http_server = None
+            self.http_server = server
+            server.serve_forever()
         http_thread = threading.Thread(target=run, daemon=True)
         http_thread.start()
 
@@ -736,6 +1500,10 @@ class BrowserBridge:
 
     def clean_sessions(self):
         now = time.time()
+        def expired(value):
+            stamp = _timestamp(value)
+            return stamp is None or now - stamp > 600
+
         # Snapshot keys, then re-fetch with .get: another thread (WS handler or a
         # concurrent clean_sessions from a parallel /link call) may delete a
         # session between the snapshot and access, so both the read and the
@@ -744,17 +1512,23 @@ class BrowserBridge:
             session = self.sessions.get(sid)
             if session is None: continue
             if not session.is_active() and session.disconnect_at is not None \
-                    and now - session.disconnect_at > 600:
+                    and expired(session.disconnect_at):
                 self.sessions.pop(sid, None)
+        for old_sid, binding in list(getattr(self, '_rebindings', {}).items()):
+            replacement = binding.get('replacement_session_id') if isinstance(binding, dict) else None
+            session = self.sessions.get(replacement) if isinstance(replacement, str) else None
+            if (session is None or not session.is_active()
+                    or expired(binding.get('ts', now))):
+                self._rebindings.pop(old_sid, None)
         # Results/acks that arrive after their caller already timed out would
         # otherwise accumulate forever in a long-lived daemon.
         for r_id in list(self.results.keys()):
             entry = self.results.get(r_id)
-            if isinstance(entry, dict) and now - entry.get('ts', now) > 600:
+            if not isinstance(entry, dict) or expired(entry.get('ts', now)):
                 self.results.pop(r_id, None)
         for a_id in list(self.acks.keys()):
             ts = self.acks.get(a_id)
-            if not isinstance(ts, float) or now - ts > 600:
+            if expired(ts):
                 self.acks.pop(a_id, None)
         # Per-client heartbeat stamps leak otherwise: client_id is random per
         # extension install/profile, so every reinstall adds a new key that
@@ -765,7 +1539,7 @@ class BrowserBridge:
         for cid in list(self.client_last_seen.keys()):
             entry = self.client_last_seen.get(cid)
             if cid not in live_clients and (not isinstance(entry, dict)
-                    or now - entry.get('ts', now) > 600):
+                    or expired(entry.get('ts', now))):
                 self.client_last_seen.pop(cid, None)
 
     def start_ws_server(self) -> None:
@@ -780,8 +1554,16 @@ class BrowserBridge:
                     return
                 try:
                     data = json.loads(self.data)
+                except (ValueError, TypeError, RecursionError):
+                    logger.warning('Rejected malformed WebSocket JSON')
+                    return
+                try:
+                    if not isinstance(data, dict):
+                        return
                     if data.get('type') == 'ready':
                         session_id = data.get('sessionId')
+                        if not _valid_protocol_id(session_id) or not _valid_page_fields(data):
+                            return
                         session_info = {'url': data.get('url'), 'title': data.get('title', ''),
                             'connected_at': time.time(), 'type': 'ws'}
                         driver._register_client(session_id, self, session_info)
@@ -793,11 +1575,16 @@ class BrowserBridge:
                         # doesn't send clientId — id(self) is unusable here because
                         # addresses get reused after GC, colliding namespaces.
                         client_id = data.get('clientId')
-                        if not client_id:
+                        if client_id is None or client_id == '':
                             if not hasattr(self, '_fallback_cid'):
                                 self._fallback_cid = f"conn_{uuid.uuid4().hex[:10]}"
                             client_id = self._fallback_cid
                         browser = data.get('browser', '')
+                        # Validate the WHOLE snapshot before claiming a socket
+                        # or publishing liveness; invalid input changes nothing.
+                        if (not _valid_protocol_id(client_id) or not isinstance(browser, str)
+                                or not _valid_tab_snapshot(tabs)):
+                            return
                         # Keep the CLIENT-level socket. It is one per browser and
                         # exists regardless of tab count, so SW-side commands
                         # (chrome.tabs.create) still work with zero open tabs —
@@ -813,7 +1600,7 @@ class BrowserBridge:
                         # and receive nothing forever.
                         if not driver._claim_ext_client(client_id, browser, self):
                             try: self.close()
-                            except Exception: pass
+                            except Exception: pass  # noqa: S110 - closing a refused socket is best-effort
                             return
                         driver.last_ext_seen = time.time()
                         driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
@@ -827,13 +1614,14 @@ class BrowserBridge:
                         # so it is what keeps a namespace owner's ts fresh.
                         driver._touch_ext_client(self)
                         try: self.send_message(json.dumps({'type': 'pong'}))
-                        except Exception: pass
-                    elif data.get('type') == 'ack': driver.acks[data.get('id','')] = time.time()
+                        except Exception: pass  # noqa: S110 - peer may have disconnected
+                    elif data.get('type') == 'ack':
+                        driver._record_operation_reply(data, transport='ws', owner=self)
                     elif data.get('type') == 'result':
-                        driver.results[data.get('id')] = {'success': True, 'data': data.get('result'), 'newTabs': data.get('newTabs', []), 'tabId': data.get('tabId'), 'ts': time.time()}
+                        driver._record_operation_reply(data, transport='ws', owner=self)
                     elif data.get('type') == 'error':
-                        driver.results[data.get('id')] = {'success': False, 'data': data.get('error'), 'newTabs': data.get('newTabs', []), 'tabId': data.get('tabId'), 'ts': time.time()}
-                except Exception:
+                        driver._record_operation_reply(data, transport='ws', owner=self)
+                except Exception:  # noqa: S110 - server close is best-effort before rebuild
                     logger.exception("Error handling WebSocket message")
             def connected(self):
                 # WebSocket is exempt from the same-origin policy and needs no
@@ -847,7 +1635,7 @@ class BrowserBridge:
                     origin = driver._ws_origin(self)
                     logger.warning("Rejected WS connection from %s, origin=%r", self.address, origin)
                     try: self.close()
-                    except Exception: pass
+                    except Exception: pass  # noqa: S110 - rejected socket is already unusable
                     return
                 logger.info("New WS connection from %s", self.address)
             def handle_close(self):
@@ -866,11 +1654,11 @@ class BrowserBridge:
             while True:
                 try:
                     srv.serve_forever()
-                except Exception:
+                except Exception:  # noqa: S110 - rebuild loop must continue after close failure
                     logger.exception("WS server loop crashed; rebuilding in 1s")
                 try:
                     srv.close()
-                except Exception:
+                except Exception:  # noqa: S110 - server close is best-effort before rebuild
                     pass
                 time.sleep(1)
                 try:
@@ -888,18 +1676,43 @@ class BrowserBridge:
     def _apply_extension_tabs(self, client_id: str, browser: str,
                               tabs: list[dict], client: WebSocket) -> None:
         """Apply one extension tab snapshot, respecting tab lifecycle generations."""
+        if not _valid_tab_snapshot(tabs):
+            raise ValueError('Invalid extension tab snapshot')
         def _sid(tab_id): return f"{client_id}:{tab_id}"
 
         current_tab_ids = {_sid(tab['id']) for tab in tabs}
         logger.debug("Received tabs update from %s (%s): %s", client_id, browser, current_tab_ids)
-        # Only sweep sessions belonging to THIS client; another browser's
-        # update must not disconnect this browser's tabs.
-        for sid in list(self.sessions.keys()):
-            sess = self.sessions[sid]
+        rebindings = getattr(self, '_rebindings', None)
+        if rebindings is None:
+            rebindings = self._rebindings = {}
+        prior_by_identity: dict[str, list[str]] = {}
+        current_identity_counts: dict[str, int] = {}
+        sess: Optional[Session]
+        for tab in tabs:
+            identity = tab.get('tab_identity')
+            if identity:
+                key = str(identity)
+                current_identity_counts[key] = current_identity_counts.get(key, 0) + 1
+        for sid, sess in list(self.sessions.items()):
             if (sess.type == 'ext_ws'
                     and sess.info.get('client_id') == client_id
                     and sid not in current_tab_ids):
+                identity = sess.info.get('tab_identity')
+                if identity:
+                    prior_by_identity.setdefault(str(identity), []).append(sid)
+        # Only sweep sessions belonging to THIS client; another browser's
+        # update must not disconnect this browser's tabs.
+        lifecycle_changed = False
+        for sid in list(self.sessions.keys()):
+            sess = self.sessions.get(sid)
+            if sess is None:
+                continue
+            if (sess.type == 'ext_ws'
+                    and sess.info.get('client_id') == client_id
+                    and sid not in current_tab_ids):
+                lifecycle_changed = lifecycle_changed or sess.is_active()
                 sess.mark_disconnected()
+                self._finish_tab_operations(sid, 'tab_removed')
         for tab in tabs:
             session_id = _sid(tab['id'])
             session_info = {
@@ -911,12 +1724,31 @@ class BrowserBridge:
                 'browser': browser,
                 'tab_id': tab['id'],
             }
+            if tab.get('tab_identity'):
+                session_info['tab_identity'] = str(tab['tab_identity'])
             if tab.get('generation') is not None:
                 session_info['generation'] = str(tab['generation'])
             sess = self.sessions.get(session_id)
+            identity = session_info.get('tab_identity')
+            prior = prior_by_identity.get(identity, []) if identity else []
+            if (not sess and identity and current_identity_counts.get(identity) == 1
+                    and len(prior) == 1 and prior[0] != session_id):
+                old_sid = prior[0]
+                rebindings[old_sid] = {
+                    'replacement_session_id': session_id,
+                    'tab_identity': identity,
+                    'reason': 'chrome.tabs.onReplaced',
+                    'ts': time.time(),
+                }
+                logger.info(
+                    "Tab handle rebound for identity %s: %s -> %s",
+                    identity,
+                    old_sid,
+                    session_id,
+                )
             old_generation = sess.info.get('generation') if sess else None
             new_generation = session_info.get('generation')
-            if (sess and sess.is_active() and old_generation is not None
+            if (sess and old_generation is not None
                     and new_generation is not None
                     and str(old_generation) != str(new_generation)):
                 # Same client:tabId, different native tab lifetime. Replace the
@@ -929,28 +1761,83 @@ class BrowserBridge:
                     new_generation,
                 )
                 sess.mark_disconnected()
+                self._finish_tab_operations(session_id, 'generation_changed')
                 self.sessions.pop(session_id, None)
                 sess = None
+                lifecycle_changed = True
             if sess and sess.is_active():
+                # Both together, and in this order: `type` is read out of `info`,
+                # so refreshing one without the other is what used to leave a
+                # session routing over a transport it no longer claimed.
                 sess.info = session_info
-                sess.ws_client = client
+                sess.client = client
             else:
                 self._register_client(session_id, client, session_info)
+        if lifecycle_changed:
+            self._notify_activity()
+
+    def _resolve_local_session_target(self, session_id: str) -> Optional[dict[str, Any]]:
+        sid = str(session_id)
+        session = self.sessions.get(sid)
+        if session is not None and not hasattr(session, 'disconnect_at'):
+            return None
+        if session and getattr(session, 'disconnect_at', None) is None:
+            # WebSocket sessions have an explicit disconnect transition. Avoid
+            # calling is_active() here: it is stateful for HTTP expiry and an
+            # extra probe would consume a transport's lifecycle edge before
+            # execute_js gets to classify it.
+            if getattr(session, 'type', None) != _QUEUE_TYPE or session.is_active():
+                return {'session_id': sid}
+        binding = getattr(self, '_rebindings', {}).get(sid)
+        if not isinstance(binding, dict):
+            return None
+        replacement = str(binding.get('replacement_session_id', ''))
+        current = self.sessions.get(replacement)
+        if not replacement or not current or getattr(current, 'disconnect_at', None) is not None:
+            getattr(self, '_rebindings', {}).pop(sid, None)
+            return None
+        return {
+            'session_id': replacement,
+            'rebound_from': sid,
+            'replacement_session_id': replacement,
+            'tab_identity': binding.get('tab_identity'),
+            'reason': binding.get('reason', 'chrome.tabs.onReplaced'),
+        }
+
+    def resolve_session_target(self, session_id: str, timeout: Optional[float] = None) -> Optional[dict[str, Any]]:
+        """Resolve a current session handle, rebinding only with tab identity evidence."""
+        sid = str(session_id)
+        if self.is_remote:
+            envelope = self._remote_cmd(
+                {'cmd': 'resolve_session', 'sessionId': sid},
+                timeout=_timeout_or_default(timeout, 5),
+            )
+            result = envelope.get('r')
+            if result is None:
+                return None
+            if not isinstance(result, dict):
+                raise RuntimeError('Bridge returned a malformed session resolution')
+            return result
+        return self._resolve_local_session_target(sid)
 
     def _register_client(self, session_id: str, client: WebSocket, session_info) -> None:
-        is_new_session = session_id not in self.sessions
-
-        if is_new_session:
-            session = Session(session_id, session_info, client)
-            self.sessions[session_id] = session
+        # One lookup, and the two branches now differ only in what they say:
+        # binding a channel is the same act whether or not there was one before it
+        # (`Session.__init__` is `reconnect`), so the only thing left that is
+        # genuinely conditional is whether the table gains a row. The log line is
+        # read after the bind either way, which is what makes it report the URL the
+        # tab has now rather than the one it registered with.
+        session = self.sessions.get(session_id)
+        if session is None:
+            session = self.sessions[session_id] = Session(session_id, session_info, client)
             logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
         else:
-            session = self.sessions[session_id]
             session.reconnect(client, session_info)
             logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
 
         self.latest_session_id = session_id
         if self.default_session_id is None: self.default_session_id = session_id
+        self._notify_activity()
 
     def _unregister_client(self, client: WebSocket) -> None:
         # Snapshot both dicts before iterating, for the same reason
@@ -959,12 +1846,17 @@ class BrowserBridge:
         # raises "dictionary changed size during iteration", which here would
         # abort the disconnect cleanup halfway and leave a dead socket in place
         # for ext_cmd to write into.
+        lifecycle_changed = False
         for session in list(self.sessions.values()):
-            if session.ws_client == client: session.mark_disconnected()
+            if session.ws_client == client:
+                lifecycle_changed = lifecycle_changed or session.is_active()
+                session.mark_disconnected()
         # Drop the client-level socket too, else ext_cmd would keep writing into
         # a closed connection instead of failing over to a live browser.
         for cid in [c for c, v in list(self.ext_clients.items()) if v.get('ws') is client]:
             self.ext_clients.pop(cid, None)
+        if lifecycle_changed:
+            self._notify_activity()
 
     def _claim_ext_client(self, client_id: str, browser: str, client: WebSocket) -> bool:
         """Bind client_id to this socket, or refuse. True once it owns it.
@@ -995,10 +1887,10 @@ class BrowserBridge:
         now = time.time()
         incumbent = self.ext_clients.get(client_id)
         if incumbent is not None and incumbent.get('ws') is not client:
-            stamp = incumbent.get('ts')
+            stamp = _timestamp(incumbent.get('ts'))
             # An entry with no usable stamp cannot prove it is alive, and the
             # lockout is the worse failure, so it counts as ancient.
-            idle = now - stamp if isinstance(stamp, (int, float)) else now
+            idle = now - stamp if stamp is not None else now
             if idle <= CLIENT_TAKEOVER_GRACE_SECONDS:
                 self.rejected_client_takeovers += 1
                 self.last_rejected_takeover = {
@@ -1043,10 +1935,32 @@ class BrowserBridge:
         every single action. Re-picking is only safe on this implicit path.
         """
         cur = self.default_session_id
-        if cur:
-            session = self.sessions.get(cur)
-            if session and session.is_active():
+        if getattr(self, 'is_remote', False):
+            if cur is not None:
                 return cur
+            client_id = self.select_client_id()
+            sessions = [s for s in self.get_all_sessions()
+                        if str(s.get('id', '')).rsplit(':', 1)[0] == client_id]
+            if not sessions:
+                return None
+            candidates = [s for s in sessions if is_scriptable_url(s.get('url'))] or sessions
+            chosen = next((s for s in candidates if s.get('active')), candidates[0])
+            self.default_session_id = str(chosen['id'])
+            return self.default_session_id
+        if cur:
+            current = self.sessions.get(cur)
+            # Lightweight test/compatibility session objects predate the
+            # disconnect_at field; retain their explicit is_active contract.
+            if current is not None and not hasattr(current, 'disconnect_at'):
+                if current.is_active():
+                    return cur
+            resolved = self._resolve_local_session_target(str(cur))
+            if resolved:
+                selected = str(resolved['session_id'])
+                if selected != str(cur):
+                    logger.info("Default session %s rebound to %s", cur, selected)
+                    self.default_session_id = selected
+                return selected
         # Snapshot before iterating: the WS thread may insert/remove sessions
         # (tabs_update) while this runs — clean_sessions already snapshots for
         # exactly that reason; missing the snapshot here raises RuntimeError.
@@ -1056,9 +1970,16 @@ class BrowserBridge:
         # Skip tabs Chrome will not let us script, for the same reason this
         # re-picks at all: the caller named nothing, so handing it a tab where
         # every call fails is worse than handing it any other live tab.
+        if cur and ':' in str(cur):
+            client_id = str(cur).rsplit(':', 1)[0]
+            alive = [s for s in alive if str(s.id).rsplit(':', 1)[0] == client_id]
+            if not alive:
+                return cur
+        elif len({str(s.id).rsplit(':', 1)[0] for s in alive if ':' in str(s.id)}) > 1:
+            raise AmbiguousBrowserError([str(s.id).rsplit(':', 1)[0] for s in alive])
         alive = _prefer_scriptable(alive)
-        latest = self.sessions.get(self.latest_session_id)
-        chosen = latest if latest in alive else alive[-1]
+        latest = self.sessions.get(self.latest_session_id) if self.latest_session_id is not None else None
+        chosen = latest if latest is not None and latest in alive else alive[-1]
         if cur:
             logger.info("Default session %s is stale; selected %s", cur, chosen.id)
         self.default_session_id = chosen.id
@@ -1091,19 +2012,21 @@ class BrowserBridge:
             if now - float(getattr(s, 'connect_at', 0.0) or 0.0) >= FAILOVER_SETTLE_SECONDS
         ]
         candidates = settled or usable
-        latest = self.sessions.get(self.latest_session_id)
+        latest = self.sessions.get(self.latest_session_id) if self.latest_session_id is not None else None
         return latest if latest in candidates else candidates[-1]
 
-    def execute_js(self, code, timeout=15, session_id=None, allow_failover=False) -> Any:
+    def execute_js(self, code, timeout=15, session_id=None, allow_failover=False, *,
+                   allow_rebind=True, wait=True, requester_id=None, operation_id=None) -> Any:
         """Run JS in a tab.
 
         allow_failover=False by default: if the target session is gone we raise
         instead of running the script on some other live tab, because the script
         may have side effects the caller only meant for the tab it named.
         """
-        timeout = float(timeout)
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
+        if not isinstance(code, str):
+            raise ValueError("code must be a string")
+        timeout = _positive_timeout(timeout)
+        requester_id = self._requester(requester_id)
         deadline = time.monotonic() + timeout
 
         def remaining():
@@ -1113,8 +2036,28 @@ class BrowserBridge:
         # must still be refused below; an implicit one the driver supplied from
         # its own memory must not be, since the caller never chose it.
         caller_named_target = session_id is not None
+        rebound = None
+        if session_id is not None and not self.is_remote and allow_rebind:
+            rebound = self.resolve_session_target(str(session_id))
+            if rebound and rebound.get('session_id'):
+                session_id = str(rebound['session_id'])
         if session_id is None:
             session_id = self._live_default_session_id()
+        scoped_remote = self.is_remote and has_command_scope()
+        if scoped_remote and session_id is not None:
+            rebound = self.resolve_session_target(str(session_id), timeout=max(0.001, remaining()))
+            if rebound and rebound.get('session_id'):
+                session_id = str(rebound['session_id'])
+            elif not caller_named_target:
+                client_id = str(session_id).rsplit(':', 1)[0]
+                candidates = [s for s in self.get_all_sessions(timeout=max(0.001, remaining()))
+                              if str(s.get('id', '')).rsplit(':', 1)[0] == client_id]
+                if candidates:
+                    candidates = [s for s in candidates if is_scriptable_url(s.get('url'))] or candidates
+                    session_id = str(next((s for s in candidates if s.get('active')), candidates[0])['id'])
+                    self.default_session_id = session_id
+        if session_id is not None:
+            guard_targets(f"{getattr(self, 'host', '127.0.0.1')}:{getattr(self, 'port', 18765)}", [str(session_id)])
         if self.is_remote:
             logger.debug("Dispatching remote execute_js (session=%s)", session_id)
             # HTTP timeout must outlast the JS timeout or long scripts die at
@@ -1123,22 +2066,33 @@ class BrowserBridge:
             # that usually lands on a transport TimeoutError and throws away the
             # structured delivery verdict; REMOTE_TRANSPORT_MARGIN buys the
             # daemon's reply the time it needs to arrive.
-            response = self._remote_cmd({"cmd": "execute_js", "sessionId": session_id,
-                                         "code": code, "timeout": str(timeout),
-                                         "allowFailover": "1" if allow_failover else "0"},
-                                        timeout=max(0.001, remaining())
-                                        + REMOTE_TRANSPORT_MARGIN).get('r', {})
+            mark_dispatched()
+            operation_id = str(operation_id or uuid.uuid4())
+            payload = {"cmd": "execute_js", "sessionId": session_id,
+                       "code": code, "timeout": str(max(0.001, remaining())),
+                       "allowFailover": "1" if allow_failover and not scoped_remote else "0",
+                       "wait": "1" if wait else "0", "requesterId": requester_id,
+                       "operationId": operation_id}
+            if scoped_remote:
+                # The lock names this resolved tab. Rebinding again in the
+                # daemon would dispatch outside the caller's acquired lock.
+                payload['allowRebind'] = '0'
+            try:
+                envelope = self._remote_cmd(payload,
+                                            timeout=max(0.001, remaining())
+                                            + REMOTE_TRANSPORT_MARGIN)
+                response = envelope.get('r')
+                if not isinstance(response, dict):
+                    raise BridgeNoResponseError(
+                        "Bridge returned a malformed execute_js result",
+                        error_code='transport_error', delivery_state='sent_unconfirmed', retry_safe=False,
+                    )
+            except (TimeoutError, BridgeNoResponseError) as remote_error:
+                if getattr(remote_error, 'delivery_state', None) != 'undelivered':
+                    _attach_operation(remote_error, operation_id, reservation_held=None)
+                raise
             if response.get('error'):
-                err = response['error']
-                error_code = response.get('error_code')
-                # Keep the exception type the same across local and remote: the
-                # bridge flattens everything to a string over HTTP, so a caller
-                # catching ValueError locally would miss it in remote mode.
-                if error_code == SessionNotConnectedError.error_code:
-                    raise SessionNotConnectedError(err)
-                if error_code == SessionDisconnectedError.error_code:
-                    raise SessionDisconnectedError(err)
-                raise Exception(err)
+                _raise_remote_error(response, script=code)
             if isinstance(response, dict) and response.get('tabId') is not None:
                 # The executor (extension/bridge) names the tab it used; surface
                 # it under the same key the local path uses so callers read one
@@ -1150,8 +2104,19 @@ class BrowserBridge:
         switched_from = None
         session = self.sessions.get(session_id)
         if not session or not session.is_active():
-            time.sleep(min(3.0, remaining()))
-            session = self.sessions.get(session_id)
+            # A just-created or reloaded tab can register during this grace
+            # window. Wait on bridge activity so a 100 ms recovery costs about
+            # 100 ms, while retaining the same three-second upper bound.
+            grace_deadline = min(deadline, time.monotonic() + 3.0)
+            activity_serial = self._activity_snapshot()
+            while True:
+                session = self.sessions.get(session_id)
+                if session and session.is_active():
+                    break
+                wait_for = max(0.0, grace_deadline - time.monotonic())
+                if wait_for <= 0:
+                    break
+                activity_serial = self._wait_for_activity(activity_serial, wait_for)
             if not session or not session.is_active():
                 alive_sessions = [s for s in list(self.sessions.values()) if s.is_active()]
                 # Do NOT execute on a substitute tab. This used to pick a live
@@ -1166,35 +2131,78 @@ class BrowserBridge:
                 if (allow_failover or not caller_named_target) and alive_sessions:
                     want_client = str(session_id).rsplit(':', 1)[0] if session_id and ':' in str(session_id) else None
                     same_client = [s for s in alive_sessions if want_client and str(s.id).startswith(want_client + ':')]
-                    pool = same_client or alive_sessions
-                    session = self._pick_failover_session(pool)
-                    logger.warning(
-                        "Session %s is disconnected; switched to active session %s",
-                        session_id,
-                        session.id,
-                    )
-                    switched_from = session_id
-                    session_id = self.default_session_id = session.id
+                    pool = same_client or alive_sessions if allow_failover else (same_client if want_client else alive_sessions)
+                    if pool:
+                        session = self._pick_failover_session(pool)
+                        logger.warning(
+                            "Session %s is disconnected; switched to active session %s",
+                            session_id,
+                            session.id,
+                        )
+                        switched_from = session_id
+                        session_id = self.default_session_id = session.id
                 if not session or not session.is_active():
                     if alive_sessions:
                         cands = ', '.join(str(s.id) for s in alive_sessions[:8])
-                        raise SessionNotConnectedError(
+                        exc = SessionNotConnectedError(
                             f"Session {session_id} is not connected. BTAP refused to execute on a "
                             f"different tab. Active sessions: {cands}. Select the intended target "
                             "with switch_tab and retry."
                         )
-                    raise SessionNotConnectedError(f"Session {session_id} is not connected")
+                        exc.diagnostics = {
+                            "stale_session_id": str(session_id),
+                            "replacement_candidates": [
+                                {
+                                    "id": str(s.id),
+                                    "url": s.info.get("url"),
+                                    "title": s.info.get("title"),
+                                    "generation": s.info.get("generation"),
+                                }
+                                for s in alive_sessions[:8]
+                            ],
+                            "next_action": "list_tabs_then_retry",
+                        }
+                        raise exc
+                    exc = SessionNotConnectedError(
+                        f"Session {session_id} is not connected. The explicitly requested tab is stale; "
+                        "run list_tabs and retry with a live session_id."
+                    )
+                    exc.diagnostics = {
+                        "stale_session_id": str(session_id),
+                        "replacement_candidates": [],
+                        "next_action": "list_tabs_then_retry",
+                    }
+                    raise exc
         # Callers (and the AI driving them) must learn their target changed.
         extra = {'switched_session': session_id, 'switched_from': switched_from} if switched_from else {}
+        if rebound and rebound.get('rebound_from'):
+            extra.update({
+                'rebound_from': rebound.get('rebound_from'),
+                'replacement_session_id': rebound.get('replacement_session_id', session_id),
+                'tab_identity': rebound.get('tab_identity'),
+                'rebind_reason': rebound.get('reason', 'chrome.tabs.onReplaced'),
+            })
 
         tp = session.type
-        assert tp in ['ws', 'http', 'ext_ws'], f"Unsupported session type: {tp}"
-        exec_id = str(uuid.uuid4())
-        payload_dict = {'id': exec_id, 'code': code}
+        guard_targets(f"{getattr(self, 'host', '127.0.0.1')}:{getattr(self, 'port', 18765)}", [str(session.id)])
+        # Not an assert: python -O strips those, and what it guards is not a
+        # tidy fall-through. Every dispatch below is `if tp in ['ws','ext_ws']
+        # ... elif tp == 'http'`, and so is the whole deadline block, so an
+        # unrecognised type sends nothing, then reaches `remaining() <= 0` with
+        # no branch to return from and spins the polling loop forever -- with
+        # `wait_for` negative there is not even a sleep in it. Measured with
+        # this line disabled: a 2-second call had not come back at 60 s, one
+        # core pegged. An unknown type is only ever a bug here (a transport
+        # added to Session and not to this dispatch), so it must raise, and it
+        # must raise under -O.
+        if tp not in ('ws', 'http', 'ext_ws'):
+            raise ValueError(f"Unsupported session type: {tp}")
+        exec_id = str(operation_id or uuid.uuid4())
+        payload_dict: dict[str, Any] = {'id': exec_id, 'code': code}
         if tp == 'ext_ws':
             # session.id is now "client_id:tab_id"; use the raw browser tab id.
             payload_dict['tabId'] = int(session.info.get('tab_id', str(session.id).rsplit(':', 1)[-1]))
-        payload = json.dumps(payload_dict)
+        wire_payload = json.dumps(payload_dict)
         # Which tab this command names, derived from the session the driver
         # resolved — so every return path (success, reload, timeout) reports
         # the executor's target instead of a later guess from driver memory.
@@ -1225,119 +2233,268 @@ class BrowserBridge:
                 extra=extra,
             )
 
-        if tp in ['ws', 'ext_ws']:
-            try: session.ws_client.send_message(payload)
-            except Exception as e:
-                # Half-open socket (e.g. after system sleep): mark it dead so
-                # the next call fails over instead of hitting it again.
-                session.mark_disconnected()
-                raise SessionDisconnectedError(
-                    f"Session {session_id} disconnected ({e}); it was marked inactive. Retry after list_tabs."
-                )
-        elif tp == 'http': session.http_queue.put(payload)
-
-        self.clean_sessions()
-        hasjump = acked = False
-        missing_result = object()
-        result = missing_result
-
-        while result is missing_result:
-            result = self.results.pop(exec_id, missing_result)
-            if result is not missing_result:
-                break
-            wait_for = min(0.05, remaining())
-            if wait_for > 0:
-                time.sleep(wait_for)
-            # A result can arrive during the final polling sleep exactly as the
-            # deadline expires. Consume that real reply instead of dropping it
-            # below and reporting an ambiguous timeout for a completed script.
-            result = self.results.pop(exec_id, missing_result)
-            if result is not missing_result:
-                break
-            if not acked and exec_id in self.acks:
-                acked = True
+        self._sync_pending_operations()
+        self._operation_state().reserve(
+            exec_id, [str(session.id)], requester_id,
+            metadata={**extra, 'executed_tab_id': exec_tab_id, 'session_id': str(session.id)},
+            reply_transport='http' if tp == 'http' else 'ws',
+            reply_owner=str(session.id) if tp == 'http' else session.ws_client,
+        )
+        with self._operation_state().retain_for_waiter(exec_id, requester_id):
+            mark_dispatched()
             if tp in ['ws', 'ext_ws']:
-                if not session.is_active(): hasjump = True
-                if hasjump and session.is_active():
-                    # 脚本随 reload 作废：晚到的结果不应再被任何人读到，直接丢弃。
-                    self.results.pop(exec_id, None)
-                    self.acks.pop(exec_id, None)
-                    return _no_response_result(
-                        f"Session {session_id} reloaded.",
-                        delivery_state="navigated",
-                        executed_tab_id=exec_tab_id,
-                        extra=extra,
-                        closed=True,
+                try: session.ws_client.send_message(wire_payload)
+                except Exception as e:
+                    # Half-open socket (e.g. after system sleep): mark it dead so
+                    # the next call fails over instead of hitting it again.
+                    session.mark_disconnected()
+                    self._notify_activity()
+                    disconnected = SessionDisconnectedError(
+                        f"Session {session_id} disconnected ({e}); the command outcome is unknown."
                     )
-            if remaining() <= 0:
-                # Make the deadline decision with one atomic dict operation.
-                # A result present now is consumed; one arriving after this
-                # point is genuinely late and is cleaned up below.
+                    _attach_operation(disconnected, exec_id)
+                    raise disconnected from e
+            elif tp == 'http': session.http_queue.put(wire_payload)
+
+            self.clean_sessions()
+            hasjump = acked = False
+            missing_result = object()
+            result = missing_result
+            activity_serial = self._activity_snapshot()
+
+            while result is missing_result:
                 result = self.results.pop(exec_id, missing_result)
                 if result is not missing_result:
                     break
-                # 清理本次 exec_id 的残留键：超时返回后 results/acks 里不会
-                # 再有调用方来取，留着只会累积到 clean_sessions 的 600s TTL——
-                # 高频超时场景下等于是长期泄漏（与 ext_cmd 超时路径一致）。
-                self.results.pop(exec_id, None)
-                self.acks.pop(exec_id, None)
+                wait_for = min(0.05, remaining())
+                if wait_for > 0:
+                    activity_serial = self._wait_for_activity(activity_serial, wait_for)
+                # A result can arrive during the final polling sleep exactly as the
+                # deadline expires. Consume that real reply instead of dropping it
+                # below and reporting an ambiguous timeout for a completed script.
+                result = self.results.pop(exec_id, missing_result)
+                if result is not missing_result:
+                    break
+                if not acked and exec_id in self.acks:
+                    acked = True
+                    self._operation_state().acknowledge(exec_id)
+                if acked and not wait:
+                    return {
+                        **extra,
+                        'status': 'in_progress',
+                        'operation_id': exec_id,
+                        'executed_tab_id': exec_tab_id,
+                        'session_id': str(session.id),
+                        'delivery_state': 'delivered_no_result',
+                        'retry_safe': False,
+                        'reservation_held': True,
+                    }
                 if tp in ['ws', 'ext_ws']:
-                    if hasjump:
+                    if not session.is_active(): hasjump = True
+                    if hasjump and session.is_active():
+                        # 脚本随 reload 作废：晚到的结果不应再被任何人读到，直接丢弃。
+                        self.results.pop(exec_id, None)
+                        self.acks.pop(exec_id, None)
                         return _no_response_result(
-                            f"Session {session_id} reloaded and new page is loading...",
+                            f"Session {session_id} reloaded.",
                             delivery_state="navigated",
                             executed_tab_id=exec_tab_id,
-                            extra=extra,
+                            extra={**extra, 'operation_id': exec_id},
                             closed=True,
                         )
-                    if acked:
+                if remaining() <= 0:
+                    # Make the deadline decision with one atomic dict operation.
+                    # A result present now is consumed; one arriving after this
+                    # point stays available through get_execute_js_result.
+                    result = self.results.pop(exec_id, missing_result)
+                    if result is not missing_result:
+                        break
+                    if tp in ['ws', 'ext_ws']:
+                        if hasjump:
+                            return _no_response_result(
+                                f"Session {session_id} reloaded and new page is loading...",
+                                delivery_state="navigated",
+                                executed_tab_id=exec_tab_id,
+                                extra={**extra, 'operation_id': exec_id},
+                                closed=True,
+                            )
+                        if acked:
+                            return _no_response_result(
+                                f"No response data in {timeout}s (ACK received, script may still be running)",
+                                delivery_state="delivered_no_result",
+                                executed_tab_id=exec_tab_id,
+                                extra={**extra, 'operation_id': exec_id},
+                            )
                         return _no_response_result(
-                            f"No response data in {timeout}s (ACK received, script may still be running)",
-                            delivery_state="delivered_no_result",
+                            (
+                                f"No response data in {timeout}s (sent but no ACK; "
+                                "the script may still have executed. Query the operation "
+                                "result before considering a retry)"
+                            ),
+                            # A successful send is not proof of receipt; a missing
+                            # ACK is likewise not proof that execution never began.
+                            delivery_state="sent_unconfirmed",
                             executed_tab_id=exec_tab_id,
-                            extra=extra,
+                            extra={**extra, 'operation_id': exec_id},
                         )
-                    return _no_response_result(
-                        (
-                            f"No response data in {timeout}s (sent but no ACK; the extension "
-                            "acknowledges before it executes, so the script most likely "
-                            "did not run)"
-                        ),
-                        # Not 'undelivered': the payload did reach a live socket.
-                        # Only the acknowledgement is missing, so the guarantee
-                        # here rests on the ACK-first protocol, not on proof.
-                        delivery_state="sent_unconfirmed",
-                        executed_tab_id=exec_tab_id,
-                        extra=extra,
-                    )
-                elif tp == 'http':
-                    if acked:
+                    elif tp == 'http':
+                        if acked:
+                            return _no_response_result(
+                                f"Session {session_id} no response in {timeout}s (delivered but no result)",
+                                delivery_state="delivered_no_result",
+                                executed_tab_id=exec_tab_id,
+                                extra={**extra, 'operation_id': exec_id},
+                            )
                         return _no_response_result(
-                            f"Session {session_id} no response in {timeout}s (delivered but no result)",
-                            delivery_state="delivered_no_result",
+                            f"Session {session_id} no response in {timeout}s (queued; a later poll may still execute it)",
+                            delivery_state="sent_unconfirmed",
                             executed_tab_id=exec_tab_id,
-                            extra=extra,
+                            extra={**extra, 'operation_id': exec_id},
                         )
-                    return _no_response_result(
-                        f"Session {session_id} no response in {timeout}s (script not polled)",
-                        delivery_state="undelivered",
-                        executed_tab_id=exec_tab_id,
-                        extra=extra,
-                    )
 
-        assert result is not missing_result
-        if exec_id in self.acks: self.acks.pop(exec_id)
-        if not result['success']: raise Exception(result['data'])
-        rr = {'data': result['data'], **extra}
-        # Prefer the tab the executor echoed back (covers failover and remote
-        # transports); fall back to the session we resolved locally.
-        rtab = result.get('tabId')
-        rr['executed_tab_id'] = int(rtab) if rtab is not None else exec_tab_id
-        newtabs = result.get('newTabs', []); [x.pop('ts', None) for x in newtabs]
-        if newtabs: rr['newTabs'] = newtabs
-        return rr
+            if not isinstance(result, dict):
+                raise RuntimeError("execute_js completed without a result")
+            completed = self._complete_operation(exec_id, result)
+            # A remote caller already holds this id. Keep its receipt even if
+            # the HTTP response is lost after the browser finishes.
+            snapshot = self._operation_state().read(
+                exec_id, requester_id, consume=completed and operation_id is None and wait,
+            )
+            if exec_id in self.acks: self.acks.pop(exec_id)
+            if snapshot['status'] == 'lifecycle_ended':
+                return _no_response_result(
+                    'The target tab lifecycle ended before the execution result could be returned',
+                    delivery_state='navigated', executed_tab_id=exec_tab_id,
+                    extra={**extra, 'operation_id': exec_id, 'js_return_lost': True}, closed=True,
+                )
+            if not result['success']:
+                execution_error = PageExecutionError(result.get('data'), script=code)
+                if not completed:
+                    _attach_operation(execution_error, exec_id, outcome_unknown=True)
+                raise execution_error
+            rr = {'data': result['data'], **extra}
+            if not wait or not completed:
+                rr['operation_id'] = exec_id
+            if not completed:
+                rr.update({
+                    'reservation_held': True, 'operation_status': snapshot['status'],
+                    'delivery_state': 'delivered_no_result', 'retry_safe': False,
+                    'poll_with': 'get_execute_js_result',
+                })
+            # Prefer the tab the executor echoed back (covers failover and remote
+            # transports); fall back to the session we resolved locally.
+            rtab = result.get('tabId')
+            rr['executed_tab_id'] = int(rtab) if rtab is not None else exec_tab_id
+            newtabs = result.get('newTabs', [])
+            for tab in newtabs:
+                tab.pop('ts', None)
+            if newtabs: rr['newTabs'] = newtabs
+            return rr
 
-    def ext_cmd(self, cmd: dict, client_id=None, timeout=15):
+    def get_execute_js_result(self, operation_id: str, timeout=0.0, *, requester_id=None):
+        """Read a retained reply, repeatably, without dispatching a browser command."""
+        operation_id = str(operation_id).strip()
+        if not operation_id:
+            raise ValueError('operation_id must be a non-empty string')
+        timeout = float(timeout)
+        if not math.isfinite(timeout) or not 0 <= timeout <= 120:
+            raise ValueError('timeout must be a finite number between 0 and 120 seconds')
+        requester_id = self._requester(requester_id)
+        if self.is_remote:
+            envelope = self._remote_cmd({
+                'cmd': 'get_execute_js_result', 'operationId': operation_id,
+                'timeout': timeout, 'requesterId': requester_id,
+            }, timeout=max(1.0, timeout) + REMOTE_TRANSPORT_MARGIN)
+            response = envelope.get('r')
+            if not isinstance(response, dict):
+                raise RuntimeError('Bridge returned a malformed execution result')
+            if response.get('error') and response.get('status') not in {'failed', 'in_progress'}:
+                _raise_remote_error(response)
+            return response
+
+        deadline = time.monotonic() + timeout
+        activity_serial = self._activity_snapshot()
+        operations = self._operation_state()
+        with operations.retain_for_waiter(operation_id, requester_id):
+            while True:
+                self._sync_pending_operations()
+                snapshot = operations.read(operation_id, requester_id)
+                if snapshot['status'] in {'outcome_unknown', 'blocked_by_dialog'}:
+                    operation_status = snapshot['status']
+                    result = snapshot.pop('wire_result', None)
+                    snapshot.update({
+                        'status': 'in_progress', 'operation_status': operation_status,
+                        'delivery_state': 'delivered_no_result', 'retry_safe': False,
+                        'poll_with': 'get_execute_js_result',
+                    })
+                    if isinstance(result, dict):
+                        if operation_status == 'outcome_unknown':
+                            snapshot.update(_error_payload(PageExecutionError(result.get('data'))))
+                            snapshot['retry_safe'] = False
+                        else:
+                            snapshot['data'] = result.get('data')
+                            snapshot['pending_execution'] = True
+                    return snapshot
+                if snapshot['status'] != 'in_progress':
+                    # Reading cannot acknowledge receipt across HTTP/MCP. TTL
+                    # and capacity bound storage; a lost query may be repeated.
+                    # The wire caches may still have a synchronous waiter.
+                    result = snapshot.pop('wire_result', None)
+                    if snapshot['status'] == 'lifecycle_ended':
+                        snapshot.update({
+                            'status': 'navigated', 'delivery_state': 'navigated',
+                            'retry_safe': False, 'js_return_lost': True,
+                        })
+                        return snapshot
+                    if snapshot['status'] == 'completed_without_result':
+                        snapshot.update({'retry_safe': False, 'js_return_lost': True})
+                        return snapshot
+                    if not isinstance(result, dict):
+                        raise RuntimeError('Completed operation has no browser result')
+                    if not result.get('success'):
+                        snapshot.update(_error_payload(PageExecutionError(result.get('data'))))
+                        snapshot['status'] = 'failed'
+                        return snapshot
+                    snapshot.update({'status': 'success', 'data': result.get('data')})
+                    if result.get('tabId') is not None:
+                        snapshot['executed_tab_id'] = int(result['tabId'])
+                    if result.get('newTabs'):
+                        snapshot['newTabs'] = [
+                            {key: value for key, value in tab.items() if key != 'ts'}
+                            for tab in result['newTabs']
+                        ]
+                    return snapshot
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    snapshot.update({
+                        'delivery_state': 'delivered_no_result' if snapshot['acknowledged'] else 'sent_unconfirmed',
+                        'retry_safe': False,
+                        'poll_with': 'get_execute_js_result',
+                    })
+                    return snapshot
+                activity_serial = self._wait_for_activity(activity_serial, min(0.05, remaining))
+
+    def select_client_id(self, client_id=None, *, use_default=True, timeout=5):
+        if client_id is not None:
+            return str(client_id)
+        current = self.default_session_id if use_default else None
+        if current and ':' in str(current):
+            return str(current).rsplit(':', 1)[0]
+        if self.is_remote:
+            response = self._remote_cmd({'cmd': 'get_clients'}, timeout=timeout).get('r')
+            if not isinstance(response, list):
+                raise RuntimeError('Bridge cannot list browser clients; restart the bridge')
+            clients = [str(item['client_id']) for item in response]
+        else:
+            clients = list(self.ext_clients)
+        if len(clients) > 1:
+            raise AmbiguousBrowserError(clients)
+        if not clients:
+            raise ExtensionNotConnectedError('No browser extension is connected')
+        return clients[0]
+
+    def ext_cmd(self, cmd: dict, client_id=None, timeout=15, *, requester_id=None,
+                operation_id=None):
         """Send a command straight to an extension service worker.
 
         The extension's socket is per-browser, so this works with ZERO open
@@ -1345,88 +2502,177 @@ class BrowserBridge:
         handleExtMessage, which runs in the SW. Plain JS still needs a tab
         (handleWsExec requires tabId) — that asymmetry is the whole point.
         """
-        timeout = float(timeout)
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
+        if not isinstance(cmd, dict):
+            raise ValueError("cmd must be a JSON object")
+        timeout = _positive_timeout(timeout)
+        requester_id = self._requester(requester_id)
+        if not isinstance(cmd.get("cmd"), str) or not cmd["cmd"].strip():
+            raise ValueError(
+                'ext_cmd payload requires a non-empty string cmd field; '
+                'for /link use {"cmd":"ext_cmd","payload":{"cmd":"tabs",...}}'
+            )
         deadline = time.monotonic() + timeout
 
         def remaining():
             return max(0.0, deadline - time.monotonic())
 
+        client_id = self.select_client_id(client_id, timeout=max(0.001, remaining()))
+        tab_ids = cmd.get('tabId')
+        if tab_ids is not None:
+            tab_ids = tab_ids if isinstance(tab_ids, list) else [tab_ids]
+            targets = [f"{client_id}:{tab_id}" for tab_id in tab_ids]
+        else:
+            targets = [f"{client_id}/extension/{cmd.get('cmd')}"]
+        guard_targets(f"{getattr(self, 'host', '127.0.0.1')}:{getattr(self, 'port', 18765)}", targets)
         if self.is_remote:
             # Same margin as execute_js: the daemon raises its own TimeoutError
             # at `timeout` and only then writes the response, so the socket has
             # to outlive that instant for the 'did not respond within' branch
             # below to be reachable at all.
-            response = self._remote_cmd({"cmd": "ext_cmd", "payload": cmd,
-                                         "clientId": client_id, "timeout": str(timeout)},
-                                        timeout=max(0.001, remaining())
-                                        + REMOTE_TRANSPORT_MARGIN).get('r', {})
+            mark_dispatched()
+            operation_id = str(operation_id or uuid.uuid4())
+            try:
+                envelope = self._remote_cmd({"cmd": "ext_cmd", "payload": cmd,
+                                             "clientId": client_id, "timeout": str(max(0.001, remaining())),
+                                             "requesterId": requester_id,
+                                             "operationId": operation_id},
+                                            timeout=max(0.001, remaining())
+                                            + REMOTE_TRANSPORT_MARGIN)
+                response = envelope.get('r')
+                if not isinstance(response, dict):
+                    raise BridgeNoResponseError(
+                        "Bridge returned a malformed ext_cmd result",
+                        error_code='transport_error', delivery_state='sent_unconfirmed', retry_safe=False,
+                    )
+            except (TimeoutError, BridgeNoResponseError) as remote_error:
+                if getattr(remote_error, 'delivery_state', None) != 'undelivered':
+                    _attach_operation(remote_error, operation_id, reservation_held=None)
+                raise
             if response.get('error'):
-                err = str(response['error'])
-                # Keep the timeout distinguishable across the HTTP hop, so
-                # callers like newtab() can tell "never answered" (do not
-                # retry, it may have happened) from "no such route".
-                if 'did not respond within' in err:
-                    raise TimeoutError(err)
-                raise Exception(err)
+                _raise_remote_error(response)
             return response
 
-        if client_id is None:
-            # Prefer the browser the caller already works in, so a stray command
-            # can't open tabs in the other browser.
-            want = (str(self.default_session_id).rsplit(':', 1)[0]
-                    if self.default_session_id and ':' in str(self.default_session_id) else None)
-            if want and want in self.ext_clients: client_id = want
-            elif self.ext_clients:
-                client_id = max(self.ext_clients.items(), key=lambda kv: kv[1].get('ts', 0))[0]
         entry = self.ext_clients.get(client_id)
         if not entry:
             raise ExtensionNotConnectedError(
                 "No browser extension is connected; verify that the extension is loaded and the bridge is running"
             )
 
-        exec_id = str(uuid.uuid4())
-        try:
-            entry['ws'].send_message(json.dumps({'id': exec_id, 'code': cmd}))
-        except Exception as e:
-            self.ext_clients.pop(client_id, None)
-            raise ExtensionNotConnectedError(
-                f"Extension client {client_id} disconnected ({e}); it was removed. Retry after it reconnects."
-            )
+        exec_id = str(operation_id or uuid.uuid4())
+        self._sync_pending_operations()
+        closing_tabs = cmd['cmd'] == 'tabs' and cmd.get('method') in {'close', 'remove'}
+        close_generations: dict[str, str | None] = {}
+        if closing_tabs:
+            for target in targets:
+                session = self.sessions.get(target)
+                close_generations[target] = (
+                    str(session.info.get('generation'))
+                    if session is not None and session.info.get('generation') is not None
+                    else None
+                )
+        self._operation_state().reserve(
+            exec_id, targets, requester_id, kind=str(cmd['cmd']),
+            cleanup=cmd['cmd'] in {'clear_dialog_policy', 'handle_dialog'} or closing_tabs,
+            close_targets=closing_tabs,
+            recover_dead_owner=closing_tabs,
+            metadata={'client_id': client_id},
+            reply_transport='ws', reply_owner=entry['ws'],
+        )
+        with self._operation_state().retain_for_waiter(exec_id, requester_id):
+            try:
+                capture_operation = self._capture_state().prepare(client_id, cmd, requester_id)
+            except BaseException:
+                self._operation_state().forget(exec_id)
+                raise
+            if capture_operation is not None:
+                with _DRIVER_STATE_LOCK:
+                    self._capture_commands[exec_id] = capture_operation
+            try:
+                # Send commands via 'cmd' field (not 'code') to prevent JSON.parse
+                # confusion: the extension can now route by field presence rather
+                # than by trying to parse a JS string as JSON.
+                mark_dispatched()
+                entry['ws'].send_message(json.dumps({'id': exec_id, 'cmd': cmd}))
+            except Exception as e:
+                self.ext_clients.pop(client_id, None)
+                disconnected = BridgeNoResponseError(
+                    f"Extension client {client_id} disconnected during dispatch ({e}); outcome is unknown.",
+                    error_code="extension_not_connected", delivery_state="sent_unconfirmed", retry_safe=False,
+                )
+                _attach_operation(disconnected, exec_id)
+                raise disconnected from e
 
-        missing_result = object()
-        result = missing_result
-        while result is missing_result:
-            result = self.results.pop(exec_id, missing_result)
-            if result is not missing_result:
-                break
-            wait_for = min(0.05, remaining())
-            if wait_for > 0:
-                time.sleep(wait_for)
-            result = self.results.pop(exec_id, missing_result)
-            if result is not missing_result:
-                break
-            if remaining() <= 0:
+            missing_result = object()
+            result = missing_result
+            activity_serial = self._activity_snapshot()
+            while result is missing_result:
                 result = self.results.pop(exec_id, missing_result)
                 if result is not missing_result:
                     break
-                # MUST raise, not return. Returning a dict here made callers
-                # like set_extension_enabled / close_tabs / open_new_tab report
-                # status:"ok" for a mutation that never reached the browser —
-                # the agent then acts on a success that did not happen.
-                self.results.pop(exec_id, None)
-                self.acks.pop(exec_id, None)
-                raise TimeoutError(
-                    f"extension {client_id} did not respond within {timeout}s; "
-                    f"the command may not have reached the browser (service worker "
-                    f"asleep, or no scriptable tab to wake it)")
-        assert result is not missing_result
-        self.acks.pop(exec_id, None)
-        if not result['success']: raise Exception(result['data'])
-        return {'data': result['data'], 'client_id': client_id}
+                wait_for = min(0.05, remaining())
+                if wait_for > 0:
+                    activity_serial = self._wait_for_activity(activity_serial, wait_for)
+                result = self.results.pop(exec_id, missing_result)
+                if result is not missing_result:
+                    break
+                if remaining() <= 0:
+                    result = self.results.pop(exec_id, missing_result)
+                    if result is not missing_result:
+                        break
+                    # MUST raise, not return. Returning a dict here made callers
+                    # like set_extension_enabled / close_tabs / open_new_tab report
+                    # status:"ok" for a mutation that never reached the browser —
+                    # the agent then acts on a success that did not happen.
+                    timeout_error: Any = TimeoutError(
+                        f"extension {client_id} did not respond within {timeout}s; "
+                        f"the command may not have reached the browser (service worker "
+                        f"asleep, or no scriptable tab to wake it)")
+                    timeout_error.delivery_state = "sent_unconfirmed"
+                    timeout_error.retry_safe = False
+                    _attach_operation(timeout_error, exec_id)
+                    raise timeout_error
+            if not isinstance(result, dict):
+                raise RuntimeError("ext_cmd completed without a result")
+            completed = self._complete_operation(exec_id, result)
+            if completed and operation_id is None:
+                self._operation_state().forget(exec_id)
+            self.acks.pop(exec_id, None)
+            # `tabs.remove` resolves before the extension's follow-up tabs_update
+            # reaches the bridge. Finish the removed target now so a caller that
+            # immediately polls an older uncertain operation observes lifecycle
+            # termination instead of the stale outcome_unknown state. Keep the
+            # generation captured before dispatch to avoid touching a reused id.
+            if closing_tabs and result.get('success') is True:
+                data = result.get('data')
+                closed = data.get('closed', []) if isinstance(data, dict) else []
+                already_gone = data.get('alreadyGone', []) if isinstance(data, dict) else []
+                for native_id in [*closed, *already_gone]:
+                    try:
+                        target = f"{client_id}:{int(native_id)}"
+                    except (TypeError, ValueError):
+                        continue
+                    self._finish_tab_operations(
+                        target, 'tab_removed', expected_generation=close_generations.get(target),
+                    )
+            if not result['success']:
+                execution_error = PageExecutionError(result['data'])
+                if not completed:
+                    _attach_operation(execution_error, exec_id, outcome_unknown=True)
+                raise execution_error
+            reply = {'data': result['data'], 'client_id': client_id}
+            if not completed:
+                snapshot = self._operation_state().read(exec_id, requester_id)
+                reply.update({
+                    'operation_id': exec_id, 'reservation_held': True,
+                    'operation_status': snapshot['status'], 'retry_safe': False,
+                    'delivery_state': 'delivered_no_result', 'poll_with': 'get_execute_js_result',
+                })
+            return reply
 
     def _remote_cmd(self, cmd, timeout=30):
+        if not isinstance(cmd, dict):
+            raise ValueError("cmd must be a JSON object")
+        timeout = _positive_timeout(timeout)
         headers = {"Content-Type": "application/json"}
         # Every client reads the same persistent per-user token file. This is
         # independent of which editor launched the MCP process.
@@ -1440,8 +2686,16 @@ class BrowserBridge:
             # Normalize requests/urllib3 transport timeouts at the driver
             # boundary. Higher layers use TimeoutError to distinguish a
             # recoverable lost response from a definitive command failure.
-            raise TimeoutError(
+            failure: Any = TimeoutError(
                 f"bridge HTTP request timed out after {timeout}s"
+            )
+            failure.delivery_state = "sent_unconfirmed"
+            failure.retry_safe = False
+            raise failure from exc
+        except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
+            raise BridgeNoResponseError(
+                'Bridge HTTP connection failed; the command outcome is unknown',
+                error_code='transport_error', delivery_state='sent_unconfirmed', retry_safe=False,
             ) from exc
         if resp.status_code == 401:
             # 别把 401 的 HTML/文本喂给 .json()（会变成一句看不懂的 JSONDecodeError）。
@@ -1455,12 +2709,35 @@ class BrowserBridge:
             # 否则调用方看到的是 JSONDecodeError 而不是真实成因。
             body = resp.text if hasattr(resp, 'text') else ''
             snippet = (body[:300] if body else '(empty response)').replace('\n', ' ')
-            raise RuntimeError(f"Bridge returned HTTP {resp.status_code}: {snippet}")
-        return resp.json()
+            raise BridgeNoResponseError(
+                f"Bridge returned HTTP {resp.status_code}: {snippet}",
+                error_code='transport_error', delivery_state='sent_unconfirmed', retry_safe=False,
+            )
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise BridgeNoResponseError(
+                "Bridge returned malformed JSON: response could not be decoded",
+                error_code='transport_error', delivery_state='sent_unconfirmed', retry_safe=False,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise BridgeNoResponseError(
+                "Bridge returned malformed JSON: expected an object",
+                error_code='transport_error', delivery_state='sent_unconfirmed', retry_safe=False,
+            )
+        return payload
 
     def get_all_sessions(self, timeout=None):
+        normalized_timeout = None if timeout is None else _positive_timeout(timeout)
         if self.is_remote:
-            return self._remote_cmd({"cmd": "get_all_sessions"}, timeout=timeout or 30).get('r', [])
+            envelope = self._remote_cmd(
+                {"cmd": "get_all_sessions"},
+                timeout=_timeout_or_default(normalized_timeout, 30),
+            )
+            result = envelope.get('r', [])
+            if not isinstance(result, list):
+                raise RuntimeError("Bridge returned a malformed session list")
+            return result
         self.clean_sessions()
         return [{'id': session.id, **session.info} for session in list(self.sessions.values())
                 if session.is_active()]
@@ -1475,10 +2752,18 @@ class BrowserBridge:
         netstat + curl + read the badge by hand. `cause` is the machine-readable
         verdict; `advice` is the one-line human fix.
         """
+        normalized_timeout = None if timeout is None else _positive_timeout(timeout)
         if self.is_remote:
             # We're a thin client; ask the real host for its self-diagnosis.
+            request_timeout = _timeout_or_default(normalized_timeout, 6)
             try:
-                return self._remote_cmd({"cmd": "diagnose"}, timeout=timeout or 6).get('r', {})
+                envelope = self._remote_cmd(
+                    {"cmd": "diagnose"}, timeout=request_timeout
+                )
+                result = envelope.get('r', {})
+                if not isinstance(result, dict):
+                    raise RuntimeError("Bridge returned a malformed diagnosis")
+                return result
             except Exception as e:
                 return {
                     "cause": "bridge_unreachable",
@@ -1492,8 +2777,11 @@ class BrowserBridge:
         self.clean_sessions()
         now = time.time()
         active = [s for s in list(self.sessions.values()) if s.is_active()]
-        ever = self.last_ext_seen is not None
-        stale = ever and (now - self.last_ext_seen) > 90
+        last_seen = self.last_ext_seen
+        seconds_since_seen = now - last_seen if last_seen is not None else None
+        ever = seconds_since_seen is not None
+        started_at = getattr(self, "started_at", None)
+        uptime = (now - started_at) if isinstance(started_at, (int, float)) else None
         # Snapshot, and never index a heartbeat entry directly: the WS thread
         # writes client_last_seen while doctor reads it, and diagnose is the tool
         # people run *because* something is already wrong — it must not be the
@@ -1504,14 +2792,19 @@ class BrowserBridge:
                       if isinstance(v, dict)}
         if active:
             cause, ok, advice = "healthy", True, f"{len(active)} tab(s) registered; bridge and extension are connected."
+        elif not ever and uptime is not None and uptime < BRIDGE_STARTUP_GRACE_SECONDS:
+            cause, ok, advice = "starting", False, (
+                f"The bridge started {round(max(0.0, uptime), 1)}s ago and is waiting for the "
+                "extension handshake. Wait a few seconds and run doctor again before reloading."
+            )
         elif not ever:
             cause, ok, advice = "ext_never_registered", False, (
                 "The extension has never connected. Check chrome://extensions for errors or a disabled "
                 "extension, then keep at least one normal http:// or https:// page open."
             )
-        elif stale:
+        elif seconds_since_seen is not None and seconds_since_seen > 90:
             cause, ok, advice = "sw_slept_or_dropped", False, (
-                f"The extension last checked in {round(now - self.last_ext_seen)}s ago. A normal open page "
+                f"The extension last checked in {round(seconds_since_seen)}s ago. A normal open page "
                 "should reconnect within 5 seconds; otherwise reload BrowserTap Bridge once in "
                 "chrome://extensions."
             )
@@ -1523,7 +2816,10 @@ class BrowserBridge:
         extension_status = None
         extension_status_error = None
         try:
-            raw_status = self.ext_cmd({"cmd": "bridge_status"}, timeout=timeout or 5)
+            raw_status = self.ext_cmd(
+                {"cmd": "bridge_status"},
+                timeout=_timeout_or_default(normalized_timeout, 5),
+            )
             extension_status = raw_status.get("data", raw_status)
         except Exception as e:
             extension_status_error = str(e)
@@ -1532,7 +2828,10 @@ class BrowserBridge:
             "bridge_version": __version__,
             "active_tabs": len(active),
             "ever_registered": ever,
-            "last_ext_seen_seconds_ago": round(now - self.last_ext_seen, 1) if ever else None,
+            "last_ext_seen_seconds_ago": round(seconds_since_seen, 1) if seconds_since_seen is not None else None,
+            "bridge_started_at": started_at,
+            "bridge_uptime_seconds": round(max(0.0, uptime), 1) if uptime is not None else None,
+            "startup_grace_seconds": BRIDGE_STARTUP_GRACE_SECONDS,
             "clients": per_client,
             # Zero unless something spoke the extension's protocol while the
             # real extension still held the namespace; see _claim_ext_client.
@@ -1551,6 +2850,11 @@ class BrowserBridge:
             )
             result["protocol_version"] = extension_status.get("protocol_version")
             result["extension_capabilities"] = extension_status.get("capabilities", {})
+            # A literal in the worker's own source, so unlike the three versions
+            # above it says which *code* answered. Forwarded rather than left to the
+            # server's fallback probe because that probe only fires when a version
+            # is missing, and a bridge old enough to omit this still reports those.
+            result["extension_build_stamp"] = extension_status.get("build_stamp")
         if extension_status_error:
             result["extension_status_error"] = extension_status_error
         if self.last_rejected_takeover:
@@ -1558,21 +2862,31 @@ class BrowserBridge:
         return result
 
     def find_session(self, url_pattern: str):
+        if not isinstance(url_pattern, str):
+            raise ValueError("url_pattern must be a string")
         if url_pattern == '':
-            session = self.sessions.get(self.latest_session_id)
+            session = self.sessions.get(self.latest_session_id) if self.latest_session_id is not None else None
             return [(session.id, session.info)] if session and session.is_active() else []
         matching_sessions = []
         # Snapshot: this runs on a caller thread while the WS thread registers
         # and drops tabs (see clean_sessions / _live_default_session_id).
         for session in list(self.sessions.values()):
             if not session.is_active(): continue
-            if 'url' in session.info and url_pattern in session.info['url']:
+            url = session.info.get('url')
+            if isinstance(url, str) and url_pattern in url:
                 matching_sessions.append((session.id, session.info))
         return matching_sessions
 
     def set_session(self, url_pattern: str) -> Optional[str]:
+        if not isinstance(url_pattern, str):
+            raise ValueError("url_pattern must be a string")
         if self.is_remote:
-            matched = self._remote_cmd({"cmd": "find_session", "url_pattern": url_pattern}).get('r', [])
+            envelope = self._remote_cmd(
+                {"cmd": "find_session", "url_pattern": url_pattern}
+            )
+            matched = envelope.get('r', [])
+            if not isinstance(matched, list):
+                raise RuntimeError("Bridge returned a malformed session match list")
         else:
             matched = self.find_session(url_pattern)
         if not matched:

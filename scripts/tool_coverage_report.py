@@ -1,4 +1,4 @@
-"""Execute and report the 55-tool behavior-evidence contract."""
+"""Execute and report the 49-tool behavior-evidence contract."""
 
 from __future__ import annotations
 
@@ -118,7 +118,7 @@ def _run_evidence(node_ids: Iterable[str], *, timeout: int) -> dict[str, Any]:
         results: dict[tuple[str, str], str] = {}
         if junit_path.is_file():
             try:
-                root = ET.parse(junit_path).getroot()
+                root = ET.parse(junit_path).getroot()  # noqa: S314 - local pytest JUnit artifact
             except (ET.ParseError, OSError):
                 root = None
             if root is not None:
@@ -146,6 +146,28 @@ def _run_evidence(node_ids: Iterable[str], *, timeout: int) -> dict[str, Any]:
             "exit_code": completed.returncode,
             "output": output[-12000:],
         }
+
+
+def _offline_verified_tool_names(
+    evidence_by_tool: dict[str, tuple[str, ...]],
+    offline_collected: set[str],
+    passed_evidence: set[str],
+) -> list[str]:
+    """Return tools with at least one executed offline evidence node that passed.
+
+    A set inclusion check over an empty intersection is true.  Without the
+    explicit non-empty guard, a tool whose evidence is entirely live would be
+    reported as offline-verified before any test had run (especially with
+    ``--no-execute``), which is a fast but misleading result.  Keep the helper
+    separate so the vacuous-pass rule is easy to test and cannot get lost in the
+    larger report assembly.
+    """
+    verified: list[str] = []
+    for name, evidence in evidence_by_tool.items():
+        offline_evidence = set(evidence) & offline_collected
+        if offline_evidence and offline_evidence <= passed_evidence:
+            verified.append(name)
+    return sorted(verified)
 
 
 def build_report(*, run_live: bool = False, execute: bool = True) -> dict[str, Any]:
@@ -258,21 +280,20 @@ def build_report(*, run_live: bool = False, execute: bool = True) -> dict[str, A
         name for name, evidence in evidence_by_tool.items()
         if name in contract_valid_names and set(evidence) <= passed_evidence
     )
-    offline_verified_tools = sorted(
-        name for name, evidence in evidence_by_tool.items()
-        if set(evidence) & offline_collected <= passed_evidence
+    offline_verified_tools = _offline_verified_tool_names(
+        evidence_by_tool, offline_collected, passed_evidence
     )
 
     return {
         "registered": len(registered),
         "contract_valid_tools": len(contract_valid_names & registered),
-        "expected_registered": 55,
+        "expected_registered": 49,
         "manifest_entries": len(manifest_names),
         "mode": "live" if run_live else "offline",
         "execution_enabled": execute,
         "all_evidence_executed": (
             execute
-            and len(contract_valid_names & registered) == len(registered) == 55
+            and len(contract_valid_names & registered) == len(registered) == 49
             and not deferred_live
             and not failed_evidence
             and not unclassified_evidence
@@ -315,9 +336,9 @@ def report_ok(report: dict[str, Any]) -> bool:
             execution_ok = execution_ok and live.get("exit_code") == 0
             execution_ok = execution_ok and report["all_evidence_executed"]
     return (
-        report["registered"] == report["expected_registered"] == 55
-        and report["manifest_entries"] == 55
-        and report["contract_valid_tools"] == 55
+        report["registered"] == report["expected_registered"] == 49
+        and report["manifest_entries"] == 49
+        and report["contract_valid_tools"] == 49
         and execution_ok
         and not any(
             report[key]

@@ -62,6 +62,23 @@ def test_configured_token_rejects_a_wrong_header(monkeypatch):
     assert getattr(exc.value, "status_code", None) == 401
 
 
+@pytest.mark.parametrize("header", ["Authorization", "X-Bridge-Token"])
+def test_non_ascii_token_is_rejected_as_unauthorized(monkeypatch, header):
+    monkeypatch.setenv(T.TOKEN_ENV, TOKEN)
+    value = "wrong-\u00e9"
+    with pytest.raises(T.bottle.HTTPResponse) as exc:
+        T.require_link_token({header: f"Bearer {value}" if header == "Authorization" else value})
+    assert exc.value.status_code == 401
+    assert value not in exc.value.body
+
+
+def test_token_diagnostics_compare_unicode_tokens_without_crashing():
+    token = "configured-\u00e9"
+    T.bridge_token_path().write_text(token, encoding="utf-8")
+    assert T.state_paths_report(enforced_token=token)["token_matches_file"] is True
+    assert T.state_paths_report(enforced_token=TOKEN)["token_matches_file"] is False
+
+
 def test_configured_token_accepts_either_header(monkeypatch):
     monkeypatch.setenv(T.TOKEN_ENV, TOKEN)
     T.require_link_token({"Authorization": f"Bearer {TOKEN}"})
@@ -172,6 +189,32 @@ class TestAuthenticatedBridge:
         r = _post(link_bridge_auth.port, {"cmd": "get_all_sessions"},
                   {"Authorization": "Bearer nope"})
         assert r.status_code == 401
+
+    @pytest.mark.parametrize("path", ["/link", "/api/result", "/api/longpoll"])
+    @pytest.mark.parametrize("refusal", ["origin", "invalid_origin", "non_ascii_token", "utf8_token"])
+    def test_refused_large_body_delivers_its_http_error(
+        self, link_bridge_auth, path, refusal, monkeypatch,
+    ):
+        monkeypatch.delenv("BROWSERTAP_WS_ALLOWED_ORIGINS", raising=False)
+        headers = {"Authorization": f"Bearer {TOKEN}"}
+        if refusal in {"origin", "invalid_origin"}:
+            headers["Origin"] = (
+                "https://untrusted.example" if refusal == "origin" else "https://invalid-\u00e9.example"
+            )
+            expected = 403
+        else:
+            headers["Authorization"] = (
+                "Bearer wrong-\u00e9" if refusal == "non_ascii_token" else b"Bearer wrong-\xc3\xa9"
+            )
+            expected = 401
+        r = requests.post(
+            f"http://127.0.0.1:{link_bridge_auth.port}{path}",
+            json={"cmd": "execute_js", "code": "x" * (2 * 1024 * 1024)},
+            headers=headers, timeout=10,
+        )
+        assert r.status_code == expected
+        assert "Access-Control-Allow-Origin" not in r.headers
+        assert link_bridge_auth.driver.sessions == {}
 
     def test_bearer_token_is_200(self, link_bridge_auth):
         r = _post(link_bridge_auth.port, {"cmd": "get_all_sessions"},
@@ -336,8 +379,10 @@ def _register_session(host, session_id, info, client):
 
 
 @pytest.mark.parametrize("kind,delivery_state,retry_safe,executed_tab_id", [
-    ("unpolled", "undelivered", True, None),
-    ("no_ack", "sent_unconfirmed", True, 7),
+    # The command is already queued in the daemon even though this test does
+    # not poll it; a later extension poll may still execute the side effect.
+    ("unpolled", "sent_unconfirmed", False, None),
+    ("no_ack", "sent_unconfirmed", False, 7),
     ("acked", "delivered_no_result", False, 7),
 ])
 def test_remote_execute_js_keeps_the_daemons_delivery_verdict(

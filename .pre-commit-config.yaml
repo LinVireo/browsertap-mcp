@@ -1,0 +1,54 @@
+minimum_pre_commit_version: '3.2.0'
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+fail_fast: true
+
+repos:
+  - repo: local
+    hooks:
+      - id: btap-lint
+        name: BTAP Ruff, ESLint and mypy
+        entry: python -m scripts.lint_report --output out/pre-commit/lint.json
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: btap-lint-enforced
+        name: BTAP lint checks actually ran
+        entry: >-
+          python -c "import json, sys; from pathlib import Path;
+          report = json.loads(Path('out/pre-commit/lint.json').read_text(encoding='utf-8'));
+          sys.exit(0 if all(report[key].get('enforced') is True for key in ('javascript', 'types'))
+          else 'Run npm ci and install the development dependencies before committing.')"
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: btap-tool-docs
+        name: BTAP tool documentation contract
+        entry: python -m scripts.check_tool_docs --format markdown
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: btap-version
+        name: BTAP version consistency
+        entry: python -m scripts.versioning check
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: btap-staged-whitespace
+        name: BTAP staged whitespace
+        entry: git diff --cached --check
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+      - id: btap-staged-secrets
+        name: BTAP staged secrets
+        entry: gitleaks git . --staged --redact --no-banner
+        language: system
+        pass_filenames: false
+        always_run: true
+        require_serial: true

@@ -176,7 +176,10 @@ let failNextContentSetting = '';
 let effectiveCameraSetting = 'ask';
 const chrome = {{
   storage: {{ local: {{
-    async get(key) {{ return {{ [key]: saved[key] }}; }},
+    async get(keys) {{
+      const names = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(names.map(key => [key, saved[key]]));
+    }},
     async set(value) {{
       events.push(['storage-set', (value.btapPermissionLeases || []).length]);
       if (failNextStageStorage && (value.btapPermissionLeases || []).length > 0) {{
@@ -328,7 +331,10 @@ let failNextRestore = false;
 const originFromPattern = pattern => pattern.endsWith('/*') ? pattern.slice(0, -2) : pattern;
 const chrome = {{
   storage: {{ local: {{
-    async get(key) {{ return {{ [key]: saved[key] }}; }},
+    async get(keys) {{
+      const names = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(names.map(key => [key, saved[key]]));
+    }},
     async set(value) {{ Object.assign(saved, JSON.parse(JSON.stringify(value))); }},
   }} }},
   alarms: {{
@@ -457,7 +463,10 @@ let failRollbackAllow = false;
 let effectiveSetting = 'ask';
 const chrome = {{
   storage: {{ local: {{
-    async get(key) {{ return {{ [key]: saved[key] }}; }},
+    async get(keys) {{
+      const names = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(names.map(key => [key, saved[key]]));
+    }},
     async set(value) {{
       const leases = value.btapPermissionLeases || [];
       if (failReplacementCommit && leases[0]?.state === 'active') {{

@@ -42,9 +42,6 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         "tests/test_phase1_tools.py::test_call_extension_parses_json_and_preserves_structured_failure",
         "tests/test_phase1_tools.py::test_call_extension_rejects_invalid_json_before_bridge",
     ),
-    "capture_desktop_screenshot": harness(
-        "capture_desktop_screenshot", reason="desktop capture had no controlled offline behavior test"
-    ),
     "capture_page_screenshot": ToolCoverage(
         "offline",
         "tests/test_screenshot_content.py::test_capture_page_screenshot_attaches_image_even_when_saved",
@@ -108,6 +105,10 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         True,
         "tests/test_dialog_policy.py::test_execute_js_restores_default_even_when_policy_cleanup_fails",
     ),
+    "get_execute_js_result": harness(
+        "get_execute_js_result",
+        reason="async result polling tool added but not yet covered by behavior tests",
+    ),
     "extension_path": harness(
         "extension_path", reason="the pure diagnostic wrapper had registration coverage only"
     ),
@@ -141,13 +142,6 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         True,
         "tests/test_dialog_policy.py::test_handle_dialog_extension_debugger_paths_detach_in_finally",
     ),
-    "hotkey": ToolCoverage(
-        "offline",
-        "tests/test_physical_input.py::test_accepted_physical_tool_runs_exactly_once[asyncio-hotkey-kwargs4-hotkey]",
-        "tests/test_physical_input.py::test_physical_tool_requires_approval_before_any_work[asyncio-response0-hotkey-kwargs4-hotkey]",
-        True,
-        "tests/test_physical_input.py::test_physical_tool_releases_lease_after_success[asyncio-hotkey-kwargs4-hotkey]",
-    ),
     "list_all_tabs": harness(
         "list_all_tabs", reason="the all-tab wrapper needed a direct client-routing boundary test"
     ),
@@ -156,27 +150,6 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
     ),
     "list_tabs": harness(
         "list_tabs", reason="diagnostic fallback behavior needed a controlled bridge failure"
-    ),
-    "mouse_click": ToolCoverage(
-        "offline",
-        "tests/test_physical_input.py::test_accepted_physical_tool_runs_exactly_once[asyncio-mouse_click-kwargs1-click]",
-        "tests/test_physical_input.py::test_mouse_click_unconfirmed_target_never_receives_physical_input[asyncio-activation0]",
-        True,
-        "tests/test_physical_input.py::test_physical_tool_releases_lease_after_success[asyncio-mouse_click-kwargs1-click]",
-    ),
-    "mouse_drag": ToolCoverage(
-        "offline",
-        "tests/test_physical_input.py::test_accepted_physical_tool_runs_exactly_once[asyncio-mouse_drag-kwargs2-dragTo]",
-        "tests/test_physical_input.py::test_physical_tool_requires_approval_before_any_work[asyncio-response0-mouse_drag-kwargs2-dragTo]",
-        True,
-        "tests/test_physical_input.py::test_physical_tool_releases_lease_after_success[asyncio-mouse_drag-kwargs2-dragTo]",
-    ),
-    "mouse_move": ToolCoverage(
-        "offline",
-        "tests/test_physical_input.py::test_accepted_physical_tool_runs_exactly_once[asyncio-mouse_move-kwargs0-moveTo]",
-        "tests/test_physical_input.py::test_physical_tool_requires_approval_before_any_work[asyncio-response0-mouse_move-kwargs0-moveTo]",
-        True,
-        "tests/test_physical_input.py::test_physical_tool_releases_lease_after_success[asyncio-mouse_move-kwargs0-moveTo]",
     ),
     "network_capture_start": ToolCoverage(
         "offline",
@@ -233,9 +206,6 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         f"{L}::test_page_type_unusable_locator_dispatches_nothing",
         True,
         "tests/test_offline.py::test_page_type_slow_session_resolution_sends_no_input_after_deadline",
-    ),
-    "pointer_info": harness(
-        "pointer_info", reason="pointer diagnostics had no controlled pyautogui behavior test"
     ),
     "remove_bookmark": ToolCoverage(
         "offline",
@@ -320,13 +290,6 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         "tests/test_live_browser.py::TestFailoverRefusal::test_switch_tab_refuses_a_dead_explicit_session",
         True,
         "tests/test_live_browser.py::TestActivateTab::test_switch_tab_opt_out_leaves_the_screen_alone",
-    ),
-    "type_text": ToolCoverage(
-        "offline",
-        "tests/test_physical_input.py::test_accepted_physical_tool_runs_exactly_once[asyncio-type_text-kwargs3-write]",
-        "tests/test_physical_input.py::test_physical_tool_requires_approval_before_any_work[asyncio-response0-type_text-kwargs3-write]",
-        True,
-        "tests/test_physical_input.py::test_physical_tool_releases_lease_after_success[asyncio-type_text-kwargs3-write]",
     ),
     "uninstall_extension": ToolCoverage(
         "offline",

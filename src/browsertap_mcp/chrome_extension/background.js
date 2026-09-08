@@ -1,4 +1,11 @@
 // background.js - Cookie + CDP Bridge
+// The build this worker was LOADED with. `chrome.runtime.getManifest().version`
+// cannot answer that: Chrome parses the manifest at load time and refreshes it on
+// its own schedule, and this file does not follow it -- measured twice here, once
+// reporting the pre-bump version and once reporting a matching version while a
+// reload was still needed. A literal has no such layer. GENERATED: run
+// `python -m scripts.extension_stamp --write` after editing any extension file.
+const BTAP_BUILD = '15864f1115676dd7';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -17,20 +24,28 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // --- Content-script reinjection after install/update ----------------------
+const REINJECT_CONCURRENCY = 4;
+
 async function reinjectAllTabs() {
   let tabs;
   try { tabs = await chrome.tabs.query({}); } catch (_) { return; }
-  for (const tab of tabs) {
-    if (!tab.id || !isScriptable(tab.url)) continue;
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        files: ['content.js'],
-      });
-    } catch (_) {
-      // Restricted pages (web store, chrome://, PDF viewer) reject injection;
-      // skip them silently — they were never scriptable anyway.
-    }
+  const targets = tabs.filter(tab => tab.id && isScriptable(tab.url));
+  // Each tab is independent. A serial loop makes extension reload recovery pay
+  // the injection latency once per tab; bounded batches keep the common case
+  // fast without flooding Chrome when a profile has many open tabs.
+  for (let start = 0; start < targets.length; start += REINJECT_CONCURRENCY) {
+    const batch = targets.slice(start, start + REINJECT_CONCURRENCY);
+    await Promise.all(batch.map(async tab => {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          files: ['content.js'],
+        });
+      } catch (_) {
+        // Restricted pages (web store, chrome://, PDF viewer) reject injection;
+        // skip them silently — they were never scriptable anyway.
+      }
+    }));
   }
 }
 
@@ -53,7 +68,6 @@ const keepalivePorts = new Map();
 let nextDialogScope = 1;
 let nextManualExecutionGeneration = 1;
 const DEFAULT_CDP_TIMEOUT_MS = 20000;
-const MAX_CDP_TIMEOUT_MS = 120000;
 
 // --- Stable tab lifecycle generations ------------------------------------
 // A native tab id can be reused after close/restart while the Python bridge
@@ -138,7 +152,7 @@ function persistCreateOperations() {
 
 async function loadCreateOperations() {
   if (createOperationsLoadPromise) return await createOperationsLoadPromise;
-  createOperationsLoadPromise = (async () => {
+  const attempt = (async () => {
     try {
       const area = chrome.storage?.session;
       if (!area) throw new Error('chrome.storage.session is unavailable');
@@ -155,7 +169,20 @@ async function loadCreateOperations() {
     }
     return createOperations;
   })();
-  return await createOperationsLoadPromise;
+  createOperationsLoadPromise = attempt;
+  let succeeded = false;
+  try {
+    const loaded = await attempt;
+    succeeded = true;
+    return loaded;
+  } finally {
+    // A worker eviction or transient storage failure must not poison every
+    // later create_status call. Successful loads stay memoised for this worker;
+    // failed reads are retried by the next caller, just like generation loads.
+    if (createOperationsLoadPromise === attempt && !succeeded) {
+      createOperationsLoadPromise = null;
+    }
+  }
 }
 
 function operationRecordData(record) {
@@ -228,26 +255,21 @@ async function loadTabGenerations() {
   // unreadable store says nothing at all. Both used to arrive here as `{}`.
   const attempt = (async () => {
     const area = chrome.storage?.session;
-    let stored = null;
-    if (area) {
-      try {
-        stored = (await area.get(TAB_GENERATIONS_KEY))[TAB_GENERATIONS_KEY] || {};
-      } catch (_) {
-        stored = null;
-      }
-    } else {
-      // No session storage at all: nothing durable to lose and nothing to
-      // restore, so this worker's map is the only truth there can be.
-      stored = {};
-    }
-    let tabs = null;
-    try {
-      tabs = await chrome.tabs.query({});
-    } catch (_) {
-      // Losing the tab list is the same wipe by another door: every stored
-      // generation would read as belonging to a tab that no longer exists.
-      tabs = null;
-    }
+    // The two reads do not depend on one another. Start them in the same turn so
+    // worker recovery pays for the slower API once instead of their sum. Each
+    // promise keeps its own failure sentinel: an unreadable half must still block
+    // persistence, rather than letting Promise.all collapse both facts into one
+    // generic rejection.
+    const storedRead = area
+      ? Promise.resolve()
+        .then(() => area.get(TAB_GENERATIONS_KEY))
+        .then(value => value[TAB_GENERATIONS_KEY] || {})
+        .catch(() => null)
+      : Promise.resolve({});
+    const tabsRead = Promise.resolve()
+      .then(() => chrome.tabs.query({}))
+      .catch(() => null);
+    const [stored, tabs] = await Promise.all([storedRead, tabsRead]);
     if (stored === null || tabs === null) {
       tabGenerationLoadFailures += 1;
       // Not memoised: a `No SW` on either call is transient, and memoising it
@@ -317,6 +339,124 @@ async function forgetTabGeneration(tabId) {
   await persistTabGenerations();
 }
 
+// --- Stable tab identities: evidence-backed rebinding across native ids -----
+// `chrome.tabs` ids are handles, not identities. Chrome's onReplaced event is
+// the one browser-provided fact that says a new native tab replaced an old one;
+// this map carries that fact across service-worker eviction and a manual
+// extension reload so the bridge can safely hand an agent the current handle
+// without guessing from URL/title. The value contains only an opaque identity
+// keyed by the current native id; it does not persist page data or credentials.
+const TAB_IDENTITIES_KEY = 'btapTabIdentitiesV1'; // gitleaks:allow - storage key, not a credential
+const tabIdentities = new Map();
+const provisionalTabIdentities = new Set();
+let tabIdentitiesLoadPromise = null;
+let tabIdentityWriteQueue = Promise.resolve();
+let tabIdentitiesLoaded = false;
+let tabIdentityLoadFailures = 0;
+
+function newTabIdentity() {
+  const random = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+  return `btap_tab_${random}`;
+}
+
+function persistTabIdentities() {
+  // Unlike generations, identities must survive a full extension reload. A
+  // reload is exactly when an old session handle may need to be rebound.
+  const area = chrome.storage?.local || chrome.storage?.session;
+  if (!area || !tabIdentitiesLoaded) return Promise.resolve();
+  const snapshot = Object.fromEntries(tabIdentities);
+  tabIdentityWriteQueue = tabIdentityWriteQueue
+    .then(() => area.set({ [TAB_IDENTITIES_KEY]: snapshot }))
+    .catch(error => console.log('[BTAP-WS] tab identity persistence unavailable', error));
+  return tabIdentityWriteQueue;
+}
+
+async function loadTabIdentities() {
+  if (tabIdentitiesLoadPromise) return await tabIdentitiesLoadPromise;
+  const attempt = (async () => {
+    const area = chrome.storage?.local || chrome.storage?.session;
+    const storedRead = area
+      ? Promise.resolve()
+        .then(() => area.get(TAB_IDENTITIES_KEY))
+        .then(value => value[TAB_IDENTITIES_KEY] || {})
+        .catch(() => null)
+      : Promise.resolve({});
+    const tabsRead = Promise.resolve()
+      .then(() => chrome.tabs.query({}))
+      .catch(() => null);
+    const [stored, tabs] = await Promise.all([storedRead, tabsRead]);
+    if (stored === null || tabs === null) {
+      tabIdentityLoadFailures += 1;
+      if (tabIdentitiesLoadPromise === attempt) tabIdentitiesLoadPromise = null;
+      console.log(
+        '[BTAP-WS] tab identities unreadable; keeping the stored snapshot',
+        `(failures=${tabIdentityLoadFailures})`,
+      );
+      return;
+    }
+    const live = new Set(tabs.map(tab => String(tab.id)));
+    for (const [rawId, identity] of Object.entries(stored)) {
+      if (live.has(String(rawId)) && typeof identity === 'string' && identity) {
+        tabIdentities.set(String(rawId), identity);
+        provisionalTabIdentities.delete(String(rawId));
+      }
+    }
+    tabIdentitiesLoaded = true;
+    for (const tab of tabs) {
+      const key = String(tab.id);
+      if (!tabIdentities.has(key)) tabIdentities.set(key, newTabIdentity());
+    }
+    provisionalTabIdentities.clear();
+    await persistTabIdentities();
+  })();
+  tabIdentitiesLoadPromise = attempt;
+  let succeeded = false;
+  try {
+    await attempt;
+    succeeded = true;
+  } finally {
+    if (tabIdentitiesLoadPromise === attempt && !succeeded) tabIdentitiesLoadPromise = null;
+  }
+}
+
+async function tabIdentityFor(tabId) {
+  const key = String(tabId);
+  await loadTabIdentities();
+  if (!tabIdentities.has(key)) {
+    tabIdentities.set(key, newTabIdentity());
+    if (!tabIdentitiesLoaded) provisionalTabIdentities.add(key);
+    await persistTabIdentities();
+  }
+  return tabIdentities.get(key);
+}
+
+async function forgetTabIdentity(tabId) {
+  await loadTabIdentities();
+  const key = String(tabId);
+  tabIdentities.delete(key);
+  provisionalTabIdentities.delete(key);
+  await persistTabIdentities();
+}
+
+async function transferTabIdentity(addedTabId, removedTabId) {
+  const oldKey = String(removedTabId);
+  const newKey = String(addedTabId);
+  await loadTabIdentities();
+  const identity = tabIdentities.get(oldKey) || newTabIdentity();
+  tabIdentities.set(newKey, identity);
+  tabIdentities.delete(oldKey);
+  provisionalTabIdentities.delete(oldKey);
+  await persistTabIdentities();
+
+  // Preserve the lifecycle fence too. A replacement is the same logical tab,
+  // so an agent-owned close may continue using the generation it received.
+  await loadTabGenerations();
+  const generation = tabGenerations.get(removedTabId) || await tabGenerationFor(addedTabId);
+  tabGenerations.set(addedTabId, generation);
+  tabGenerations.delete(removedTabId);
+  await persistTabGenerations();
+}
+
 async function validateTabCloseGenerations(tabIds, expected) {
   if (!expected || typeof expected !== 'object') return null;
   for (const tabId of tabIds) {
@@ -336,23 +476,30 @@ async function closeTabsWithGenerations(tabIds, expected) {
   const liveIds = [];
   const alreadyGone = [];
   for (const tabId of tabIds) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (message !== `No tab with id: ${tabId}.` &&
+          message !== `No tab with id: ${tabId}`) throw error;
       alreadyGone.push(tabId);
       continue;
     }
-    if (expected && typeof expected === 'object') {
-      const expectedGeneration = expected[String(tabId)];
-      if (typeof expectedGeneration !== 'string') {
-        throw new Error(`missing expected generation for tab ${tabId}`);
-      }
-      const currentGeneration = await tabGenerationFor(tabId);
-      if (currentGeneration !== expectedGeneration) {
-        throw new Error(`tab ${tabId} lifecycle generation changed; refusing close`);
-      }
+    if (!tab || tab.id !== tabId) {
+      throw new Error(`Tab lookup returned no matching tab for ${tabId}`);
     }
     liveIds.push(tabId);
   }
+  // Delegate rather than repeat: this used to carry its own copy of the
+  // comparison above, and `validateTabCloseGenerations` -- the copy the offline
+  // suite drives -- was called by nothing at all. Two copies of a refusal, one
+  // shipped and one tested, is the worst arrangement available: editing the live
+  // one leaves the test green. A tab that is already gone is deliberately left
+  // out of the check; there is no generation to compare and closing it is a
+  // no-op the caller already asked for.
+  const refusal = await validateTabCloseGenerations(liveIds, expected);
+  if (refusal) throw new Error(refusal);
   // Validate every live tab before removing any member of the batch.
   if (liveIds.length) await chrome.tabs.remove(liveIds);
   return { closed: liveIds, alreadyGone };
@@ -426,15 +573,20 @@ async function schedulePermissionRetry(lease) {
 }
 
 async function loadPermissionLeases() {
-  const stored = await chrome.storage.local.get(PERMISSION_LEASES_KEY);
+  // The current and legacy records are independent. Read both in one storage
+  // call so a cold worker does not pay two sequential extension round trips
+  // before it can decide whether a permission must be restored.
+  const stored = await chrome.storage.local.get([
+    PERMISSION_LEASES_KEY,
+    LEGACY_PERMISSION_LEASES_KEY,
+  ]);
   let leases = stored[PERMISSION_LEASES_KEY];
   if (!Array.isArray(leases)) {
     // Migration from the pre-BTAP key name, read only when the current key holds
     // nothing. A lease records the site permission value that was in effect
     // BEFORE automation raised it, so a lease that becomes unreadable leaves
     // the user's browser permanently elevated with no record of what to restore.
-    const legacyStored = await chrome.storage.local.get(LEGACY_PERMISSION_LEASES_KEY);
-    const legacy = legacyStored[LEGACY_PERMISSION_LEASES_KEY];
+    const legacy = stored[LEGACY_PERMISSION_LEASES_KEY];
     if (!Array.isArray(legacy)) return [];
     leases = legacy;
     try {
@@ -869,6 +1021,33 @@ function boundedCaptureInteger(value, fallback, minimum, maximum) {
     : fallback;
 }
 
+const captureCommandsInFlight = new Set();
+
+async function withCaptureCommandLock(tabId, work) {
+  // Refuse overlapping work immediately so an expired caller cannot leave a
+  // queued start/stop that changes the browser after its timeout.
+  if (captureCommandsInFlight.has(tabId)) {
+    return {
+      ok: false,
+      code: 'capture_busy',
+      error: {
+        code: 'capture_busy',
+        message: `A capture operation is already in progress on tab ${tabId}`,
+        retryable: true,
+        dispatched: false,
+      },
+      retryable: true,
+      dispatched: false,
+    };
+  }
+  captureCommandsInFlight.add(tabId);
+  try {
+    return await work();
+  } finally {
+    captureCommandsInFlight.delete(tabId);
+  }
+}
+
 function truncateCaptureText(value, maxBytes) {
   const text = String(value ?? '');
   const bytes = new TextEncoder().encode(text);
@@ -1119,6 +1298,10 @@ async function handleNetworkCaptureCommand(msg, sender) {
   if (!Number.isInteger(tabId)) {
     return { ok: false, code: 'invalid_tab_id', error: 'network_capture requires tabId' };
   }
+  return await withCaptureCommandLock(tabId, () => runNetworkCaptureCommand(msg, tabId));
+}
+
+async function runNetworkCaptureCommand(msg, tabId) {
   if (msg.method === 'start') {
     const existing = networkCaptures.get(tabId);
     if (existing?.active) {
@@ -1201,6 +1384,10 @@ async function handleConsoleCaptureCommand(msg, sender) {
   if (!Number.isInteger(tabId)) {
     return { ok: false, code: 'invalid_tab_id', error: 'console requires tabId' };
   }
+  return await withCaptureCommandLock(tabId, () => runConsoleCaptureCommand(msg, tabId));
+}
+
+async function runConsoleCaptureCommand(msg, tabId) {
   if (msg.method === 'start') {
     const existing = consoleCaptures.get(tabId);
     if (existing?.active) {
@@ -1482,7 +1669,7 @@ async function resolveDebuggerTargetIdentity(target) {
       tabId: original.tabId || null,
     };
   }
-  let targets = [];
+  let targets;
   try {
     targets = await chrome.debugger.getTargets();
   } catch (_) {
@@ -1560,14 +1747,21 @@ function forgetDebuggerDetach(marker) {
 
 async function detachDebuggerFromChrome(attachment) {
   const detachMarker = rememberDebuggerDetach(attachment);
+  let timeoutId = null;
   try {
     return await Promise.race([
       chrome.debugger.detach(attachment.target),
-      new Promise(resolve => setTimeout(resolve, 1000)),
+      new Promise(resolve => {
+        timeoutId = setTimeout(resolve, 1000);
+      }),
     ]);
   } catch (error) {
     forgetDebuggerDetach(detachMarker);
     throw error;
+  } finally {
+    // A successful detach usually wins immediately. Clear its watchdog so a
+    // burst of cleanups does not retain one timer/closure per tab for a second.
+    if (timeoutId !== null) clearTimeout(timeoutId);
   }
 }
 
@@ -1614,11 +1808,19 @@ function handleDebuggerDetach(source) {
 }
 
 // --- Debugger attach/detach and pending-command rejection -----------------
+// Declared here rather than with the state maps at the top of the file, and that
+// is not only a readability preference: the offline suite drives this file by
+// slicing it between two function names and eval'ing the slice, so a constant a
+// function body closes over is only defined if it happens to fall inside the same
+// slice. It used to sit 1550 lines up, which made every clamp read `120000`
+// instead -- two literals to keep in step, and the named ceiling read by nothing.
+const MAX_CDP_TIMEOUT_MS = 120000;
+
 function boundedCdpTimeout(value, fallback = 20000, minimum = 100) {
   const requested = Number(value);
   const lowerBound = Math.max(1, Math.floor(Number(minimum) || 100));
   return Number.isFinite(requested) && requested > 0
-    ? Math.max(lowerBound, Math.min(Math.floor(requested), 120000))
+    ? Math.max(lowerBound, Math.min(Math.floor(requested), MAX_CDP_TIMEOUT_MS))
     : fallback;
 }
 
@@ -1662,6 +1864,7 @@ function rejectPendingDebuggerCommands(attachment, reason, excludedCommand = nul
     attachment.pendingCommands.delete(command);
     const error = new Error(`debugger_detached: ${reason || 'attachment released'}`);
     error.code = 'debugger_detached';
+    error.dispatched = Boolean(command.dispatched);
     command.reject(error);
   }
 }
@@ -1678,6 +1881,7 @@ function rejectPendingDebuggerCommandsForLease(attachment, lease, reason) {
     attachment.pendingCommands.delete(command);
     const error = new Error(`debugger_detached: ${reason || 'lease released'}`);
     error.code = 'debugger_detached';
+    error.dispatched = Boolean(command.dispatched);
     command.reject(error);
   }
 }
@@ -1986,6 +2190,7 @@ async function forceInvalidateDebuggerAttachment(
 // --- CDP command dispatch with a deadline ---------------------------------
 async function sendDebuggerCommandWithTimeout(
   lease, method, params = {}, timeoutMs = 20000, minimumTimeoutMs = 100,
+  dispatchState = null,
 ) {
   if (!lease?.attachment || lease.released || lease.attachment.invalidated ||
       lease.generation !== lease.attachment.generation) {
@@ -2000,29 +2205,53 @@ async function sendDebuggerCommandWithTimeout(
     timer: null,
     reject: null,
     settled: false,
+    dispatched: false,
   };
+  if (dispatchState && typeof dispatchState === 'object') {
+    dispatchState.dispatched = false;
+  }
   attachment.pendingCommands ||= new Set();
   attachment.pendingCommands.add(commandState);
   const command = Promise.resolve().then(
-    () => chrome.debugger.sendCommand(attachment.target, method, params || {}),
+    () => {
+      commandState.dispatched = true;
+      if (dispatchState && typeof dispatchState === 'object') {
+        dispatchState.dispatched = true;
+      }
+      return chrome.debugger.sendCommand(attachment.target, method, params || {});
+    },
   );
+  let timeoutError = null;
   const watchdog = new Promise((_, reject) => {
     commandState.reject = reject;
     commandState.timer = setTimeout(async () => {
       if (commandState.settled) return;
       const reason = `cdp_timeout: ${method} exceeded ${bounded}ms`;
-      await forceInvalidateDebuggerAttachment(attachment, reason, commandState);
-      if (commandState.settled) return;
       const error = new Error(reason);
       error.code = 'cdp_timeout';
       error.method = method;
       error.timeoutMs = bounded;
+      error.dispatched = Boolean(commandState.dispatched);
+      // Chrome may resolve or reject sendCommand while detach is in flight.
+      // The deadline has already won; neither reply can replace its outcome.
+      timeoutError = error;
+      await forceInvalidateDebuggerAttachment(attachment, reason, commandState);
+      if (commandState.settled) return;
       reject(error);
     }, bounded);
   });
   try {
-    return await Promise.race([command, watchdog]);
+    const result = await Promise.race([command, watchdog]);
+    if (timeoutError) throw timeoutError;
+    return result;
   } catch (error) {
+    if (timeoutError) {
+      await attachment.invalidatingPromise;
+      throw timeoutError;
+    }
+    if (error && typeof error === 'object' && error.dispatched === undefined) {
+      error.dispatched = Boolean(commandState.dispatched);
+    }
     if (debuggerFailureCode(error) === 'debugger_conflict') {
       await forceInvalidateDebuggerAttachment(
         attachment, `debugger_conflict: ${error.message || String(error)}`,
@@ -2057,10 +2286,17 @@ async function handleProtocolDialog(msg) {
     // command" while that navigation command is still paused.  Route the
     // explicit accept/dismiss through the owning lease instead; it already has
     // Page enabled and is released only after navigation + handledSignal settle.
-    if (owningNavigation?.action === 'manual' && owningNavigation.dialog &&
-        owningNavigation.debuggerLease && !owningNavigation.released &&
-        !owningNavigation.debuggerLease.attachment?.invalidated) {
-      debuggerLease = owningNavigation.debuggerLease;
+    const retainedLease = owningNavigation?.action === 'manual' &&
+      owningNavigation.dialog && owningNavigation.debuggerLease &&
+      !owningNavigation.released &&
+      !owningNavigation.debuggerLease.attachment?.invalidated
+      ? owningNavigation.debuggerLease
+      : owningManual?.debuggerLease && !owningManual.released &&
+          !owningManual.debuggerLease.attachment?.invalidated
+        ? owningManual.debuggerLease
+        : null;
+    if (retainedLease) {
+      debuggerLease = retainedLease;
       borrowedNavigationLease = true;
     } else {
       debuggerLease = await attachBtapDebugger({ tabId });
@@ -2246,21 +2482,37 @@ async function runCdpExecFallback(tabId, wrappedCode) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let lease = null;
-    let dispatched = false;
+    let commandInvoked = false;
+    const dispatchState = { dispatched: false };
     try {
       lease = await attachBtapDebugger({ tabId });
-      dispatched = true;
-      const cdpRes = await sendDebuggerCommandWithTimeout(lease, 'Runtime.evaluate', {
-        expression: wrappedCode, awaitPromise: true, returnByValue: true
-      }, DEFAULT_CDP_TIMEOUT_MS);
+      commandInvoked = true;
+      const cdpRes = await sendDebuggerCommandWithTimeout(
+        lease, 'Runtime.evaluate', {
+          expression: wrappedCode, awaitPromise: true, returnByValue: true,
+        }, DEFAULT_CDP_TIMEOUT_MS, 100, dispatchState,
+      );
+      // A successful command necessarily reached Chrome. This also keeps the
+      // helper correct in small test/integration shims that do not implement the
+      // optional dispatchState argument.
+      dispatchState.dispatched = true;
       if (cdpRes.exceptionDetails) {
         const desc = cdpRes.exceptionDetails.exception?.description || 'CDP Error';
         return { ok: false, error: { name: 'Error', message: desc, stack: desc } };
       }
       return cdpRes.result.value;
     } catch (cdpErr) {
+      if (cdpErr?.dispatched !== undefined) {
+        dispatchState.dispatched = Boolean(cdpErr.dispatched);
+      } else if (commandInvoked) {
+        // The in-tree sender annotates every rejection. Keep the conservative
+        // answer for an older/thin adapter that does not: once the send helper
+        // was entered, replaying arbitrary caller JS is never the safe default.
+        dispatchState.dispatched = true;
+      }
       lastError = cdpErr;
       const code = debuggerFailureCode(cdpErr);
+      const dispatched = Boolean(dispatchState.dispatched);
       const retryable = !dispatched && code !== 'cdp_error';
       if (attempt > 0 || !retryable) {
         let message = 'CDP fallback failed: ' + (cdpErr?.message || String(cdpErr));
@@ -2432,9 +2684,11 @@ async function navigateWithDialogPolicy(msg) {
       else if (debuggerLease) {
         try { await detachBtapDebugger(debuggerLease); } catch (_) {}
       }
-    } else {
-      debuggerLease = null;
     }
+    // The manual owner keeps the lease on purpose -- releasing it here would
+    // detach the debugger out from under the execution the caller is still
+    // driving. Nothing below reads `debuggerLease`, so there is deliberately
+    // nothing to do in this branch.
   }
 }
 
@@ -2724,7 +2978,7 @@ async function handleExtMessage(msg, sender) {
     const token = `${Date.now()}-${nextDialogScope++}`;
     const requestedTimeout = Number(msg.timeoutMs);
     const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
-      ? Math.min(Math.floor(requestedTimeout), 120000) : 15000;
+      ? Math.min(Math.floor(requestedTimeout), MAX_CDP_TIMEOUT_MS) : 15000;
     const scopes = execDialogPolicies.get(tabId) || new Map();
     scopes.set(token, {
       token,
@@ -3078,8 +3332,14 @@ async function handleExtMessage(msg, sender) {
       version: extensionVersion,
       extension_version: extensionVersion,
       manifest_version: extensionVersion,
+      // The three above all come from the manifest, which Chrome parsed when it
+      // loaded the extension and refreshes on its own schedule -- so they answer
+      // "which manifest", never "which code". This one is a literal in this file,
+      // so it is the code, and the server recomputes it from the directory on disk.
+      build_stamp: BTAP_BUILD,
       protocol_version: 3,
       capabilities: {
+        batch_result_guard: true,
         structured_locator: true,
         console_user_filter: true,
         network_stop_filter: true,
@@ -3106,6 +3366,7 @@ async function handleExtMessage(msg, sender) {
     // frozen string here is the most misleading place for one. `extensionVersion`
     // is scoped to the bridge_status branch above, hence the second read.
     version: chrome.runtime.getManifest().version,
+    build_stamp: BTAP_BUILD,
     knownCommands,
     hint: 'The extension command router is alive; compare knownCommands and reload the unpacked extension if this server expects a newer build.',
   };
@@ -3145,7 +3406,7 @@ async function handleCookies(msg, sender) {
     // ("Cannot read properties of null"), which surfaced to the popup user as
     // an internal error instead of an explanation. Kept self-contained (no
     // isScriptable) so this handler stays independently testable.
-    const originMatch = typeof url === 'string' ? url.match(/^https?:\/\/[^\/]+/) : null;
+    const originMatch = typeof url === 'string' ? url.match(/^https?:\/\/[^/]+/) : null;
     if (!originMatch) {
       return {
         ok: false,
@@ -3154,11 +3415,36 @@ async function handleCookies(msg, sender) {
       };
     }
     const origin = originMatch[0];
-    const all = await chrome.cookies.getAll({ url });
-    const part = await chrome.cookies.getAll({ url, partitionKey: { topLevelSite: origin } }).catch(() => []);
+    // These are independent reads. Start both together so the popup and cookie
+    // tool pay for the slower query once, while a browser without partitionKey
+    // support still degrades only that optional half to an empty list.
+    const [all, part] = await Promise.all([
+      chrome.cookies.getAll({ url }),
+      chrome.cookies.getAll({
+        url,
+        partitionKey: { topLevelSite: origin },
+      }).catch(() => []),
+    ]);
+    // Chrome identifies a cookie by name/domain/path/partition. Collapsing on
+    // name + domain alone drops valid same-name cookies on different paths and
+    // loses the partitioned copy when an unpartitioned cookie shares its name.
+    // A key set also keeps the merge linear when a profile carries many cookies.
+    const cookieKey = (cookie) => JSON.stringify([
+      cookie.name || '',
+      cookie.domain || '',
+      cookie.path || '',
+      cookie.storeId || '',
+      cookie.partitionKey?.topLevelSite || '',
+      cookie.partitionKey?.hasCrossSiteAncestor ?? null,
+    ]);
     const merged = [...all];
+    const seen = new Set(merged.map(cookieKey));
     for (const c of part) {
-      if (!merged.some(x => x.name === c.name && x.domain === c.domain)) merged.push(c);
+      const key = cookieKey(c);
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(c);
+      }
     }
     return { ok: true, data: merged };
   } catch (e) {
@@ -3214,6 +3500,7 @@ async function handleBatch(msg, sender) {
   const R = [];
   let attachedTabId = null;
   let debuggerLease = null;
+  const dispatchStates = [];
   const resolve$N = (params) => JSON.parse(JSON.stringify(params || {}).replace(/"\$(\d+)\.([^"]+)"/g,
     (_, i, path) => { let v = R[+i]; for (const k of path.split('.')) v = v[k]; return JSON.stringify(v); }));
   try {
@@ -3241,24 +3528,79 @@ async function handleBatch(msg, sender) {
         }
         const remaining = batchDeadlineRemainingMs(msg, `before dispatching ${c.method}`);
         const requestedTimeout = boundedCdpTimeout(c.timeoutMs ?? msg.timeoutMs);
-        R.push(await sendDebuggerCommandWithTimeout(
-          debuggerLease, c.method, resolve$N(c.params),
-          remaining === null ? requestedTimeout : Math.min(requestedTimeout, remaining),
-          remaining === null ? 100 : 1,
-        ));
+        const commandDispatch = { dispatched: false };
+        dispatchStates.push(commandDispatch);
+        try {
+          const result = await sendDebuggerCommandWithTimeout(
+            debuggerLease, c.method, resolve$N(c.params),
+            remaining === null ? requestedTimeout : Math.min(requestedTimeout, remaining),
+            remaining === null ? 100 : 1,
+            commandDispatch,
+          );
+          R.push(result);
+          // A resolved CDP call has completed in Chrome, even when a thin test
+          // shim ignores the optional state parameter.
+          commandDispatch.dispatched = true;
+          if (c.assertTruthy === true &&
+              (result?.exceptionDetails || result?.result?.value !== true)) {
+            const error = new Error('batch_guard_failed: guarded evaluation did not return true');
+            error.code = 'batch_guard_failed';
+            error.failedCommandIndex = R.length - 1;
+            throw error;
+          }
+        } catch (error) {
+          if (error?.dispatched !== undefined) {
+            commandDispatch.dispatched = Boolean(error.dispatched);
+          }
+          throw error;
+        }
       } else {
         R.push({ ok: false, error: 'unknown cmd: ' + c.cmd });
       }
     }
     return { ok: true, results: R };
   } catch (e) {
-    const code = debuggerFailureCode(e);
+    const guardFailed = e?.code === 'batch_guard_failed';
+    const code = guardFailed ? e.code : debuggerFailureCode(e);
+    const commandsDispatched = dispatchStates.reduce(
+      (total, state) => total + (state.dispatched ? 1 : 0), 0,
+    );
+    const dispatched = commandsDispatched > 0;
+    const retryable = !dispatched &&
+      (code === 'cdp_timeout' || code === 'debugger_detached');
+    let hint;
+    if (guardFailed) {
+      hint = 'The guarded evaluation failed; subsequent batch commands were not dispatched. Refresh the target before retrying.';
+    } else if (code === 'debugger_conflict') {
+      hint = dispatched
+        ? 'Close DevTools or the competing debugger, then inspect the completed batch results before deciding whether to rebuild the remaining commands.'
+        : 'Close DevTools or the competing debugger on this tab, then retry.';
+    } else if (retryable) {
+      hint = 'BTAP failed before dispatching any batch command; retry once on the same tab.';
+    } else if (dispatched) {
+      hint = 'At least one batch command was dispatched and may have taken effect. Do not replay the whole batch; inspect results and browser state, then issue only the unfinished commands.';
+    } else {
+      hint = 'No batch command was dispatched. Fix the command or target before retrying.';
+    }
+    // The WebSocket envelope preserves error and results, but not arbitrary
+    // fields beside them. Carry guard details inside error as well.
+    const error = guardFailed ? {
+      code,
+      message: e.message,
+      failed_command_index: e.failedCommandIndex,
+      commands_completed: R.length,
+      commands_dispatched: commandsDispatched,
+      dispatched,
+      retryable: false,
+    } : e.message || String(e);
     return {
-      ok: false, code, error: e.message || String(e), results: R,
-      retryable: code === 'cdp_timeout' || code === 'debugger_detached',
-      hint: code === 'debugger_conflict'
-        ? 'Close DevTools or the competing debugger on this tab, then retry.'
-        : 'BTAP invalidated and detached the timed-out debugger lease; retry once on the same tab.',
+      ok: false, code, error, results: R,
+      ...(guardFailed ? { failed_command_index: e.failedCommandIndex } : {}),
+      commands_completed: R.length,
+      commands_dispatched: commandsDispatched,
+      dispatched,
+      retryable,
+      hint,
     };
   } finally {
     if (debuggerLease) {
@@ -3266,8 +3608,8 @@ async function handleBatch(msg, sender) {
         const needsForce = debuggerLease.attachment?.invalidated;
         await detachBtapDebugger(debuggerLease, needsForce);
       } catch (_) {}
-      debuggerLease = null;
-      attachedTabId = null;
+      // Both locals died with this frame; clearing them here only read as if
+      // some later step depended on it.
     }
   }
 }
@@ -3288,13 +3630,27 @@ async function handleCDP(msg, sender) {
     return { ok: false, error: 'no tabId, extensionId or targetId' };
   }
   let debuggerLease = null;
+  const dispatchStates = [];
+  const methodDispatch = { dispatched: false };
   try {
     debuggerLease = await attachBtapDebugger(target);
     let params = msg.params || {};
     if (msg.method === 'Page.captureScreenshot' && msg.fullPage === true) {
-      const metrics = await sendDebuggerCommandWithTimeout(
-        debuggerLease, 'Page.getLayoutMetrics', {}, boundedCdpTimeout(msg.timeoutMs),
-      );
+      const metricsDispatch = { dispatched: false };
+      dispatchStates.push(metricsDispatch);
+      let metrics;
+      try {
+        metrics = await sendDebuggerCommandWithTimeout(
+          debuggerLease, 'Page.getLayoutMetrics', {}, boundedCdpTimeout(msg.timeoutMs),
+          100, metricsDispatch,
+        );
+        metricsDispatch.dispatched = true;
+      } catch (error) {
+        if (error?.dispatched !== undefined) {
+          metricsDispatch.dispatched = Boolean(error.dispatched);
+        }
+        throw error;
+      }
       const size = metrics?.cssContentSize || metrics?.contentSize;
       if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height) ||
           size.width <= 0 || size.height <= 0) {
@@ -3306,22 +3662,53 @@ async function handleCDP(msg, sender) {
         clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
       };
     }
-    const result = await sendDebuggerCommandWithTimeout(
-      debuggerLease, msg.method, params, boundedCdpTimeout(msg.timeoutMs),
-    );
+    dispatchStates.push(methodDispatch);
+    let result;
+    try {
+      result = await sendDebuggerCommandWithTimeout(
+        debuggerLease, msg.method, params, boundedCdpTimeout(msg.timeoutMs),
+        100, methodDispatch,
+      );
+      methodDispatch.dispatched = true;
+    } catch (error) {
+      if (error?.dispatched !== undefined) {
+        methodDispatch.dispatched = Boolean(error.dispatched);
+      }
+      throw error;
+    }
     return { ok: true, data: result };
   } catch (e) {
     const code = debuggerFailureCode(e);
+    const commandsDispatched = dispatchStates.reduce(
+      (total, state) => total + (state.dispatched ? 1 : 0), 0,
+    );
+    const methodDispatched = Boolean(methodDispatch.dispatched);
+    const dispatched = commandsDispatched > 0;
+    const retryable = !dispatched &&
+      (code === 'cdp_timeout' || code === 'debugger_detached');
+    let hint;
+    if (code === 'debugger_conflict') {
+      hint = dispatched
+        ? 'Close DevTools or the competing debugger, then inspect browser state before deciding whether this command is safe to repeat.'
+        : 'Close DevTools or the competing debugger on this tab, then retry.';
+    } else if (retryable) {
+      hint = 'BTAP failed before dispatching the CDP command; retry once after list_tabs confirms the same tab.';
+    } else if (dispatched) {
+      hint = 'A CDP command was dispatched and may have taken effect. Inspect browser state before retrying; only repeat an operation you know is read-only or idempotent.';
+    } else {
+      hint = 'The CDP command was not dispatched. Fix the target, method or parameters before retrying.';
+    }
     return {
       ok: false,
       code,
       error: e.message || String(e),
       method: msg.method,
       timeout_ms: boundedCdpTimeout(msg.timeoutMs),
-      retryable: code === 'cdp_timeout' || code === 'debugger_detached',
-      hint: code === 'debugger_conflict'
-        ? 'Close DevTools or the competing debugger on this tab, then retry.'
-        : 'BTAP invalidated and detached the timed-out debugger lease; retry once after list_tabs.',
+      commands_dispatched: commandsDispatched,
+      method_dispatched: methodDispatched,
+      dispatched,
+      retryable,
+      hint,
     };
   } finally {
     if (debuggerLease) try { await detachBtapDebugger(debuggerLease); } catch (_) {}
@@ -3341,24 +3728,90 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
   const execSourceUrl = typeof sourceUrl === 'string' && sourceUrl
     ? sourceUrl.replace(/[\r\n]/g, '') : null;
   return `(async () => {
-    function smartProcessResult(result) {
-      if (result === null || result === undefined || typeof result !== 'object') return result;
-      try { if (result.window === result && result.document) return '[Window: ' + (result.location?.href || 'about:blank') + ']'; } catch(_){}
-      if (typeof jQuery !== 'undefined' && result instanceof jQuery) {
-        const elements = []; for (let i = 0; i < result.length; i++) { if (result[i] && result[i].nodeType === 1) elements.push(result[i].outerHTML); } return elements;
+    // Turning a page value into something the extension boundary can carry.
+    //
+    // This asks the engine two questions rather than naming the types that
+    // answer them: \`Object.prototype.toString\` for what a value IS -- the
+    // internal class it already tracks, and the only classification that
+    // survives a value arriving from an iframe's realm, where \`instanceof\`
+    // does not -- and the iteration protocol for whether it is a collection.
+    //
+    // Naming jQuery, NodeList and HTMLCollection one branch each, as this did,
+    // decided the answer for exactly three types and silently mangled every
+    // other: a \`Set\` or \`Map\` of elements, a generator's output, a \`$\` bound
+    // in noConflict mode and any non-jQuery wrapper all reached JSON.stringify
+    // and arrived as \`{}\`, with nothing anywhere reporting the loss. Four
+    // branches collapse into one gate because the engine already has a single
+    // answer to "is this a collection".
+    //
+    // Four more defects the shape carried, each of them silent:
+    //  - The cap sat on the wrong branch. Only the array-like path stopped at
+    //    100 while the NodeList and jQuery paths were unbounded, so
+    //    \`querySelectorAll('div')\` on a large page serialised every element's
+    //    outerHTML -- the cap was on the branch least likely to be large.
+    //  - Array-like conversion required \`result[0]\` to be an element, so a
+    //    collection whose first slot was empty fell through to JSON.
+    //  - A node without \`outerHTML\` (a text node, a comment, a document)
+    //    became \`{}\`, and \`window\`/\`document\` nested inside a result became
+    //    the string '[Object]', which a real object can also produce.
+    //  - A cycle threw inside JSON.stringify and discarded the *entire* result
+    //    for one bad edge. Cycles are marked now and the rest survives.
+    const BTAP_MAX_ITEMS = 200;
+    const BTAP_MAX_DEPTH = 6;
+    function smartProcessResult(result, depth, seen) {
+      if (typeof result === 'bigint') return String(result);
+      if (typeof result === 'function') return '[Function: ' + (result.name || 'anonymous') + ']';
+      if (result === null || typeof result !== 'object') return result;
+      depth = depth || 0;
+      seen = seen || new WeakSet();
+      const kind = Object.prototype.toString.call(result).slice(8, -1);
+      if (kind === 'Window') {
+        // Reading any further can throw on a cross-origin frame, so the class
+        // name is the part that is always available.
+        let href = 'cross-origin';
+        try { href = result.location.href; } catch (_) {}
+        return '[Window: ' + href + ']';
       }
-      if (result instanceof NodeList || result instanceof HTMLCollection) {
-        const elements = []; for (let i = 0; i < result.length; i++) { if (result[i] && result[i].nodeType === 1) elements.push(result[i].outerHTML); } return elements;
+      if (kind === 'Error') return '[' + (result.name || 'Error') + ': ' + result.message + ']';
+      if (typeof result.outerHTML === 'string') return result.outerHTML;
+      if (typeof result.nodeType === 'number') {
+        return '[' + kind + (result.nodeValue ? ': ' + result.nodeValue : '') + ']';
       }
-      if (result.nodeType === 1) return result.outerHTML;
-      if (!Array.isArray(result) && typeof result === 'object' && 'length' in result && typeof result.length === 'number') {
-        const firstElement = result[0];
-        if (firstElement && firstElement.nodeType === 1) {
-          const elements = []; const length = Math.min(result.length, 100);
-          for (let i = 0; i < length; i++) { const elem = result[i]; if (elem && elem.nodeType === 1) elements.push(elem.outerHTML); } return elements;
+      // \`toJSON\` is the engine's own opt-in serialisation hook, which is how a
+      // Date keeps arriving as an ISO string without Date being named here.
+      if (typeof result.toJSON === 'function') {
+        try { return result.toJSON(); } catch (_) {}
+      }
+      if (seen.has(result)) return '[Circular]';
+      if (depth >= BTAP_MAX_DEPTH) return '[' + kind + ': depth limit]';
+      seen.add(result);
+      try {
+        // Iterable covers NodeList, Set, Map, arguments, typed arrays, jQuery 3
+        // and anything a page defines. The array-like fallback is gated on the
+        // class not being a plain object, so \`{length: 2}\` keeps its keys
+        // instead of becoming a two-element array of undefined.
+        const iterable = typeof result[Symbol.iterator] === 'function';
+        if (iterable || (kind !== 'Object' && typeof result.length === 'number')) {
+          const all = Array.from(result);
+          const out = all.slice(0, BTAP_MAX_ITEMS).map(v => smartProcessResult(v, depth + 1, seen));
+          if (all.length > BTAP_MAX_ITEMS) {
+            out.push('[' + (all.length - BTAP_MAX_ITEMS) + ' more of ' + all.length + ']');
+          }
+          return out;
         }
+        const out = {};
+        for (const key of Object.keys(result)) {
+          try {
+            out[key] = smartProcessResult(result[key], depth + 1, seen);
+          } catch (e) {
+            // A throwing getter loses its own value, not the whole object.
+            out[key] = '[unreadable: ' + e.message + ']';
+          }
+        }
+        return out;
+      } finally {
+        seen.delete(result);
       }
-      try { return JSON.parse(JSON.stringify(result, function(key, value) { if (typeof value === 'object' && value !== null) { if (value.nodeType === 1) return value.outerHTML; if (value === window || value === document) return '[Object]'; try { if (value.window === value && value.document) return '[Window]'; } catch(_){} } return value; })); } catch (e) { return '[无法序列化: ' + e.message + ']'; }
     }
     // Dialog suppression is scoped to this command: disable_dialogs.js defers
     // to the native alert/confirm/prompt unless this deadline is in the future,
@@ -3501,8 +3954,9 @@ function buildSubframeScopeScript(dialogScope) {
 function buildPageScript(code, dialogScope = null) {
   return buildExecScript(code, `
       const errMsg = e.message || String(e);
+      const isCspEvalError = typeof EvalError === 'function' && e instanceof EvalError;
       return { ok: false, error: { name: e.name || 'Error', message: errMsg, stack: e.stack || '' },
-        csp: errMsg.includes('Refused to evaluate') || errMsg.includes('unsafe-eval') || errMsg.includes('Content Security Policy') };
+        csp: isCspEvalError && /refused to evaluate|unsafe-eval|content security policy/i.test(errMsg) };
   `, dialogScope);
 }
 
@@ -3747,7 +4201,7 @@ async function executeManualScript(tabId, code, dialogScope) {
 // commands on different tabs; a refcount keeps nested calls on the SAME tab
 // from tearing the rule down early.
 const CSP_RULE_BASE = 90000;
-// tabId -> {depth, ruleId}. A single tab can have nested withCspOff calls
+// tabId -> {depth, ruleId, ready}. A single tab can have nested withCspOff calls
 // (e.g. a retry inside the original); the depth refcount keeps the rule alive
 // until the LAST nested call exits. ruleId is allocated once per tab so two
 // different tabs never share an id (tabId % 9000 collided once tabId >= 9000).
@@ -3756,7 +4210,7 @@ let cspNextRuleId = CSP_RULE_BASE;
 function cspRuleIdFor(tabId) {
   let entry = cspRefs.get(tabId);
   if (!entry) {
-    entry = { depth: 0, ruleId: cspNextRuleId++ };
+    entry = { depth: 0, ruleId: cspNextRuleId++, ready: null };
     cspRefs.set(tabId, entry);
   }
   return entry;
@@ -3766,8 +4220,9 @@ function cspRuleIdFor(tabId) {
 // rule means CSP stays off for that tab. Session rules die with the browser,
 // but the worker restarts far more often than the browser does — so sweep a
 // generous id range on every startup. cspNextRuleId resets on SW restart, so
-// the sweep range must not depend on the in-memory counter.
-(async () => {
+// the sweep range must not depend on the in-memory counter. New scopes wait
+// for this sweep before reusing ids that it may still be removing.
+const cspStartupCleanup = (async () => {
   try {
     const rules = await chrome.declarativeNetRequest.getSessionRules();
     // Sweep every rule in our namespace. tabId is unbounded and ruleId grows
@@ -3824,6 +4279,7 @@ function cspRuleIdFor(tabId) {
 })();
 
 async function withCspOff(tabId, fn) {
+  await cspStartupCleanup;
   const entry = cspRuleIdFor(tabId);
   const ruleId = entry.ruleId;
   // Increment the refcount BEFORE the await. Doing it after let two concurrent
@@ -3831,33 +4287,45 @@ async function withCspOff(tabId, fn) {
   // finally — even while the other call's fn() was still relying on it.
   entry.depth += 1;
   if (entry.depth === 1) {
-    try {
-      await chrome.declarativeNetRequest.updateSessionRules({
-        removeRuleIds: [ruleId],
-        addRules: [{
-          id: ruleId, priority: 1,
-          action: { type: 'modifyHeaders', responseHeaders: [
-            { header: 'content-security-policy', operation: 'remove' },
-            { header: 'content-security-policy-report-only', operation: 'remove' }
-          ]},
-          // tabIds confines this to the automated tab only.
-          condition: { urlFilter: '*', resourceTypes: ['main_frame', 'sub_frame'], tabIds: [tabId] }
-        }]
-      });
-    } catch (e) {
-      // Not fatal: injection may still succeed on pages without CSP, and the
-      // CDP fallback bypasses CSP entirely.
-      console.log('[BTAP] CSP rule add failed:', e.message);
-    }
+    entry.ready = (async () => {
+      try {
+        await chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [ruleId],
+          addRules: [{
+            id: ruleId, priority: 1,
+            action: { type: 'modifyHeaders', responseHeaders: [
+              { header: 'content-security-policy', operation: 'remove' },
+              { header: 'content-security-policy-report-only', operation: 'remove' }
+            ]},
+            // tabIds confines this to the automated tab only.
+            condition: { urlFilter: '*', resourceTypes: ['main_frame', 'sub_frame'], tabIds: [tabId] }
+          }]
+        });
+      } catch (e) {
+        // Not fatal: injection may still succeed on pages without CSP, and the
+        // CDP fallback bypasses CSP entirely.
+        console.log('[BTAP] CSP rule add failed:', e.message);
+      }
+    })();
   }
   try {
+    // A refcount protects removal, but every caller also needs installation.
+    await entry.ready;
     // Never let a hung injection keep CSP off: race the work against a cap so
     // `finally` always runs and the rule always comes back.
+    let timeoutId = null;
     return await Promise.race([
       fn(),
-      new Promise((_, rej) => setTimeout(
-        () => rej(new Error('CSP-relaxed injection timed out')), 30000)),
-    ]);
+      new Promise((_, rej) => {
+        timeoutId = setTimeout(
+          () => rej(new Error('CSP-relaxed injection timed out')), 30000,
+        );
+      }),
+    ]).finally(() => {
+      // Injection normally resolves well before the cap. Do not leave a
+      // 30-second watchdog alive for every successful CSP retry.
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    });
   } finally {
     entry.depth -= 1;
     if (entry.depth <= 0) {
@@ -3950,7 +4418,10 @@ function applyBridgePort(value) {
 
 async function loadBridgePort() {
   try {
-    const stored = await chrome.storage.local.get('btap_port');
+    // The current and legacy keys are independent. Read them together so a cold
+    // worker pays one storage round trip, while keeping the current key's
+    // precedence and the legacy migration retry semantics below.
+    const stored = await chrome.storage.local.get(['btap_port', 'tmwd_port']);
     if (stored.btap_port !== undefined) {
       applyBridgePort(stored.btap_port);
       return;
@@ -3958,9 +4429,8 @@ async function loadBridgePort() {
     // Carry a port saved under the pre-BTAP key over once, so an install that
     // was already pointed at a non-default bridge does not silently fall back
     // to 18765 and appear disconnected after the upgrade.
-    const legacy = await chrome.storage.local.get('tmwd_port');
-    applyBridgePort(legacy.tmwd_port);
-    if (legacy.tmwd_port !== undefined) {
+    applyBridgePort(stored.tmwd_port);
+    if (stored.tmwd_port !== undefined) {
       try {
         await chrome.storage.local.set({ btap_port: bridgePort });
         await chrome.storage.local.remove?.('tmwd_port');
@@ -4025,14 +4495,16 @@ async function getClientId() {
     // cross-restart id stability, whereas an exception here kills ext_ready /
     // tabs_update entirely (server registers 0 sessions). Degrade, don't crash.
     try {
-      const s = await chrome.storage.local.get('btap_client_id');
+      // Current and legacy ids are independent keys. Read them in one storage
+      // call so the first bridge registration does not pay two sequential
+      // extension API round trips.
+      const s = await chrome.storage.local.get(['btap_client_id', 'tmwd_client_id']);
       if (s.btap_client_id) { CLIENT_ID = s.btap_client_id; return CLIENT_ID; }
       // Reuse the id saved under the pre-BTAP key rather than minting a new one:
       // the client id is half of every session id the caller holds, so changing
       // it would invalidate every remembered session across the rename.
-      const legacy = await chrome.storage.local.get('tmwd_client_id');
-      if (legacy.tmwd_client_id) {
-        CLIENT_ID = legacy.tmwd_client_id;
+      if (s.tmwd_client_id) {
+        CLIENT_ID = s.tmwd_client_id;
         try {
           await chrome.storage.local.set({ btap_client_id: CLIENT_ID });
           await chrome.storage.local.remove?.('tmwd_client_id');
@@ -4142,22 +4614,30 @@ async function isServerAlive() {
   // Probe the HTTP side (base+1), not the WS port (which returns 426 to fetch).
   try {
     const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 1500);
-    await fetch(HTTP_PROBE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cmd: 'get_all_sessions' }),
-      signal: ctrl.signal,
-    });
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    try {
+      await fetch(HTTP_PROBE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd: 'get_all_sessions' }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     return true;
   } catch (_) {
     // Network refused / timeout. Still try WS: some stacks answer WS but not this route.
     try {
       const ctrl2 = new AbortController();
-      setTimeout(() => ctrl2.abort(), 800);
-      await fetch(`http://127.0.0.1:${bridgePort}/`, { signal: ctrl2.signal });
+      const timer2 = setTimeout(() => ctrl2.abort(), 800);
+      try {
+        await fetch(`http://127.0.0.1:${bridgePort}/`, { signal: ctrl2.signal });
+      } finally {
+        clearTimeout(timer2);
+      }
       return true; // any response including 426 means port is open
-    } catch (e2) {
+    } catch (_) {
       return false;
     }
   }
@@ -4217,13 +4697,11 @@ async function handleWsExec(data) {
     }
     return false;
   };
-  // The ACK is the bridge's ONLY signal that the script was delivered: no ACK
-  // means it classifies the command "undelivered" and retries it as
-  // side-effect-free. So if the ACK can't go out, we must NOT run the script —
-  // otherwise a form submit / purchase executes here, the retry runs it again,
-  // and the agent sees a clean success on a double execution.
+  // Do not execute when the ACK cannot even be sent. A successful send only
+  // queues it locally; if that ACK is lost, the bridge must still treat the
+  // command as sent_unconfirmed, never as safe to replay.
   if (!send({ type: 'ack', id: data.id })) {
-    console.log('[BTAP-WS] ACK undeliverable, skipping exec so the retry stays safe', data.id);
+    console.log('[BTAP-WS] ACK send failed, skipping this execution', data.id);
     return;
   }
   if (!tabId) {
@@ -4254,23 +4732,76 @@ async function handleWsExec(data) {
         const result = await chrome.scripting.executeScript({
           target: { tabId, allFrames: true },
           world: 'MAIN',
-          func: async (s, sub) => (window.top === window ? await eval(s) : eval(sub)),
+          // Always wrap the top-frame value in a marker. Without this layer a
+          // perfectly valid `return undefined` is indistinguishable from an
+          // injection response that never carried a top-frame result, and the
+          // old caller treated both as CSP. The marker also preserves explicit
+          // null/false/0/empty-string values across the scripting boundary.
+          func: async (s, sub) => {
+            if (window.top === window) {
+              try {
+                return { __btap_top_frame_result: true, value: await eval(s) };
+              } catch (e) {
+                // A page CSP can reject eval before buildPageScript's own
+                // try/catch starts, which used to erase the marker altogether.
+                // At that point no caller code ran, so a verified EvalError is
+                // safe to route through the existing CSP retry/CDP fallback.
+                const message = e?.message || String(e);
+                const csp = typeof EvalError === 'function' && e instanceof EvalError &&
+                  /refused to evaluate|unsafe-eval|content security policy/i.test(message);
+                return {
+                  __btap_top_frame_result: true,
+                  value: {
+                    ok: false,
+                    error: {
+                      name: e?.name || 'Error',
+                      message,
+                      stack: e?.stack || '',
+                      dispatched: false,
+                      may_have_executed: false,
+                      retryable: csp,
+                    },
+                    csp,
+                    dispatched: false,
+                    may_have_executed: false,
+                  },
+                };
+              }
+            }
+            return eval(sub);
+          },
           args: [
             buildPageScript(data.code, dialogScope),
             buildSubframeScopeScript(dialogScope),
           ]
         });
-        // Pick the top frame by id, not by position: with allFrames the order of
-        // the results array is not specified. One entry means a single-frame page,
-        // where there is nothing to disambiguate.
-        const top = result.find(entry => entry?.frameId === 0)
-          || (result.length === 1 ? result[0] : undefined);
-        let r = top?.result;
-        if (r === null || r === undefined) {
-          console.log('[BTAP-WS] executeScript returned null/undefined, treating as CSP issue');
-          r = { ok: false, error: { name: 'Error', message: 'executeScript returned null (possible CSP or context issue)', stack: '' }, csp: true };
+        // Pick the top frame by the marker produced by the injected function,
+        // not by frameId or array position. Chrome can return a top-level
+        // document under a non-zero frame id (observed after navigation on MDN),
+        // while allFrames also returns ordinary sub-frame entries.
+        const top = result.find(
+          entry => entry?.result?.__btap_top_frame_result === true,
+        );
+        const wrapped = top?.result;
+        if (!wrapped || wrapped.__btap_top_frame_result !== true) {
+          // The call reached Chrome, but no trustworthy top-frame result came
+          // back. It may have run before the result channel failed; replaying it
+          // through CSP/CDP would duplicate a click, submit or purchase.
+          return {
+            ok: false,
+            error: {
+              name: 'Error',
+              message: 'executeScript returned no trustworthy top-frame result; the script may already have executed',
+              stack: '',
+              dispatched: true,
+              may_have_executed: true,
+              retryable: false,
+            },
+            dispatched: true,
+            may_have_executed: true,
+          };
         }
-        return r;
+        return wrapped.value;
       };
       try {
         // First attempt WITHOUT touching CSP. Most pages inject fine, and a
@@ -4284,11 +4815,51 @@ async function handleWsExec(data) {
           console.log('[BTAP-WS] retrying injection with CSP relaxed for tab', tabId);
           try { res = await withCspOff(tabId, inject); } catch (e) {
             console.log('[BTAP-WS] CSP-relaxed retry failed:', e.message);
+            // The relaxed attempt reached Chrome. Its rejection does not tell
+            // us whether the page function ran before the result channel broke,
+            // so keep the outcome unknown and never fall through to CDP replay.
+            const message = e.message || String(e);
+            res = {
+              ok: false,
+              error: {
+                name: e.name || 'Error',
+                message: message + ' (the CSP-relaxed attempt may already have executed; BTAP did not replay it)',
+                stack: e.stack || '',
+                dispatched: true,
+                may_have_executed: true,
+                retryable: false,
+              },
+              csp: false,
+              dispatched: true,
+              may_have_executed: true,
+            };
           }
         }
       } catch (e) {
         console.log('[BTAP-WS] scripting.executeScript failed:', e.message);
-        res = { ok: false, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' }, csp: true };
+        const message = e.message || String(e);
+        // A user script can throw any message it likes. Treating a matching
+        // phrase as CSP used to run that script again through CDP. The only
+        // page-side CSP signal we can trust here is the browser's EvalError;
+        // ordinary executeScript API failures are otherwise unknown outcomes.
+        const csp = String(e.name || '').toLowerCase() === 'evalerror' &&
+          /refused to evaluate|unsafe-eval|content security policy/i.test(message);
+        const dispatched = !csp;
+        const mayHaveExecuted = !csp;
+        res = {
+          ok: false,
+          error: {
+            name: e.name || 'Error',
+            message,
+            stack: e.stack || '',
+            dispatched,
+            may_have_executed: mayHaveExecuted,
+            retryable: csp,
+          },
+          csp,
+          dispatched,
+          may_have_executed: mayHaveExecuted,
+        };
       }
       // CDP fallback for CSP-restricted pages
       if (res && !res.ok && res.csp) {
@@ -4300,18 +4871,21 @@ async function handleWsExec(data) {
     if (newTabIds.size === 0) await new Promise(r => setTimeout(r, 200));
     chrome.tabs.onCreated.removeListener(onCreated);
     // Get full info for captured new tabs
-    const newTabs = [];
-    for (const id of newTabIds) {
+    // Each captured tab is independent, so different tabs can resolve in
+    // parallel instead of paying a serial round trip each. Within one tab the
+    // existence check stays first: generating concurrently with tabs.get could
+    // reinsert a generation after onRemoved had already cleaned a tab that
+    // closed during this lookup.
+    const newTabs = (await Promise.all([...newTabIds].map(async id => {
       try {
         const t = await chrome.tabs.get(id);
-        newTabs.push({
-          id: t.id,
-          url: t.url,
-          title: t.title,
-          generation: await tabGenerationFor(t.id),
-        });
-      } catch (_) {}
-    }
+        const generation = await tabGenerationFor(t.id);
+        const tab_identity = await tabIdentityFor(t.id);
+        return { id: t.id, url: t.url, title: t.title, generation, tab_identity };
+      } catch (_) {
+        return null;
+      }
+    }))).filter(Boolean);
     if (res?.ok) {
       // Echo back the tab we actually ran on. The Python side reports this
       // instead of guessing from its remembered default, which can be stale
@@ -4388,6 +4962,7 @@ function connectWS() {
           url: t.url,
           title: t.title,
           generation: await tabGenerationFor(t.id),
+          tab_identity: await tabIdentityFor(t.id),
         })))
       }));
       console.log('[BTAP-WS] Sent ext_ready with', tabs.length, 'tabs as', clientId);
@@ -4409,32 +4984,32 @@ function connectWS() {
     // Capture the socket we arrived on and only answer if it's still open --
     // the reply is worthless anyway once the bridge is gone.
     const sock = self;
+    const resultPayload = (res) => {
+      // Null, false, 0 and '' are valid command results. Nullish coalescing
+      // still loses an explicit null, so select by own-property presence.
+      if (res !== null && (typeof res === 'object' || typeof res === 'function')) {
+        if (Object.prototype.hasOwnProperty.call(res, 'data')) return res.data;
+        if (Object.prototype.hasOwnProperty.call(res, 'results')) return res.results;
+      }
+      return res;
+    };
     const reply = (obj) => {
       if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
     };
     try {
       const data = JSON.parse(event.data);
       if (data.type === 'pong') { lastPongAt = Date.now(); return; }
-      if (data.id && data.code) {
-        let code = data.code;
-        // If code is a JSON string representing an object, parse it
-        if (typeof code === 'string') {
-          try { const p = JSON.parse(code); if (p && typeof p === 'object') code = p; } catch (_) {}
-        }
-        if (typeof code === 'object' && code !== null && code.cmd) {
-          // Custom protocol message → route to handleExtMessage
-          if (code.tabId === undefined && data.tabId !== undefined) code.tabId = data.tabId;
-          const res = await handleExtMessage(code, {});
-          reply({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error });
-        } else if (typeof code === 'string') {
-          // Plain JS code
-          await handleWsExec(data);
-        } else if (typeof code === 'object' && code !== null) {
-          // Object without cmd → legacy extension message
-          const msg = code.tabId === undefined && data.tabId !== undefined ? { ...code, tabId: data.tabId } : code;
-          const res = await handleExtMessage(msg, {});
-          reply({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error });
-        }
+      // Route by field presence to prevent JSON.parse confusion attacks:
+      // - data.cmd (object) → internal command channel
+      // - data.code (string) → JS execution channel
+      if (data.id && data.cmd && typeof data.cmd === 'object') {
+        // Command path: route directly to handleExtMessage, never parse user JS
+        if (data.cmd.tabId === undefined && data.tabId !== undefined) data.cmd.tabId = data.tabId;
+        const res = await handleExtMessage(data.cmd, {});
+        reply({ type: res.ok ? 'result' : 'error', id: data.id, result: resultPayload(res), error: res.error });
+      } else if (data.id && data.code && typeof data.code === 'string') {
+        // JS execution path: pass string directly to eval, never parse as command
+        await handleWsExec(data);
       }
     } catch (e) {
       // Name the two cases apart: a dead socket is benign (bridge restarted),
@@ -4547,37 +5122,54 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-// Sync tab list on changes — also re-open WS if SW slept
-async function sendTabsUpdate() {
-  ensureConnected('tabs-event');
-  // The check above goes stale across these awaits, so re-check the SAME socket
-  // right before sending rather than trusting the earlier readyState.
+// Sync tab list on changes — also re-open WS if SW slept. Tab creation and
+// navigation commonly emit several events in one burst. Serialising snapshots
+// prevents an older, slower query from arriving after a newer one and making the
+// bridge briefly resurrect a tab that was already removed; the dirty bit folds
+// the whole burst into the in-flight sample plus one final, current sample.
+let tabsUpdatePromise = null;
+let tabsUpdateDirty = false;
+
+async function sendTabsUpdateOnce() {
   const sock = ws;
   try {
     // Must match the ext_ready filter exactly. A leftover title-based exclusion
     // here made any tab whose title happened to contain a hard-coded keyword
     // register on connect and then silently vanish on the next update tick.
-    const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
-    if (!sock || sock.readyState !== WebSocket.OPEN) return;
-    const clientId = await getClientId();
-    if (!sock || sock.readyState !== WebSocket.OPEN) return;
+    const [queriedTabs, clientId] = await Promise.all([
+      chrome.tabs.query({}),
+      getClientId(),
+    ]);
+    const tabs = queriedTabs.filter(t => isScriptable(t.url));
+    if (sock !== ws || sock.readyState !== WebSocket.OPEN) return;
+      const snapshot = await Promise.all(tabs.map(async t => {
+        const tab_identity = typeof tabIdentityFor === 'function'
+          ? await tabIdentityFor(t.id)
+          : null;
+        return {
+      id: t.id,
+      url: t.url,
+      title: t.title,
+      generation: await tabGenerationFor(t.id),
+          ...(tab_identity ? { tab_identity } : {}),
+        };
+      }));
+    // Generations can require storage recovery on a cold worker, so the socket
+    // must be checked once more after that await. Never publish on a superseded
+    // connection merely because the old WebSocket has not closed yet.
+    if (sock !== ws || sock.readyState !== WebSocket.OPEN) return;
     sock.send(JSON.stringify({
       type: 'tabs_update',
       clientId,
       browser: getBrowserType(),
-      tabs: await Promise.all(tabs.map(async t => ({
-        id: t.id,
-        url: t.url,
-        title: t.title,
-        generation: await tabGenerationFor(t.id),
-      })))
+      tabs: snapshot,
     }));
   } catch (e) {
     // Same benign/real split as onmessage: the bridge restarting under us is
     // routine (the next keepalive tick re-pushes tabs), a real failure is not.
     // An eviction mid-update is routine as well and does not present as a dead
     // socket -- see isWorkerGoneError for why readyState still reads OPEN.
-    const dead = !sock || sock.readyState !== WebSocket.OPEN;
+    const dead = !sock || sock !== ws || sock.readyState !== WebSocket.OPEN;
     const benign = dead || isWorkerGoneError(e);
     let what = '[BTAP-WS] tabs_update failed';
     if (dead) what = '[BTAP-WS] tabs_update dropped, bridge went away mid-update';
@@ -4585,16 +5177,46 @@ async function sendTabsUpdate() {
     console[benign ? 'log' : 'error'](what, e);
   }
 }
+
+async function drainTabsUpdates() {
+  try {
+    while (tabsUpdateDirty) {
+      tabsUpdateDirty = false;
+      await sendTabsUpdateOnce();
+    }
+  } finally {
+    // No event can interleave between the final while check and this assignment:
+    // JavaScript runs this continuation as one job. A later caller therefore
+    // either dirties the active loop or observes null and starts a new one.
+    tabsUpdatePromise = null;
+  }
+}
+
+function sendTabsUpdate() {
+  ensureConnected('tabs-event');
+  tabsUpdateDirty = true;
+  if (!tabsUpdatePromise) tabsUpdatePromise = drainTabsUpdates();
+  return tabsUpdatePromise;
+}
 chrome.tabs.onUpdated.addListener((_, changeInfo) => {
   if (changeInfo.status === 'complete' || changeInfo.url) sendTabsUpdate();
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
-  void forgetTabGeneration(tabId).finally(() => sendTabsUpdate());
+  void Promise.all([
+    forgetTabGeneration(tabId),
+    forgetTabIdentity(tabId),
+  ]).finally(() => sendTabsUpdate());
 });
 chrome.tabs.onCreated.addListener((tab) => {
   void (async () => {
     await loadTabGenerations();
     if (!tabGenerations.has(tab.id)) await scheduleNewTabGeneration(tab.id);
+    await tabIdentityFor(tab.id);
   })().finally(() => sendTabsUpdate());
 });
+if (chrome.tabs.onReplaced?.addListener) {
+  chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+    void transferTabIdentity(addedTabId, removedTabId).finally(() => sendTabsUpdate());
+  });
+}
 chrome.tabs.onActivated.addListener(() => ensureConnected('tab-activated'));

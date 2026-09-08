@@ -1271,42 +1271,49 @@ class _ApprovalContext:
 
 
 class _FakePyAutoGUI:
+    """Only `hotkey` is reachable now: the Enter fallback is the last caller."""
+
     def __init__(self):
         self.calls = []
-
-    def moveTo(self, x, y, duration=0.0):
-        self.calls.append(("moveTo", x, y, duration))
-
-    def click(self, *args, **kwargs):
-        self.calls.append(("click", args, kwargs))
-
-    def dragTo(self, x, y, duration=0.3, button="left"):
-        self.calls.append(("dragTo", x, y, duration, button))
-
-    def write(self, text, interval=0.01):
-        self.calls.append(("write", text, interval))
 
     def hotkey(self, *keys):
         self.calls.append(("hotkey", keys))
 
 
-_PHYSICAL_TOOL_CASES = [
-    ("mouse_move", {"x": 1, "y": 2, "session_id": "client:7"}, "moveTo"),
-    ("mouse_click", {"x": 1, "y": 2, "session_id": "client:7"}, "click"),
-    ("mouse_drag", {"x1": 1, "y1": 2, "x2": 3, "y2": 4, "session_id": "client:7"}, "dragTo"),
-    ("type_text", {"text": "hello", "session_id": "client:7"}, "write"),
-    ("hotkey", {"keys_csv": "ctrl,l", "session_id": "client:7"}, "hotkey"),
-]
+def _reach_the_leave_fallback(monkeypatch, *, mode="lab", no_elicit=None):
+    """Put resolve_leave_dialog on the one path that dispatches physical input.
+
+    Protocol accept must fail *without* looking like a transport timeout (that
+    branch deliberately returns `no_response` and sends nothing), and the mode
+    must be lab -- safe mode returns `requires_user_action` before the gate.
+    """
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", mode)
+    if no_elicit is None:
+        monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
+    else:
+        monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1" if no_elicit else "0")
+    monkeypatch.setattr(
+        S, "switch_session", lambda session_id=None: session_id or "client:7"
+    )
+    monkeypatch.setattr(
+        S,
+        "handle_dialog",
+        lambda *args, **kwargs: {
+            "status": "dialog_handle_failed",
+            "handled": False,
+            "error": "the dialog did not close",
+        },
+    )
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("tool_name, kwargs, gui_call", _PHYSICAL_TOOL_CASES)
-async def test_accepted_physical_tool_runs_exactly_once(monkeypatch, tool_name, kwargs, gui_call):
+async def test_accepted_physical_fallback_runs_exactly_once(monkeypatch):
     gui = _FakePyAutoGUI()
     ctx = _ApprovalContext()
     physical_calls = []
     activation_calls = []
 
+    _reach_the_leave_fallback(monkeypatch)
     monkeypatch.setattr(S, "_pyautogui", lambda: gui)
     monkeypatch.setattr(
         S,
@@ -1320,9 +1327,10 @@ async def test_accepted_physical_tool_runs_exactly_once(monkeypatch, tool_name, 
 
     monkeypatch.setattr(S.physical_input, "run_physical_action", run)
 
-    result = await getattr(S, tool_name)(ctx=ctx, **kwargs)
+    result = await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
     assert result["status"] == "ok"
+    assert result["resolution"] == "physical_fallback"
     # lab mode defaults to no_elicit=true, so elicitation is skipped
     profile = S._automation_profile()
     if profile["mode"] == "lab" and profile["no_elicit"]:
@@ -1330,19 +1338,17 @@ async def test_accepted_physical_tool_runs_exactly_once(monkeypatch, tool_name, 
     else:
         assert len(ctx.calls) == 1
     assert len(physical_calls) == 1
-    assert sum(1 for call in gui.calls if call[0] == gui_call) == 1
+    assert gui.calls == [("hotkey", ("enter",))]
     assert activation_calls == [("current", "client:7")]
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("tool_name, kwargs, gui_call", _PHYSICAL_TOOL_CASES)
-async def test_physical_tool_releases_lease_after_success(
-    monkeypatch, tmp_path, tool_name, kwargs, gui_call
-):
+async def test_physical_fallback_releases_lease_after_success(monkeypatch, tmp_path):
     gui = _FakePyAutoGUI()
-    lock_path = tmp_path / f"{tool_name}.lock"
+    lock_path = tmp_path / "leave.lock"
     real_run = P.run_physical_action
 
+    _reach_the_leave_fallback(monkeypatch)
     monkeypatch.setattr(S, "_pyautogui", lambda: gui)
     monkeypatch.setattr(S, "_maybe_activate", lambda *args: {"on_screen": True})
     monkeypatch.setattr(P, "wait_for_quiet", lambda quiet_seconds=0.75: None)
@@ -1357,54 +1363,47 @@ async def test_physical_tool_releases_lease_after_success(
         ),
     )
 
-    result = await getattr(S, tool_name)(ctx=_ApprovalContext(), **kwargs)
+    result = await S.resolve_leave_dialog(ctx=_ApprovalContext(), session_id="client:7")
 
     assert result["status"] == "ok"
-    assert sum(1 for call in gui.calls if call[0] == gui_call) == 1
+    assert gui.calls == [("hotkey", ("enter",))]
     assert not lock_path.exists()
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("tool_name, kwargs, _", _PHYSICAL_TOOL_CASES)
 @pytest.mark.parametrize("response", [("decline", False), ("cancel", False), ("accept", False)])
-async def test_physical_tool_requires_approval_before_any_work(
-    monkeypatch, tool_name, kwargs, _, response
-):
+async def test_physical_fallback_requires_approval_before_any_work(monkeypatch, response):
     action, approve = response
     ctx = _ApprovalContext(action=action, approve=approve)
-    events = []
 
-    # Force safe mode so elicitation is required (lab defaults to no_elicit=true now)
-    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
-
+    # lab with no_elicit off, so the prompt is required: safe mode would return
+    # before the gate and prove nothing about approval handling.
+    _reach_the_leave_fallback(monkeypatch, no_elicit=False)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(S, "_maybe_activate", lambda *args: pytest.fail("must not activate"))
-    monkeypatch.setattr(S.physical_input, "run_physical_action", lambda *args: pytest.fail("must not acquire lease"))
+    monkeypatch.setattr(
+        S.physical_input,
+        "run_physical_action",
+        lambda *args: pytest.fail("must not acquire lease"),
+    )
 
-    async def fail_worker(*args, **kwargs):
-        events.append("worker")
-        pytest.fail("must not offload without approval")
-
-    monkeypatch.setattr(S.anyio.to_thread, "run_sync", fail_worker)
-    result = await getattr(S, tool_name)(ctx=ctx, **kwargs)
+    result = await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
     assert result["status"] == "requires_user_action"
-    assert events == []
+    assert result["physical"]["status"] == "requires_user_action"
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("action,error", [("decline", None), ("cancel", None), ("accept", RuntimeError("unsupported"))])
 async def test_elicitation_decline_cancel_and_failure_are_structured(monkeypatch, action, error):
     ctx = _ApprovalContext(action=action, approve=True, error=error)
-    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
+    _reach_the_leave_fallback(monkeypatch, no_elicit=False)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(S.physical_input, "run_physical_action", lambda *args: pytest.fail("must not acquire lease"))
 
-    result = await S.mouse_click(ctx=ctx, x=1, y=2)
+    result = await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
-    assert result["status"] == "requires_user_action"
+    assert result["physical"]["status"] == "requires_user_action"
 
 
 @pytest.mark.anyio
@@ -1413,14 +1412,13 @@ async def test_approval_requires_a_boolean_true(monkeypatch):
         async def elicit(self, message, schema):
             return SimpleNamespace(action="accept", data=SimpleNamespace(approve=1))
 
-    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
+    _reach_the_leave_fallback(monkeypatch, no_elicit=False)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(S.physical_input, "run_physical_action", lambda *args: pytest.fail("must not acquire lease"))
 
-    result = await S.mouse_click(ctx=NonBooleanApproval(), x=1, y=2)
+    result = await S.resolve_leave_dialog(ctx=NonBooleanApproval(), session_id="client:7")
 
-    assert result["status"] == "requires_user_action"
+    assert result["physical"]["status"] == "requires_user_action"
 
 
 @pytest.mark.parametrize("value", [1, "true", "yes"])
@@ -1443,8 +1441,7 @@ async def test_unanswered_approval_times_out_instead_of_holding_the_tool_lock(mo
             await anyio.sleep(30)
             pytest.fail("the approval wait was not bounded")
 
-    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
-    monkeypatch.delenv("BROWSERTAP_LAB_NO_ELICIT", raising=False)
+    _reach_the_leave_fallback(monkeypatch, no_elicit=False)
     monkeypatch.setenv("BROWSERTAP_APPROVAL_TIMEOUT", "0.05")
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
     monkeypatch.setattr(
@@ -1452,9 +1449,9 @@ async def test_unanswered_approval_times_out_instead_of_holding_the_tool_lock(mo
         lambda *args: pytest.fail("must not acquire lease"),
     )
 
-    result = await S.mouse_click(ctx=NeverAnswers(), x=1, y=2)
+    result = await S.resolve_leave_dialog(ctx=NeverAnswers(), session_id="client:7")
 
-    assert result["status"] == "requires_user_action"
+    assert result["physical"]["status"] == "requires_user_action"
     assert S._TOOL_LOCK.locked() is False
 
 
@@ -1481,13 +1478,14 @@ def test_approval_timeout_falls_back_on_bad_configuration(monkeypatch):
 )
 async def test_physical_gate_errors_are_structured(monkeypatch, error, status):
     ctx = _ApprovalContext()
+    _reach_the_leave_fallback(monkeypatch)
     monkeypatch.setattr(S, "_maybe_activate", lambda *args: None)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import after gate failure"))
     monkeypatch.setattr(S.physical_input, "run_physical_action", lambda *args: (_ for _ in ()).throw(error))
 
-    result = await S.mouse_click(ctx=ctx, x=1, y=2)
+    result = await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
-    assert result["status"] == status
+    assert result["physical"]["status"] == status
 
 
 @pytest.mark.anyio
@@ -1499,9 +1497,10 @@ async def test_physical_gate_errors_are_structured(monkeypatch, error, status):
         {"activation_skipped": "dead session"},
     ],
 )
-async def test_mouse_click_unconfirmed_target_never_receives_physical_input(monkeypatch, activation):
+async def test_unconfirmed_target_never_receives_physical_input(monkeypatch, activation):
     ctx = _ApprovalContext()
 
+    _reach_the_leave_fallback(monkeypatch)
     monkeypatch.setattr(S, "_maybe_activate", lambda *args: activation)
     monkeypatch.setattr(S, "_pyautogui", lambda: pytest.fail("must not import pyautogui"))
 
@@ -1510,16 +1509,17 @@ async def test_mouse_click_unconfirmed_target_never_receives_physical_input(monk
 
     monkeypatch.setattr(S.physical_input, "run_physical_action", run_physical_action)
 
-    result = await S.mouse_click(ctx=ctx, x=1, y=2, session_id="client:7")
+    result = await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
-    assert result["status"] == "activation_failed"
-    assert result["activated"] == activation
+    assert result["physical"]["status"] == "activation_failed"
+    assert result["physical"]["activated"] == activation
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("error", [P.PhysicalInputBusy("late busy"), P.InputActivityDetected("late activity")])
 async def test_physical_gate_errors_after_action_started_are_not_hidden(monkeypatch, error):
     ctx = _ApprovalContext()
+    _reach_the_leave_fallback(monkeypatch)
     monkeypatch.setattr(S, "_maybe_activate", lambda *args: {"on_screen": True})
 
     def run_physical_action(summary, action):
@@ -1529,7 +1529,7 @@ async def test_physical_gate_errors_after_action_started_are_not_hidden(monkeypa
     monkeypatch.setattr(S, "_pyautogui", lambda: (_ for _ in ()).throw(error))
 
     with pytest.raises(type(error), match=str(error)):
-        await S.mouse_click(ctx=ctx, x=1, y=2)
+        await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
 
 @pytest.mark.anyio
@@ -1538,15 +1538,12 @@ async def test_physical_action_is_offloaded_and_activation_follows_quiet_gate(mo
     ctx = _ApprovalContext(events=events)
     gui = _FakePyAutoGUI()
 
-    async def run_sync(worker, *args, **kwargs):
-        events.append("worker")
-        return worker()
+    _reach_the_leave_fallback(monkeypatch)
 
     def run_physical_action(summary, action):
         events.append("lease_and_quiet_passed")
         return action()
 
-    monkeypatch.setattr(S.anyio.to_thread, "run_sync", run_sync)
     monkeypatch.setattr(S.physical_input, "run_physical_action", run_physical_action)
     monkeypatch.setattr(
         S,
@@ -1555,13 +1552,12 @@ async def test_physical_action_is_offloaded_and_activation_follows_quiet_gate(mo
     )
     monkeypatch.setattr(S, "_pyautogui", lambda: events.append("import_pyautogui") or gui)
 
-    result = await S.mouse_click(ctx=ctx, x=1, y=2, session_id="client:7")
+    result = await S.resolve_leave_dialog(ctx=ctx, session_id="client:7")
 
     assert result["status"] == "ok"
     # lab mode defaults to no_elicit=true, so elicitation is skipped
     profile = S._automation_profile()
     expected_events = [
-        "worker",
         "lease_and_quiet_passed",
         "activate",
         "import_pyautogui",
@@ -1569,7 +1565,7 @@ async def test_physical_action_is_offloaded_and_activation_follows_quiet_gate(mo
     if not (profile["mode"] == "lab" and profile["no_elicit"]):
         expected_events = ["elicit"] + expected_events
     assert events == expected_events
-    assert len(gui.calls) == 1
+    assert gui.calls == [("hotkey", ("enter",))]
 
 
 def test_desktop_backend_failure_while_importing_names_the_missing_desktop(monkeypatch):

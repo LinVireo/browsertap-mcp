@@ -14,7 +14,10 @@ instead -- see `TestUnknownBounds`.
 
 from __future__ import annotations
 
+import inspect
+import re
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -102,7 +105,7 @@ class TestPointsOffScreen:
         assert "1920x1080 at (0, 0)" in message
         assert "nothing was dispatched" in message
         assert "clamps" in message
-        assert "pointer_info" in message
+        assert "viewport coordinates" in message
 
     def test_every_offender_is_listed_not_just_the_first(self):
         with pytest.raises(P.CoordinatesOffScreen) as excinfo:
@@ -155,8 +158,8 @@ class TestUnknownBounds:
         assert report["enforced"] is False
 
     def test_no_comparable_point_is_not_reported_as_enforced(self):
-        # type_text without click coordinates, or a click at the current
-        # pointer: there is nothing to check, so claiming enforcement would be
+        # A caller with no coordinates at all, like resolve_leave_dialog's
+        # Enter: there is nothing to check, so claiming enforcement would be
         # the same silent-success shape the quiet gate had.
         report = P.check_screen_bounds([], bounds=FULL_HD)
 
@@ -331,6 +334,48 @@ class TestMssProbe:
         assert P._mss_virtual_screen() is None
 
 
+class TestMssApiIsReal:
+    """Every other mss test substitutes the module, so none of them can see a
+    call to a name mss does not export.
+
+    That is not hypothetical: both call sites were once changed to `mss.MSS()`
+    and all eight fake-module sites were updated in the same edit, so the suite
+    stayed green while the then-current desktop-screenshot tool raised
+    AttributeError on every machine and `screen_bounds()` fell back to None --
+    which turns the out-of-range refusal above into an unenforced pass. `MSS` is the per-platform
+    class inside `mss.windows` / `mss.linux` / `mss.darwin`; the only name the
+    package exports at top level is the `mss()` factory.
+
+    This asks the installed package instead of a stand-in, so it fails for a
+    rename in either direction and in either module, and it reads the attribute
+    out of the source rather than repeating it -- a test naming `mss` itself
+    would have to be edited by the same hand that broke the call, and would then
+    agree with it.
+    """
+
+    # Match `mss.NAME` even when the call is stored (`factory = ... or mss.mss`)
+    # rather than invoked inline (`mss.mss()`). Requiring `(` missed a getattr
+    # fallback that used to live in server.py and made this gate vacuous.
+    CALL = re.compile(r"\bmss\.([A-Za-z_][A-Za-z0-9_]*)")
+
+    # server.py holds no mss call since the desktop-screenshot tool was removed
+    # in 0.5.0, so parametrising over it would assert on an empty match set.
+    @pytest.mark.parametrize("module", [P], ids=["physical_input"])
+    def test_every_mss_attribute_the_code_calls_exists(self, module):
+        mss = pytest.importorskip("mss", reason="mss ships in the desktop extra")
+        source = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+        # Docstrings mention the same call, which is deliberate: a stale comment
+        # naming a dead API is the trail that produced this defect.
+        called = sorted(set(self.CALL.findall(source)))
+        assert called, f"no mss call found in {module.__name__}; update this test"
+        missing = [name for name in called if not hasattr(mss, name)]
+        assert not missing, (
+            f"{module.__name__} calls mss.{{{','.join(missing)}}}, which the "
+            f"installed mss {getattr(mss, '__version__', '?')} does not export. "
+            f"Top-level names: {sorted(n for n in dir(mss) if not n.startswith('_'))}"
+        )
+
+
 class TestSourceSelection:
     def test_mss_wins_because_it_needs_no_particular_load_order(self, monkeypatch):
         monkeypatch.setattr(
@@ -386,17 +431,8 @@ class _FakeGui:
     def __init__(self):
         self.calls = []
 
-    def moveTo(self, x, y, duration=0.0):
-        self.calls.append(("moveTo", x, y))
-
-    def click(self, *args, **kwargs):
-        self.calls.append(("click", args, kwargs))
-
-    def dragTo(self, x, y, duration=0.3, button="left"):
-        self.calls.append(("dragTo", x, y))
-
-    def write(self, text, interval=0.01):
-        self.calls.append(("write", text))
+    def hotkey(self, *keys):
+        self.calls.append(("hotkey", keys))
 
 
 class _Ctx:
@@ -405,7 +441,7 @@ class _Ctx:
 
 
 def _install_tool_harness(monkeypatch, bounds=FULL_HD):
-    """Run the real tool body with no lease, no quiet wait and no real input."""
+    """Run the real gate body with no lease, no quiet wait and no real input."""
     gui = _FakeGui()
     probes = []
     monkeypatch.setattr(S, "_pyautogui", lambda: gui)
@@ -413,7 +449,7 @@ def _install_tool_harness(monkeypatch, bounds=FULL_HD):
     monkeypatch.setattr(
         S.physical_input, "run_physical_action", lambda summary, action: action()
     )
-    # Counted, not just faked: a tool with nothing to validate must not bind the
+    # Counted, not just faked: a call with nothing to validate must not bind the
     # display at all, and an empty `probes` is the only way to see that.
     monkeypatch.setattr(
         S.physical_input, "screen_bounds", lambda: probes.append("probe") or bounds
@@ -421,86 +457,91 @@ def _install_tool_harness(monkeypatch, bounds=FULL_HD):
     return gui, probes
 
 
+async def _dispatch(points=None, **kwargs):
+    """Drive the gate the way a coordinate-taking caller would.
+
+    The seven OS-level tools were removed in 0.5.0, so no shipped tool passes
+    `points=` any more -- resolve_leave_dialog's Enter fallback needs no
+    coordinates. The gate itself still enforces the rectangle for any caller
+    that does, and that enforcement is what these tests are about, so they
+    drive it directly instead of through a tool that no longer exists.
+    """
+
+    def action():
+        S._pyautogui().hotkey("enter")
+        return {"status": "ok", "input": "enter"}
+
+    return await S._run_approved_physical_action(
+        _Ctx(),
+        "a coordinate-taking physical action",
+        action,
+        points=points,
+        **kwargs,
+    )
+
+
 @pytest.mark.anyio
-class TestToolsRefuseBeforeDispatch:
-    async def test_an_off_screen_click_dispatches_nothing(self, monkeypatch):
+class TestTheGateRefusesBeforeDispatch:
+    async def test_an_off_screen_point_dispatches_nothing(self, monkeypatch):
         gui, _probes = _install_tool_harness(monkeypatch)
 
-        result = await S.mouse_click(ctx=_Ctx(), x=2400, y=1300, session_id="client:7")
+        result = await _dispatch(points=[(2400, 1300)], session_id="client:7")
 
         assert result["status"] == "coordinates_off_screen"
         assert "1920x1080" in result["message"]
-        # The property that matters: not "it reported an error" but "the mouse
-        # never moved". A clamped click would have looked identical in the log.
+        # The property that matters: not "it reported an error" but "the input
+        # never went out". A clamped dispatch would have looked identical.
         assert gui.calls == []
 
-    async def test_an_on_screen_click_lands_and_carries_the_report(self, monkeypatch):
+    async def test_an_on_screen_point_lands_and_carries_the_report(self, monkeypatch):
         gui, _probes = _install_tool_harness(monkeypatch)
 
-        result = await S.mouse_click(ctx=_Ctx(), x=100, y=200, session_id="client:7")
+        result = await _dispatch(points=[(100, 200)], session_id="client:7")
 
         assert result["status"] == "ok"
-        assert gui.calls and gui.calls[0][0] == "click"
+        assert gui.calls == [("hotkey", ("enter",))]
         assert result["screen_bounds"]["enforced"] is True
         assert result["screen_bounds"]["checked"] == [[100, 200]]
 
     @pytest.mark.parametrize(
-        ("tool", "kwargs"),
+        "points",
         [
-            ("mouse_move", {"x": 4000, "y": 10}),
-            ("mouse_drag", {"x1": 10, "y1": 10, "x2": 4000, "y2": 10}),
-            ("type_text", {"text": "secret", "click_x": 4000, "click_y": 10}),
+            [(4000, 10)],
+            [(10, 10), (4000, 10)],
+            [(4000, 10), (10, 10)],
         ],
+        ids=["single", "second_endpoint", "first_endpoint"],
     )
-    async def test_every_coordinate_taking_tool_is_gated(self, monkeypatch, tool, kwargs):
-        gui, _probes = _install_tool_harness(monkeypatch)
-
-        result = await getattr(S, tool)(ctx=_Ctx(), session_id="client:7", **kwargs)
-
-        assert result["status"] == "coordinates_off_screen"
-        assert gui.calls == []
-
-    async def test_a_drag_is_refused_for_its_destination_too(self, monkeypatch):
-        gui, _probes = _install_tool_harness(monkeypatch)
-
-        result = await S.mouse_drag(
-            ctx=_Ctx(), x1=10, y1=10, x2=10, y2=5000, session_id="client:7"
-        )
-
-        assert result["status"] == "coordinates_off_screen"
-        assert gui.calls == []
-
-    async def test_a_click_with_no_coordinates_does_not_probe_the_display(
-        self, monkeypatch
+    async def test_any_offending_endpoint_refuses_the_whole_dispatch(
+        self, monkeypatch, points
     ):
-        # Wherever the pointer already is, the OS put it there, so there is
-        # nothing to validate and no reason to bind the display for it.
+        gui, _probes = _install_tool_harness(monkeypatch)
+
+        result = await _dispatch(points=points, session_id="client:7")
+
+        assert result["status"] == "coordinates_off_screen"
+        assert gui.calls == []
+
+    async def test_no_points_does_not_probe_the_display(self, monkeypatch):
+        # resolve_leave_dialog's shape: an Enter goes wherever the activated tab
+        # is, so there is nothing to validate and no reason to bind the display.
         gui, probes = _install_tool_harness(monkeypatch)
 
-        result = await S.mouse_click(ctx=_Ctx(), session_id="client:7")
+        result = await _dispatch(session_id="client:7")
 
         assert result["status"] == "ok"
         assert probes == []
         assert "screen_bounds" not in result
-
-    async def test_a_hotkey_is_not_gated(self, monkeypatch):
-        gui, probes = _install_tool_harness(monkeypatch)
-        gui.hotkey = lambda *keys: gui.calls.append(("hotkey", keys))
-
-        result = await S.hotkey(ctx=_Ctx(), keys_csv="ctrl,l", session_id="client:7")
-
-        assert result["status"] == "ok"
-        assert probes == []
 
     async def test_unknown_geometry_lets_the_action_through_and_says_so(
         self, monkeypatch
     ):
         gui, _probes = _install_tool_harness(monkeypatch, bounds=None)
 
-        result = await S.mouse_click(ctx=_Ctx(), x=99999, y=99999, session_id="client:7")
+        result = await _dispatch(points=[(99999, 99999)], session_id="client:7")
 
         assert result["status"] == "ok"
-        assert gui.calls and gui.calls[0][0] == "click"
+        assert gui.calls == [("hotkey", ("enter",))]
         assert result["screen_bounds"]["enforced"] is False
         assert "without being compared" in result["screen_bounds"]["note"]
 
@@ -510,7 +551,7 @@ class TestToolsRefuseBeforeDispatch:
         gui, _probes = _install_tool_harness(monkeypatch)
         monkeypatch.setattr(S, "_maybe_activate", lambda mode, sid=None: {"on_screen": False})
 
-        result = await S.mouse_click(ctx=_Ctx(), x=100, y=200, session_id="client:7")
+        result = await _dispatch(points=[(100, 200)], session_id="client:7")
 
         assert result["status"] == "activation_failed"
         assert gui.calls == []
@@ -525,7 +566,7 @@ class TestToolsRefuseBeforeDispatch:
             lambda mode, sid=None: activations.append(sid) or {"on_screen": True},
         )
 
-        result = await S.mouse_click(ctx=_Ctx(), x=2400, y=1300, session_id="client:7")
+        result = await _dispatch(points=[(2400, 1300)], session_id="client:7")
 
         assert result["status"] == "coordinates_off_screen"
         assert activations == []

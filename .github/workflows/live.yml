@@ -62,10 +62,11 @@ jobs:
 
             python -m pytest tests/ -q -m live
 
-          and leave the browser idle while they run. The suite checks that for
-          itself now: it samples the tab list before the first test and skips the
-          whole live layer if anything moved, then compares the inventory again
-          at the end. CONTRIBUTING.md describes both checks and the override.
+          and leave the browser idle while they run. The suite records browser
+          activity as context and does not refuse the run because a user opened,
+          closed, navigated or focused a tab. The only browser-state failure is a
+          tab the suite opened and failed to close; the teardown reports its
+          ownership and the close failure that needs attention.
           EOF
           exit 1
       - name: Report prerequisites satisfied

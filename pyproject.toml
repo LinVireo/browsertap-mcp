@@ -5,18 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "browsertap-mcp"
 dynamic = ["version"]
-description = "Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, cookies, and physical input"
+description = "Real-browser MCP server with a BrowserBridge/CDP transport, background-tab page input, screenshots, and cookies"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-# Explicit, not the implicit default glob: the upstream notice in
-# THIRD-PARTY-NOTICES.md has to reach whoever receives a copy, and most
-# people receive the wheel. Both files land in `.dist-info/licenses/`.
-license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
+license-files = ["LICENSE"]
 authors = [
-  { name = "zhea" }
-]
-maintainers = [
   { name = "LinVireo" }
 ]
 keywords = ["mcp", "browser automation", "chrome", "cdp", "browser bridge", "claude-code"]
@@ -79,6 +73,13 @@ dev = [
   "pytest-cov>=5.0,<8",
   "build>=1.2,<2",
   "ruff>=0.12,<0.17",
+  # The type-check half of the lint gate, bounded for the same reason as ruff: a
+  # new minor that sharpens inference turns it red with no commit behind it.
+  # `types-requests` is a stub-only package -- `requests` ships none, and without
+  # it the one import mypy cannot resolve makes the run report a problem rather
+  # than a verdict.
+  "mypy>=1.11,<2",
+  "types-requests>=2.31,<3",
   # Reads the built archives, not the source tree: `twine check --strict` is the
   # only local way to learn that the index would refuse the long description
   # before an upload burns the version number, since a filename can never be
@@ -106,9 +107,8 @@ branch = true
 # is measured too. Note that a `--cov=<pkg>` flag on the pytest command line
 # REPLACES this list rather than adding to it: the release and CI commands pass
 # `--cov=browsertap_mcp` explicitly, so they measure only the package. Adding
-# `--cov=scripts` there would fold the release tooling into `--cov-fail-under`,
-# which currently lands at 82.53% combined (package 89.1%, scripts 67.5%) and
-# would fail the 85 gate; ~185 more covered units are needed first.
+# `--cov=scripts` there would also fold release tooling into the package's
+# coverage gate. The 95% requirement below measures shipped Python behavior.
 source = ["browsertap_mcp", "scripts"]
 omit = ["*/chrome_extension/*"]
 
@@ -117,18 +117,74 @@ exclude_also = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
 ]
-fail_under = 85
+fail_under = 95
 show_missing = true
 
 [tool.ruff]
 target-version = "py310"
 line-length = 100
 
+[tool.ruff.format]
+# Pinned rather than left on `auto`, which resolves to the platform default:
+# on Windows that rewrites a whole file to CRLF, while `.gitattributes` pins every
+# source type here to LF. The two disagreeing is not cosmetic -- the offline suite
+# drives the extension by slicing `background.js` between two literal blank-line
+# anchors, so a CRLF worktree fails around twenty tests with a misleading
+# "handler not found" instead of anything mentioning line endings.
+line-ending = "lf"
+
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I"]
+# `B` (bugbear) and `S` (bandit) added in 0.4.21. The whole backlog they found in
+# `src/` was 19 findings, and every one is either fixed or carries an inline
+# `noqa` naming the reason -- there is no blanket exemption for first-party code,
+# so a new finding here fails rather than joining a pile.
+select = ["E4", "E7", "E9", "F", "I", "B", "S"]
 # Preserve compact legacy control-flow formatting while enforcing correctness,
 # imports, and new-code quality across the whole repository.
 ignore = ["E402", "E701", "E702", "E741"]
+
+[tool.mypy]
+python_version = "3.10"
+# Scoped to the shipped package. `tests/` and `scripts/` are next, not excluded
+# on principle -- they are 6k+ lines whose annotation debt would have to be paid
+# before the gate could be green, and a gate that starts red is a gate nobody
+# turns on.
+files = ["src/browsertap_mcp"]
+# The bodies of unannotated functions are checked too. Without this mypy skips
+# them entirely, which on a codebase that is 80% annotated means the 20% with no
+# signature -- the least reviewed part -- is also the unchecked part.
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+# Deliberately not enabled yet: `disallow_untyped_defs` (72 functions still have
+# no return annotation), `warn_return_any`, and `disallow_any_generics`. Each is
+# a separate pass with its own backlog; turning them on together is how this ends
+# up permanently disabled instead of incrementally true.
+
+[[tool.mypy.overrides]]
+# Third-party packages that ship no type information. Listed one by one rather
+# than with a global `ignore_missing_imports`, so that a new untyped dependency
+# shows up as a decision instead of being silently absorbed.
+module = ["bottle", "simple_websocket_server.*", "pyautogui", "mss", "mss.*"]
+ignore_missing_imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# S608 reads "SQL injection" but there is no database in this project. It fires
+# on the browser-side JavaScript templates, whose every interpolation goes
+# through `json.dumps`. The suppression is per-file rather than inline because
+# the reported line opens a multi-line f-string: a trailing `# noqa` there would
+# be emitted as part of the script.
+"src/browsertap_mcp/page_input.py" = ["S608"]
+# Tests assert, and they shell out to `git` and to this interpreter on purpose;
+# their "passwords" are deliberately fake fixtures. Suppressing the six rules
+# that describe test code as written keeps `B`/`S` meaningful for `src/` instead
+# of drowning it -- S101 alone is 3967 hits here.
+"tests/*" = ["S101", "S105", "S106", "S107", "S603", "S607", "S311", "B017"]
+# Gate scripts exist to run other programs -- `git`, `python -m build`, `node`.
+# Resolving those by name is the intent, not an oversight.
+"scripts/*" = ["S101", "S603", "S607"]
 
 [project.urls]
 Homepage = "https://github.com/LinVireo/browsertap-mcp"
@@ -139,6 +195,10 @@ Documentation = "https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE
 # The index page is the first place a reader looks for where to send a report,
 # and it is the one link that must not go through a public issue.
 Security = "https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md"
+# The Chrome Web Store listing points at this exact URL, and the store requires
+# the policy it serves to match the listing's data-usage answers. Moving or
+# renaming the file breaks a published link, not just an internal one.
+Privacy = "https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md"
 
 [project.scripts]
 browsertap = "browsertap_mcp.cli:main"
@@ -160,6 +220,11 @@ browsertap_mcp = [
   # The agent skills ship with the package so `browsertap skill-path`
   # resolves from a plain `pip install`, not only from a repository checkout.
   "skills/*/SKILL.md",
+  # The scan_page payload -- pageOutline/listGroups -- is read from these at
+  # import time (simphtml._load_page_script), so the wheel is broken without
+  # them. They live as real .js files rather than Python string literals so
+  # eslint and `node --check` can see them.
+  "page_scripts/*.js",
 ]
 
 [tool.setuptools.exclude-package-data]

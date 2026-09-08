@@ -67,6 +67,9 @@ docs/superpowers/
 /_*.json
 /_*.txt
 /_*.md
+/.tmp_*.txt
+/PLAN.md
+/JSON_PARSE_TIGHTEN.md
 
 # local MCP client wiring
 #
@@ -97,6 +100,12 @@ docs/superpowers/
 .claude/settings.local.json
 .claude/settings.local.json.*
 *.bak-*
+*-bak-*
+
+# local agent configs with absolute paths
+CODE_REVIEW_REPORT.md
+.codex/
+opencode.json
 *.bak
 
 # local test/build caches that are safe to regenerate
@@ -118,3 +127,7 @@ pip-audit.*
 gitleaks
 gitleaks.tar.gz
 gitleaks-*.json
+
+# The JavaScript half of the lint gate (`package.json`, `eslint.config.mjs`
+# and `package-lock.json` are tracked; what npm unpacks is not).
+node_modules/

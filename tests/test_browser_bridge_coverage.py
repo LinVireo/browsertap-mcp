@@ -57,6 +57,7 @@ def driver_stub(*, remote=False):
 
 def wsgi_post(app, path, payload, *, origin=None, headers=None):
     body = json.dumps(payload).encode("utf-8")
+    input_stream = io.BytesIO(body)
     environ = {
         "REQUEST_METHOD": "POST",
         "PATH_INFO": path,
@@ -67,7 +68,7 @@ def wsgi_post(app, path, payload, *, origin=None, headers=None):
         "CONTENT_LENGTH": str(len(body)),
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": "http",
-        "wsgi.input": io.BytesIO(body),
+        "wsgi.input": input_stream,
         "wsgi.errors": io.StringIO(),
         "wsgi.multithread": False,
         "wsgi.multiprocess": False,
@@ -85,6 +86,7 @@ def wsgi_post(app, path, payload, *, origin=None, headers=None):
 
     chunks = app(environ, start_response)
     response["body"] = b"".join(chunks).decode("utf-8")
+    response["unread_body_bytes"] = len(body) - input_stream.tell()
     close = getattr(chunks, "close", None)
     if callable(close):
         close()
@@ -124,6 +126,22 @@ def test_persist_token_creates_secure_file_and_ignores_chmod_failure(monkeypatch
     monkeypatch.setattr(T.os, "chmod", lambda *args: (_ for _ in ()).throw(OSError("readonly")))
     assert T._persist_token(path, "abc") == "abc"
     assert path.read_text(encoding="utf-8") == "abc\n"
+
+
+def test_persist_token_retries_partial_writes(monkeypatch, tmp_path):
+    path = tmp_path / "token"
+    real_write = T.os.write
+    writes = []
+
+    def partial_write(fd, data):
+        chunk = bytes(data[: max(1, len(data) // 2)])
+        writes.append(chunk)
+        return real_write(fd, chunk)
+
+    monkeypatch.setattr(T.os, "write", partial_write)
+    assert T._persist_token(path, "partial-write-token") == "partial-write-token"
+    assert len(writes) > 1
+    assert path.read_text(encoding="utf-8") == "partial-write-token\n"
 
 
 def test_persist_token_converges_when_another_process_wins(monkeypatch, tmp_path):
@@ -192,13 +210,31 @@ def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, caplog):
     assert "Tab disconnected" in caplog.text
 
 
-def test_http_session_reconnect_and_unknown_type():
-    session = T.Session("h:1", {"url": "http://x", "type": "http"}, queue.Queue())
+def test_reconnecting_as_an_unserved_transport_keeps_no_handle_from_the_old_one():
+    """A transport this bridge does not route must not inherit the last one's channel.
+
+    This used to assert the opposite -- that `http_queue` was still set -- which
+    read as "the session survived" and was really the old queue showing through:
+    the two mutually exclusive slots were assigned branch by branch, so a type
+    matching no branch left the previous transport's handle in place while the
+    client that had just registered was dropped on the floor. Sends then went to
+    a queue nobody was polling and reported success.
+    """
+    first = queue.Queue()
+    session = T.Session("h:1", {"url": "http://x", "type": "http"}, first)
+    assert session.http_queue is first
     session.disconnect_at = time.time()
-    session.reconnect(queue.Queue(), {"url": "x", "type": "other"})
+    replacement = queue.Queue()
+    session.reconnect(replacement, {"url": "x", "type": "other"})
     assert session.type == "other"
     assert session.disconnect_at is None
-    assert session.http_queue is not None
+    # The new client is what is held -- the stale one is unreachable, by
+    # construction rather than by having been cleared.
+    assert session.client is replacement
+    # ...and neither routing name hands it out, because neither transport is the
+    # one it registered as.
+    assert session.ws_client is None
+    assert session.http_queue is None
 
 
 def test_driver_registration_reconnect_and_unregister(caplog):
@@ -303,6 +339,49 @@ def test_extension_tab_snapshot_isolates_clients_and_replaces_generation():
     assert other.is_active() is True
 
 
+def test_extension_tab_replacement_rebinds_only_with_stable_tab_identity():
+    driver = driver_stub()
+    client = FakeSocket()
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 1, "url": "https://same.test", "generation": "g1", "tab_identity": "tab-a"}],
+        client,
+    )
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 2, "url": "https://same.test", "generation": "g1", "tab_identity": "tab-a"}],
+        client,
+    )
+    assert driver.sessions["one:2"].info["tab_identity"] == "tab-a"
+    assert driver.resolve_session_target("one:1") == {
+        "session_id": "one:2",
+        "rebound_from": "one:1",
+        "replacement_session_id": "one:2",
+        "tab_identity": "tab-a",
+        "reason": "chrome.tabs.onReplaced",
+    }
+
+
+def test_same_url_different_tab_identity_is_not_rebound():
+    driver = driver_stub()
+    client = FakeSocket()
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 1, "url": "https://same.test", "generation": "g1", "tab_identity": "tab-a"}],
+        client,
+    )
+    driver._apply_extension_tabs(
+        "one",
+        "chrome",
+        [{"id": 2, "url": "https://same.test", "generation": "g2", "tab_identity": "tab-b"}],
+        client,
+    )
+    assert driver.resolve_session_target("one:1") is None
+
+
 def test_a_closed_tab_is_reported_once_and_can_still_be_reaped(caplog):
     """The snapshot sweep must not keep a dead session looking freshly dead.
 
@@ -374,9 +453,14 @@ def test_remote_command_maps_http_statuses_and_json_errors(monkeypatch, tmp_path
     driver._http = SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(502, None, "bad\n gateway"))
     with pytest.raises(RuntimeError, match="502: bad +gateway"):
         driver._remote_cmd({"cmd": "x"})
-    driver._http = SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(200, ValueError("bad json")))
-    with pytest.raises(ValueError, match="bad json"):
+    decode_error = ValueError("bad json")
+    driver._http = SimpleNamespace(post=lambda *args, **kwargs: FakeResponse(200, decode_error))
+    with pytest.raises(T.BridgeNoResponseError, match="malformed JSON") as raised:
         driver._remote_cmd({"cmd": "x"})
+    assert raised.value.delivery_state == "sent_unconfirmed"
+    assert raised.value.retry_safe is False
+    assert raised.value.error_code == "transport_error"
+    assert raised.value.__cause__ is decode_error
 
     driver._http = SimpleNamespace(
         post=lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -385,6 +469,40 @@ def test_remote_command_maps_http_statuses_and_json_errors(monkeypatch, tmp_path
     )
     with pytest.raises(TimeoutError, match="bridge HTTP request timed out"):
         driver._remote_cmd({"cmd": "x"}, timeout=1.25)
+
+
+@pytest.mark.parametrize("payload", [None, [], "ok", 7])
+def test_remote_command_rejects_non_object_json(payload):
+    driver = driver_stub(remote=True)
+    driver._http = SimpleNamespace(
+        post=lambda *args, **kwargs: FakeResponse(200, payload)
+    )
+    with pytest.raises(RuntimeError, match="expected an object"):
+        driver._remote_cmd({"cmd": "x"})
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf"), "bad"])
+def test_bridge_waiting_entry_points_reject_invalid_timeouts(timeout):
+    driver = driver_stub()
+    calls = [
+        lambda: driver.execute_js("return 1", timeout=timeout),
+        lambda: driver.ext_cmd({"cmd": "tabs"}, timeout=timeout),
+        lambda: driver.get_all_sessions(timeout=timeout),
+        lambda: driver.diagnose(timeout=timeout),
+    ]
+    for call in calls:
+        with pytest.raises(ValueError, match="finite number greater than zero"):
+            call()
+
+
+def test_bridge_command_boundaries_reject_wrong_container_types():
+    driver = driver_stub()
+    with pytest.raises(ValueError, match="code must be a string"):
+        driver.execute_js(None)
+    with pytest.raises(ValueError, match="cmd must be a JSON object"):
+        driver.ext_cmd([])
+    with pytest.raises(ValueError, match="cmd must be a JSON object"):
+        driver._remote_cmd("tabs")
 
 
 def test_remote_get_sessions_diagnose_and_set_session(monkeypatch):
@@ -439,16 +557,56 @@ def test_remote_execute_js_maps_errors_and_echoed_tab(monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_remote_execute_js_preserves_page_error_diagnostics():
+    driver = driver_stub(remote=True)
+    driver._remote_cmd = lambda *args, **kwargs: {
+        "r": {
+            "error": "Cannot access contents of the page",
+            "error_code": "page_access_denied",
+            "diagnostics": {"dispatched": False, "may_have_executed": False},
+        }
+    }
+
+    with pytest.raises(T.PageExecutionError) as caught:
+        driver.execute_js("document.body.innerText", timeout=2, session_id="c:7")
+
+    assert caught.value.error_code == "page_access_denied"
+    assert caught.value.diagnostics["dispatched"] is False
+    assert caught.value.retry_safe is False
+
+
 def test_remote_ext_cmd_maps_timeout_and_other_errors():
     driver = driver_stub(remote=True)
     driver._remote_cmd = lambda *args, **kwargs: {"r": {"data": "ok"}}
-    assert driver.ext_cmd({"cmd": "tabs"}) == {"data": "ok"}
-    driver._remote_cmd = lambda *args, **kwargs: {"r": {"error": "did not respond within 1s"}}
-    with pytest.raises(TimeoutError):
-        driver.ext_cmd({"cmd": "tabs"})
+    assert driver.ext_cmd({"cmd": "tabs"}, client_id="test-client") == {"data": "ok"}
+    driver._remote_cmd = lambda *args, **kwargs: {"r": {
+        "error": "did not respond within 1s", "error_code": "internal_error",
+        "delivery_state": "sent_unconfirmed", "retry_safe": False,
+    }}
+    with pytest.raises(TimeoutError) as raised:
+        driver.ext_cmd({"cmd": "tabs"}, client_id="test-client")
+    assert raised.value.delivery_state == "sent_unconfirmed"
+    assert raised.value.retry_safe is False
     driver._remote_cmd = lambda *args, **kwargs: {"r": {"error": "bad route"}}
     with pytest.raises(Exception, match="bad route"):
-        driver.ext_cmd({"cmd": "tabs"})
+        driver.ext_cmd({"cmd": "tabs"}, client_id="test-client")
+
+
+def test_remote_ext_cmd_resolves_a_unique_browser_client_before_dispatch():
+    driver = driver_stub(remote=True)
+    calls = []
+
+    def remote(command, timeout):
+        calls.append(command)
+        if command["cmd"] == "get_clients":
+            return {"r": [{"client_id": "selected-client"}]}
+        return {"r": {"data": "ok", "client_id": command["clientId"]}}
+
+    driver._remote_cmd = remote
+    result = driver.ext_cmd({"cmd": "tabs"})
+    assert result == {"data": "ok", "client_id": "selected-client"}
+    assert [command["cmd"] for command in calls] == ["get_clients", "ext_cmd"]
+    assert calls[-1]["clientId"] == "selected-client"
 
 
 def test_newtab_requires_operation_id_and_forwards_exact_payload():
@@ -651,6 +809,7 @@ def test_http_hook_rejects_web_origin_and_allows_extension_or_configured_origin(
 ):
     rejected = wsgi_post(http_app.app, "/link", {"cmd": "get_all_sessions"}, origin="https://evil")
     assert rejected["status"] == 403
+    assert rejected["unread_body_bytes"] == 0
     allowed = wsgi_post(
         http_app.app,
         "/link",
@@ -666,6 +825,19 @@ def test_http_hook_rejects_web_origin_and_allows_extension_or_configured_origin(
         origin="https://trusted",
     )
     assert trusted["status"] == 200
+
+
+@pytest.mark.parametrize("origin", ["https://untrusted.example", "https://invalid-\u00e9.example"])
+@pytest.mark.parametrize("path", ["/link", "/api/result", "/api/longpoll"])
+def test_http_origin_rejection_consumes_large_body(http_app, monkeypatch, origin, path):
+    monkeypatch.delenv("BROWSERTAP_WS_ALLOWED_ORIGINS", raising=False)
+    result = wsgi_post(
+        http_app.app, path, {"code": "x" * (2 * 1024 * 1024)}, origin=origin,
+    )
+    assert result["status"] == 403
+    assert result["unread_body_bytes"] == 0
+    assert "Access-Control-Allow-Origin" not in result["headers"]
+    assert http_app.sessions == {}
 
 
 @pytest.mark.parametrize(
@@ -719,6 +891,17 @@ def test_http_link_ext_cmd_success_and_error(http_app):
     assert body["r"]["error"] == "ext failed"
 
 
+def test_http_link_ext_cmd_rejects_missing_payload_with_actionable_shape(http_app):
+    calls = []
+    http_app.ext_cmd = lambda *args, **kwargs: calls.append((args, kwargs))
+    command = {"cmd": "ext_cmd", "payload": {"method": "tabs"}}
+    body = json.loads(wsgi_post(http_app.app, "/link", command)["body"])
+    assert body["r"]["error_code"] == "invalid_payload"
+    assert "payload" in body["r"]["error"]
+    assert "Do not put" in body["r"]["hint"]
+    assert calls == []
+
+
 def test_http_link_execute_js_success_and_error(http_app):
     calls = []
     http_app.execute_js = lambda code, **kwargs: calls.append((code, kwargs)) or {"data": 7}
@@ -737,22 +920,92 @@ def test_http_link_execute_js_success_and_error(http_app):
     assert body["r"]["error"] == "dead tab"
 
 
+@pytest.mark.parametrize(
+    "command, method_name",
+    [
+        ({"cmd": "ext_cmd", "payload": {"cmd": "tabs"}, "timeout": "bad"}, "ext_cmd"),
+        ({"cmd": "execute_js", "code": "return 1", "timeout": "bad"}, "execute_js"),
+    ],
+)
+def test_http_link_invalid_timeout_returns_an_error_without_dispatch(
+    http_app, command, method_name
+):
+    setattr(http_app, method_name, lambda *args, **kwargs: pytest.fail("must not dispatch"))
+    response = wsgi_post(http_app.app, "/link", command)
+    assert response["status"] == 200
+    error = json.loads(response["body"])["r"]["error"]
+    assert "finite number greater than zero" in error
+
+
 def test_http_result_route_records_success_error_and_ignores_other(http_app):
+    operations = http_app._operation_state()
+    operations.reserve(
+        "ok", ["http:1"], "test",
+        reply_transport="http", reply_owner="http:1",
+    )
+    operations.reserve(
+        "bad", ["http:2"], "test",
+        reply_transport="http", reply_owner="http:2",
+    )
     assert wsgi_post(
         http_app.app,
         "/api/result",
-        {"type": "result", "id": "ok", "result": 3, "newTabs": [{"id": 2}], "tabId": 1},
+        {
+            # The original long-poll/userscript protocol never echoed a
+            # sessionId on this route.  Operation id + HTTP transport must
+            # therefore remain sufficient for a compatible reply.
+            "type": "result", "id": "ok",
+            "result": 3, "newTabs": [{"id": 2}], "tabId": 1,
+        },
     )["body"] == "ok"
     assert http_app.results["ok"]["success"] is True
     wsgi_post(
         http_app.app,
         "/api/result",
-        {"type": "error", "id": "bad", "error": "boom"},
+        {"type": "error", "id": "bad", "sessionId": "http:2", "error": "boom"},
     )
     assert http_app.results["bad"]["success"] is False
     before = dict(http_app.results)
     wsgi_post(http_app.app, "/api/result", {"type": "other", "id": "ignored"})
     assert http_app.results == before
+
+
+def test_http_result_route_rejects_an_explicit_wrong_session_owner(http_app):
+    http_app._operation_state().reserve(
+        "owned", ["http:1"], "test",
+        reply_transport="http", reply_owner="http:1",
+    )
+
+    response = wsgi_post(
+        http_app.app,
+        "/api/result",
+        {
+            "type": "result", "id": "owned", "sessionId": "http:2",
+            "result": "forged",
+        },
+    )
+
+    assert response["body"] == "ok"
+    assert http_app.results == {}
+    assert http_app.rejected_operation_replies == 1
+
+
+def test_http_result_route_ignores_unknown_or_wrong_channel_operations(http_app):
+    http_app._operation_state().reserve(
+        "socket-op", ["chrome:1"], "test",
+        reply_transport="ws", reply_owner=object(),
+    )
+
+    for operation_id in ("unknown", "socket-op"):
+        response = wsgi_post(
+            http_app.app,
+            "/api/result",
+            {"type": "result", "id": operation_id, "result": "forged"},
+        )
+        assert response["body"] == "ok"
+
+    assert http_app.results == {}
+    assert http_app.rejected_operation_replies == 2
 
 
 def test_http_longpoll_registers_session_returns_command_and_ack(http_app, monkeypatch):
@@ -762,6 +1015,10 @@ def test_http_longpoll_registers_session_returns_command_and_ack(http_app, monke
             self.put(json.dumps({"id": "exec-1", "code": "return 1"}))
 
     monkeypatch.setattr(T.queue, "Queue", ReadyQueue)
+    http_app._operation_state().reserve(
+        "exec-1", ["http:1"], "test",
+        reply_transport="http", reply_owner="http:1",
+    )
     response = wsgi_post(
         http_app.app,
         "/api/longpoll",
@@ -837,12 +1094,21 @@ def test_start_ws_server_exposes_handler_and_handles_protocol_messages(monkeypat
     ping.handle()
     assert ping.sent == [{"type": "pong"}]
     ack = peer({"type": "ack", "id": "a"})
+    driver._operation_state().reserve(
+        "a", ["legacy:1"], "test", reply_transport="ws", reply_owner=ack,
+    )
     ack.handle()
     assert "a" in driver.acks
     result = peer({"type": "result", "id": "r", "result": 3, "tabId": 7})
+    driver._operation_state().reserve(
+        "r", ["chrome:7"], "test", reply_transport="ws", reply_owner=result,
+    )
     result.handle()
     assert driver.results["r"]["success"] is True
     error = peer({"type": "error", "id": "e", "error": "bad"})
+    driver._operation_state().reserve(
+        "e", ["chrome:7"], "test", reply_transport="ws", reply_owner=error,
+    )
     error.handle()
     assert driver.results["e"]["success"] is False
     bad = peer("not-json")
@@ -853,6 +1119,44 @@ def test_start_ws_server_exposes_handler_and_handles_protocol_messages(monkeypat
     assert rejected.closed is True
     ext.handle_close()
     assert "chrome" not in driver.ext_clients
+
+
+@pytest.mark.parametrize("payload", [[], "text", 7, None, True])
+def test_ws_handler_rejects_non_object_json_without_internal_error(
+    monkeypatch, caplog, payload,
+):
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    item = ws_peer(handler, json.dumps(payload))
+    before = (dict(driver.sessions), dict(driver.ext_clients), dict(driver.results), dict(driver.acks))
+
+    item.handle()
+
+    after = (driver.sessions, driver.ext_clients, driver.results, driver.acks)
+    assert after == before
+    assert "Error handling WebSocket message" not in caplog.text
+
+
+def test_ws_handler_rejects_unknown_and_wrong_socket_replies(monkeypatch):
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    owner = ws_peer(handler, {"type": "ping"}, address=("local", 1))
+    other = ws_peer(handler, {"type": "ping"}, address=("local", 2))
+    driver._operation_state().reserve(
+        "owned", ["chrome:7"], "test", reply_transport="ws", reply_owner=owner,
+    )
+
+    for message in (
+        {"type": "ack", "id": "unknown"},
+        {"type": "result", "id": "owned", "result": "forged"},
+        {"type": "error", "id": "unknown", "error": "forged"},
+    ):
+        other.data = json.dumps(message)
+        other.handle()
+
+    assert driver.acks == {}
+    assert driver.results == {}
+    assert driver.rejected_operation_replies == 3
 
 
 def test_ws_handler_assigns_stable_fallback_client_and_tolerates_ping_send_error(monkeypatch):
@@ -947,6 +1251,20 @@ def test_local_diagnose_classifies_every_lifecycle_state(
     assert result["clients"]["c"]["seconds_ago"] == 10.0
 
 
+def test_local_diagnose_reports_startup_handshake_window(monkeypatch):
+    driver = driver_stub()
+    driver.started_at = 995.0
+    driver.clean_sessions = lambda: None
+    driver.ext_cmd = lambda *args, **kwargs: {"data": {}}
+    monkeypatch.setattr(T.time, "time", lambda: 1000.0)
+    result = driver.diagnose(timeout=2)
+    assert result["cause"] == "starting"
+    assert result["ok"] is False
+    assert result["bridge_uptime_seconds"] == 5.0
+    assert result["startup_grace_seconds"] == T.BRIDGE_STARTUP_GRACE_SECONDS
+    assert "wait" in result["advice"].lower()
+
+
 def test_local_diagnose_reports_the_paths_the_daemon_itself_resolved():
     """The daemon is the process whose answer matters for a 401.
 
@@ -1028,25 +1346,32 @@ def test_ext_cmd_local_success_prefers_default_browser_and_cleans_ack(monkeypatc
     monkeypatch.setattr(T.uuid, "uuid4", lambda: "cmd-1")
     result = driver.ext_cmd({"cmd": "tabs"})
     assert result == {"data": {"ok": True}, "client_id": "one"}
-    assert one.messages[0]["code"] == {"cmd": "tabs"}
+    assert one.messages[0]["cmd"] == {"cmd": "tabs"}
     assert "cmd-1" not in driver.acks
 
 
-def test_ext_cmd_local_uses_newest_client_and_surfaces_extension_error(monkeypatch):
+def test_ext_cmd_local_requires_selection_and_surfaces_selected_extension_error(monkeypatch):
     driver = driver_stub()
 
     class ErrorSocket(FakeSocket):
         def send_message(self, message):
             payload = json.loads(message)
+            self.messages.append(payload)
             driver.results[payload["id"]] = {"success": False, "data": "denied"}
 
+    old, new = FakeSocket(), ErrorSocket()
     driver.ext_clients = {
-        "old": {"ws": FakeSocket(), "ts": 1},
-        "new": {"ws": ErrorSocket(), "ts": 9},
+        "old": {"ws": old, "ts": 1},
+        "new": {"ws": new, "ts": 9},
     }
     monkeypatch.setattr(T.uuid, "uuid4", lambda: "cmd-2")
-    with pytest.raises(Exception, match="denied"):
+    with pytest.raises(T.AmbiguousBrowserError):
         driver.ext_cmd({"cmd": "tabs"})
+    assert old.messages == new.messages == []
+    with pytest.raises(T.PageExecutionError, match="denied"):
+        driver.ext_cmd({"cmd": "tabs"}, client_id="new")
+    assert old.messages == []
+    assert new.messages[0]["cmd"] == {"cmd": "tabs"}
 
 
 def test_ext_cmd_local_validates_route_and_drops_broken_socket():
@@ -1056,8 +1381,11 @@ def test_ext_cmd_local_validates_route_and_drops_broken_socket():
     with pytest.raises(T.ExtensionNotConnectedError, match="No browser extension"):
         driver.ext_cmd({"cmd": "tabs"})
     driver.ext_clients = {"bad": {"ws": FakeSocket(send_error=RuntimeError("closed")), "ts": 1}}
-    with pytest.raises(T.ExtensionNotConnectedError, match="disconnected"):
+    with pytest.raises(T.BridgeNoResponseError, match="disconnected") as raised:
         driver.ext_cmd({"cmd": "tabs"}, client_id="bad")
+    assert raised.value.error_code == "extension_not_connected"
+    assert raised.value.delivery_state == "sent_unconfirmed"
+    assert raised.value.retry_safe is False
     assert "bad" not in driver.ext_clients
 
 
@@ -1069,6 +1397,43 @@ def test_ext_cmd_local_timeout_cleans_late_state(monkeypatch):
         driver.ext_cmd({"cmd": "tabs"}, client_id="c", timeout=0.001)
     assert "cmd-timeout" not in driver.results
     assert "cmd-timeout" not in driver.acks
+
+
+def test_execute_js_with_json_payload_does_not_route_to_ext_cmd():
+    """Verify that JSON.parse command hijacking is prevented.
+
+    Before the fix, sending JS code like '{"cmd":"get_cookies"}' via execute_js
+    would be parsed by the extension and routed to handleExtMessage, exposing
+    internal commands. After the fix, the extension routes by field presence:
+    data.cmd → command channel, data.code → JS execution channel.
+    """
+    driver = driver_stub()
+
+    class CaptureSocket(FakeSocket):
+        def __init__(self):
+            super().__init__()
+            self.sent_payloads = []
+
+        def send_message(self, message):
+            payload = json.loads(message)
+            self.sent_payloads.append(payload)
+            # Simulate successful JS execution (not command routing)
+            driver.acks[payload["id"]] = time.time()
+            driver.results[payload["id"]] = {"success": True, "data": "executed"}
+
+    sock = CaptureSocket()
+    _install_exec_session(driver, socket=sock)
+
+    # Attack payload: JSON string that looks like a command
+    attack_code = '{"cmd":"get_cookies","domain":".example.com"}'
+    driver.execute_js(attack_code, timeout=1)
+
+    # Verify the payload was sent via 'code' field (JS execution), not 'cmd'
+    assert len(sock.sent_payloads) == 1
+    sent = sock.sent_payloads[0]
+    assert "code" in sent, "JS payload must use 'code' field"
+    assert "cmd" not in sent, "JS payload must NOT use 'cmd' field"
+    assert sent["code"] == attack_code, "JS code must be sent verbatim"
 
 
 def _install_exec_session(driver, *, session_type="ext_ws", socket=None, session_id="c:7"):
@@ -1122,6 +1487,31 @@ def test_execute_js_local_http_queue_and_extension_error(monkeypatch):
     monkeypatch.setattr(T.uuid, "uuid4", lambda: "exec-http")
     with pytest.raises(Exception, match="script failed"):
         driver.execute_js("bad()", session_id="http:1")
+
+
+def test_execute_js_local_page_error_has_a_non_replayable_classification():
+    driver = driver_stub()
+
+    class ReplySocket(FakeSocket):
+        def send_message(self, message):
+            payload = json.loads(message)
+            driver.results[payload["id"]] = {
+                "success": False,
+                "data": {
+                    "message": "Cannot access contents of the page",
+                    "dispatched": False,
+                    "may_have_executed": False,
+                    "retryable": False,
+                },
+            }
+
+    _install_exec_session(driver, socket=ReplySocket())
+    with pytest.raises(T.PageExecutionError) as caught:
+        driver.execute_js("document.body.innerText", session_id="c:7")
+
+    assert caught.value.error_code == "page_access_denied"
+    assert caught.value.diagnostics["access_kind"] == "script_injection"
+    assert caught.value.retry_safe is False
 
 
 def test_execute_js_local_marks_broken_socket_disconnected():
@@ -1327,11 +1717,11 @@ def test_execute_js_deadline_can_expire_before_dispatch(monkeypatch, session_typ
     "session_type, ack, expected, state, safe",
     [
         # A payload written to a live socket with no ACK back is NOT provably
-        # undelivered — only the ACK-before-execute protocol says it did not run.
-        ("ext_ws", False, "no ACK", "sent_unconfirmed", True),
+        # undelivered: the ACK could be lost after the command was received.
+        ("ext_ws", False, "no ACK", "sent_unconfirmed", False),
         ("ext_ws", True, "ACK received", "delivered_no_result", False),
-        # An http session's queue lives in this process: never polled is proof.
-        ("http", False, "script not polled", "undelivered", True),
+            # The payload remains queued after this caller stops waiting.
+            ("http", False, "a later poll may still execute", "sent_unconfirmed", False),
         ("http", True, "delivered but no result", "delivered_no_result", False),
     ],
 )
@@ -1395,6 +1785,20 @@ def test_find_session_skips_inactive_and_url_less_entries():
         "c:2": T.Session("c:2", {"type": "ws"}, FakeSocket()),
     }
     assert driver.find_session("x") == []
+
+
+def test_find_session_rejects_non_string_patterns_and_skips_bad_urls():
+    driver = driver_stub()
+    driver.sessions = {
+        "c:none": T.Session("c:none", {"url": None, "type": "ws"}, FakeSocket()),
+        "c:number": T.Session("c:number", {"url": 7, "type": "ws"}, FakeSocket()),
+        "c:good": T.Session("c:good", {"url": "https://good.test", "type": "ws"}, FakeSocket()),
+    }
+    assert [item[0] for item in driver.find_session("good.test")] == ["c:good"]
+    with pytest.raises(ValueError, match="url_pattern must be a string"):
+        driver.find_session(None)
+    with pytest.raises(ValueError, match="url_pattern must be a string"):
+        driver.set_session(7)
 
 
 def test_jump_delegates_to_execute_js_with_json_quoted_url():
@@ -1609,3 +2013,21 @@ def test_local_diagnose_reports_refused_takeovers():
 
     assert result["rejected_client_takeovers"] == 3
     assert result["last_rejected_takeover"]["client_id"] == "chrome"
+
+
+def test_execute_js_names_an_unsupported_session_type_under_dash_o():
+    """`python -O` strips asserts, and this one guards a dispatch.
+
+    Both the send and the deadline handling below are `if tp in ['ws','ext_ws']
+    ... elif tp == 'http'`, so an unrecognised type dispatches nothing and then
+    reaches the timeout check with no branch to return from: the polling loop
+    spins with a negative sleep interval and never exits. Measured with the
+    guard disabled -- a call made with `timeout=2` had not returned at 60 s,
+    with a core pegged. That is why this may not be an assert: under `python -O`
+    the stripped version does not degrade to a worse error message, it hangs the
+    bridge.
+    """
+    driver = driver_stub()
+    _install_exec_session(driver, session_type="carrier-pigeon", session_id="odd:1")
+    with pytest.raises(ValueError, match="Unsupported session type: carrier-pigeon"):
+        driver.execute_js("return 1", session_id="odd:1")

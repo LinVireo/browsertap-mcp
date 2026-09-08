@@ -1,6 +1,16 @@
-*.py text eol=lf
-*.js text eol=lf
-*.json text eol=lf
-*.md text eol=lf
-*.html text eol=lf
-*.css text eol=lf
+# One rule, on purpose. The seal in `artifacts/evidence-manifest.json` records
+# `content_sha256` over the *raw bytes* of every tracked file, so a file whose
+# line endings depend on the cloner's `core.autocrlf` gives that fingerprint a
+# value nobody else can reproduce -- including from a clone of the very commit it
+# describes.
+#
+# This was a per-suffix list, and the list lost three times: `*.mjs`, `*.yml` and
+# `*.toml` had to be appended when eslint and the packaging config arrived, `.yaml`
+# was never covered at all, and an extensionless file (`LICENSE`, `MANIFEST.in`,
+# `.gitignore`, this file) could not be covered by a suffix in the first place.
+# Measured at 0.4.15: five tracked files were ungoverned, and a fresh clone
+# differed from the working tree in three of them.
+#
+# `text=auto` still detects binaries by content, so an image added later is left
+# alone without needing a line here.
+* text=auto eol=lf

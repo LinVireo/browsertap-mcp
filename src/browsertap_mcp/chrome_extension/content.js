@@ -1,4 +1,3 @@
-;(function(){
 
 // NOTE: this script used to strip <meta http-equiv="Content-Security-Policy">
 // from every page it loaded into, which weakened the page's own protections
@@ -76,6 +75,4 @@
     port.onMessage.addListener(receiveStatus);
     port.postMessage({ type: 'btap_status_request' });
   } catch(_) { paint(false); }
-})();
-
 })();

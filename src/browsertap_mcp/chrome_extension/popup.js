@@ -1,10 +1,13 @@
 document.addEventListener('DOMContentLoaded', () => {
   localizeDocument();
-  const btn = document.getElementById('refresh');
-  btn.addEventListener('click', fetchCookies);
+  document.getElementById('refresh').addEventListener('click', fetchCookies);
+  document.getElementById('copy').addEventListener('click', copyCookies);
   document.getElementById('indicator-visible').addEventListener('change', saveIndicatorVisibility);
   loadIndicatorVisibility();
-  fetchCookies();
+  // Nothing reads cookies on open. This used to call fetchCookies(), whose tail
+  // wrote every cookie of the active tab to the clipboard -- so opening the popup
+  // for the indicator checkbox above silently replaced the clipboard with session
+  // credentials, HttpOnly ones included. Both halves are gestures now.
 });
 
 // The bridge port is deliberately NOT editable here. The Python side owns it
@@ -19,6 +22,11 @@ function message(name, substitutions) {
   return chrome.i18n.getMessage(name, substitutions) || name;
 }
 
+// What the last Refresh put on screen. The copy button works off this instead of
+// re-reading, so what lands in the clipboard is exactly what the user is looking
+// at -- a second read could return a different jar after a background refresh.
+let renderedCookies = null;
+
 function localizeDocument() {
   document.documentElement.lang = chrome.i18n.getUILanguage();
   document.querySelectorAll('[data-i18n]').forEach((element) => {
@@ -27,15 +35,20 @@ function localizeDocument() {
 }
 
 async function loadIndicatorVisibility() {
-  const stored = await chrome.storage.local.get('btap_indicator_visible');
+  // Read the current and legacy keys together. The popup opens on the user's
+  // click, so the extra storage round trip is visible on slower profiles; the
+  // combined read preserves the same precedence and migration retry semantics.
+  const stored = await chrome.storage.local.get([
+    'btap_indicator_visible',
+    'tmwd_indicator_visible',
+  ]);
   let visible = stored.btap_indicator_visible;
   if (visible === undefined) {
     // Carry the pre-BTAP preference over once. The popup is the only place with
     // a healthy extension context guaranteed, so the migration lives here;
     // content.js just reads both keys.
-    const legacy = await chrome.storage.local.get('tmwd_indicator_visible');
-    if (legacy.tmwd_indicator_visible !== undefined) {
-      visible = legacy.tmwd_indicator_visible;
+    if (stored.tmwd_indicator_visible !== undefined) {
+      visible = stored.tmwd_indicator_visible;
       try {
         await chrome.storage.local.set({ btap_indicator_visible: visible });
         await chrome.storage.local.remove?.('tmwd_indicator_visible');
@@ -52,6 +65,9 @@ async function saveIndicatorVisibility() {
 
 async function fetchCookies() {
   const out = document.getElementById('out');
+  // A refresh replaces the previous jar. Invalidate it before any query so a
+  // failed read can never leave stale credentials available to Copy.
+  renderedCookies = null;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url) { out.textContent = message('noActiveTab'); return; }
@@ -70,13 +86,38 @@ async function fetchCookies() {
       out.textContent = message('errorPrefix') + message('unknownError');
       return;
     }
-    if (!resp.data.length) { out.textContent = message('noCookies'); return; }
+    if (!resp.data.length) { renderedCookies = null; out.textContent = message('noCookies'); return; }
     // Display the flags that affect how a cookie can be reused.
     out.textContent = resp.data.map(c =>
       `${c.name}=${c.value}` + (c.httpOnly ? ' [H]' : '') + (c.secure ? ' [S]' : '') + (c.partitionKey ? ' [P]' : '')
     ).join('\n');
-    // Preserve the existing one-click name=value clipboard workflow.
-    const str = resp.data.map(c => `${c.name}=${c.value}`).join('; ');
-    await navigator.clipboard.writeText(str);
-  } catch (e) { out.textContent = message('errorPrefix') + e.message; }
+    renderedCookies = resp.data;
+  } catch (e) { renderedCookies = null; out.textContent = message('errorPrefix') + e.message; }
+}
+
+async function copyCookies() {
+  const btn = document.getElementById('copy');
+  if (!renderedCookies?.length) { flashButton(btn, 'copyNothing'); return; }
+  try {
+    await navigator.clipboard.writeText(
+      renderedCookies.map(c => `${c.name}=${c.value}`).join('; ')
+    );
+    flashButton(btn, 'copyDone');
+  } catch (_) {
+    // Report on the button, never in #out. A clipboard failure is unrelated to
+    // the cookie list, and overwriting it would erase what the user asked for --
+    // which is what the old shared try/catch did.
+    flashButton(btn, 'copyFailed');
+  }
+}
+
+// Confirm on the button for 1.5s, then restore the label from i18n rather than
+// from whatever text was there: restoring captured text would make a temporary
+// message permanent when a second click lands inside the window.
+function flashButton(btn, key) {
+  btn.textContent = message(key);
+  clearTimeout(btn._btapFlashTimer);
+  btn._btapFlashTimer = setTimeout(() => {
+    btn.textContent = message('copyButton');
+  }, 1500);
 }

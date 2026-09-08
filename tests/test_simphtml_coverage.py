@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import subprocess
+import tempfile
 
 import pytest
 from bs4 import BeautifulSoup
@@ -113,8 +117,20 @@ def test_get_main_block_forwards_options_and_normalizes_text():
     assert result == "alpha beta\ngamma\n\ndelta"
     script, kwargs = driver.calls[0]
     assert "window.prepared = true" in script
-    assert "return optHTML(true)" in script
+    assert "return pageOutline(true)" in script
     assert kwargs == {"timeout": 7, "allow_failover": True, "session_id": "chrome:9"}
+
+
+def test_text_normalisation_covers_the_whitespace_a_page_actually_carries():
+    """Tabs and trailing spaces, which a space-run pass leaves exactly in place.
+
+    Text lifted off a real page is full of both -- a tab between two table cells,
+    a trailing space after a heading -- and they cost the same tokens as any other
+    character while carrying nothing. This is the half that separates asking
+    `str.split` what the words are from matching runs of one specific character.
+    """
+    driver = QueueDriver([{"data": "one\t\ttwo   \n\tthree \t\n\n\n\n four\t"}])
+    assert S.get_main_block(driver, text_only=True) == "one two\nthree\n\nfour"
 
 
 @pytest.mark.parametrize(
@@ -183,6 +199,54 @@ def test_get_html_cutlist_keeps_instruction_hit_and_emits_hint(monkeypatch):
     assert "[FAKE ELEMENT] 6 more items hidden" in html
 
 
+def test_get_html_cutlist_uses_one_roundtrip_and_keeps_script_order():
+    page = _list_page(7)
+    driver = QueueDriver([
+        {
+            "data": {
+                "__btap_cutlist_payload__": True,
+                "groups": [{"selector": ".item"}],
+                "page": page,
+            }
+        }
+    ])
+
+    html = S.get_html(
+        driver,
+        cutlist=True,
+        instruction="item-6",
+        maxchars=100_000,
+    )
+
+    assert "[FAKE ELEMENT]" in html
+    assert len(driver.calls) == 1
+    script = driver.calls[0][0]
+    groups_call = "const __btapCutlistGroups = listGroups(document.body);"
+    assert script.index(groups_call) < script.index("pageOutline(false)")
+
+
+def test_get_html_cutlist_preserves_extra_js_scope_and_early_return_shape():
+    driver = QueueDriver([
+        {"data": [{"selector": ".item"}]},
+        {"data": "<p>caller result</p>"},
+    ])
+
+    result = S.get_html(
+        driver,
+        cutlist=True,
+        extra_js=(
+            "const __btapCutlistGroups = 'caller-owned';\n"
+            "await Promise.resolve();\n"
+            "return '<p>caller result</p>';"
+        ),
+    )
+
+    assert result == "<p>caller result</p>"
+    assert len(driver.calls) == 2
+    assert "const __btapCutlistGroups" not in driver.calls[0][0]
+    assert driver.calls[1][0].startswith("const __btapCutlistGroups = 'caller-owned';")
+
+
 def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch, caplog):
     caplog.set_level("DEBUG", logger="browsertap_mcp.simphtml")
     page = _list_page(6) + "<div>" + "".join('<i class="few">x</i>' for _ in range(4)) + "</div>"
@@ -195,6 +259,86 @@ def test_get_html_cutlist_covers_invalid_small_and_default_selection(monkeypatch
     output = caplog.text
     assert "skipped invalid selector" in output
     assert "cutlist found 5 list" in output
+
+
+def test_neither_retired_way_of_marking_a_container_came_back():
+    """Two generations of writing to the user's DOM, both reverse-gated here.
+
+    The cutlist selector has to survive into a *second* roundtrip, and for most
+    of this package's life the way it did that was by marking the live container
+    so the mark would clone. First with a minted id (`_ljq<n>`), which is visible
+    to `document.getElementById`, to `#id` rules in the page's own stylesheet, to
+    `:target` and to anything that serialises the document; then with a
+    `data-btap-list` attribute, which is narrower but still a write. 0.4.15
+    derives the selector from the container's own structure instead, so neither
+    is needed and both are gone.
+
+    This is the narrow half. That the scripts write nothing *at all* is checked
+    statically in `tests/test_documentation_contract.py` and behaviourally under
+    node in `tests/test_page_scripts.py`; those two would catch a third spelling,
+    which is exactly what this one cannot do.
+    """
+    for name, source in (
+        ("page_outline", S.js_page_outline),
+        ("list_groups", S.js_list_groups),
+    ):
+        assert "_ljq" not in source, name
+        assert "data-btap-list" not in source, name
+        # No assignment to an `.id` property anywhere, however it is spelled.
+        # Reads are fine: `list_groups` reports `containerId` from one.
+        assert re.search(r"\.id\s*=(?!=)", source) is None, name
+    assert "parent.id" in S.js_list_groups
+
+
+def test_list_groups_is_syntactically_valid_javascript(tmp_path):
+    """The last resort behind the two gates that now cover this file properly.
+
+    This was written when the script was a `r'''...'''` literal in `simphtml.py`
+    that no JavaScript tool could see -- ruff read one Python string, so a syntax
+    error would ship and surface as a runtime failure in the caller's browser.
+    It lives in `page_scripts/list_groups.js` now, so eslint covers it (see
+    `JS_LINT_TARGETS`) and `tests/test_page_scripts.py` runs it under node.
+
+    Kept anyway, because both of those can be absent where this cannot: the lint
+    gate needs `node_modules`, which one CI job out of nine installs, and this
+    asserts on the constant `simphtml` actually loaded rather than on the file
+    eslint read -- so it also covers a `_load_page_script` that returns something
+    unparseable.
+    """
+    script = tmp_path / "list_groups.js"
+    script.write_text(S.js_list_groups, encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(script)], capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr.strip()
+
+
+def test_get_html_cutlist_matches_a_data_attribute_prefixed_selector(monkeypatch):
+    """The container mark has to survive into the snapshot to be worth writing.
+
+    `optimize_html_for_tokens` strips most attributes; it keeps `data-*` whose
+    value is 20 characters or fewer, which is why the mark is a short counter.
+    This runs the whole cutlist path with the selector shape `describeResult`
+    now produces, so a change to that allowlist fails here rather than silently
+    turning every cutlist selector into a miss.
+    """
+    page = (
+        '<main data-btap-list="1">'
+        + "".join(
+            f'<article class="item">item-{i} {"x" * 800}</article>' for i in range(7)
+        )
+        + "</main>"
+    )
+    selector = '[data-btap-list="1"] > .item'
+    driver = QueueDriver([{"data": [{"selector": selector}]}])
+    monkeypatch.setattr(S, "get_main_block", lambda *_args, **_kwargs: page)
+    html = S.get_html(driver, cutlist=True, maxchars=100_000)
+    soup = BeautifulSoup(html, "html.parser")
+    # The mark itself crossed the pipeline...
+    assert soup.select_one('[data-btap-list="1"]') is not None
+    # ...so the prefixed selector still resolves, and the cut actually happened.
+    assert len(soup.select(selector)) == 3
+    assert "[FAKE ELEMENT] 4 more items hidden" in html
 
 
 def test_get_html_handles_dict_candidate_empty_page_and_parse_cap(monkeypatch):
@@ -289,6 +433,59 @@ def test_execute_js_rich_handles_monitor_session_and_execution_failures(monkeypa
     assert result["transients"] == []
 
 
+def test_execute_js_rich_classifies_page_access_failure_without_replay(monkeypatch):
+    driver = QueueDriver([
+        Exception({
+            "message": "Cannot access contents of the page",
+            "dispatched": False,
+            "may_have_executed": False,
+            "retryable": False,
+        })
+    ])
+    monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("snapshot down")))
+
+    result = S.execute_js_rich(
+        "document.body.innerText",
+        driver,
+        no_monitor=True,
+        timeout=2,
+        before_sids=set(),
+        session_id="c:7",
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "page_access_denied"
+    assert result["retryable"] is False
+    assert result["diagnostics"]["dispatched"] is False
+    assert result["diagnostics"]["next_action"] == "list_tabs_then_retry_or_use_supported_cdp"
+    assert "open_new_tab" in result["hint"]
+
+
+def test_execute_js_rich_marks_new_tab_intent_without_claiming_popup_cause():
+    driver = QueueDriver([
+        Exception({
+            "message": "Popup blocked by browser policy",
+            "dispatched": True,
+            "may_have_executed": True,
+        })
+    ])
+
+    result = S.execute_js_rich(
+        "window.open('https://example.test')",
+        driver,
+        no_monitor=True,
+        timeout=2,
+        before_sids=set(),
+        session_id="c:7",
+    )
+
+    assert result["error_code"] == "page_execution_failed"
+    assert result["diagnostics"]["script_intent"] == "new_tab_or_navigation"
+    assert result["diagnostics"]["policy_constraint"] == "popup_or_user_gesture"
+    assert result["diagnostics"]["next_action"] == "open_new_tab"
+    assert result["retry_safe"] is False
+
+
 def test_execute_js_rich_expired_deadline_never_calls_driver(monkeypatch):
     driver = QueueDriver([], default_session_id="no-colon")
     monkeypatch.setattr(S.time, "monotonic", lambda: 10.0)
@@ -300,10 +497,57 @@ def test_execute_js_rich_expired_deadline_never_calls_driver(monkeypatch):
     assert driver.calls == []
 
 
+def test_execute_js_rich_no_monitor_skips_settling_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(S.time, "sleep", sleeps.append)
+
+    result = S.execute_js_rich(
+        "return 7",
+        QueueDriver([{"data": 7, "executed_tab_id": 42}]),
+        no_monitor=True,
+        timeout=2,
+        before_sids=set(),
+        session_id="c:42",
+    )
+
+    assert result["status"] == "success"
+    assert sleeps == []
+
+
+def test_execute_js_rich_only_settles_for_a_started_monitor(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(S.time, "sleep", sleeps.append)
+    monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: [])
+
+    pages = iter(["<p>before</p>", "<p>after</p>"])
+    monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: next(pages))
+    S.execute_js_rich(
+        "return 1",
+        QueueDriver([{"data": 1}], sessions={}),
+        timeout=2,
+        before_sids=set(),
+    )
+    assert len(sleeps) == 1
+
+    sleeps.clear()
+    monkeypatch.setattr(
+        S,
+        "get_html",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("snapshot down")),
+    )
+    S.execute_js_rich(
+        "return 1",
+        QueueDriver([{"data": 1}], sessions={}),
+        timeout=2,
+        before_sids=set(),
+    )
+    assert sleeps == []
+
+
 def test_execute_js_rich_retries_undelivered_and_reports_switch_and_tabs(monkeypatch):
     driver = QueueDriver(
         [
-            {"result": "No response data in 2s (no ACK, script may not have been delivered)"},
+            {"delivery_state": "undelivered", "result": "script not polled"},
             {
                 "data": 7,
                 "executed_tab_id": 42,
@@ -430,3 +674,267 @@ def test_execute_js_rich_after_ack_does_not_retry():
     assert len(driver.calls) == 1
     assert "before retrying side effects" in result["suggestion"]
     assert "wait_for" in result["suggestion"]
+
+
+def _run_temp_monitor_harness(body: str, extra_scripts: str = "") -> dict:
+    """Drive the injected monitor script under node with a fake DOM and clock.
+
+    Real timers would make this slow and flaky, so `setInterval` is replaced by
+    a manual queue and `Date.now` by a settable counter: `advance(ms)` moves the
+    clock and fires one tick, which is all the expiry logic needs.
+
+    `textNodes` is the page's text, and the body may push to it and pop from it
+    between ticks -- which is the only way to make text appear and then vanish,
+    and so the only way to test what the monitor is *for*.
+    """
+    harness = """
+        let now = 1000000;
+        Date.now = () => now;
+        const timers = new Map();
+        let nextTimerId = 1;
+        globalThis.setInterval = (fn) => { const id = nextTimerId++; timers.set(id, fn); return id; };
+        globalThis.clearInterval = (id) => { timers.delete(id); };
+        function advance(ms) { now += ms; for (const [id, fn] of [...timers]) if (timers.has(id)) fn(); }
+        const textNodes = [{textContent: '  a transient toast message  '}];
+        globalThis.NodeFilter = {SHOW_TEXT: 4};
+        globalThis.document = {
+            body: {},
+            createTreeWalker: () => { let i = 0; return {nextNode: () => (i < textNodes.length ? textNodes[i++] : null)}; },
+        };
+        globalThis.window = globalThis;
+        SCRIPT_UNDER_TEST
+        EXTRA_SCRIPTS
+        BODY
+    """
+    # The builder appends its own `startStrMonitor(...)` call; each test drives
+    # the function directly so it can control the lifetime it passes.
+    declaration = S.build_temp_monitor_js(10).replace("startStrMonitor(450, 10000);", "")
+    script = (
+        harness
+        .replace("SCRIPT_UNDER_TEST", declaration)
+        .replace("EXTRA_SCRIPTS", extra_scripts)
+        .replace("BODY", body)
+    )
+    handle, path = tempfile.mkstemp(suffix=".js")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(script)
+        completed = subprocess.run(["node", path], capture_output=True, text=True)
+        if completed.returncode:
+            raise AssertionError(f"node harness failed: {completed.stderr.strip()}")
+        return json.loads(completed.stdout)
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def test_temp_monitor_stops_itself_once_its_lifetime_is_up():
+    """The monitor's own expiry is the only cleanup on two of its paths.
+
+    `execute_js_rich` skips the Python-side stop when the deadline is exhausted
+    and when the transient read raises, and both of those are states in which
+    there is no budget left to send anything. Whatever ships here therefore has
+    to stop the 450ms full-document TreeWalker without another roundtrip, or it
+    keeps running on a real page for as long as the document lives.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        const started = {live: !!window.__btap_tm, timers: timers.size};
+        advance(500);
+        const collecting = {live: !!window.__btap_tm, seen: [...window.__btap_tm.all].length};
+        advance(10000);
+        console.log(JSON.stringify({
+            started, collecting,
+            afterExpiry: {live: !!window.__btap_tm, timers: timers.size},
+        }));
+        """
+    )
+    assert report["started"] == {"live": True, "timers": 1}
+    assert report["collecting"]["live"] is True
+    assert report["collecting"]["seen"] == 1
+    # Both halves matter: a cleared interval that leaves the object behind is
+    # still residue on the page, and a deleted object whose interval survives
+    # keeps walking the document forever.
+    assert report["afterExpiry"] == {"live": False, "timers": 0}
+
+
+def test_a_superseded_temp_monitor_clears_itself_and_not_the_newcomer():
+    """A stale interval must never reach through the global at a live monitor.
+
+    The tick reads `window.__btap_tm` back out of the page, so an interval that
+    has been superseded is looking at somebody else's object. Comparing the
+    captured handle against `m.id` is what keeps it from clearing the newcomer
+    and deleting a monitor a later call is about to read. This harness keeps the
+    first tick registered on purpose -- the real `clearInterval` in the
+    replacement path is what a browser would have run, and the point is that the
+    survivor is safe even when it did not.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        const first = window.__btap_tm.id;
+        const firstTick = timers.get(first);
+        startStrMonitor(450, 60000);
+        const second = window.__btap_tm.id;
+        timers.set(first, firstTick);
+        advance(500);
+        console.log(JSON.stringify({
+            distinct: first !== second,
+            firstGone: !timers.has(first),
+            live: !!window.__btap_tm,
+            stillSecond: window.__btap_tm ? window.__btap_tm.id === second : null,
+        }));
+        """
+    )
+    assert report["distinct"] is True
+    # The stale tick removed itself rather than the monitor now on the page.
+    assert report["firstGone"] is True
+    assert report["live"] is True
+    assert report["stillSecond"] is True
+
+
+def test_temp_monitor_script_is_namespaced_and_self_limiting():
+    """Reverse gate for both halves of the fix.
+
+    `window._tm` was a three-character global on a real page; the expiry check
+    is the part with no other enforcement, since no linter reads this module's
+    JavaScript and no offline test can observe a browser leak directly.
+    """
+    source = S.build_temp_monitor_js(12)
+    assert "window._tm" not in source
+    assert source.count("window.__btap_tm") >= 5
+    assert "clearInterval(id)" in source
+    assert "Date.now() > expires" in source
+    assert "startStrMonitor(450, 12000);" in source
+
+
+def test_temp_monitor_js_is_syntactically_valid_javascript(tmp_path):
+    script = tmp_path / "temp_monitor.js"
+    script.write_text(S.build_temp_monitor_js(3), encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(script)], capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr.strip()
+
+
+def test_the_transient_read_returns_what_came_and_went_and_nothing_else():
+    """The read is the only reason the monitor is allowed to walk a real page.
+
+    A 450ms full-document TreeWalker on somebody's page is an expensive, invasive
+    thing, and it earns that only by catching text a snapshot cannot: text that
+    appeared and is gone again. So all three other categories have to be absent
+    from the answer, and each of them is a distinct way of getting this wrong --
+    text that was already there is not news, text still on the page is in the
+    HTML the caller gets beside this list, and reporting a still-visible message
+    as transient tells an agent the opposite of the truth about it.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        textNodes.push({textContent: 'saving your changes please wait'});
+        advance(500);
+        textNodes.pop();
+        textNodes.push({textContent: 'email is required and stays'});
+        advance(500);
+        const transients = readStrMonitor();
+        console.log(JSON.stringify({
+            transients,
+            live: !!window.__btap_tm,
+            timers: timers.size,
+            secondRead: readStrMonitor(),
+        }));
+        """,
+        extra_scripts=S._MONITOR_READ_JS.replace("readStrMonitor();", ""),
+    )
+    # Only the one that vanished. `extract` keys on the first 20 characters.
+    assert report["transients"] == ["saving your changes "]
+    # The read is also the stop: nothing left ticking, nothing left on the page.
+    assert report["live"] is False
+    assert report["timers"] == 0
+    # And a second read cannot resurrect it or throw.
+    assert report["secondRead"] == []
+
+
+def test_discarding_the_monitor_reports_whether_there_was_one():
+    """The discard path has no reader for its answer, which is why it is checked.
+
+    `stop_temp_monitor` throws the value away, so nothing in production notices
+    if this stops clearing the interval -- and the paths that call it are exactly
+    the ones with no budget left for a second roundtrip.
+    """
+    report = _run_temp_monitor_harness(
+        """
+        startStrMonitor(450, 10000);
+        const stopped = discardStrMonitor();
+        console.log(JSON.stringify({
+            stopped,
+            live: !!window.__btap_tm,
+            timers: timers.size,
+            again: discardStrMonitor(),
+        }));
+        """,
+        extra_scripts=S._MONITOR_DISCARD_JS.replace("discardStrMonitor();", ""),
+    )
+    assert report["stopped"] is True
+    assert report["live"] is False
+    assert report["timers"] == 0
+    assert report["again"] is False
+
+
+@pytest.mark.parametrize(
+    "script", ["_MONITOR_READ_JS", "_MONITOR_DISCARD_JS"], ids=["read", "discard"]
+)
+def test_both_monitor_scripts_are_syntactically_valid_javascript(script, tmp_path):
+    path = tmp_path / f"{script}.js"
+    path.write_text(getattr(S, script), encoding="utf-8")
+    completed = subprocess.run(
+        ["node", "--check", str(path)], capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr.strip()
+
+
+def test_execute_js_rich_stops_the_monitor_when_nothing_will_read_it(monkeypatch):
+    """A truthy `kind` returns early, and that return used to leak the interval.
+
+    The path has no reader for the transients, so the stop cannot come from
+    `get_temp_texts`; it has to be sent explicitly while a channel may still
+    exist. The script's own expiry covers the tab that is already gone.
+    """
+    stops = []
+    monkeypatch.setattr(S, "get_html", lambda *_args, **_kwargs: "<p>baseline</p>")
+    monkeypatch.setattr(
+        S, "stop_temp_monitor", lambda *_args, **kwargs: stops.append(kwargs)
+    )
+    monkeypatch.setattr(S, "get_temp_texts", lambda *_args, **_kwargs: ["never read"])
+    monkeypatch.setattr(S.time, "sleep", lambda _seconds: None)
+
+    driver = QueueDriver(
+        [{"result": "No response data in 2s (ACK received, script may still be running)"}],
+        sessions={},
+    )
+    result = S.execute_js_rich(
+        "slow()", driver, timeout=4, before_sids=set(), session_id="c:3"
+    )
+
+    assert result["status"] == "no_response"
+    assert "transients" not in result
+    assert len(stops) == 1
+    assert stops[0]["session_id"] == "c:3"
+
+
+def test_execute_js_rich_does_not_stop_a_monitor_it_never_started(monkeypatch):
+    """`no_monitor=True` shares the same early return, and there is nothing to
+    stop there. Sending the stop anyway would spend a roundtrip on every
+    no-monitor call, which is the flag's whole purpose to avoid."""
+    stops = []
+    monkeypatch.setattr(
+        S, "stop_temp_monitor", lambda *_args, **kwargs: stops.append(kwargs)
+    )
+    driver = QueueDriver(
+        [{"result": "No response data in 2s (ACK received, script may still be running)"}]
+    )
+    S.execute_js_rich("slow()", driver, no_monitor=True, timeout=2, before_sids=set())
+    assert stops == []

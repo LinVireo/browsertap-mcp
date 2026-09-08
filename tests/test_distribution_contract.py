@@ -60,13 +60,23 @@ def _core_metadata(version: str, *, drop: str = "", replace: tuple[str, str] | N
     return "\n".join(lines) + "\n\nlong description body\n"
 
 
-def _write_sdist(path: Path, *names: str, version: str = "0.3.4", metadata: str | None = None) -> None:
+def _write_sdist(
+    path: Path,
+    *names: str,
+    version: str = "0.3.4",
+    metadata: str | None = None,
+    directories: tuple[str, ...] = (),
+) -> None:
     prefix = f"browsertap_mcp-{version}"
     members = list(names)
     pkg_info = f"{prefix}/PKG-INFO"
     text = metadata if metadata is not None else _core_metadata(version)
     contents = {pkg_info: text.encode("utf-8")}
     with tarfile.open(path, "w:gz") as archive:
+        for name in directories:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
         for name in (*members, pkg_info):
             data = contents.get(name, b"test")
             info = tarfile.TarInfo(name)
@@ -84,36 +94,165 @@ def _write_wheel(path: Path, names, *, version: str = "0.3.4", metadata: str | N
         )
 
 
-def _wheel_names() -> list[str]:
+def _wheel_names(*, version: str = "0.3.4") -> list[str]:
     # The licence members are generated into `dist-info` rather than copied out
     # of the package tree, so they carry that prefix instead of a bare package
     # path. The gate matches on suffix, so the version in it is immaterial.
-    prefix = "browsertap_mcp-0.3.4.dist-info"
+    prefix = f"browsertap_mcp-{version}.dist-info"
     return [
         *(suffix.lstrip("/") for suffix in REQUIRED_WHEEL_SUFFIXES),
         *(f"{prefix}{suffix}" for suffix in REQUIRED_WHEEL_METADATA_SUFFIXES),
     ]
 
 
-def _sdist_names() -> list[str]:
-    prefix = "browsertap_mcp-0.3.4"
+def _sdist_names(*, version: str = "0.3.4") -> list[str]:
+    prefix = f"browsertap_mcp-{version}"
     return [f"{prefix}{suffix}" for suffix in REQUIRED_SDIST_SUFFIXES]
+
+
+def _sdist_package_names_for_wheel(
+    wheel_names: list[str], *, version: str = "0.3.4"
+) -> list[str]:
+    """Mirror installable wheel members into the source-tree layout.
+
+    ``validate_dist_dir`` intentionally compares package members only: a wheel
+    contains the installable ``browsertap_mcp/...`` path while an sdist carries
+    the same file below ``<name>-<version>/src/``.  Keep the synthetic archives
+    honest by deriving the sdist package set from the wheel fixture instead of
+    maintaining a second hand-written list that can drift.
+    """
+    prefix = f"browsertap_mcp-{version}/src/"
+    return [
+        f"{prefix}{name}"
+        for name in wheel_names
+        if name.startswith("browsertap_mcp/") and not name.endswith("/")
+    ]
 
 
 def test_distribution_contract_accepts_clean_wheel_and_sdist(tmp_path):
     wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
-    _write_wheel(wheel, ["browsertap_mcp/server.py", *_wheel_names()])
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    _write_wheel(wheel, wheel_members)
     sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
     _write_sdist(
         sdist,
-        "browsertap_mcp-0.3.4/src/browsertap_mcp/server.py",
+        *_sdist_package_names_for_wheel(wheel_members),
         *_sdist_names(),
+        # Real sdists carry directory records without a trailing slash. They
+        # are archive structure, not installable package members.
+        directories=("browsertap_mcp-0.3.4/src/browsertap_mcp/page_scripts",),
     )
 
     archives, failures = validate_dist_dir(tmp_path)
 
     assert set(archives) == {wheel, sdist}
     assert failures == {}
+
+
+def test_distribution_contract_rejects_multiple_wheels(tmp_path):
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, wheel_members)
+    extra_wheel = tmp_path / "browsertap_mcp-0.3.5-py3-none-any.whl"
+    _write_wheel(
+        extra_wheel,
+        ["browsertap_mcp/server.py", *_wheel_names(version="0.3.5")],
+        version="0.3.5",
+    )
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(wheel_members),
+        *_sdist_names(),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_dist_dir(tmp_path)
+
+    message = str(exc_info.value)
+    assert "expected exactly one wheel and one source distribution" in message
+    assert "found 2 wheel(s)" in message
+    assert wheel.name in message
+    assert extra_wheel.name in message
+
+
+def test_distribution_contract_rejects_multiple_source_distributions(tmp_path):
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, wheel_members)
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(wheel_members),
+        *_sdist_names(),
+    )
+    # The archive helpers accept both conventional sdist suffixes. Counting
+    # only ``*.tar.gz`` would let this second source archive bypass the pair
+    # contract even though ``validate_archive`` treats it as an sdist.
+    extra_sdist = tmp_path / "browsertap_mcp-0.3.5.tgz"
+    _write_sdist(
+        extra_sdist,
+        *_sdist_package_names_for_wheel(wheel_members, version="0.3.5"),
+        *_sdist_names(version="0.3.5"),
+        version="0.3.5",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_dist_dir(tmp_path)
+
+    message = str(exc_info.value)
+    assert "expected exactly one wheel and one source distribution" in message
+    assert "2 source distribution(s)" in message
+    assert sdist.name in message
+    assert extra_sdist.name in message
+
+
+def test_distribution_contract_rejects_wheel_files_left_by_a_stale_build_tree(tmp_path):
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    wheel_members = [
+        "browsertap_mcp/server.py",
+        "browsertap_mcp/page_scripts/retired.js",
+        *_wheel_names(),
+    ]
+    _write_wheel(
+        wheel,
+        wheel_members,
+    )
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(
+            [name for name in wheel_members if name != "browsertap_mcp/page_scripts/retired.js"]
+        ),
+        *_sdist_names(),
+    )
+
+    _, failures = validate_dist_dir(tmp_path)
+
+    assert failures[wheel] == [
+        "wheel contains package files absent from sdist: "
+        "browsertap_mcp/page_scripts/retired.js"
+    ]
+
+
+def test_distribution_contract_rejects_wheel_missing_a_source_package_file(tmp_path):
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
+    _write_wheel(wheel, wheel_members)
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    _write_sdist(
+        sdist,
+        *_sdist_package_names_for_wheel(wheel_members),
+        "browsertap_mcp-0.3.4/src/browsertap_mcp/new_runtime.py",
+        *_sdist_names(),
+    )
+
+    _, failures = validate_dist_dir(tmp_path)
+
+    assert failures[wheel] == [
+        "sdist contains package files absent from wheel: "
+        "browsertap_mcp/new_runtime.py"
+    ]
 
 
 def test_distribution_contract_rejects_generated_extension_config(tmp_path):
@@ -603,6 +742,29 @@ def test_manifest_ships_the_packaged_agent_skills():
     assert "include CONTRIBUTING.zh-CN.md" in manifest
 
 
+@pytest.mark.parametrize("relative, ignored", [
+    (".tmp_browser_bridge_diff.txt", True),
+    (".tmp_server_diff.txt", True),
+    ("PLAN.md", True),
+    ("JSON_PARSE_TIGHTEN.md", True),
+    ("tests/fixtures/.tmp_expected.txt", False),
+    ("tests/fixtures/PLAN.md", False),
+    ("tests/fixtures/JSON_PARSE_TIGHTEN.md", False),
+    ("src/browsertap_mcp/_version.py", False),
+    ("tests/test_http_operation_recovery.py", False),
+    ("package-lock.json", False),
+])
+def test_root_scratch_rules_preserve_public_sources_and_fixtures(tmp_path, relative, ignored):
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / ".gitignore").write_bytes((root / ".gitignore").read_bytes())
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    result = subprocess.run(
+        ["git", "-c", "core.excludesFile=", "check-ignore", "--no-index", "--", relative],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == (0 if ignored else 1), result.stderr or result.stdout
+
+
 def test_repository_hygiene_rules_do_not_hide_python_sources_or_mutate_import_paths():
     root = Path(__file__).resolve().parents[1]
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
@@ -753,7 +915,7 @@ def test_publish_workflow_cannot_fire_by_accident_and_stores_no_upload_token():
     build_stage = workflow.split("publish:", 1)[0]
     assert "python -m scripts.check_distribution dist" in build_stage
     assert "python -m twine check --strict dist/*" in build_stage
-    assert "--cov-fail-under=85" in build_stage
+    assert "--cov-fail-under=95" in build_stage
     assert build_stage.index("python -m build --wheel --sdist") < build_stage.index(
         "python -m scripts.check_distribution dist"
     )
@@ -772,3 +934,79 @@ def test_publish_workflow_defaults_to_the_index_that_can_be_undone():
     assert "default: testpypi" in inputs
     assert "repository-url: https://test.pypi.org/legacy/" in workflow
     assert "if: github.event_name == 'release' || inputs.index == 'pypi'" in workflow
+
+
+# Each entry is (why it is needed, the Chrome version that shipped it, a probe
+# that answers "does this tree still use it?"). The probes read the tree rather
+# than restating it, so the floor below is derived, not remembered.
+_CHROME_API_FLOORS = (
+    ("manifest_version 3", 88, lambda m, js: m.get("manifest_version") == 3),
+    ("chrome.scripting", 88, lambda m, js: "chrome.scripting" in js),
+    ("chrome.storage.session", 102, lambda m, js: "chrome.storage.session" in js),
+    (
+        'content_scripts[].world "MAIN"',
+        111,
+        lambda m, js: any(c.get("world") == "MAIN" for c in m["content_scripts"]),
+    ),
+    (
+        "Element.checkVisibility() options contentVisibilityAuto / "
+        "opacityProperty / visibilityProperty",
+        121,
+        lambda m, js: "contentVisibilityAuto" in js,
+    ),
+)
+
+
+def test_manifest_declares_the_chrome_floor_its_own_api_use_forces():
+    """Without this key Chrome installs the extension and then misbehaves.
+
+    An unsupported `world: "MAIN"` content script is not rejected -- it is
+    registered in the isolated world instead, so `disable_dialogs.js` patches a
+    copy of `window` that the page never sees and every dialog it was meant to
+    suppress comes back, with nothing anywhere reporting a problem. Declaring
+    the floor turns that into an install-time refusal naming the browser.
+
+    An option name has the same shape one layer in, which is why the floor is
+    121 rather than 111: unknown members of a WebIDL dictionary are dropped
+    without an error, so `checkVisibility({opacityProperty: true, ...})` on a
+    pre-121 engine returns a verdict computed without the opacity and visibility
+    checks, and hidden text reaches the model.
+
+    The number is not a preference: it is the highest floor any API this tree
+    actually calls demands, so adding a newer API without raising it fails here,
+    and raising it past what the code needs fails here too.
+
+    The **file set** is part of the gate, not scaffolding around it. This probed
+    `chrome_extension/*.js` alone, which was the whole of the browser-side code
+    until the page analysis moved into `page_scripts/` -- and the highest floor in
+    the tree then lived in a directory the gate could not see, so a manifest
+    stating 111 read as verified while the code needed 121. The guard below is
+    what turns losing a directory into a red gate rather than a quieter one.
+    """
+    package = Path(__file__).resolve().parents[1] / "src" / "browsertap_mcp"
+    extension = package / "chrome_extension"
+    manifest = json.loads((extension / "manifest.json").read_text(encoding="utf-8"))
+    sources = sorted(extension.glob("*.js"))
+    sources += sorted((package / "page_scripts").glob("*.js"))
+    directories = {path.parent.name for path in sources}
+    assert directories == {"chrome_extension", "page_scripts"}, (
+        f"the probed file set covers {sorted(directories)}; browser-side code in "
+        "any other directory is invisible to this gate, which is how the floor went "
+        "stale the first time"
+    )
+    js = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+
+    used = [(why, floor) for why, floor, probe in _CHROME_API_FLOORS if probe(manifest, js)]
+    assert used, "no probe matched, so this gate would pass vacuously"
+    binding_why, required = max(used, key=lambda item: item[1])
+
+    declared = manifest.get("minimum_chrome_version")
+    assert declared is not None, (
+        "manifest.json declares no minimum_chrome_version, so an older Chrome "
+        f"installs this extension and then silently drops {binding_why}"
+    )
+    assert declared == str(required), (
+        f"minimum_chrome_version is {declared!r} but this tree's API use forces "
+        f"{required} ({binding_why}); the floor is derived from "
+        "_CHROME_API_FLOORS, so change the code or the table, not just the number"
+    )

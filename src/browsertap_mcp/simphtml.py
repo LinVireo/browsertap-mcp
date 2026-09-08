@@ -1,643 +1,118 @@
+import difflib
+import html as html_module
 import json
 import logging
 import re
 import time
+from pathlib import Path
+from typing import Any
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 logger = logging.getLogger(__name__)
 
-js_optHTML = r'''function optHTML(text_only=false) {
-  // Silence console output during page analysis to avoid polluting console capture.
-  const _origLog = console.log, _origWarn = console.warn, _origInfo = console.info, _origDebug = console.debug;
-  console.log = console.warn = console.info = console.debug = () => {};
-  try {
-function createEnhancedDOMCopy() {  
-  const nodeInfo = new WeakMap();  
-  const ignoreTags = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'META', 'LINK', 'COLGROUP', 'COL', 'TEMPLATE', 'PARAM', 'SOURCE'];  
-  const ignoreIds = ['btap-indicator'];
-  function cloneNode(sourceNode, keep=false) {  
-    if (!sourceNode) return null;
-    if (sourceNode.nodeType === 8 ||   
-        (sourceNode.nodeType === 1 && (  
-          ignoreTags.includes(sourceNode.tagName) ||   
-          (sourceNode.id && ignoreIds.includes(sourceNode.id))  
-        ))) {  
-      return null;  
-    }  
-    if (sourceNode.nodeType === 3) return sourceNode.cloneNode(false);  
-    const clone = sourceNode.cloneNode(false);
-    if ((sourceNode.tagName === 'INPUT' || sourceNode.tagName === 'TEXTAREA') && sourceNode.value) clone.setAttribute('value', sourceNode.value);
-    if (sourceNode.tagName === 'INPUT' && (sourceNode.type === 'radio' || sourceNode.type === 'checkbox') && sourceNode.checked) clone.setAttribute('checked', '');
-    else if (sourceNode.tagName === 'SELECT' && sourceNode.value) clone.setAttribute('data-selected', sourceNode.value);  
-    try { if (sourceNode.matches && sourceNode.matches(':-webkit-autofill')) { clone.setAttribute('data-autofilled', 'true'); if (!sourceNode.value) clone.setAttribute('value', '[protected autofill value]'); } } catch(e) {}
+_PAGE_SCRIPTS = Path(__file__).resolve().parent / "page_scripts"
 
-    const isDropdown = sourceNode.classList?.contains('dropdown-menu') ||   
-             /dropdown|menu/i.test(sourceNode.className) || sourceNode.getAttribute('role') === 'menu'; 
-    const _ddItems = isDropdown ? sourceNode.querySelectorAll('a, button, [role="menuitem"], li').length : 0;
-    const isSmallDropdown = _ddItems > 0 && _ddItems <= 7 && sourceNode.textContent.length < 500;  
 
-    const childNodes = [];  
-    for (const child of sourceNode.childNodes) {  
-      const childClone = cloneNode(child, keep || isSmallDropdown);  
-      if (childClone) childNodes.push(childClone);  
-    }  
-    if (sourceNode.tagName === 'IFRAME') {
-      try {
-        const iDoc = sourceNode.contentDocument || sourceNode.contentWindow?.document;
-        if (iDoc && iDoc.body && iDoc.body.children.length > 0) {
-          const wrapper = document.createElement('div');
-          wrapper.setAttribute('data-iframe-content', sourceNode.src || '');
-          for (const ch of iDoc.body.childNodes) {
-            const c = cloneNode(ch, keep);
-            if (c) wrapper.appendChild(c);
-          }
-          if (wrapper.childNodes.length) childNodes.push(wrapper);
-        }
-      } catch(e) {}
-    }
-    if (sourceNode.shadowRoot) {
-      for (const shadowChild of sourceNode.shadowRoot.childNodes) {
-        const shadowClone = cloneNode(shadowChild, keep);
-        if (shadowClone) childNodes.push(shadowClone);
-      }
-    }
+def _load_page_script(name: str) -> str:
+    """Read one injected page script from the packaged ``page_scripts`` dir.
 
-    const rect = sourceNode.getBoundingClientRect();
-    const style = window.getComputedStyle(sourceNode);
-    const area = (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) <= 0)?0:rect.width * rect.height;
-    const renders = rect.width > 1 && rect.height > 1 &&
-                  style.display !== 'none' && style.visibility !== 'hidden' &&
-                  parseFloat(style.opacity) > 0;
-    // getBoundingClientRect is viewport-relative, so this is "within 5000px of
-    // the CURRENT scroll position", not of the document. Content past it used
-    // to vanish with no trace, and the agent would conclude the item isn't on
-    // the page. Still excluded (keeps the payload small), but now counted so
-    // the caller can say "scroll and re-scan".
-    const inRange = Math.abs(rect.left) < 5000 && Math.abs(rect.top) < 5000;
-    if (renders && !inRange) window.__btap_offscreen = (window.__btap_offscreen || 0) + 1;
-    const isVisible = (renders && inRange) || isSmallDropdown;
-    const zIndex = style.position !== 'static' ? (parseInt(style.zIndex) || 0) : 0;
-  
-    let info = {
-          rect, area, isVisible, isSmallDropdown, zIndex,
-          style: {  
-            display: style.display, visibility: style.visibility,  
-            opacity: style.opacity, position: style.position
-          }};
-    
-    const nonTextChildren = childNodes.filter(child => child.nodeType !== 3);  
-    const hasValidChildren = nonTextChildren.length > 0;  
-          
-    if (hasValidChildren) {
-      const childrenInfos = nonTextChildren.map(c => nodeInfo.get(c)).filter(i => i && i.rect && i.rect.width > 0 && i.rect.height > 0);
-      const bgAlpha = (() => {
-        const c = style.backgroundColor;
-        if (!c || c === 'transparent') return 0;
-        const m = c.match(/rgba?\([^)]+,\s*([\d.]+)\)/);
-        return m ? parseFloat(m[1]) : 1;
-      })();
-      const hasVisualBg = bgAlpha > 0.1 || style.backgroundImage !== 'none' || (style.backdropFilter && style.backdropFilter !== 'none') || style.boxShadow !== 'none';
-      
-      if (!hasVisualBg && childrenInfos.length > 0) {
-        let minL = Infinity, minT = Infinity, maxR = -Infinity, maxB = -Infinity;
-        for (const cInfo of childrenInfos) {
-          minL = Math.min(minL, cInfo.rect.left);
-          minT = Math.min(minT, cInfo.rect.top);
-          maxR = Math.max(maxR, cInfo.rect.right);
-          maxB = Math.max(maxB, cInfo.rect.bottom);
-        }
-        info.rect = { left: minL, top: minT, right: maxR, bottom: maxB, width: maxR - minL, height: maxB - minT };
-        info.area = info.rect.width * info.rect.height;
-      } else {
-        const maxC = childrenInfos.filter(i => i.isVisible).sort((a, b) => b.area - a.area)[0];
-        if (maxC && maxC.area > 10000 && (!isVisible || maxC.area > info.area * 5)) info = maxC;
-      }
-    }
-    nodeInfo.set(clone, info);
+    These scripts are the scan_page payload -- browser JavaScript that used
+    to live as string literals in this module, unreachable by eslint or
+    `node --check` in the ordinary editor. They ship as package data (see
+    `pyproject.toml`) and are read back here.
 
-    if (sourceNode.nodeType === 1 && sourceNode.tagName === 'DIV') {    
-      if (!hasValidChildren && !sourceNode.textContent.trim()) return null; 
-    }  
-    // aria-hidden + not visible = truly hidden (e.g. mobile menus), remove even if has children
-    if (sourceNode.getAttribute && sourceNode.getAttribute('aria-hidden') === 'true' && !info.isVisible) {
-      return null;
-    }
-    if (info.isVisible || hasValidChildren || keep) {  
-      childNodes.forEach(child => clone.appendChild(child));  
-      return clone;  
-    }  
-    return null;  
-  }  
-  
-  return {  
-    domCopy: cloneNode(document.body),  
-    getNodeInfo: node => nodeInfo.get(node),  
-    isVisible: node => {  
-      const info = nodeInfo.get(node);  
-      return info && info.isVisible;  
-    }  
-  };  
-}  
-window.__btap_offscreen = 0;
-const { domCopy, getNodeInfo, isVisible } = createEnhancedDOMCopy();
-if (!domCopy) {
-  if (text_only) return '';
-  const emptyRoot = document.createElement('body');
-  emptyRoot.setAttribute('data-btap-state', 'empty-document');
-  emptyRoot.insertAdjacentHTML('afterbegin', '<!--btap-base:' + location.href + '-->');
-  return emptyRoot.outerHTML;
-}
-if (text_only) {
-  const blocks = new Set(['DIV','P','H1','H2','H3','H4','H5','H6','LI','TR','SECTION','ARTICLE','HEADER','FOOTER','NAV','BLOCKQUOTE','PRE','HR','BR','DT','DD','FIGCAPTION','DETAILS','SUMMARY']);
-  domCopy.querySelectorAll('*').forEach(el => {
-    if (blocks.has(el.tagName)) el.insertAdjacentText('beforebegin', '\n');
-  });
-  domCopy.querySelectorAll('input:not([type=hidden]),textarea,select').forEach(el=>{
-    const p=[el.tagName,el.id&&'#'+el.id,el.getAttribute('name')&&'name='+el.getAttribute('name'),el.tagName==='INPUT'&&'type='+(el.getAttribute('type')||'text'),el.getAttribute('placeholder')&&'"'+el.getAttribute('placeholder')+'"',el.getAttribute('data-autofilled')&&'autofilled',el.disabled&&'disabled',el.tagName==='SELECT'&&el.getAttribute('data-selected')&&'="'+el.getAttribute('data-selected')+'"'].filter(Boolean).join(' ');
-    el.insertAdjacentText('beforebegin','\n['+p+']\n');
-  });
-  domCopy.querySelectorAll('button[disabled]').forEach(el=>el.insertAdjacentText('beforebegin','[DISABLED] '));
-  return domCopy.textContent;
-}
-const viewportArea = window.innerWidth * window.innerHeight; 
+    The trailing newline every text file carries is stripped: the call sites
+    below append `return pageOutline(...)` / `return listGroups(...)` to the
+    fragment, so a stray newline would change the payload.
+    """
+    return (_PAGE_SCRIPTS / name).read_text(encoding="utf-8").rstrip("\n")
 
-function analyzeNode(node, pPathType='main') {  
-    // 处理非元素节点和叶节点  
-    if (node.nodeType !== 1 || !node.children.length) {  
-      node.nodeType === 1 && (node.dataset.mark = 'K:leaf');  
-      return;  
-    }  
-    const pathType = (node.dataset.mark === 'K:secondary') ? 'second' : pPathType;  
-    const nodeInfoData = getNodeInfo(node);
-    if (!nodeInfoData || !nodeInfoData.rect) return;
-    const rectn = nodeInfoData.rect; 
-    if (rectn.width < window.innerWidth * 0.8 && rectn.height < window.innerHeight * 0.8) return node;
-    if (node.tagName === 'TABLE') return;
-    const children = Array.from(node.children);  
-    if (children.length === 1) {  
-      node.dataset.mark = 'K:container';  
-      return analyzeNode(children[0], pathType);  
-    }  
-    if (children.length > 10) return;
-    
-    // 获取子元素信息并排序  
-    const childrenInfo = children.map(child => {  
-      const info = getNodeInfo(child) || { rect: {}, style: {} };  
-      return { node: child, rect: info.rect, style: info.style, 
-          area: info.area, zIndex: (info.zIndex || 0), isVisible: info.isVisible };  
-    });
-    childrenInfo.sort((a, b) => b.area - a.area);  
-    
-    // 检测是划分还是覆盖  
-    const isOverlay = hasOverlap(childrenInfo);  
-    node.dataset.mark = isOverlay ? 'K:overlayParent' : 'K:partitionParent';  
-    
-    if (isOverlay) handleOverlayContainer(childrenInfo, pathType);  
-    else handlePartitionContainer(childrenInfo, pathType);  
 
-    console.log(`${isOverlay ? 'overlay' : 'partition'} container:`, node, `children: ${children.length}`);
-    console.log('children and marks:', children.map(child => ({
-      element: child,   
-      mark: child.dataset.mark || 'none',
-      info: getNodeInfo ? getNodeInfo(child) : undefined  
-    })));  
-    for (const child of children)  
-      if (!child.dataset.mark || child.dataset.mark[0] !== 'R') analyzeNode(child, pathType);  
-  }  
-  
-  // 处理划分容器  
-  function handlePartitionContainer(childrenInfo, pathType) {  
-    childrenInfo.sort((a, b) => b.area - a.area);
-    const totalArea = childrenInfo.reduce((sum, item) => sum + item.area, 0);  
-    console.log(childrenInfo[0].area / totalArea);
-    const hasMainElement = childrenInfo.length >= 1 &&   
-                          (childrenInfo[0].area / totalArea > 0.5) &&   
-                          (childrenInfo.length === 1 || childrenInfo[0].area > childrenInfo[1].area * 2);  
-    if (hasMainElement) {  
-      childrenInfo[0].node.dataset.mark = 'K:main';
-      for (let i = 1; i < childrenInfo.length; i++) {  
-        const child = childrenInfo[i];  
-        let className = (child.node.getAttribute('class') || '').toLowerCase();
-        let isSecondary = containsButton(child.node);
-        if (className.includes('nav')) isSecondary = true;
-        if (className.includes('breadcrumbs')) isSecondary = true;
-        if (className.includes('header') && className.includes('table')) isSecondary = true;
-        if (child.node.innerHTML.trim().replace(/\s+/g, '').length < 500) isSecondary = true;
-        if (child.node.textContent.trim().length > 200) isSecondary = true;  // P3: 有实质文本内容则保留
-        if (child.style.visibility === 'hidden') isSecondary = false;
-        if (isSecondary) child.node.dataset.mark = 'K:secondary';  
-        else child.node.dataset.mark = 'K:nonEssential';  
-      }  
-    } else {  
-      return; // relaxed: skip equalmany filtering, list truncation handles token budget
-      const uniqueClassNames = new Set(childrenInfo.map(item => item.node.getAttribute('class') || '')).size;  
-      const highClassNameVariety = uniqueClassNames >= childrenInfo.length * 0.8;  
-      if (pathType !== 'main' && highClassNameVariety && childrenInfo.length > 5) {
-        childrenInfo.forEach(child => child.node.dataset.mark = 'R:equalmany');  
-      } else {
-        childrenInfo.forEach(child => child.node.dataset.mark = 'K:equal');  
-      }
-    }  
-  }  
+# The page analysis. Both ask the engine for what it already knows --
+# element visibility via `Element.checkVisibility()`, repetition via
+# structural signatures -- rather than re-deriving either from tuned
+# constants.
+js_page_outline = _load_page_script("page_outline.js")
+js_list_groups = _load_page_script("list_groups.js")
 
-  function containsButton(container) {  
-    const hasStandardButton = container.querySelector('button, input[type="button"], input[type="submit"], [role="button"]') !== null;  
-    if (hasStandardButton) return true;  
-    const hasClassButton = container.querySelector('[class*="-btn"], [class*="-button"], .button, .btn, [class*="btn-"]') !== null;  
-    return hasClassButton;  
-  }   
-  
-  function handleOverlayContainer(childrenInfo, pathType) {  
-    // elementFromPoint ground truth: 让浏览器告诉我们谁在视觉最上层
-    const _efp = document.elementFromPoint(window.innerWidth/2, window.innerHeight/2);
-    if (_efp) { let _el = _efp; while (_el) { const _h = childrenInfo.find(c => c.node.id && c.node.id === _el.id); if (_h) { _h.zIndex = 9999; break; } _el = _el.parentElement; } }
-    const sorted = [...childrenInfo].sort((a, b) => b.zIndex - a.zIndex);  
-    console.log('sorted children:', sorted);
-    if (sorted.length === 0) return;  
-    
-    const top = sorted[0];  
-    const rect = top.rect;  
-    const topNode = top.node; 
-    const isComplex = top.node.querySelectorAll('input, select, textarea, button, a, [role="button"]').length >= 1;  
 
-    const textContent = topNode.textContent?.trim() || '';  
-    const textLength = textContent.length;  
-    const hasLinks = topNode.querySelectorAll('a').length > 0;  
-    const isMostlyText = textLength > 7 && !hasLinks;  
+# Which attributes survive the strip below, grouped by the reason each group
+# is worth its tokens. Four unrelated questions decide an attribute's fate --
+# is it a script hook, is it framework bookkeeping, can a caller act on it, and
+# is its value long enough to be worth shortening -- and they are asked
+# separately, because two of them are namespace rules that need no list at all.
+#
+# Keeping the whole `aria-*` namespace is the one deliberate widening: naming
+# individual members means `aria-checked`, `aria-disabled` and `aria-selected`
+# are dropped, and those are exactly the state a caller has to read before
+# deciding whether to click. A namespace covers them without growing.
+_SELECTOR_ATTRS = frozenset({'id', 'class', 'name', 'type', 'for'})
+_CONTENT_ATTRS = frozenset({'src', 'href', 'alt', 'value', 'title', 'placeholder'})
+_STATE_ATTRS = frozenset({
+    'disabled', 'checked', 'selected', 'readonly', 'required', 'multiple',
+    'contenteditable',
+})
+_SUBMIT_ATTRS = frozenset({'action', 'method', 'target'})
+_TABLE_ATTRS = frozenset({'colspan', 'rowspan'})
+_KEPT_ATTRS = (
+    _SELECTOR_ATTRS | _CONTENT_ATTRS | _STATE_ATTRS | _SUBMIT_ATTRS | _TABLE_ATTRS
+)
 
-    const centerDiff = Math.abs((rect.left + rect.width/2) - window.innerWidth/2) / window.innerWidth;  
-    const minDimensionRatio = Math.min(rect.width / window.innerWidth, rect.height / window.innerHeight);  
-    const maxDimensionRatio = Math.max(rect.width / window.innerWidth, rect.height / window.innerHeight);  
-    const isNearTop = rect.top < 50;  
-    const isDialog = (top.node.querySelector('iframe') || top.node.querySelector('button') || top.node.querySelector('input')) && centerDiff < 0.3;
+# Two caps, because the right way to shorten a value depends on whether a
+# prefix of it is usable. No prefix of a URL is -- a caller cannot navigate to
+# half of one -- so a long URL is replaced outright and the tokens go to zero.
+# Human-readable text is the opposite: the opening is the informative part, so
+# it is kept and the cut is marked.
+_URL_CAP = 30
+_URL_ATTRS = frozenset({'src', 'action'})
+_TEXT_CAP = 100
+_TEXT_KEEP = 50
+_ELIDED = ' ...'
+# `data-*` is kept because a page's own hooks are often the only stable
+# selector a caller has, but only while the value stays short enough to read.
+_DATA_CAP = 20
 
-    if (isComplex && centerDiff < 0.2 && 
-        ((minDimensionRatio > 0.2 && rect.width/window.innerWidth < 0.98) || minDimensionRatio > 0.95)) {  
-      top.node.dataset.mark = 'K:mainInteractive';  
-       sorted.slice(1).forEach(e => {
-          if ((parseInt(e.zIndex)||0) <= (parseInt(sorted[0].zIndex)||0)) {
-              e.node.dataset.mark = 'R:covered';
-          } else {
-              e.node.dataset.mark = 'K:noncovered';
-          }
-      });
-    } else {
-      if (isComplex && isNearTop && maxDimensionRatio > 0.4 && top.isVisible) {
-        top.node.dataset.mark = 'K:topBar';
-      } else if (isMostlyText || isComplex || isDialog) {  
-        topNode.dataset.mark = 'K:messageContent'; 
-      } else {  
-        topNode.dataset.mark = 'R:floatingAd'; 
-      }  
-      const rest = sorted.slice(1);  
-      rest.length && (!hasOverlap(rest) ? handlePartitionContainer(rest, pathType) : handleOverlayContainer(rest, pathType));  
-    } 
-  }  
-    
-  function hasOverlap(items) {  
-    return items.some((a, i) =>   
-      items.slice(i+1).some(b => {  
-        const r1 = a.rect, r2 = b.rect;  
-        if (!r1.width || !r2.width || !r1.height || !r2.height) {return false;}
-        const epsilon = 1;
-        const x1 = r1.x !== undefined ? r1.x : r1.left;
-        const y1 = r1.y !== undefined ? r1.y : r1.top;
-        const x2 = r2.x !== undefined ? r2.x : r2.left;
-        const y2 = r2.y !== undefined ? r2.y : r2.top;
-        return !(x1 + r1.width <= x2 + epsilon || x1 >= x2 + r2.width - epsilon || 
-            y1 + r1.height <= y2 + epsilon || y1 >= y2 + r2.height - epsilon
-        );
-      })
-    );  
-}
 
-// Hoist top 1-2 deep fixed dialogs to body level for overlay detection
-const _fc = [...domCopy.querySelectorAll('*')].filter(el => {
-  if (el.parentNode === domCopy) return false;
-  const info = getNodeInfo(el);
-  if (!info?.rect || info.style.position !== 'fixed') return false;
-  const r = info.rect, cover = (r.width * r.height) / viewportArea;
-  const cd = Math.abs((r.left + r.width/2) - window.innerWidth/2) / window.innerWidth;
-  return cover > 0.15 && cover < 1.0 && cd < 0.3 && el.querySelector('button, input, a, [role="button"], iframe');
-}).filter((el, _, arr) => !arr.some(o => o !== el && o.contains(el)))
-  .sort((a, b) => (getNodeInfo(b).rect.width * getNodeInfo(b).rect.height) - (getNodeInfo(a).rect.width * getNodeInfo(a).rect.height))
-  .slice(0, 2);
-_fc.forEach(el => { const r = getNodeInfo(el).rect; console.log('[simphtml] Hoisted fixed dialog:', el.tagName + (el.id ? '#'+el.id : '') + (el.className ? '.'+String(el.className).split(' ')[0] : ''), Math.round(r.width)+'x'+Math.round(r.height), Math.round(100*r.width*r.height/viewportArea)+'%'); el.parentNode.removeChild(el); domCopy.appendChild(el); });
-const result = analyzeNode(domCopy); 
-domCopy.querySelectorAll('[data-mark^="R:"]').forEach(el=>el.parentNode?.removeChild(el));  
-let root = domCopy;  
-while (root.children.length === 1) {  
-  root = root.children[0];  
-}  
-for (let ii = 0; ii < 3; ii++) {
-  root.querySelectorAll('div').forEach(div => (!div.textContent.trim() && div.children.length === 0) && div.remove());
-}
-root.querySelectorAll('[data-mark]').forEach(e => e.removeAttribute('data-mark'));  
-root.removeAttribute('data-mark');
-root.querySelectorAll('iframe').forEach(f => {
-  if (f.children.length) {
-    const d = document.createElement('div');
-    for (const a of f.attributes) d.setAttribute(a.name, a.value);
-    d.setAttribute('data-tag', 'iframe');
-    while (f.firstChild) d.appendChild(f.firstChild);
-    f.parentNode.replaceChild(d, f);
-  }
-});
-// Emit the page URL so relative hrefs can be resolved to absolute ones when
-// they get turned into refs. Comments survive outerHTML and are stripped again
-// before the HTML reaches the caller.
-root.insertAdjacentHTML('afterbegin', '<!--btap-base:' + location.href + '-->');
-// Tell the caller what the ±5000px viewport clamp dropped, plus where we are
-// in the document, so "nothing found" can be told apart from "not scrolled to
-// it yet". A comment survives outerHTML and costs nothing to parse.
-if (window.__btap_offscreen > 0) {
-  const de = document.documentElement;
-  root.insertAdjacentHTML('afterbegin',
-    '<!--btap-offscreen:' + window.__btap_offscreen +
-    ' scrollY:' + Math.round(window.scrollY) +
-    ' viewH:' + window.innerHeight +
-    ' docH:' + Math.max(de.scrollHeight, document.body.scrollHeight) + '-->');
-}
-return root.outerHTML;
-  } finally {
-    console.log = _origLog; console.warn = _origWarn; console.info = _origInfo; console.debug = _origDebug;
-  }
-}
-optHTML()'''
+def _keeps_attribute(name):
+    """Whether an attribute survives, decided by rule rather than by a list."""
+    if name.startswith('on'):
+        return False  # a script hook; there is no reader for it here
+    if name.startswith('data-v'):
+        return False  # scoped-style bookkeeping, one per element, no meaning
+    if name.startswith('data-'):
+        return True  # capped by length in `_shortened`
+    return name == 'role' or name.startswith('aria-') or name in _KEPT_ATTRS
 
-js_findMainList = r'''function findMainList(startElement = null) {
-        const _fmlOrigLog = console.log; console.log = () => {};
-        try {
-        const root = startElement || document.body;
-        if (!root) return [];
-        const MIN_CHILDREN = 8;
-        const MAX_CONTAINERS = 20;
 
-        // 全局扫描：收集候选容器，按 l1 + l2*0.1 排序（l2=孙子元素数，捕获表格等多层结构）
-        const candidates = [];
-        const allEls = root.querySelectorAll('*');
-        for (const node of allEls) {
-            if (node.closest('svg')) continue;
-            const l1 = node.children.length;
-            if (l1 < 5) continue;
-            let l2 = 0;
-            for (const child of node.children) l2 += child.children.length;
-            const score = l1 + l2 * 0.1;
-            if (score >= MIN_CHILDREN) candidates.push({node, score});
-        }
-        candidates.sort((a, b) => b.score - a.score);
-        const toProcess = candidates.slice(0, MAX_CONTAINERS).map(c => c.node);
+def _shortened(name, value):
+    """The value trimmed to its cap, or unchanged when it is already small."""
+    if name in _URL_ATTRS and len(value) > _URL_CAP:
+        return '__url__'
+    if name in _CONTENT_ATTRS and len(value) > _TEXT_CAP:
+        return value[:_TEXT_KEEP] + _ELIDED
+    if name.startswith('data-') and len(value) > _DATA_CAP:
+        return '__data__'
+    return value
 
-        // 对每个容器找候选组并评分
-        let allCandidates = [];
-        for (const container of toProcess) {
-            const topGroups = findTopGroups(container, 3);
-            for (const groupInfo of topGroups) {
-                const items = findMatchingElements(container, groupInfo.selector);
-                if (items.length >= 5) {
-                    const score = scoreContainer(container, items) + groupInfo.score;
-                    if (score >= 30) {
-                        allCandidates.push({ container, selector: groupInfo.selector, items, score });
-                    }
-                }
-            }
-        }
 
-        // 按分数降序排列
-        allCandidates.sort((a, b) => b.score - a.score);
+def _href_ref(url, link_refs, base_url):
+    """A long href as a short '#r7' ref, recording the real URL out of band."""
+    if link_refs is None:
+        return '__link__'
+    if base_url:
+        # Store absolute URLs: a ref of '/en-US/docs/x' is not something
+        # open_url can navigate to.
+        try:
+            url = urljoin(base_url, url)
+        except Exception:  # noqa: S110 - malformed base URLs fall back to the original href
+            pass
+    ref = link_refs.get(url)
+    if ref is None:
+        ref = f"r{len(link_refs) + 1}"
+        link_refs[url] = ref
+    return f"#{ref}"
 
-        // 去重：移除与更高分候选重叠超50%的结果
-        const kept = [];
-        for (const cand of allCandidates) {
-            let dominated = false;
-            for (const k of kept) {
-                if (k.container.contains(cand.container) || cand.container.contains(k.container)) {
-                    const kSet = new Set(k.items);
-                    const overlap = cand.items.filter(it => kSet.has(it)).length;
-                    if (overlap > cand.items.length * 0.5) { dominated = true; break; }
-                }
-            }
-            if (!dominated) kept.push(cand);
-        }
-
-        function describeResult(container, items, selector, score) {
-            if(container&&!container.id)container.id='_ljq'+(window._lci=(window._lci||0)+1);
-            const cTag = container ? container.tagName : null;
-            const cId = container ? (container.id || '') : '';
-            const cClass = container ? (String(container.className || '').trim()) : '';
-            const result = {
-                containerTag: cTag, containerId: cId, containerClass: cClass,
-                itemCount: items.length,
-            };
-            let prefix = '';
-            if (cId) prefix = '#' + CSS.escape(cId);
-            if (selector) result.selector = prefix ? (prefix + ' > ' + selector) : selector;
-            if (score !== undefined) result.score = score;
-            if (items.length > 0) {
-                result.firstItemPreview = items[0].outerHTML.substring(0, 200);
-                result.itemTags = items.slice(0, 10).map(el => el.tagName + (el.className ? '.' + String(el.className).trim().split(/\s+/)[0] : ''));
-            }
-            return result;
-        }
-
-        if (kept.length === 0) return [];
-
-        return kept.map(c => describeResult(c.container, c.items, c.selector, c.score));
-        } finally {
-            console.log = _fmlOrigLog;
-        }
-    }
-    
-    function findTopGroups(container, limit) {
-        const children = Array.from(container.children).filter(c => !c.closest('svg'));
-        const totalChildren = children.length;
-        if (totalChildren < 3) return [];
-
-        const minGroupSize = Math.max(3, Math.floor(totalChildren * 0.2));
-        const groups = [];
-
-        // 统计标签和类名
-        const tagFreq = {}, classFreq = {}, tagMap = {}, classMap = {};
-
-        children.forEach(child => {
-            // 统计标签
-            const tag = child.tagName.toLowerCase();
-            if (tag === "td") return;
-            tagFreq[tag] = (tagFreq[tag] || 0) + 1;
-            if (!tagMap[tag]) tagMap[tag] = [];
-            tagMap[tag].push(child);
-
-            // 统计类名
-            if (child.className) {
-                child.className.trim().split(/\s+/).forEach(cls => {
-                    if (cls) {
-                        classFreq[cls] = (classFreq[cls] || 0) + 1;
-                        if (!classMap[cls]) classMap[cls] = [];
-                        classMap[cls].push(child);
-                    }
-                });
-            }
-        });
-
-        // 评分函数
-        const scoreGroup = (selector, elements) => {
-            const coverage = elements.length / totalChildren;
-            let specificity = selector.startsWith('.')
-            ? (0.6 + (selector.match(/\./g).length - 1) * 0.1) // 类选择器
-            : (selector.includes('.')
-               ? (0.7 + (selector.match(/\./g).length) * 0.1) // 标签+类
-               : 0.3); // 纯标签
-            return (coverage * 0.5) + (specificity * 0.5);
-        };
-
-        // 添加标签组
-        Object.keys(tagFreq).forEach(tag => {
-            if (tag !== "div" && tagFreq[tag] >= minGroupSize) {
-                groups.push({
-                    selector: tag,
-                    elements: tagMap[tag],
-                    score: scoreGroup(tag, tagMap[tag]) - 0.5
-                });
-            }
-        });
-
-        // 添加类组
-        Object.keys(classFreq).forEach(cls => {
-            if (classFreq[cls] >= minGroupSize) {
-                const selector = '.' + CSS.escape(cls);
-                groups.push({
-                    selector,
-                    elements: classMap[cls],
-                    score: scoreGroup(selector, classMap[cls])
-                });
-            }
-        });
-        // 添加标签+类组合
-        const topTags = Object.keys(tagFreq).filter(t => tagFreq[t] >= minGroupSize).slice(0, 3);
-        const topClasses = Object.keys(classFreq).filter(c => classFreq[c] >= minGroupSize).sort((a, b) => classFreq[b] - classFreq[a]).slice(0, 3);
-
-        // 标签+类
-        topTags.forEach(tag => {
-            topClasses.forEach(cls => {
-                const elements = children.filter(el =>
-                                                 el.tagName.toLowerCase() === tag &&
-                                                 el.className && el.className.split(/\s+/).includes(cls)
-                                                );
-
-                if (elements.length >= minGroupSize) {
-                    const selector = tag + '.' + CSS.escape(cls);
-                    groups.push({selector, elements, score: scoreGroup(selector, elements)});
-                }
-            });
-        });
-
-        // 多类组合
-        for (let i = 0; i < topClasses.length; i++) {
-            for (let j = i + 1; j < topClasses.length; j++) {
-                const elements = children.filter(el =>
-                                                 el.className && el.className.split(/\s+/).includes(topClasses[i]) && el.className.split(/\s+/).includes(topClasses[j]));
-
-                if (elements.length >= minGroupSize) {
-                    const selector = '.' + CSS.escape(topClasses[i]) + '.' + CSS.escape(topClasses[j]);
-                    groups.push({selector, elements,score: scoreGroup(selector, elements)});
-                }
-            }
-        }
-        // 返回得分最高的N个组
-        return groups.sort((a, b) => b.score - a.score).slice(0, limit);
-    }
-
-    function findMatchingElements(container, selector) {
-        try {
-            return Array.from(container.querySelectorAll(selector));
-        } catch (e) {
-            // 处理无效选择器
-            console.error('Invalid selector:', selector, e);
-            return [];
-        }
-    }
-
-    function scoreContainer(container, items) {
-        if (!container || items.length < 3) return 0;
-        // 1. 计算基础面积数据
-        const containerRect = container.getBoundingClientRect();
-        const containerArea = containerRect.width * containerRect.height;
-        if (containerArea < 10000) return 0; // 容器太小
-
-        // 收集列表项面积数据
-        const itemAreas = [];
-        let totalItemArea = 0;
-        let visibleItems = 0;
-
-        items.forEach(item => {
-            const rect = item.getBoundingClientRect();
-            const area = rect.width * rect.height;
-            if (area > 0) {
-                totalItemArea += area;
-                itemAreas.push(area);
-                visibleItems++;
-            }
-        });
-        // 如果可见项太少，返回低分
-        if (visibleItems < 3) return 0;
-        // 防止异常值：确保面积不超过容器
-        totalItemArea = Math.min(totalItemArea, containerArea * 0.98);
-        const areaRatio = totalItemArea / containerArea;
-        // 3. 计算各项评分 - 使用线性插值而非阶梯
-        // 3.2 面积比评分 - 最多40分，连续曲线
-        // 使用sigmoid函数让评分更平滑
-        const areaScore = 40 / (1 + Math.exp(-12 * (areaRatio - 0.4)));
-
-        // 3.3 均匀性评分 - 最多20分，连续曲线
-        let uniformityScore = 0;
-        if (itemAreas.length >= 3) {
-            const mean = itemAreas.reduce((sum, area) => sum + area, 0) / itemAreas.length;
-            const variance = itemAreas.reduce((sum, area) => sum + Math.pow(area - mean, 2), 0) / itemAreas.length;
-            const cv = mean > 0 ? Math.sqrt(variance) / mean : 1;
-            // 指数衰减函数，cv越小分数越高
-            uniformityScore = 20 * Math.exp(-2.5 * cv);
-        }
-
-        const baseScore = Math.log2(visibleItems) * 5 + Math.floor(visibleItems / 5) * 0.25;
-        const rawCountScore = Math.min(40, baseScore);
-        const countScore = rawCountScore * Math.max(0.1, uniformityScore / 20);
-
-        // 3.4 容器尺寸评分 - 最多15分，连续曲线
-        const viewportArea = window.innerWidth * window.innerHeight;
-        const containerViewportRatio = containerArea / viewportArea;
-        const sizeScore = 2 * (1 - 1/(1 + Math.exp(-10 * (containerViewportRatio - 0.25))));  
-
-        let layoutScore = 0;
-        if (items.length >= 3) {
-            // 坐标分组并计算行列数
-            const uniqueRows = new Set(items.map(item => Math.round(item.getBoundingClientRect().top / 5) * 5)).size;
-            const uniqueCols = new Set(items.map(item => Math.round(item.getBoundingClientRect().left / 5) * 5)).size;
-            // 如果是单行或单列，直接给满分；否则评估网格质量
-            if (uniqueRows === 1 || uniqueCols === 1) { layoutScore = 20;
-            } else {
-                const coverage = Math.min(1, items.length / (uniqueRows * uniqueCols));
-                const efficiency = Math.max(0, 1 - (uniqueRows + uniqueCols) / (2 * items.length));
-                layoutScore = 20 * (0.7 * coverage + 0.3 * efficiency);
-            }
-        }
-
-        // 总分 - 仍然保持100分左右的总分
-        const totalScore = countScore + areaScore + uniformityScore + layoutScore + sizeScore;
-
-        if (totalScore > 100)
-            console.log(container, {
-                total: totalScore.toFixed(2),
-                count: countScore.toFixed(2),
-                areaRatio: areaRatio.toFixed(2),
-                area: areaScore.toFixed(2),
-                uniformity: uniformityScore.toFixed(2),
-                size: sizeScore.toFixed(2),
-                layout: layoutScore.toFixed(2)
-            });
-
-        return totalScore;
-    }'''
 
 def optimize_html_for_tokens(html, link_refs=None, base_url=None):
     """Shrink HTML for token budget.
@@ -648,59 +123,74 @@ def optimize_html_for_tokens(html, link_refs=None, base_url=None):
     them. Now each long href becomes a short '#r7'-style ref and the real URL
     is handed back out of band, so the text stays small AND addressable.
     """
-    if type(html) is str: soup = BeautifulSoup(html, 'html.parser')
-    else: soup = html
+    soup = BeautifulSoup(html, 'html.parser') if isinstance(html, str) else html
     for svg in soup.find_all('svg'):
-        svg.clear(); svg.attrs = {}
-    [tag.attrs.pop('style', None) for tag in soup.find_all(True)]
+        # An inline icon's path data is pure noise to a reader, and there can be
+        # hundreds of them. The tag stays so the layout still reads.
+        svg.clear()
+        svg.attrs = {}
     for tag in soup.find_all(True):
-        if tag.has_attr('src'):
-            if tag['src'].startswith('data:'): tag['src'] = '__img__'
-            elif len(tag['src']) > 30: tag['src'] = '__url__'
-        if tag.has_attr('href') and len(tag['href']) > 30:
-            if link_refs is None:
-                tag['href'] = '__link__'
-            else:
-                url = tag['href']
-                if base_url:
-                    # Store absolute URLs: a ref of '/en-US/docs/x' is not
-                    # something open_url can navigate to.
-                    try: url = urljoin(base_url, url)
-                    except Exception: pass
-                ref = link_refs.get(url)
-                if ref is None:
-                    ref = f"r{len(link_refs) + 1}"
-                    link_refs[url] = ref
-                tag['href'] = f"#{ref}"
-        if tag.has_attr('action') and len(tag['action']) > 30: tag['action'] = '__url__'
-        for a in ('value', 'title', 'alt'):
-            if tag.has_attr(a) and isinstance(tag[a], str) and len(tag[a]) > 100: tag[a] = tag[a][:50] + ' ...'
-        for attr in list(tag.attrs.keys()):  
-            if attr not in ['id', 'class', 'name', 'src', 'href', 'alt', 'value', 'type', 'placeholder',
-                          'disabled', 'checked', 'selected', 'readonly', 'required', 'multiple',
-                          'role', 'aria-label', 'aria-expanded', 'aria-hidden', 'contenteditable',
-                          'title', 'for', 'action', 'method', 'target', 'colspan', 'rowspan']:  
-                if attr.startswith('data-v'): tag.attrs.pop(attr, None)
-                elif attr.startswith('data-') and isinstance(tag[attr], str) and len(tag[attr]) > 20:  
-                    tag[attr] = '__data__'  
-                elif not attr.startswith('data-'): tag.attrs.pop(attr, None)  
+        for name in [name for name in tag.attrs if not _keeps_attribute(name)]:
+            del tag.attrs[name]
+        src = tag.get('src')
+        if isinstance(src, str) and src.startswith('data:'):
+            # Length is the wrong question for these: a short data: URL is
+            # still an image nobody can read, and a long one is megabytes.
+            tag['src'] = '__img__'
+        href = tag.get('href')
+        if isinstance(href, str) and len(href) > _URL_CAP:
+            # Handled before the loop below and then skipped by it: an href is
+            # the one long value a caller still has to be able to reach, so it
+            # becomes a ref rather than being trimmed or blanked.
+            tag['href'] = _href_ref(href, link_refs, base_url)
+        for name, value in list(tag.attrs.items()):
+            # `class` arrives as a list, and no cap here applies to one.
+            if name != 'href' and isinstance(value, str):
+                tag[name] = _shortened(name, value)
     return soup
 
 
-temp_monitor_js = """function startStrMonitor(interval) {  
-        if (window._tm && window._tm.id) clearInterval(window._tm.id);  
-        window._tm = {extract: () => {  
-            const texts = new Set(), walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);  
-            let node, t, s; while (node = walker.nextNode())   
-                ((t = node.textContent.trim()) && t.length > 10 && !(s = t.substring(0, 20)).includes('_')) && texts.add(s);  
-            return texts;  
-        }}; 
-        window._tm.init = window._tm.extract();  
-        window._tm.all = new Set();  
-        window._tm.id = setInterval(() => window._tm.extract().forEach(t => window._tm.all.add(t)), interval);  
-    }  
-    startStrMonitor(450);  
-"""  
+# Upper bound on how long the transient-text monitor may keep ticking after
+# the call that started it has given up. The three paths that skip the Python
+# cleanup below -- an early return on a no_response ``kind``, an exhausted
+# deadline, and a failed roundtrip -- are precisely the ones where the page
+# can no longer be reached, so the stop has to be inside the injected script.
+# Without it a 450ms full-document TreeWalker runs on the user's real page for
+# as long as the document lives.
+TEMP_MONITOR_TTL_GRACE = 5.0
+
+
+def build_temp_monitor_js(ttl_seconds, interval_ms=450):
+    """Return the monitor script, wired to stop itself after ``ttl_seconds``.
+
+    The interval captures its own handle rather than reading ``.id`` back off
+    the global: a monitor that has already been replaced by a newer one must
+    clear *itself* and leave the newcomer alone.
+    """
+    ttl_ms = max(0, int(float(ttl_seconds) * 1000))
+    return """function startStrMonitor(interval, lifetimeMs) {
+        if (window.__btap_tm && window.__btap_tm.id) clearInterval(window.__btap_tm.id);
+        const expires = Date.now() + lifetimeMs;
+        window.__btap_tm = {extract: () => {
+            const texts = new Set(), walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node, t, s; while (node = walker.nextNode())
+                ((t = node.textContent.trim()) && t.length > 10 && !(s = t.substring(0, 20)).includes('_')) && texts.add(s);
+            return texts;
+        }};
+        window.__btap_tm.init = window.__btap_tm.extract();
+        window.__btap_tm.all = new Set();
+        const id = setInterval(() => {
+            const m = window.__btap_tm;
+            if (!m || m.id !== id) { clearInterval(id); return; }
+            if (Date.now() > expires) { clearInterval(id); delete window.__btap_tm; return; }
+            m.extract().forEach(t => m.all.add(t));
+        }, interval);
+        window.__btap_tm.id = id;
+    }
+    startStrMonitor(%d, %d);
+""" % (int(interval_ms), ttl_ms)
+
+
 def _execute_in_session(driver, script, timeout, session_id=None, **kwargs):
     call_kwargs = {"timeout": timeout, **kwargs}
     if session_id is not None:
@@ -708,29 +198,71 @@ def _execute_in_session(driver, script, timeout, session_id=None, **kwargs):
     return driver.execute_js(script, **call_kwargs)
 
 
-def start_temp_monitor(driver, timeout=15, session_id=None):
-    try: _execute_in_session(driver, temp_monitor_js, timeout, session_id=session_id)
-    except Exception: pass
+def start_temp_monitor(driver, timeout=15, session_id=None, ttl=None):
+    """Start the transient-text monitor, bounded by its own lifetime.
+
+    ``ttl`` defaults to the roundtrip budget plus a grace window, so a monitor
+    whose reader never comes back stops on its own instead of ticking for the
+    life of the page.
+    """
+    if ttl is None: ttl = float(timeout) + TEMP_MONITOR_TTL_GRACE
+    try: _execute_in_session(driver, build_temp_monitor_js(ttl), timeout, session_id=session_id)
+    except Exception: pass  # noqa: S110 - monitor cleanup is best-effort
+
+
+# Stopping the monitor and reading what it collected are two different needs: the
+# paths with no reader still have to stop the ticking, and the path that reads it
+# must not leave the monitor behind. Both drop the global *before* touching the
+# DOM, so a throw inside the walk cannot leave a page whose global says a monitor
+# is running while its interval is already gone. A tick that fires in between
+# clears itself, because the interval callback compares its own captured handle
+# against the global (`build_temp_monitor_js`).
+_MONITOR_DISCARD_JS = """function discardStrMonitor() {
+    const monitor = window.__btap_tm;
+    if (!monitor) return false;
+    delete window.__btap_tm;
+    clearInterval(monitor.id);
+    return true;
+}
+discardStrMonitor();
+"""
+
+# What a transient *is*: text the page showed at some point inside the window and
+# is no longer showing. Both halves of the filter follow from that -- text in the
+# opening snapshot was never new, and text still on the page is not transient and
+# not lost either, since it is in the HTML and in the diff the caller gets beside
+# this list. Reporting it here instead would be actively misleading: an agent
+# reading `transients: ["Email is required"]` cannot tell whether the message is
+# still on screen, which is the one thing it needs to know.
+_MONITOR_READ_JS = """function readStrMonitor() {
+    const monitor = window.__btap_tm;
+    if (!monitor) return [];
+    delete window.__btap_tm;
+    clearInterval(monitor.id);
+    const present = monitor.extract();
+    return [...monitor.all].filter(t => !monitor.init.has(t) && !present.has(t));
+}
+readStrMonitor();
+"""
+
+
+def stop_temp_monitor(driver, timeout=15, session_id=None):
+    """Clear the monitor without paying for its payload.
+
+    Used by the return paths that have no reader for the transients but did
+    start the monitor; the collected text is discarded, the interval is not.
+    """
+    try: _execute_in_session(driver, _MONITOR_DISCARD_JS, timeout, session_id=session_id)
+    except Exception as e: logger.debug("Temporary monitor stop failed: %s", e)
 
 def get_temp_texts(driver, timeout=15, session_id=None):
-    js = """function stopStrMonitor() {  
-        if (!window._tm) return [];  
-        clearInterval(window._tm.id);  
-        const final = window._tm.extract();  
-        const newlySeen = [...window._tm.all].filter(t => !window._tm.init.has(t));
-        let result;
-        if (newlySeen.length < 8) {
-            result = newlySeen;
-        } else {
-            result = newlySeen.filter(t => !final.has(t));
-        }
-        delete window._tm;  
-        return result;  
-        }  
-        stopStrMonitor();  
-    """  
-    try: return list(set(_execute_in_session(
-        driver, js, timeout, session_id=session_id).get('data', [])))
+    """Stop the monitor and return the text that came and went while it ran."""
+    try:
+        # `dict.fromkeys` rather than `set`: the page walks its text nodes in
+        # document order and that order is worth keeping, where a set would hand
+        # the agent the same toasts in an order that changes between runs.
+        return list(dict.fromkeys(_execute_in_session(
+            driver, _MONITOR_READ_JS, timeout, session_id=session_id).get('data', [])))
     except Exception as e:
         logger.debug("Temporary monitor read failed: %s", e)
         return []
@@ -747,6 +279,25 @@ class PageUnavailable(RuntimeError):
     diagnosis of WHY it didn't answer.
     """
 
+def _collapsed_text(page):
+    """One space between words, at most one blank line between blocks.
+
+    Done line by line rather than by pattern, because ``str.split`` already
+    answers "what are the words on this line" for every kind of whitespace. A
+    pass tuned to runs of the space character leaves a tab between two table
+    cells and a trailing space after a heading exactly where they were, and text
+    lifted off a real page is full of both.
+    """
+    kept: list[str] = []
+    for line in page.split('\n'):
+        text = ' '.join(line.split())
+        # A blank line survives only if the last kept line was not blank: the
+        # break between two blocks is information, the size of the gap is not.
+        if text or (kept and kept[-1]):
+            kept.append(text)
+    return '\n'.join(kept).strip()
+
+
 def get_main_block(driver, extra_js="", text_only=False, timeout=15,
                    allow_failover=False, session_id=None):
     # Default is no failover. Reading has no side effects, but silently reading
@@ -754,11 +305,19 @@ def get_main_block(driver, extra_js="", text_only=False, timeout=15,
     # agent gets a page it never requested and no indication of the swap.
     raw = _execute_in_session(
         driver,
-        f"{extra_js}\n{js_optHTML}\nreturn optHTML({str(text_only).lower()});",
+        f"{extra_js}\n{js_page_outline}\nreturn pageOutline({str(text_only).lower()});",
         timeout,
         session_id=session_id,
         allow_failover=allow_failover,
     )
+    page = _page_from_response(raw)
+    if text_only:
+        return _collapsed_text(page)
+    return page
+
+
+def _page_from_response(raw):
+    """Return a page payload, preserving the bridge's no-response diagnosis."""
     # A timeout carries no 'data' at all, only 'result' with the reason.
     if 'data' not in raw:
         reason = raw.get('result') or 'no data returned'
@@ -768,66 +327,227 @@ def get_main_block(driver, extra_js="", text_only=False, timeout=15,
     if page is None:
         raise PageUnavailable(
             "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
-    if text_only:
-        page = re.sub(r' {2,}', ' ', page)           # 连续空格→单空格
-        page = re.sub(r'^ +', '', page, flags=re.M)   # 去行首空格
-        page = re.sub(r'(\n\s*){3,}', '\n\n', page)   # 3+空行→1空行
-        return page.strip()
     return page
 
+
+_CUTLIST_PAYLOAD_MARK = "__btap_cutlist_payload__"
+_CUTLIST_FALLBACK = object()
+
+
+def _get_cutlist_page(driver, extra_js, timeout, session_id):
+    """Read repeated groups and the page outline in one browser roundtrip."""
+    raw = _execute_in_session(
+        driver,
+        (
+            f"{js_list_groups}\n"
+            "const __btapCutlistGroups = listGroups(document.body);\n"
+            f"{extra_js}\n{js_page_outline}\n"
+            "return {"
+            f"{json.dumps(_CUTLIST_PAYLOAD_MARK)}: true, "
+            "groups: __btapCutlistGroups, page: pageOutline(false)"
+            "};"
+        ),
+        timeout,
+        session_id=session_id,
+    )
+    payload = _page_from_response(raw)
+    if not (
+        isinstance(payload, dict)
+        and payload.get(_CUTLIST_PAYLOAD_MARK) is True
+    ):
+        # An unmarked list or dict is the response shape of an older
+        # bridge/test double answering the legacy listGroups-only payload.
+        return payload, _CUTLIST_FALLBACK
+    page = payload.get('page')
+    if page is None:
+        raise PageUnavailable(
+            "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
+    return payload.get('groups', []), page
+
+TOP_CHANGE_MAXCHARS = 2000
+
+
+def _element_signature(element):
+    """One line standing for an element's own identity, children excluded.
+
+    Attributes are sorted so the line does not depend on the order the parser
+    happened to see them in, and only the element's *direct* text is included --
+    a descendant's text belongs to that descendant's own line, and counting it
+    here would make every ancestor of a changed node look changed too.
+    """
+    own_text = ' '.join(
+        stripped
+        for node in element.children
+        if isinstance(node, NavigableString) and (stripped := str(node).strip())
+    )
+    return f"{element.name}\x00{sorted(element.attrs.items())}\x00{own_text}"
+
+
 def find_changed_elements(before_html, after_html):
-    before_soup = BeautifulSoup(before_html, 'html.parser')
-    after_soup = BeautifulSoup(after_html, 'html.parser')
-    def direct_text(el):
-        return ''.join(t.strip() for t in el.find_all(string=True, recursive=False)).strip()
-    def get_sig(el):
-        attrs = {k:v for k,v in el.attrs.items() if k != 'data-track-id'}
-        return f"{el.name}:{attrs}:{direct_text(el)}"
-    def build_sigs(soup):
-        result = {}
-        for el in soup.find_all(True):
-            sig = get_sig(el)
-            result.setdefault(sig, []).append(el)
-        return result
-    before_sigs, after_sigs = build_sigs(before_soup), build_sigs(after_soup)
-    changed = []
-    for sig, els in after_sigs.items():
-        if sig not in before_sigs: changed.extend(els)
-        elif len(els) > len(before_sigs[sig]): changed.extend(els[:len(els) - len(before_sigs[sig])])
-    if len(changed) == 0 and str(before_soup) != str(after_soup):
-        before_els, after_els = before_soup.find_all(True), after_soup.find_all(True)
-        for i in range(min(len(before_els), len(after_els))):
-            if get_sig(before_els[i]) != get_sig(after_els[i]): changed.append(after_els[i])
-    # 变化边界: parent不在changed中的元素
-    cids = set(id(el) for el in changed)
-    boundaries = [el for el in changed if el.parent is None or id(el.parent) not in cids]
-    top = max(boundaries, key=lambda el: len(str(el))) if boundaries else None
-    result = {"changed": len(changed)}
-    if top:
-        h = str(top)
-        result["top_change"] = h if len(h) <= 2000 else h[:2000] + '...[TRUNCATED]'
-    return result
+    """Summarise what the page gained or lost between two HTML snapshots.
+
+    The alignment is `difflib`'s. Each element becomes one signature line, the
+    two streams are aligned once, and every opcode that is not `equal` is a
+    change -- so an insertion, a deletion and a reorder all fall out of the same
+    walk. Tallying how many copies of each signature the `after` side holds
+    cannot do that: it sees additions only, needs a second positional pass for
+    the reorder case, and still reports a pure deletion as zero changes.
+
+    `top_change` is the longest changed element, and nothing has to filter for
+    the outermost one first: an element's serialisation contains its children's,
+    so a changed element that sits inside another changed element is strictly
+    shorter than it and can never be the maximum.
+    """
+    before = BeautifulSoup(before_html, 'html.parser').find_all(True)
+    after = BeautifulSoup(after_html, 'html.parser').find_all(True)
+    # autojunk would treat a signature shared by 1% of a long page as noise and
+    # stop matching it, which on a list page is most of the document.
+    matcher = difflib.SequenceMatcher(
+        None,
+        [_element_signature(element) for element in before],
+        [_element_signature(element) for element in after],
+        autojunk=False,
+    )
+    appeared, vanished = [], 0
+    for opcode, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if opcode == 'equal':
+            continue
+        appeared.extend(after[new_start:new_end])
+        vanished += old_end - old_start
+
+    summary: dict[str, Any] = {"changed": len(appeared) + vanished}
+    if appeared:
+        rendered = str(max(appeared, key=lambda element: len(str(element))))
+        summary["top_change"] = (
+            rendered
+            if len(rendered) <= TOP_CHANGE_MAXCHARS
+            else rendered[:TOP_CHANGE_MAXCHARS] + '...[TRUNCATED]'
+        )
+    return summary
+
+# The mark that tells the truncator a node is the page's own account of what was
+# removed rather than page content, so that it survives being cut (`_is_hint`).
+_HINT_MARK = '[FAKE ELEMENT]'
+
+# A collapsed list keeps its first few items -- or every item the caller's
+# instruction names, and more of those, because they are what was asked for.
+_CUTLIST_KEEP = 3
+_CUTLIST_HIT_KEEP = 6
+
+# How much of each hidden item is quoted back, so the agent can tell what kind of
+# thing it is not being shown.
+_CUTLIST_SAMPLES = 5
+_CUTLIST_SAMPLE_CHARS = 40
+
+# The hint costs tokens too, so a collapse has to buy back several times what it
+# spends. Measuring the hint that was actually built is what makes one number
+# enough here: it already accounts for how long the selector turned out to be and
+# how much sample text there was, neither of which an absolute character count
+# can see. Measured on the shapes this has to separate, the ratio is not near
+# either edge -- a ten-link nav bar comes out at 1.3 and a list of
+# paragraph-sized cards at 9.8, so the cut falls between them rather than just
+# inside one of them.
+_CUTLIST_MIN_GAIN = 4
+
+
+def _cutlist_hint(soup, selector, removed):
+    """The note that stands in for the items a collapse is about to hide."""
+    samples = [
+        text
+        for element in removed[:_CUTLIST_SAMPLES]
+        if (text := element.get_text(" ", strip=True)[:_CUTLIST_SAMPLE_CHARS])
+    ]
+    parts = [f'{_HINT_MARK} {len(removed)} more items hidden, selector: "{selector}"']
+    if samples:
+        parts.append('Hidden items: ' + ','.join(f'"{text}"' for text in samples))
+    hint = soup.new_tag('div')
+    hint.string = ' '.join(parts)
+    return hint
+
+
+def _collapse_list(soup, selector, instruction):
+    """Hide the repetitive tail of one list in place; report whether it happened.
+
+    Whether to collapse is decided against the hint's own measured length, so the
+    price of the exchange is known before it is made rather than after: a list
+    whose items are shorter than the note describing them is one where hiding
+    them makes the page *bigger*, and no absolute item-size threshold can rule
+    that out, because it cannot see the note.
+    """
+    try:
+        items = soup.select(selector)
+    except Exception:
+        logger.debug("cutlist skipped invalid selector: %s", selector)
+        return False
+    wanted = instruction.strip() if instruction else ''
+    asked_for = [
+        item for item in items
+        if wanted and wanted in item.get_text(" ", strip=True)
+    ]
+    keep = asked_for[:_CUTLIST_HIT_KEEP] if asked_for else items[:_CUTLIST_KEEP]
+    # By identity, not by `in`: two list items that happen to serialise the same
+    # -- a repeated "More" link, an empty cell -- compare equal as tags, so a
+    # membership test would read a duplicate of a kept item as kept and leave it
+    # behind while the hint counted it as hidden.
+    kept = {id(item) for item in keep}
+    removed = [item for item in items if id(item) not in kept]
+    if not removed:
+        return False
+    hint = _cutlist_hint(soup, selector, removed)
+    saved, cost = sum(len(str(item)) for item in removed), len(str(hint))
+    logger.debug(
+        "cutlist selector=%s items=%d hidden=%d saves=%d hint=%d",
+        selector, len(items), len(removed), saved, cost,
+    )
+    if saved < cost * _CUTLIST_MIN_GAIN:
+        return False
+    # `keep` is empty only when `items` is, and `removed` is then empty too, so
+    # by here there is always an anchor to put the hint after.
+    keep[-1].insert_after(hint)
+    for item in removed:
+        item.decompose()
+    return True
+
 
 def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
              text_only=False, timeout=15, link_refs=None, session_id=None):
-    if cutlist:
-        rr = _execute_in_session(
+    if isinstance(maxchars, bool) or not isinstance(maxchars, int) or maxchars < 0:
+        raise ValueError("maxchars must be a non-negative integer")
+    if cutlist and not text_only and not extra_js.strip():
+        rr, page = _get_cutlist_page(driver, extra_js, timeout, session_id)
+        if page is _CUTLIST_FALLBACK:
+            page = get_main_block(
+                driver,
+                extra_js=extra_js,
+                text_only=False,
+                timeout=timeout,
+                session_id=session_id,
+            )
+    else:
+        if cutlist and not text_only:
+            # `extra_js` is authored as part of the driver's AsyncFunction and
+            # may contain an early return, top-level await, lexical declarations
+            # or reads of `this` / `arguments`. Nesting it merely to retain a
+            # cutlist result would change at least one of those semantics. Keep
+            # the historical two-call order for this uncommon path: discover
+            # groups first, then execute extra_js immediately before pageOutline.
+            rr = _execute_in_session(
+                driver,
+                js_list_groups + "return listGroups(document.body);",
+                timeout,
+                session_id=session_id,
+            ).get('data', [])
+        page = get_main_block(
             driver,
-            js_findMainList + "return findMainList(document.body);",
-            timeout,
+            extra_js=extra_js,
+            text_only=text_only,
+            timeout=timeout,
             session_id=session_id,
-        ).get('data', [])
-    page = get_main_block(
-        driver,
-        extra_js=extra_js,
-        text_only=text_only,
-        timeout=timeout,
-        session_id=session_id,
-    )
+        )
     # Hard cap before parsing: BeautifulSoup on a multi-MB page dominates the
     # call's latency, and callers only ever see maxchars of it anyway.
     if isinstance(page, str) and len(page) > 1_500_000: page = page[:1_500_000]
-    if text_only: return page
+    if text_only: return _limit_chars(page, maxchars)
     base_url = None
     if isinstance(page, str):
         m = re.search(r'<!--btap-base:(.*?)-->', page)
@@ -839,149 +559,161 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
             page = page.replace(m.group(0), '', 1)
     soup = optimize_html_for_tokens(page, link_refs=link_refs, base_url=base_url)
     for div in soup.select('div[data-tag="iframe"]'):
-        div.name = 'iframe'; del div['data-tag']
+        div.name = 'iframe'
+        del div['data-tag']
     html = str(soup)
-    if not cutlist: return html
-    lists = rr if isinstance(rr, list) else ([rr] if isinstance(rr, dict) and rr.get('selector') else [])
-    if lists:
+    if not cutlist:
+        if len(html) > maxchars:
+            html = str(smart_truncate(soup, maxchars))
+        return _limit_chars(html, maxchars, markup=True)
+    # `listGroups` answers with one entry per repeated block, but a single dict
+    # and a non-answer are both shapes this has had to read, so the reply is
+    # normalised before anything looks for a selector inside it.
+    candidates = rr if isinstance(rr, list) else [rr]
+    selectors = [
+        entry['selector'] for entry in candidates
+        if isinstance(entry, dict) and entry.get('selector')
+    ]
+    if candidates:
+        logger.debug("cutlist found %d list(s): %s", len(candidates), selectors)
+    # Deliberately not `any(...)`: it short-circuits on the first collapse, and
+    # every list the page offered has to be given its own chance to be cut.
+    collapsed = [sel for sel in selectors if _collapse_list(soup, sel, instruction)]
+    if collapsed:
+        # A collapse happened, so the page had content and `html` is not empty --
+        # which is what the ratio below needs, and the only reason the old
+        # unconditional version of it needed an "empty page" branch at all.
+        cut = str(soup)
         logger.debug(
-            "cutlist found %d list(s): %s",
-            len(lists),
-            [e.get('selector', '?') if isinstance(e, dict) else '?' for e in lists],
+            "get_html cutlist collapsed %d list(s): %d -> %d chars (%d%% saved)",
+            len(collapsed), len(html), len(cut), 100 - len(cut) * 100 // len(html),
         )
-    for entry in lists:
-        sel = entry.get('selector') if isinstance(entry, dict) else None
-        if not sel: continue
-        try:
-            items = soup.select(sel)
-        except Exception:
-            logger.debug("cutlist skipped invalid selector: %s", sel)
-            continue
-        if len(items) < 5: continue
-        total_len = sum(len(str(it)) for it in items)
-        avg_len = total_len / len(items)
-        logger.debug(
-            "cutlist selector=%s items=%d avg_chars=%.0f total_chars=%d estimated_saved=%.0f",
-            sel,
-            len(items),
-            avg_len,
-            total_len,
-            total_len - 3 * avg_len,
-        )
-        if avg_len < 200 or (avg_len < 700 and total_len < 2500): continue
-        hit = [it for it in items if instruction and instruction.strip() and instruction in it.get_text(" ",strip=True)]
-        keep = hit[:6] if hit else items[:3]
-        removed = [it for it in items if it not in keep]
-        sample_texts = []
-        for rm in removed[:5]:
-            txt = rm.get_text(" ", strip=True)[:40]
-            if txt: sample_texts.append(txt)
-        hint_parts = [f'[FAKE ELEMENT] {len(removed)} more items hidden, selector: "{sel}"']
-        if sample_texts: hint_parts.append('Hidden items: ' + ','.join(f'"{t}"' for t in sample_texts))
-        hint_tag = soup.new_tag("div")
-        hint_tag.string = ' '.join(hint_parts)
-        if keep: keep[-1].insert_after(hint_tag)
-        for it in removed: it.decompose()
-    ss = str(optimize_html_for_tokens(soup, link_refs=link_refs, base_url=base_url)) if lists else html
-    saved = f"{100 - len(ss) * 100 // len(html)}% saved" if html else "empty page"
-    logger.debug("get_html cutlist result: %d -> %d chars (%s)", len(html), len(ss), saved)
-    if len(ss) > maxchars: ss = str(smart_truncate(soup, maxchars))
-    return ss
+        html = cut
+    if len(html) > maxchars:
+        html = str(smart_truncate(soup, maxchars))
+    return _limit_chars(html, maxchars, markup=True)
+
+
+def _limit_chars(text, budget, *, markup=False):
+    """Enforce the serialized cap, including tag overhead and preserved hints."""
+    if len(text) <= budget:
+        return text
+    marker = '...[TRUNCATED]'
+    if markup:
+        # Wrapper tags or preserved hints can exhaust even the smallest cap.
+        # A bounded text fragment remains readable without emitting a cut tag.
+        plain = BeautifulSoup(text, 'html.parser').get_text(' ', strip=True)
+        room = max(0, budget - len(marker))
+        lower, upper = 0, min(len(plain), room)
+        while lower < upper:
+            middle = (lower + upper + 1) // 2
+            if len(html_module.escape(plain[:middle], quote=False)) <= room:
+                lower = middle
+            else:
+                upper = middle - 1
+        return html_module.escape(plain[:lower], quote=False) + marker[:budget]
+    return text[:max(0, budget - len(marker))] + marker[:budget]
+
+# A child bigger than this keeps its own structure: it is subdivided by another
+# round of allocation rather than having its serialised text sliced, so the
+# agent still sees where in the tree the content sat.
+SUBDIVIDE_ABOVE = 8000
+
+
+def _is_hint(node):
+    return bool(node.string) and _HINT_MARK in node.string
+
+
+def _clip_markup(element, keep):
+    """Cut one element down to ``keep`` characters, hints kept, marker appended."""
+    hints = [node.extract() for node in element.find_all(_is_hint)]
+    over = len(str(element)) - keep
+    if over > 0:
+        marker = f' [TRUNCATED {over // 1000}k chars]'
+        inner = element.decode_contents()
+        room = max(keep - (len(str(element)) - len(inner)) - len(marker), 0)
+        element.clear()
+        if room:
+            element.append(BeautifulSoup(inner[:room], 'html.parser'))
+        element.append(NavigableString(marker))
+    for hint in hints:
+        element.append(hint)
+
+
+def _allocate(sizes, budget):
+    """Largest-remainder allocation of ``budget`` over ``sizes``, biggest first.
+
+    Every child is given what it asks for while the budget covers it; the first
+    one that does not fit takes whatever is left and the rest get zero. So the
+    result is exact (the shares sum to at most the budget, never over it) and
+    total: no child is exempt from being cut, which a fixed top-N rule cannot
+    promise -- upstream's spread the overflow across the three biggest children
+    and left the fourth untouched no matter how far over budget the page was,
+    then needed a separate tail-deletion branch for the case where three were
+    not enough. One rule covers both here.
+
+    Ordering by size descending is what makes the outcome useful rather than
+    merely exact: the big blocks are the content, so they are served first and
+    the boilerplate is what runs out of budget.
+    """
+    order = sorted(range(len(sizes)), key=lambda index: -sizes[index])
+    shares = [0] * len(sizes)
+    left = max(budget, 0)
+    for index in order:
+        shares[index] = min(sizes[index], left)
+        left -= shares[index]
+    return shares
+
 
 def smart_truncate(soup, budget, _depth=0):
-    """原地截断 soup 使其接近 budget 字符。
-    策略：穿透单子元素找分叉点；top3 能扛住 over 则按比例分担，否则从尾部删子元素。"""
-    CUT_THRESHOLD = 8000  # 小于此值直接去尾，大于则继续递归找分叉点
-    indent = '  ' * _depth
-    def cut(ele, keep):
-        from bs4 import NavigableString
-        s = str(ele)
-        over = len(s) - keep
-        if over <= 0: return
-        # 保护 FAKE ELEMENT 提示标签
-        protected = [c.extract() for c in ele.find_all(lambda tag: tag.string and '[FAKE ELEMENT]' in tag.string)]
-        s = str(ele)
-        over = len(s) - keep
-        if over <= 0:
-            for p in protected: ele.append(p)
-            return
-        marker = f' [TRUNCATED {over//1000}k chars]'
-        inner = ele.decode_contents()
-        tag_overhead = len(s) - len(inner)
-        inner_keep = max(keep - tag_overhead - len(marker), 0)
-        ele.clear()
-        if inner_keep > 0:
-            ele.append(BeautifulSoup(inner[:inner_keep], 'html.parser'))
-        ele.append(NavigableString(marker))
-        for p in protected: ele.append(p)
+    """Trim ``soup`` in place until it serialises to about ``budget`` chars.
+
+    Each level spends its budget on its children by `_allocate`, then either
+    subdivides a child that is still large (so its structure survives) or clips
+    its markup. A lone child is passed straight through, which is what lets a
+    deeply wrapped page reach its real content instead of spending the whole
+    budget on `<div><div><div>`.
+    """
     total = len(str(soup))
-    if total <= budget: return soup
-    kids = [(c, len(str(c))) for c in soup.children if c.name and not (c.string and '[FAKE ELEMENT]' in c.string)]
-    if not kids: return soup
-    selflen = total - sum(l for _, l in kids)
-    remaining_budget = max(budget - selflen, 0)
-    tag = getattr(soup, 'name', '?')
+    if total <= budget:
+        return soup
+    children = [node for node in soup.children if node.name and not _is_hint(node)]
+    if not children:
+        _clip_markup(soup, budget)
+        return soup
+
+    sizes = [len(str(node)) for node in children]
+    # What the element costs on its own: its tags, and any text sitting directly
+    # between the children. The children have to fit in what is left of it.
+    inner_budget = max(budget - (total - sum(sizes)), 0)
     logger.debug(
-        "%ssmart_truncate tag=%s total=%d budget=%d selflen=%d children=%d",
-        indent,
-        tag,
+        "%ssmart_truncate tag=%s total=%d budget=%d children=%d",
+        '  ' * _depth,
+        getattr(soup, 'name', '?'),
         total,
         budget,
-        selflen,
-        len(kids),
+        len(children),
     )
-    # === 1 kid: 穿透 ===
-    if len(kids) == 1:
-        logger.debug("%ssmart_truncate recursing into single child tag=%s", indent, kids[0][0].name)
-        smart_truncate(kids[0][0], remaining_budget, _depth)
+    if len(children) == 1:
+        smart_truncate(children[0], inner_budget, _depth)
         return soup
-    over = sum(l for _, l in kids) - remaining_budget
-    if over <= 0: return soup
-    # 看 top 3 能否承担 over
-    ranked = sorted(range(len(kids)), key=lambda i: kids[i][1], reverse=True)
-    tops = list(ranked[:min(3, len(ranked))])
-    top_total = sum(kids[i][1] for i in tops)
-    if top_total < over:
-        # === top 3 扛不住，从尾部删子元素 ===
-        removed = 0
-        removed_count = 0
-        while kids and removed < over:
-            c, l = kids.pop(); c.decompose()
-            removed += l; removed_count += 1
+
+    for node, size, keep in zip(children, sizes, _allocate(sizes, inner_budget), strict=True):
+        if keep >= size:
+            continue
         logger.debug(
-            "%ssmart_truncate tail cut removed_children=%d removed_chars=%d",
-            indent,
-            removed_count,
-            removed,
+            "%ssmart_truncate child=%s chars=%d keep=%d",
+            '  ' * _depth,
+            node.name,
+            size,
+            keep,
         )
-        return soup
-    # === top 2-3 按比例分担 ===
-    # 过滤掉太小的 kid（不到最大的 10%），让大的全扛
-    max_size = kids[ranked[0]][1]
-    filtered = [i for i in tops if kids[i][1] >= max_size * 0.1]
-    filtered_total = sum(kids[i][1] for i in filtered)
-    if filtered_total >= over:
-        tops, top_total = filtered, filtered_total
-    # 先打印所有分配计划
-    actions = []
-    for i in tops:
-        c, l = kids[i]
-        share = int(over * l / top_total)
-        new_keep = l - share
-        logger.debug(
-            "%ssmart_truncate child=%s chars=%d keep=%d share=%d",
-            indent,
-            c.name,
-            l,
-            new_keep,
-            share,
-        )
-        actions.append((c, l, new_keep))
-    # 再统一执行
-    for c, l, new_keep in actions:
-        if new_keep <= 0: c.decompose()
-        elif new_keep > CUT_THRESHOLD: smart_truncate(c, new_keep, _depth + 1)
-        else: cut(c, new_keep)
+        if not keep:
+            node.decompose()
+        elif keep > SUBDIVIDE_ABOVE:
+            smart_truncate(node, keep, _depth + 1)
+        else:
+            _clip_markup(node, keep)
     return soup
 
 # The monitor snapshots/diff around execute_js are best-effort context, not the
@@ -994,29 +726,25 @@ MONITOR_MAXCHARS = 300000
 def no_response_kind(response):
     """Classify a driver timeout pseudo-result.
 
-    'undelivered' is the retry-safe class: either the script provably never left
-    the bridge, or it was written to a live socket and never acknowledged, which
-    the ACK-before-execute protocol makes overwhelmingly likely to mean "did not
-    run". These two are one *kind* on purpose — every caller's retry policy is
-    the same for both — but the driver keeps them apart in ``delivery_state``
-    ('undelivered' vs 'sent_unconfirmed') for callers whose work is
-    irreversible. 'after_ack' means it was delivered and may still be running,
-    so retrying could double side effects.
+    'undelivered' is retry-safe only when the bridge proves that the payload
+    never left or its HTTP queue was never polled. The 'after_ack' bucket also
+    covers a lost ACK: delivery is unknown, so retrying could repeat a mutation.
     """
     if not isinstance(response, dict) or 'data' in response: return None
     delivery_state = response.get('delivery_state')
     structured = {
         'undelivered': 'undelivered',
-        'sent_unconfirmed': 'undelivered',
+        'sent_unconfirmed': 'after_ack',
         'delivered_no_result': 'after_ack',
         'navigated': 'navigated',
-    }.get(delivery_state)
+    }.get(delivery_state) if isinstance(delivery_state, str) else None
     if structured: return structured
     # Compatibility with bridge versions that predate structured delivery
     # metadata. New callers must not derive policy from this human text.
     msg = response.get('result')
     if not isinstance(msg, str): return None
-    if 'no ACK' in msg or 'script not polled' in msg: return 'undelivered'
+    if 'script not polled' in msg: return 'undelivered'
+    if 'no ACK' in msg: return 'after_ack'
     if 'ACK received' in msg or 'delivered but no result' in msg: return 'after_ack'
     # The page unloaded before the result came back (click -> navigation, the
     # single most common action). This is NOT a timeout and NOT a success: the
@@ -1057,6 +785,124 @@ def undelivered_retry_split(left):
     return first, reserve
 
 
+# Fields of a structured browser error that cost tokens and tell an agent nothing
+# it can act on. `stack` is the reason this exists at all: a browser stack trace
+# is routinely longer than the whole rest of the reply.
+_ERROR_NOISE = frozenset({'stack', 'stackTrace'})
+
+_PAGE_ACCESS_ERROR_PATTERNS = (
+    "cannot access contents of the page",
+    "extensions gallery cannot be scripted",
+    "cannot access a chrome:// url",
+    "cannot access contents of a chrome-extension",
+)
+_PAGE_POPUP_ERROR_PATTERNS = ("popup", "user gesture", "not allowed to open")
+
+
+def _execution_error_metadata(exc, script):
+    """Extract actionable page-execution facts without inventing a cause."""
+    detail = exc.args[0] if exc.args else str(exc)
+    if isinstance(detail, dict):
+        nested = detail.get('error')
+        source = nested if isinstance(nested, dict) else detail
+        message = source.get('message')
+        if not isinstance(message, str) or not message:
+            message = nested if isinstance(nested, str) else detail.get('error')
+        message = str(message or detail)
+    else:
+        source = {}
+        message = str(detail)
+    container = detail if isinstance(detail, dict) else {}
+    lower = message.lower()
+
+    def field(name):
+        if name in container:
+            return container[name]
+        return source.get(name)
+
+    dispatched = field('dispatched')
+    may_have_executed = field('may_have_executed')
+    retryable = field('retryable')
+    code = getattr(exc, 'error_code', None)
+    if not code or code == 'internal_error':
+        code = container.get('error_code') or source.get('error_code')
+    if not code:
+        code = container.get('code') or source.get('code')
+    access_denied = any(pattern in lower for pattern in _PAGE_ACCESS_ERROR_PATTERNS)
+    if not code:
+        code = 'page_access_denied' if access_denied else 'page_execution_failed'
+
+    diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+    for name in ('delivery_state', 'operation_id', 'reservation_held', 'poll_with', 'operation_status'):
+        value = getattr(exc, name, None)
+        if value is not None:
+            diagnostics[name] = value
+    if dispatched is not None:
+        diagnostics['dispatched'] = bool(dispatched)
+    if may_have_executed is not None:
+        diagnostics['may_have_executed'] = bool(may_have_executed)
+    if retryable is not None:
+        retry_safe = bool(retryable)
+        diagnostics['retryable'] = retry_safe
+    elif hasattr(exc, 'retry_safe'):
+        retry_safe = bool(exc.retry_safe)
+    else:
+        retry_safe = dispatched is False and may_have_executed is False and not access_denied
+    diagnostics.setdefault('retry_safe', retry_safe)
+
+    hint = None
+    if access_denied:
+        diagnostics.setdefault('access_kind', 'script_injection')
+        diagnostics.setdefault(
+            'next_action', 'list_tabs_then_retry_or_use_supported_cdp'
+        )
+        hint = (
+            'The target page refused script injection. Run list_tabs and retry on a '
+            'scriptable page or use the supported CDP path. If the intent was to '
+            'open a new tab or navigate, use open_new_tab instead of window.open.'
+        )
+    if isinstance(script, str) and re.search(
+        r"(?:window\.open\s*\(|(?:window\.)?location(?:\.assign|\.replace)?\s*=|target\s*=\s*['\"]_blank)",
+        script,
+        re.IGNORECASE,
+    ):
+        diagnostics['script_intent'] = 'new_tab_or_navigation'
+        if any(pattern in lower for pattern in _PAGE_POPUP_ERROR_PATTERNS):
+            diagnostics['policy_constraint'] = 'popup_or_user_gesture'
+            diagnostics['next_action'] = 'open_new_tab'
+            hint = (
+                'The script attempted a new tab or navigation. Page window.open is '
+                'subject to popup/user-gesture policy; use open_new_tab for a '
+                'reliable browser operation.'
+            )
+        elif hint is None and access_denied:
+            diagnostics['next_action'] = 'open_new_tab_or_choose_scriptable_tab'
+    return str(code), retry_safe, diagnostics, hint
+
+
+def _error_text(exc):
+    """Flatten whatever the driver raised into one line an agent can read.
+
+    The bridge raises with a structured dict when the page itself reported the
+    failure and with a plain string otherwise. Two things follow, and neither is
+    served by `str()` on the dict: its repr is Python's -- single quotes, `True`
+    rather than `true` -- inside a reply that is otherwise JSON, and a dict whose
+    only remaining content is a message reads better as that message. A copy is
+    built rather than keys dropped in place, because the dict belongs to the
+    exception the driver raised and may still be read after this.
+    """
+    detail = exc.args[0] if exc.args else str(exc)
+    if not isinstance(detail, dict):
+        return str(detail)
+    useful = {
+        key: value for key, value in detail.items()
+        if key not in _ERROR_NOISE and value not in (None, '')
+    }
+    if set(useful) == {'message'}:
+        return str(useful['message'])
+    return json.dumps(useful, ensure_ascii=False, default=str)
+
+
 def execute_js_rich(
     script,
     driver,
@@ -1081,16 +927,18 @@ def execute_js_rich(
         remaining = _remaining(deadline, cap)
         return remaining if remaining > 0.001 else 0.0
 
+    monitor_started = False
     if not no_monitor and phase_timeout(MONITOR_TIMEOUT):
         try:
             last_html = get_html(
                 driver,
                 cutlist=False,
-                extra_js=temp_monitor_js,
+                extra_js=build_temp_monitor_js(_remaining(deadline) + TEMP_MONITOR_TTL_GRACE),
                 maxchars=MONITOR_MAXCHARS,
                 timeout=phase_timeout(MONITOR_TIMEOUT),
                 session_id=session_id,
             )
+            monitor_started = True
         except Exception as e:
             logger.debug("Monitor baseline snapshot unavailable: %s", e)
     if before_sids is None:
@@ -1110,7 +958,12 @@ def execute_js_rich(
     newTabs = []
     response = {}
     blocked_dialog = False
+    execution_pending = False
     retried = False
+    error_code = None
+    error_retryable = False
+    error_diagnostics = {}
+    error_hint = None
     try:
         logger.debug("Executing browser script (%d chars)", len(script))
         # Hold back part of the budget so the undelivered retry below is
@@ -1122,15 +975,16 @@ def execute_js_rich(
             )
         else:
             response = {
+                'delivery_state': 'undelivered',
                 'result': (
                     f"No response data in {configured_timeout}s "
-                    "(no ACK, total execute_js deadline exhausted)"
+                    "(script not sent, total execute_js deadline exhausted)"
                 )
             }
         if no_response_kind(response) == 'undelivered' and phase_timeout():
             # Never reached the page (session asleep / SW reconnecting): retry
             # only with the time still left in the original budget.
-            logger.warning("No ACK; retrying once within the remaining deadline")
+            logger.warning("Script not delivered; retrying once within the remaining deadline")
             retried = True
             response = _execute_in_session(
                 driver,
@@ -1144,14 +998,25 @@ def execute_js_rich(
             and result.get('__btap_dialog_result') is True
             and result.get('status') == 'blocked_by_dialog'
         )
+        execution_pending = bool(response.get('reservation_held')) or bool(
+            isinstance(result, dict) and result.get('__btap_dialog_result') is True
+            and result.get('pending_execution') is True
+        )
         if response.get('closed', 0) == 1:
             reloaded = True
-        if not blocked_dialog and not no_response_kind(response):
+        # Only the transient monitor consumes this settling window. A
+        # no-monitor call returns immediately after the result, and a failed
+        # baseline or a reloaded page has no post-call monitor/diff to sample.
+        if monitor_started and not reloaded and not execution_pending and not no_response_kind(response):
             time.sleep(min(1.0, _remaining(deadline)))
     except Exception as e:
-        error = e.args[0] if e.args else str(e)
-        if isinstance(error, dict): error.pop('stack', None)
-        error_msg = str(error)
+        error_msg = _error_text(e)
+        (
+            error_code,
+            error_retryable,
+            error_diagnostics,
+            error_hint,
+        ) = _execution_error_metadata(e, script)
         logger.warning("Browser script execution failed: %s", error_msg)
 
     etab = response.get('executed_tab_id')
@@ -1171,11 +1036,41 @@ def execute_js_rich(
         "js_return": result,
         "tab_id": tab_id_field,
     }
+    if response.get('operation_id'):
+        rr['operation_id'] = response['operation_id']
+    for key in ('reservation_held', 'operation_status', 'delivery_state', 'session_id'):
+        if key in response:
+            rr[key] = response[key]
+    if execution_pending:
+        rr['reservation_held'] = True
+        if rr.get('operation_id'):
+            rr['poll_with'] = 'get_execute_js_result'
+    if error_code:
+        rr['error_code'] = error_code
+        rr['retryable'] = bool(error_retryable)
+        rr['retry_safe'] = bool(error_retryable)
+    if error_diagnostics:
+        rr['diagnostics'] = error_diagnostics
+        for key in ('delivery_state', 'operation_id', 'reservation_held', 'poll_with', 'operation_status'):
+            if key in error_diagnostics:
+                rr[key] = error_diagnostics[key]
+        if error_diagnostics.get('reservation_held'):
+            rr.setdefault('delivery_state', 'delivered_no_result')
+            rr.setdefault('operation_status', 'outcome_unknown')
+        if rr.get('operation_id'):
+            rr.setdefault('poll_with', 'get_execute_js_result')
+    if error_hint:
+        rr['hint'] = error_hint
     if reloaded: rr['reloaded'] = reloaded
     if response.get('switched_session'):
         rr['switched_session'] = response['switched_session']
         rr['switched_from'] = response.get('switched_from')
         rr['switch_note'] = "The original session disconnected, so this ran in another session from the same browser. Verify with list_tabs and switch_tab if needed."
+    if response.get('rebound_from'):
+        rr['rebound_from'] = response['rebound_from']
+        rr['replacement_session_id'] = response.get('replacement_session_id')
+        rr['tab_identity'] = response.get('tab_identity')
+        rr['rebind_reason'] = response.get('rebind_reason', 'chrome.tabs.onReplaced')
     kind = no_response_kind(response)
     if kind == 'navigated' and not error_msg:
         rr['status'] = 'navigated'
@@ -1198,14 +1093,20 @@ def execute_js_rich(
         rr['suggestion'] = "The script ran and the page navigated. Verify landed_url; rerun only a read operation on the new page if a result is needed."
     elif kind and not error_msg:
         rr['status'] = 'no_response'
-        # Pass the driver's own verdict through when it has one: 'undelivered'
-        # and 'sent_unconfirmed' share a retry policy but not a guarantee, and
-        # collapsing them here would hide that from the caller. Derive from kind
-        # only for pre-structured bridges.
-        rr['delivery_state'] = response.get('delivery_state') or (
-            'undelivered' if kind == 'undelivered' else 'delivered_no_result'
-        )
+        # Preserve transport evidence; a lost ACK proves neither delivery nor
+        # non-delivery. Only pre-structured bridges need the text fallback.
+        delivery_state = response.get('delivery_state')
+        if not delivery_state:
+            if kind == 'undelivered':
+                delivery_state = 'undelivered'
+            elif 'no ACK' in response.get('result', ''):
+                delivery_state = 'sent_unconfirmed'
+            else:
+                delivery_state = 'delivered_no_result'
+        rr['delivery_state'] = delivery_state
         rr['retry_safe'] = kind == 'undelivered'
+        if rr.get('operation_id'):
+            rr['poll_with'] = 'get_execute_js_result'
         # Report whether the in-deadline retry actually ran instead of asking the
         # caller to trust prose about it. False means the budget was too small to
         # reserve a retry window, so a caller-side retry is the only one there is.
@@ -1219,12 +1120,21 @@ def execute_js_rich(
             )
         else:
             rr['suggestion'] = (
-                "The script was delivered but did not return before timeout. If it only waited "
+                ("Delivery was not confirmed; the script may already have executed. "
+                 if delivery_state == 'sent_unconfirmed' else
+                 "The script was delivered but did not return before timeout. ")
+                + "If it only waited "
                 "with setTimeout/sleep, replace that wait with wait_for or wait_for_url; do not "
                 "embed waits in execute_js. Otherwise inspect with scan_page before retrying side "
                 "effects; only retry read operations with a longer timeout."
             )
-    if blocked_dialog:
+            if rr.get('operation_id'):
+                rr['suggestion'] = (
+                    "The script may still be running and its tab remains reserved. "
+                    "Use get_execute_js_result with this operation_id to collect its result; "
+                    "do not replay the script."
+                )
+    if blocked_dialog or execution_pending:
         if response.get('newTabs'):
             rr['newTabs'] = response['newTabs']
         return rr
@@ -1242,7 +1152,14 @@ def execute_js_rich(
             rr['newTabs'] = newTabs
             rr['suggestion'] = "The page refreshed; the listed new tabs connected during execution."
     if error_msg: rr['error'] = error_msg
-    if no_monitor or kind: return rr
+    if no_monitor or kind:
+        # No reader for the transients on this path, but the interval is still
+        # ticking on the user's page. Stop it now while there may still be a
+        # channel; build_temp_monitor_js' own expiry is the fallback when the
+        # tab is already gone (which is what a truthy `kind` usually means).
+        if monitor_started and phase_timeout(MONITOR_TIMEOUT):
+            stop_temp_monitor(driver, timeout=phase_timeout(MONITOR_TIMEOUT), session_id=session_id)
+        return rr
     if not reloaded and phase_timeout(MONITOR_TIMEOUT):
         try:
             rr['transients'] = get_temp_texts(
@@ -1252,26 +1169,32 @@ def execute_js_rich(
             )
         except Exception:
             rr['transients'] = []
-    if not reloaded and not error_msg and len(newTabs) == 0 and phase_timeout(MONITOR_TIMEOUT):
+    if not reloaded and not error_msg and not newTabs and phase_timeout(MONITOR_TIMEOUT):
         try:
-            current_html = get_html(
+            # Checked before the roundtrip, not after it: with no baseline there
+            # is nothing a second full-page fetch could be compared against, and
+            # the old order paid for one anyway on every call whose opening
+            # snapshot had failed. Reported as unavailable rather than as zero
+            # changes, which an agent would read as "the script did nothing".
+            if last_html is None:
+                raise PageUnavailable("no baseline snapshot to compare against")
+            diff = find_changed_elements(last_html, get_html(
                 driver,
                 cutlist=False,
                 maxchars=MONITOR_MAXCHARS,
                 timeout=phase_timeout(MONITOR_TIMEOUT),
                 session_id=session_id,
-            )
-            if last_html is None: raise Exception("no baseline")
-            diff_data = find_changed_elements(last_html, current_html)
-            change_count = diff_data.get('changed', 0)
-            top_change = diff_data.get('top_change', '')
-            diff_summary = f"DOM changes: {change_count}"
-            if top_change: diff_summary += f"\nMost significant change:\n{top_change}"
-            transients = rr.get('transients', [])
-            if change_count == 0 and not transients and len(newTabs) == 0:
-                diff_summary += " (no page changes)"
-                rr['suggestion'] = "No visible page changes were detected."
+            ))
         except Exception:
-            diff_summary = "Page-change monitoring is unavailable."
-        rr['diff'] = diff_summary
+            rr['diff'] = "Page-change monitoring is unavailable."
+        else:
+            # `changed` is always present and `top_change` only when something
+            # appeared, because the producer is this module -- no default needed.
+            summary = f"DOM changes: {diff['changed']}"
+            if diff.get('top_change'):
+                summary += f"\nMost significant change:\n{diff['top_change']}"
+            if not diff['changed'] and not rr.get('transients'):
+                summary += " (no page changes)"
+                rr['suggestion'] = "No visible page changes were detected."
+            rr['diff'] = summary
     return rr

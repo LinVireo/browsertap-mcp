@@ -4,6 +4,7 @@ import argparse
 import json
 import socket
 import sys
+from typing import Any
 
 from . import __version__
 from .server import (
@@ -57,29 +58,79 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def cmd_doctor() -> int:
-    driver = get_driver()
+    payload: dict[str, Any]
+    try:
+        driver = get_driver()
+    except Exception as init_error:
+        # get_driver() can fail before the bridge is even contacted: invalid host,
+        # environment variable type errors, missing dependencies. These failures
+        # must still produce JSON so automated tooling can parse the diagnosis.
+        payload = {
+            "status": "initialization_failed",
+            "action": "check_config",
+            "extension_path": str(chrome_extension_dir()),
+            "error": str(init_error),
+            "error_type": type(init_error).__name__,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(
+            f"\n[!!] initialization_failed: {type(init_error).__name__}: {init_error}",
+            file=sys.stderr,
+        )
+        return 1
     ws_port = getattr(driver, "port", 18765)
     http_port = ws_port + 1
     sessions = []
     err = None
     diag = None
     try:
-        sessions = driver.get_all_sessions()
-    except Exception as e:
-        err = str(e)
-    try:
-        diag = driver.diagnose()
-    except Exception as e:
-        diag = {"cause": "diagnose_failed", "ok": False, "error": str(e)}
-    try:
         payload = get_setup_status()
     except Exception as e:
+        # get_setup_status normally contains both the session snapshot and the
+        # bridge diagnosis. Only fall back to the direct calls when that status
+        # request itself failed; otherwise doctor would pay for both roundtrips
+        # twice on every healthy invocation.
+        try:
+            sessions = driver.get_all_sessions()
+        except Exception as session_error:
+            err = str(session_error)
+        try:
+            diag = driver.diagnose()
+        except Exception as diagnosis_error:
+            diag = {
+                "cause": "diagnose_failed",
+                "ok": False,
+                "error": str(diagnosis_error),
+            }
         payload = {
             "status": "bridge_unreachable",
             "action": "restart_bridge",
             "extension_path": str(chrome_extension_dir()),
             "setup_error": str(e),
         }
+    else:
+        raw_sessions = payload.get("tabs")
+        if isinstance(raw_sessions, list):
+            sessions = raw_sessions
+        else:
+            # Keep compatibility with older status providers that predate the
+            # detailed tab payload, without adding a call for current bridges.
+            try:
+                sessions = driver.get_all_sessions()
+            except Exception as session_error:
+                err = str(session_error)
+        raw_diagnosis = payload.get("diagnosis")
+        if isinstance(raw_diagnosis, dict):
+            diag = raw_diagnosis
+        else:
+            try:
+                diag = driver.diagnose()
+            except Exception as diagnosis_error:
+                diag = {
+                    "cause": "diagnose_failed",
+                    "ok": False,
+                    "error": str(diagnosis_error),
+                }
     payload.update({
         "remote_mode": getattr(driver, "is_remote", False),
         "bridge_host": getattr(driver, "host", "127.0.0.1"),
@@ -114,10 +165,16 @@ def cmd_doctor() -> int:
             "Chrome does not need restarting.",
             file=sys.stderr,
         )
+    elif payload.get("action") == "wait_for_extension":
+        print(
+            "\n[..] starting: the bridge is waiting for the extension handshake; "
+            "wait a few seconds and run doctor again.",
+            file=sys.stderr,
+        )
     elif isinstance(final_diag, dict) and final_diag.get("advice"):
         mark = "OK" if final_diag.get("ok") else "!!"
         print(f"\n[{mark}] {final_diag.get('cause')}: {final_diag.get('advice')}", file=sys.stderr)
-    return 0 if payload.get("status") == "healthy" else 1
+    return 0 if payload.get("status") in {"healthy", "starting"} else 1
 
 
 def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
@@ -149,7 +206,7 @@ def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="browsertap",
-        description="Real-browser MCP server with a BrowserBridge/CDP transport, screenshots, and physical input.",
+        description="Real-browser MCP server with a BrowserBridge/CDP transport, background page input, and screenshots.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")

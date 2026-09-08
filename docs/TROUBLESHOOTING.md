@@ -41,12 +41,14 @@ the MCP client with the absolute executable path. On Windows this is typically
 `<repo>\.venv\Scripts\browsertap.exe`; on Linux/macOS it is
 `<repo>/.venv/bin/browsertap`.
 
-If OS-level input or desktop capture reports a missing dependency, reinstall
-with the desktop extra, for example:
+If the remaining lab-only `resolve_leave_dialog` physical fallback reports a
+missing dependency, reinstall with the desktop extra, for example:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"
+.\.venv\Scripts\python.exe -m pip install -U "browsertap-mcp[desktop]"
 ```
+
+From a source checkout the equivalent is `-e ".[desktop]"` run in that checkout.
 
 ### `/link` returns HTTP 401
 
@@ -84,14 +86,22 @@ Select the tab you meant with `switch_tab`, or pass its `session_id` verbatim,
 then retry. A short message with no candidate list means nothing is connected at
 all; see "No connected tabs" above.
 
+There is one evidence-backed exception: when Chrome reports that the same native
+tab was replaced, BTAP may return `rebound_from`, `replacement_session_id`, and
+`tab_identity` instead of refusing. Adopt the returned session id and verify the
+page before repeating a state-changing action. Without those fields, an explicit
+stale session is never substituted.
+
 ### A result carries `switched_session`
 
 You passed no `session_id`, the shared default target had died, and BTAP re-picked
 a live tab in the same browser rather than failing a call that never named one.
 The call did execute, on the tab reported in `switched_session`; `switched_from`
 is the tab that went away. Confirm with `list_tabs` or `scan_page` that it landed
-where you intended before repeating anything with side effects. An explicit
-`session_id` is never switched silently: it produces the refusal above instead.
+where you intended before repeating anything with side effects. An explicitly
+named session is only rebound when the result also carries the evidence-backed
+`rebound_from` / `replacement_session_id` / `tab_identity` fields; otherwise it
+produces the refusal above.
 
 ### A call returns `no_response` or `bridge_error`
 
@@ -260,10 +270,11 @@ only when desktop input is required.
 
 ### Physical input does not work on macOS
 
-Grant Accessibility permission to the terminal or MCP client. Desktop capture
-also requires Screen Recording permission.
+Grant Accessibility permission to the terminal or MCP client if the remaining
+`resolve_leave_dialog` Enter fallback is required. `capture_page_screenshot` is
+CDP page capture and does not need macOS Screen Recording permission.
 
-### Physical input reports that the desktop session could not be initialised
+### The remaining physical fallback reports that the desktop session could not be initialised
 
 The desktop extra is installed but this machine has no usable desktop: a
 headless server, an SSH session with no X11 display, or a locked or unattended

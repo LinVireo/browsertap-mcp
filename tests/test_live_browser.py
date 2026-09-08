@@ -15,6 +15,7 @@ import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from browsertap_mcp import server as S
+from tests import live_preflight as P
 
 pytestmark = pytest.mark.live
 
@@ -29,6 +30,48 @@ def goto(sid, url, selector, timeout=30):
     got = S.wait_for(selector=selector, timeout=timeout, session_id=sid)
     assert got["status"] == "success", f"{url} never rendered {selector}: {got}"
     return nav
+
+
+def current_tab_id(remembered, session_id):
+    """The remembered tab's id *now*, or None if the browser retired it.
+
+    Never pass a remembered id straight back to the browser: Chrome discards an
+    idle background tab and restores it under a new id, so the id these tests
+    sampled at their start may name nothing by the time they clean up.
+    `live_preflight.resolve_remembered_tab` owns the matching, so this stays the
+    one place that reads the current tab set.
+    """
+    if remembered is None:
+        return None
+    try:
+        tabs = S.list_all_tabs(session_id=session_id).get("data", [])
+    except Exception:
+        return None
+    return P.resolve_remembered_tab(remembered, tabs)
+
+
+def restore_foreground(remembered, client_id, session_id):
+    """Hand the user's tab back, and report which id actually got it.
+
+    Best effort on purpose. This runs in cleanup, after the assertions that
+    matter have already passed, so a tab that no longer exists must not turn a
+    green test red -- and it is not being swallowed either: a tab that was there
+    at the baseline and is gone at the end is what the `driver` fixture's
+    end-of-run inventory check reports, which is the right place for a claim
+    about the browser rather than about one test.
+    """
+    tab_id = current_tab_id(remembered, session_id)
+    if tab_id is None:
+        return None
+    try:
+        S.require_driver().ext_cmd(
+            {"cmd": "tabs", "method": "switch", "tabId": tab_id},
+            client_id=client_id,
+            timeout=15.0,
+        )
+    except Exception:
+        return None
+    return tab_id
 
 
 class TestScreenshotContent:
@@ -161,14 +204,9 @@ class TestDialogPolicy:
                     session_id=scratch_session,
                     no_monitor=True,
                 )
-            except Exception:
+            except Exception:  # noqa: S110 - cleanup must not mask the live test result
                 pass
-            if original_active is not None:
-                S.require_driver().ext_cmd(
-                    {"cmd": "tabs", "method": "switch", "tabId": original_active["id"]},
-                    client_id=client_id,
-                    timeout=15.0,
-                )
+            restore_foreground(original_active, client_id, session_id=scratch_session)
 
 
 class TestWaitFor:
@@ -209,10 +247,12 @@ class TestWaitFor:
                        session_id=scratch_session)
         assert r["status"] == "timeout"
 
-    def test_a_long_wait_is_still_one_roundtrip(self, scratch_session):
-        """Polling happens in-page, so a 5s wait must not cost 50 bridge calls.
-        Measured indirectly: the call returns close to the timeout, not much
-        later, which it would if each poll were a roundtrip."""
+    def test_a_long_wait_stays_within_its_total_deadline(self, scratch_session):
+        """Server-side checks stay within one bounded total deadline.
+
+        The page probe is synchronous so background timer throttling cannot keep
+        an abandoned promise holding the target after the wait returns.
+        """
         import time
 
         goto(scratch_session, STATIC, "h1")
@@ -220,7 +260,7 @@ class TestWaitFor:
         r = S.wait_for(selector="#nope-xyz", timeout=4, session_id=scratch_session)
         elapsed = time.time() - t0
         assert r["status"] == "timeout"
-        assert elapsed < 12, f"took {elapsed:.1f}s for a 4s in-page wait"
+        assert elapsed < 12, f"took {elapsed:.1f}s for a 4s wait"
 
 
 class TestScrollPage:
@@ -479,11 +519,17 @@ class TestBackgroundPageInput:
             assert json.loads(observed["js_return"]) == [
                 {"type": "click", "id": "never-active-button"}
             ]
-            if original_active is not None:
+            # Same claim as `foreground_changed`, read off the browser instead of
+            # the result. Resolved rather than remembered: Chrome may have handed
+            # the user's tab a new id since it was sampled, and if it retired the
+            # tab outright there is no premise left to check -- the assertion
+            # above still covers the product's half.
+            foreground = current_tab_id(original_active, scratch_session)
+            if foreground is not None:
                 tabs = S.list_all_tabs(session_id=scratch_session).get("data", [])
                 assert next(
                     tab.get("active") for tab in tabs
-                    if tab.get("id") == original_active["id"]
+                    if str(tab.get("id")) == str(foreground)
                 ) is True
         finally:
             if background_sid:
@@ -808,12 +854,7 @@ class TestBackgroundPageInput:
             }
             assert len(move_points) >= 2
         finally:
-            if original_active is not None:
-                S.require_driver().ext_cmd(
-                    {"cmd": "tabs", "method": "switch", "tabId": original_active["id"]},
-                    client_id=client_id,
-                    timeout=15.0,
-                )
+            restore_foreground(original_active, client_id, session_id=scratch_session)
 
     def test_page_type_autofocuses_single_xterm_from_body(self, scratch_session):
         goto(scratch_session, STATIC, "h1")
@@ -1051,12 +1092,21 @@ class TestActivateTab:
             S.activate_tab(session_id=scratch_session)
             assert self._is_active(scratch_session) is True
         finally:
-            S.require_driver().ext_cmd(
-                {"cmd": "tabs", "method": "switch", "tabId": original["id"]},
-                client_id=client_id,
-                timeout=15.0,
-            )
-        assert self._is_active(f"{client_id}:{original['id']}") is True
+            # Resolved rather than remembered: the id sampled above may have been
+            # retired while this case ran. Handing focus back is the thing being
+            # asserted here, so a switch that fails is a real failure and is not
+            # swallowed -- but a tab the browser has retired is an absent
+            # condition, which is what a skip says.
+            restored = current_tab_id(original, scratch_session)
+            if restored is not None:
+                S.require_driver().ext_cmd(
+                    {"cmd": "tabs", "method": "switch", "tabId": restored},
+                    client_id=client_id,
+                    timeout=15.0,
+                )
+        if restored is None:
+            pytest.skip("the browser retired the tab this case restores")
+        assert self._is_active(f"{client_id}:{restored}") is True
 
 
 class TestCookiesAndStorage:

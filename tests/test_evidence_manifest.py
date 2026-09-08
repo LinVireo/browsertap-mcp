@@ -2,12 +2,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts import evidence_manifest as E
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _offline_files(artifacts: Path) -> dict[Path, bytes]:
+    """One file per canonical offline artifact, derived from the module's own list.
+
+    Hand-listing them here passed for as long as the two copies happened to
+    agree: adding `lint.json` to `OFFLINE_ARTIFACTS` left three fixtures writing
+    a set the sealer no longer considers complete, and the resulting failures
+    pointed at the sealer rather than at the fixtures. Reading the list means a
+    new artifact is covered by these tests the moment it is required.
+    """
+    return {artifacts / Path(relative).name: relative.encode() for relative in E.OFFLINE_ARTIFACTS}
 
 
 def test_validate_manifest_accepts_matching_source_and_artifacts(monkeypatch, tmp_path):
@@ -22,9 +37,7 @@ def test_validate_manifest_accepts_matching_source_and_artifacts(monkeypatch, tm
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
     files = {
-        artifacts / "coverage.json": b"coverage",
-        artifacts / "offline-junit.xml": b"junit",
-        artifacts / "tool-coverage-offline.json": b"tools",
+        **_offline_files(artifacts),
         dist / "package.whl": b"wheel",
         dist / "package.tar.gz": b"sdist",
     }
@@ -143,9 +156,7 @@ def test_a_live_seal_binds_the_preflight_record_as_well_as_the_junit(monkeypatch
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
     files = {
-        artifacts / "coverage.json": b"coverage",
-        artifacts / "offline-junit.xml": b"junit",
-        artifacts / "tool-coverage-offline.json": b"tools",
+        **_offline_files(artifacts),
         artifacts / "live-junit.xml": b"live junit",
         artifacts / "tool-coverage-live.json": b"live tools",
         dist / "package.whl": b"wheel",
@@ -195,9 +206,7 @@ def test_validate_manifest_rejects_extra_records_and_noncanonical_distribution_s
     dist = artifacts / "dist"
     dist.mkdir(parents=True)
     for relative, content in {
-        "coverage.json": b"coverage",
-        "offline-junit.xml": b"junit",
-        "tool-coverage-offline.json": b"tools",
+        **{Path(name).name: name.encode() for name in E.OFFLINE_ARTIFACTS},
         "extra.txt": b"extra",
         "dist/a.whl": b"wheel",
         "dist/b.tar.gz": b"sdist",
@@ -305,3 +314,75 @@ def test_source_identity_separates_a_deleted_tracked_file_from_one_never_tracked
     assert never_tracked["missing_file_count"] == 0
     assert after_delete["git_dirty"] is True
     assert never_tracked["git_dirty"] is False
+
+
+def _repo_tracked_files() -> list[str]:
+    if shutil.which("git") is None or not (ROOT / ".git").exists():
+        pytest.skip("needs a git checkout")
+    completed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    return [name for name in completed.stdout.decode().split("\0") if name]
+
+
+def test_every_tracked_path_has_its_line_endings_governed():
+    """An ungoverned path makes `content_sha256` depend on who cloned it.
+
+    The fingerprint above hashes raw working-tree bytes, and `core.autocrlf=true`
+    -- Git for Windows' default -- rewrites the line endings of any path no
+    attribute governs. So the seal recorded on one machine cannot be reproduced
+    on another, including from a clone of the commit it names.
+
+    `.gitattributes` used to list suffixes, and the list lost three times:
+    `*.mjs`, `*.yml` and `*.toml` were appended late, `.yaml` was never covered,
+    and an extensionless path cannot be covered by a suffix at all. Measured at
+    0.4.15: five tracked files were ungoverned and a fresh clone differed from the
+    working tree in three of them. Ask git which paths it governs rather than
+    re-deriving the answer from a fourth list of extensions.
+    """
+    names = _repo_tracked_files()
+    completed = subprocess.run(
+        ["git", "check-attr", "eol", "-z", "--stdin"],
+        cwd=ROOT,
+        input="\0".join(names).encode(),
+        capture_output=True,
+        check=True,
+    )
+    fields = completed.stdout.decode().split("\0")
+    governed = {
+        fields[index]: fields[index + 2]
+        for index in range(0, len(fields) - 2, 3)
+        if fields[index + 1] == "eol"
+    }
+    assert set(governed) == set(names), "git did not answer for every tracked path"
+    ungoverned = sorted(name for name, value in governed.items() if value != "lf")
+    assert not ungoverned, f"no eol=lf attribute governs: {ungoverned}"
+
+
+def test_no_tracked_text_file_holds_crlf_in_this_worktree():
+    """The attribute above governs a checkout; a local tool can still undo it.
+
+    `Path.write_text` translates on Windows, so a script that reads a file,
+    edits one line and writes it back converts the whole file -- which
+    `check_derived_notices.py --write` did to its own source, meaning the one
+    command a maintainer runs to make the notice table honest silently made the
+    release fingerprint unreproducible. A `ruff format` with `line-ending = auto`
+    did it to 21 tracked files at once.
+
+    Nothing in the sealed record mentions line endings, so this is the only place
+    the damage is visible before a third party fails to reproduce the hash.
+    """
+    offenders = []
+    for name in _repo_tracked_files():
+        path = ROOT / name
+        if not path.is_file():
+            continue
+        raw = path.read_bytes()
+        if b"\0" in raw[:8000]:  # git treats it as binary; so do we
+            continue
+        if b"\r\n" in raw:
+            offenders.append(name)
+    assert not offenders, f"CRLF in the working tree: {sorted(offenders)}"

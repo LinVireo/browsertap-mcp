@@ -27,6 +27,7 @@ from browsertap_mcp.page_input import (
     _HIT_TEST_JS,
     resolve_selector_script,
     structured_locator_script,
+    type_target_script,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -49,6 +50,8 @@ function makeElement(def) {
     rect: def.rect,
     getAttribute: name => (def.attributes || {})[name] || null,
     getBoundingClientRect() { return this.rect; },
+    focus() { document.activeElement = this; },
+    select() {},
     scrollIntoView(options) {
       scrolls.push({id: this.id, options: options || null});
       if (def.rectAfterScroll) this.rect = def.rectAfterScroll;
@@ -65,7 +68,14 @@ for (const def of spec.elements) nodes[def.id] = makeElement(def);
 
 const document = {
   title: spec.title || 'page',
-  querySelector: () => nodes[spec.match] || null,
+  querySelector: selector => {
+    if (spec.throwSelector) throw new SyntaxError('Invalid selector: ' + selector);
+    return nodes[(spec.matches || [spec.match])[0]] || null;
+  },
+  querySelectorAll: selector => {
+    if (spec.throwSelector) throw new SyntaxError('Invalid selector: ' + selector);
+    return (spec.matches || [spec.match]).map(id => nodes[id]).filter(Boolean);
+  },
   elementFromPoint(x, y) {
     for (const id of spec.stack) {
       const rect = nodes[id].rect;
@@ -77,6 +87,7 @@ const document = {
 };
 for (const id of Object.keys(nodes)) nodes[id].ownerDocument = document;
 const window = {innerWidth: spec.innerWidth, innerHeight: spec.innerHeight};
+window.getComputedStyle = () => ({display: 'block', visibility: 'visible', opacity: '1'});
 document.defaultView = window;
 const location = {
   origin: 'https://example.test', pathname: '/',
@@ -104,6 +115,10 @@ def _click_script(**kwargs) -> str:
     )
 
 
+def _type_script() -> str:
+    return type_target_script("#target", select_all=True)
+
+
 def _spec(**overrides) -> dict:
     spec = {
         "match": "target",
@@ -124,6 +139,32 @@ def test_a_visible_unobstructed_element_is_verified():
     assert out["result"]["hitVerified"] is True
     assert out["result"]["scrolledIntoView"] is False
     assert out["scrolls"] == []
+
+
+def test_interactable_selector_skips_hidden_template_match():
+    spec = _spec(
+        matches=["hidden", "target"],
+        elements=[
+            {"id": "hidden", "rect": {"left": 0, "top": 0, "width": 0, "height": 0}},
+            {"id": "target", "rect": {"left": 100, "top": 100, "width": 80, "height": 40}},
+        ],
+    )
+    out = _run(_click_script(center_x=True, center_y=True), spec)
+    assert out["result"]["found"] is True
+    assert out["result"]["hitVerified"] is True
+
+
+def test_type_selector_skips_hidden_template_match_and_focuses_visible_target():
+    spec = _spec(
+        matches=["hidden", "target"],
+        elements=[
+            {"id": "hidden", "rect": {"left": 0, "top": 0, "width": 0, "height": 0}},
+            {"id": "target", "tagName": "INPUT", "rect": {"left": 100, "top": 100, "width": 180, "height": 32}},
+        ],
+    )
+    out = _run(_type_script(), spec)
+    assert out["result"]["found"] is True
+    assert out["result"]["focusConfirmed"] is True
 
 
 def test_an_overlay_that_owns_the_pixel_refuses_instead_of_clicking_it():
@@ -271,6 +312,16 @@ def test_verification_is_opt_in_so_query_and_type_paths_are_unchanged():
     assert out["result"]["hitVerified"] is False
 
 
+def test_a_legacy_invalid_css_selector_returns_structured_status():
+    out = _run(resolve_selector_script(">>>"), _spec(throwSelector=True))
+    assert out["result"] == {
+        "found": False,
+        "status": "invalid_selector",
+        "error": "Invalid selector: >>>",
+        "stage": "selector",
+    }
+
+
 def test_the_structured_resolver_carries_the_same_proof():
     script = structured_locator_script(
         {"role": "button", "name": "Pay"}, purpose="click", verify_hit=True
@@ -292,6 +343,58 @@ def test_the_structured_resolver_carries_the_same_proof():
     assert "const framed = true" in framed
 
 
+def test_a_css_transformed_frame_is_rejected_before_dispatch():
+    script = structured_locator_script(
+        {"css": "#pay", "frame": [{"css": "iframe"}]},
+        purpose="click",
+        verify_hit=True,
+    )
+    harness = r"""
+const vm = require('vm');
+const frameDocument = {defaultView: {getComputedStyle: () => ({transform: 'matrix(1, 0, 0, 1, 12, 0)'})}};
+const frame = {
+  ownerDocument: frameDocument,
+  parentElement: null,
+  getAttribute: () => null,
+  getBoundingClientRect: () => ({left: 10, top: 10, width: 400, height: 300}),
+};
+const document = {
+  title: 'page',
+  querySelectorAll: selector => selector === 'iframe' ? [frame] : [],
+};
+const location = {origin: 'https://example.test', pathname: '/', hostname: 'example.test', href: 'https://example.test/'};
+const window = {innerWidth: 800, innerHeight: 600};
+const context = vm.createContext({document, window, location, console});
+const result = vm.runInContext(%s, context);
+process.stdout.write(JSON.stringify(result));
+""" % json.dumps(script)
+    completed = subprocess.run(
+        ["node", "-"], input=harness, text=True, capture_output=True, timeout=20
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result == {
+        "found": False,
+        "status": "unsupported_frame_transform",
+        "stage": "frame",
+        "frameTransform": "matrix(1, 0, 0, 1, 12, 0)",
+    }
+    point_script = structured_locator_script(
+        {"frame": [{"css": "iframe"}], "x": 20, "y": 30}, purpose="click"
+    )
+    point_completed = subprocess.run(
+        ["node", "-"], input=harness.replace(json.dumps(script), json.dumps(point_script)),
+        text=True, capture_output=True, timeout=20
+    )
+    assert point_completed.returncode == 0, point_completed.stderr
+    assert json.loads(point_completed.stdout) == {
+        "found": False,
+        "status": "unsupported_frame_transform",
+        "stage": "frame",
+        "frameTransform": "matrix(1, 0, 0, 1, 12, 0)",
+    }
+
+
 # Every script this module hands to the browser, across the switches that change
 # how it is assembled. A resolver that does not compile fails identically to one
 # whose logic is wrong -- `Runtime.evaluate` answers with a SyntaxError and the
@@ -303,6 +406,9 @@ _GENERATED_SCRIPTS = {
     ),
     "structured_click_framed": lambda: structured_locator_script(
         {"frame": ["iframe"], "css": "#target"}, purpose="click", verify_hit=True
+    ),
+    "structured_frame_point": lambda: structured_locator_script(
+        {"frame": ["iframe"], "x": 20, "y": 30}, purpose="click"
     ),
     "structured_type": lambda: structured_locator_script(
         {"role": "textbox", "name": "Email"}, purpose="type", select_all=True

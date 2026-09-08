@@ -1,4 +1,4 @@
-"""Reject machine-local browser data from Python distribution archives."""
+"""Validate one wheel/source archive pair against the release contract."""
 
 from __future__ import annotations
 
@@ -8,17 +8,12 @@ import zipfile
 from pathlib import Path
 
 # A licence obligation, not packaging tidiness: the wheel is the copy most people
-# receive, and part of what it carries is upstream's code under upstream's MIT
-# notice. A wheel without these two distributes that code with its notice
-# stripped. Kept apart from REQUIRED_WHEEL_SUFFIXES because these are the only
-# required members the build generates rather than copies out of the tree, so the
+# receive, and a wheel without the licence file distributes the code with its
+# terms stripped. Kept apart from REQUIRED_WHEEL_SUFFIXES because this is a
+# required member the build generates rather than copies out of the tree, so the
 # `src/` + suffix mapping that checks the others against `git ls-files` does not
-# apply -- their tree counterparts are `LICENSE` and `THIRD-PARTY-NOTICES.md`,
-# which REQUIRED_SDIST_SUFFIXES already pins.
-REQUIRED_WHEEL_METADATA_SUFFIXES = (
-    "/licenses/LICENSE",
-    "/licenses/THIRD-PARTY-NOTICES.md",
-)
+# apply -- its tree counterpart is pinned below for the sdist.
+REQUIRED_WHEEL_METADATA_SUFFIXES = ("/licenses/LICENSE",)
 REQUIRED_WHEEL_SUFFIXES = (
     "/browsertap_mcp/browser_bridge.py",
     "/browsertap_mcp/chrome_extension/background.js",
@@ -34,15 +29,29 @@ REQUIRED_WHEEL_SUFFIXES = (
     # command that resolves to an empty directory.
     "/browsertap_mcp/skills/browsertap-default/SKILL.md",
     "/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
+    # The scan_page payload. `simphtml` reads these at import, so a wheel
+    # without them raises `FileNotFoundError` on the first `import`, not at
+    # some later call -- the package would not load at all.
+    "/browsertap_mcp/page_scripts/page_outline.js",
+    "/browsertap_mcp/page_scripts/list_groups.js",
 )
 REQUIRED_SDIST_SUFFIXES = (
     "/.gitignore",
     "/LICENSE",
-    "/THIRD-PARTY-NOTICES.md",
     "/CONTRIBUTING.zh-CN.md",
+    # Same reason as `server.json` below rather than packaging tidiness: the
+    # sdist carries `tests/`, and `test_documentation_contract.py` reads this
+    # file to check the policy still covers every permission the manifest asks
+    # for. An sdist without it turns that gate into a traceback. It is also the
+    # URL the Chrome Web Store listing serves as its privacy policy.
+    "/PRIVACY.md",
     "/src/browsertap_mcp/browser_bridge.py",
     "/src/browsertap_mcp/skills/browsertap-default/SKILL.md",
     "/src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
+    # Same reason as the wheel, plus one the wheel does not have: the sdist
+    # carries `tests/`, and the offline suite imports `simphtml`.
+    "/src/browsertap_mcp/page_scripts/page_outline.js",
+    "/src/browsertap_mcp/page_scripts/list_groups.js",
     "/.github/workflows/live.yml",
     "/.github/workflows/release.yml",
     "/.github/workflows/supply-chain.yml",
@@ -112,6 +121,61 @@ def archive_names(path: Path) -> list[str]:
         with tarfile.open(path, "r:gz") as archive:
             return archive.getnames()
     raise ValueError(f"unsupported distribution archive: {path}")
+
+
+def _runtime_package_members(path: Path) -> set[str]:
+    """Return installable package files using one path shape for both archives.
+
+    A stale ``build/`` directory can leave an old module in a wheel even though
+    the source distribution no longer contains it. Comparing the package file
+    sets makes that contamination observable without treating docs or tests,
+    which intentionally differ between wheel and sdist, as a mismatch.
+    """
+    if path.suffix == ".whl":
+        with zipfile.ZipFile(path) as archive:
+            return {
+                info.filename.replace("\\", "/")
+                for info in archive.infolist()
+                if not info.is_dir()
+                and info.filename.replace("\\", "/").startswith("browsertap_mcp/")
+            }
+
+    package_members: set[str] = set()
+    marker = "/src/browsertap_mcp/"
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            normalised = member.name.replace("\\", "/")
+            index = normalised.find(marker)
+            if index >= 0:
+                package_members.add(normalised[index + len("/src/") :])
+    return package_members
+
+
+def runtime_package_mismatch(wheel: Path, sdist: Path) -> list[str]:
+    """Describe installable package files present in only one archive.
+
+    ``validate_archive`` proves each archive is internally valid, but it cannot
+    see a stale build artifact that exists only in the wheel (or a source file
+    omitted from the wheel).  Keep this comparison separate so callers that
+    already have a manifest-bound pair can enforce the same cross-archive
+    contract without having to expose a directory with unrelated files.
+    """
+    wheel_members = _runtime_package_members(Path(wheel))
+    sdist_members = _runtime_package_members(Path(sdist))
+    mismatch: list[str] = []
+    wheel_only = sorted(wheel_members - sdist_members)
+    sdist_only = sorted(sdist_members - wheel_members)
+    if wheel_only:
+        mismatch.append(
+            "wheel contains package files absent from sdist: " + ", ".join(wheel_only)
+        )
+    if sdist_only:
+        mismatch.append(
+            "sdist contains package files absent from wheel: " + ", ".join(sdist_only)
+        )
+    return mismatch
 
 
 def filename_version(path: Path) -> str | None:
@@ -284,18 +348,33 @@ def validate_archive(path: Path) -> list[str]:
 
 
 def validate_dist_dir(dist_dir: Path) -> tuple[list[Path], dict[Path, list[str]]]:
-    archives = sorted((*dist_dir.glob("*.whl"), *dist_dir.glob("*.tar.gz")))
-    if not any(path.suffix == ".whl" for path in archives):
+    wheels = sorted(dist_dir.glob("*.whl"))
+    sdists = sorted((*dist_dir.glob("*.tar.gz"), *dist_dir.glob("*.tgz")))
+    archives = sorted((*wheels, *sdists))
+    if not wheels:
         raise ValueError(f"no wheel found in {dist_dir}")
-    if not any(path.name.endswith(".tar.gz") for path in archives):
+    if not sdists:
         raise ValueError(f"no source distribution found in {dist_dir}")
+    if len(wheels) != 1 or len(sdists) != 1:
+        wheel_names = ", ".join(path.name for path in wheels)
+        sdist_names = ", ".join(path.name for path in sdists)
+        raise ValueError(
+            "expected exactly one wheel and one source distribution in "
+            f"{dist_dir}; found {len(wheels)} wheel(s) [{wheel_names}] and "
+            f"{len(sdists)} source distribution(s) [{sdist_names}]"
+        )
+
     failures = {path: issues for path in archives if (issues := validate_archive(path))}
+    wheel, sdist = wheels[0], sdists[0]
+    mismatch = runtime_package_mismatch(wheel, sdist)
+    if mismatch:
+        failures.setdefault(wheel, []).extend(mismatch)
     return archives, failures
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check release archives for machine-local browser data"
+        description="Validate one wheel/source archive pair for release"
     )
     parser.add_argument("dist_dir", nargs="?", type=Path, default=Path("artifacts/dist"))
     args = parser.parse_args(argv)

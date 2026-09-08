@@ -14,7 +14,10 @@
 // script throws, the tab navigates mid-command, or the worker is evicted — and
 // a stuck flag silently eats the user's own confirm() dialogs, which is the very
 // bug this was meant to fix. Note the preamble also maintains a legacy
-// window.__btap_suppress_until mirror; nothing reads it, so do not rely on it.
+// window.__btap_suppress_until mirror. Nothing in this extension consumes it
+// as a policy decision -- the only read is the preamble zeroing its own value
+// on the way out -- so do not rely on it. It is kept because a page or
+// userscript may still be looking at it; deleting it is an observable change.
 (function() {
   const _log = console.log.bind(console);
   const native = {
@@ -38,7 +41,7 @@
       (document.body || document.documentElement).appendChild(d);
       setTimeout(() => { d.style.opacity = '0'; }, 3000);
       setTimeout(() => { d.remove(); }, 3600);
-    } catch(e) {}
+    } catch (_) {}
   }
 
   function activeScope() {

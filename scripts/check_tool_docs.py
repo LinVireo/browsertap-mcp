@@ -101,17 +101,6 @@ REQUIRED_SKILL_TEXT = {
 REQUIRED_DEFAULT_PARAMETERS = {
     "scan_page": {"cutlist", "maxchars", "timeout"},
     "scroll_page": {"to", "timeout"},
-    # The five physical-input tools move the real cursor and keyboard, so a
-    # caller that guesses their pacing guesses wrong at the user's expense.
-    # `activate_session` is here because its default is the safety property
-    # (raise the target tab before acting); a README that only says the value
-    # exists lets a reader assume the opposite.
-    "mouse_move": {"duration", "activate_session"},
-    "mouse_click": {"button", "clicks", "interval", "activate_session"},
-    "mouse_drag": {"duration", "button", "activate_session"},
-    "type_text": {"interval", "activate_session"},
-    "hotkey": {"activate_session"},
-    "capture_desktop_screenshot": {"return_base64"},
 }
 
 
@@ -177,7 +166,7 @@ def _mentions_default(block: str, parameter: str, value: Any) -> bool:
 
 def _skill_hashes(paths: Iterable[Path]) -> dict[str, str]:
     return {
-        str(path): hashlib.md5(path.read_bytes()).hexdigest()
+        str(path): hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()
         for path in paths
     }
 
@@ -288,7 +277,7 @@ def build_report(
         version_error = str(exc)
     return {
         "registered": len(registered_set),
-        "expected_registered": 55,
+        "expected_registered": 49,
         "coverage_manifest": len(TOOL_COVERAGE),
         "readme_missing": {
             name: sorted(registered_set - documented[name])
@@ -331,8 +320,8 @@ def report_ok(report: dict[str, Any]) -> bool:
         not report.get("skill_mirrors_unset")
     )
     return (
-        report["registered"] == report["expected_registered"] == 55
-        and report["coverage_manifest"] == 55
+        report["registered"] == report["expected_registered"] == 49
+        and report["coverage_manifest"] == 49
         and all(not values for values in report["readme_missing"].values())
         and all(not values for values in report["readme_extra"].values())
         and not report["missing_params"]

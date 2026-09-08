@@ -23,11 +23,6 @@ class TestRealReturns:
 class TestUndelivered:
     """Never reached the page, so a retry cannot double a side effect."""
 
-    def test_no_ack(self):
-        assert no_response_kind(
-            {"result": "No response data in 15s (no ACK, script may not have been delivered)"}
-        ) == "undelivered"
-
     def test_http_never_polled(self):
         assert no_response_kind(
             {"result": "Session a:1 no response in 15s (script not polled)"}
@@ -46,6 +41,11 @@ class TestUndelivered:
 
 class TestAfterAck:
     """Delivered and possibly still running: retrying could double a submit."""
+
+    def test_no_ack_is_not_proof_that_execution_never_started(self):
+        assert no_response_kind(
+            {"result": "No response data in 15s (no ACK, script may not have been delivered)"}
+        ) == "after_ack"
 
     def test_ack_received(self):
         assert no_response_kind(

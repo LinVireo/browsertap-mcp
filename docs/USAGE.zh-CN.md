@@ -3,19 +3,22 @@
 [English](USAGE.md) | 中文
 
 本文档定义 `browsertap-mcp` 在现有 Chrome、Edge 或 Opera 会话中的推荐操作方式，
-目标是在保持任务可控的同时，尽量避免改变用户正在使用的浏览器和桌面状态。55 个工具及其
+目标是在保持任务可控的同时，尽量避免改变用户正在使用的浏览器和桌面状态。49 个工具及其
 参数以根目录的 [README 中文版](../README.zh-CN.md)为权威参考；本文档仅说明操作流程和
 边界选择。
 
+所有公开工具都返回 `btap.result.v1` 结果 envelope。成功时从 `data` 读取操作结果，失败时检查
+`error` / `error_code` / `retryable`，并结合 `target` / `diagnostics` 判断是否可以安全重试。
+为保持兼容，既有操作字段仍可能投影在顶层。
+
 ## 1. 操作层级
 
-BTAP 的操作分为三个层级：
+BTAP 的操作分为两个层级：
 
 | 层级 | 操作对象 | 对可见界面的影响 |
 |---|---|---|
 | 后台标签页操作 | 通过 CDP 或扩展操作指定标签页 | 不改变。`switch_tab` 仅修改后续调用目标 |
 | 前台标签页操作 | 可见标签页及其浏览器窗口 | 会改变。仅由 `activate_tab` 或 `switch_tab(activate=true)` 显式触发 |
-| 桌面级操作 | 操作系统屏幕、真实鼠标和键盘 | 会改变。物理输入作用于屏幕上实际可见的对象 |
 
 默认采用后台标签页操作。`switch_tab` 选定标签页后，该标签页不会自动变为可见、获得窗口
 焦点或成为浏览器当前活动页。
@@ -43,6 +46,10 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 
 需要导航、填写表单或执行其他明显状态变更时，应创建 Agent 自有标签页，不应修改用户标签页。
 
+如果 `scan_page` 返回 `render_state` 为 `loading`、`hydrating` 或 `shell_only`，或
+`content_ready=false`，就还不能确认页面已准备好。先重试 `scan_page` 或使用 `wait_for`，
+不要把空壳结果当成页面确实为空。
+
 ## 3. 状态变更与标签页所有权
 
 导航、表单、下载等状态变更操作通常使用 `open_new_tab` 创建工作标签页。新标签页默认在后台
@@ -56,36 +63,45 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 创建且 `owner_id` 匹配的标签页。若用户已提前关闭该标签页，清理结果为 `already_gone`；不得
 为完成清理而重新创建标签页或复用旧标签页 ID。
 
-## 4. 截图来源与模型能力
+Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `rebound_from`、
+`replacement_session_id` 和 `tab_identity`。此时应采用返回的新 session 句柄，并在副作用操作前
+重新确认页面；没有这些字段的普通过期显式 session 仍会被拒绝，应通过 `list_tabs` / `switch_tab`
+重新选定目标。
 
-两个截图工具具有不同的数据来源：
+## 4. 截图与模型能力
+
+截图工具只有一个：
 
 - `capture_page_screenshot` 通过 CDP 捕获指定标签页，支持后台标签页、整页截图和显式裁剪，
   无需将页面切换到前台。MCP 结果包含图片内容，并可返回相关元数据或 base64。
-- `capture_desktop_screenshot` 捕获操作系统当前可见的虚拟桌面，覆盖全部显示器，并保留可能
-  出现的负显示器坐标。该工具适用于核对物理输入、浏览器界面、原生对话框和文件选择器，不
-  捕获后台标签页。浏览器最小化或被其他窗口遮挡时，截图就是当时实际显示的内容。返回结果
-  包含 `monitor_count`、`left`、`top` 和说明该边界的 `model_note`。
+  操作系统级桌面截图已在 0.5.0 移除：它拍的是当时恰好在前台的窗口，这跟「这个标签页显示
+  的是什么」是两个问题。
+
+这两个工具以及 `save_pdf` 的 `save_path` 都是**相对路径**，落在 `~/Downloads/browsertap`
+下。绝对路径或 `..` 越界会抛 `ValueError`；该沙箱不通过环境变量配置。
 
 工具成功返回图片附件或保存路径，仅表示截图已生成，不表示当前模型或宿主具备像素读取能力。
 需要判断布局、canvas、WebGL、验证码或其他视觉状态时，应使用支持图片输入的多模态模型。
 模型不支持图片输入时，应改用 `scan_page`、`execute_js`、页面数据 API 或环境提供的 OCR。
 对于终端模拟器、canvas 和 WebGL 页面，仍应优先获取结构化数据，仅在确需像素判断时使用截图。
 
-## 5. 前台激活与物理输入
+## 5. 前台激活，以及仅剩的那条物理路径
 
-普通表单、页面按钮、页内快捷键、滚动和拖拽应优先使用 `page_*` 或其他 CDP 工具。以下情况
-才需要前台激活或操作系统级输入：
+普通表单、页面按钮、页内快捷键、滚动和拖拽**就用** `page_*` 等 CDP 工具，`page_click`、
+`page_type`、`page_press`、`page_drag` 全部不需要前台激活。
 
-- 浏览器自身界面；
-- 扩展弹窗；
-- 原生文件选择器；
-- 操作系统对话框；
-- 页面不存在可用的 DOM、协议或 API 操作入口。
+**那七个操作系统级工具已在 0.5.0 移除**，所以没有屏幕坐标面可以「升级」过去。
+`page_click` 失败是定位问题：按返回的 `obscured` / `outside_viewport` / `not_found` 修正
+目标。浏览器自身界面、扩展弹窗、原生文件选择器和操作系统对话框本来就不在页面级事件能到的
+范围内，按**不支持**上报。
 
-物理输入的执行顺序如下：
+单纯的前台激活（`activate_tab`、`switch_tab(activate=true)`）不发送任何输入；用户需要看到
+某个标签页时用它。
 
-1. 仅在用户需要查看页面或桌面操作依赖可见状态时，显式激活目标标签页。
+只剩一条物理路径：`resolve_leave_dialog` 在两次协议 accept 失败后发送 Enter，且仅限 `lab`。
+其执行顺序如下：
+
+1. 先走两次协议级尝试。返回 `no_dialog` 或传输超时就到此为止，什么都不发。
 2. BTAP 验证目标窗口、标签页所有权和 `on_screen` 状态。
 3. BTAP 获取跨进程输入锁并等待安静窗口；若检测到用户鼠标或键盘活动，本次操作取消。
    要检测得到这种活动，靠的是操作系统给的信号，而不是每台机器都有：一个信号都
@@ -93,9 +109,9 @@ capture_page_screenshot(session_id="chrome_client:123", full_page=true)
 4. 无法确认目标显示在屏幕上时，返回 `activation_failed`，且不发送输入。
 
 默认 `lab` profile 免 elicitation，以支持连续自动化。设置
-`BROWSERTAP_LAB_NO_ELICIT=0` 或 `false` 可恢复 lab 会话级询问；`safe` profile 对每次
-物理输入和站点 `allow` 操作进行询问。两种 profile 均保留输入锁、安静窗口、所有权检查、
-目标激活和屏幕确认。
+`BROWSERTAP_LAB_NO_ELICIT=0` 或 `false` 可恢复 lab 会话级询问；`safe` profile 直接拒发这条
+Enter 兜底，并对每次站点 `allow` 操作进行询问。两种 profile 均保留输入锁、安静窗口、
+所有权检查、目标激活和屏幕确认。
 
 ## 6. 对话框、权限与挑战页
 
@@ -122,6 +138,9 @@ browsertap doctor
 变化后，仍需在 `chrome://extensions` 或 Edge、Opera 对应页面中手动执行 **Reload**。工具
 schema 变化后，需重启 MCP 会话或客户端以重新读取工具描述。
 
+刚启动时，`get_setup_status` 可能返回 `status="starting"`、`action="wait_for_extension"`；
+等待扩展握手后再次运行诊断即可。
+
 若将 `BROWSERTAP_BRIDGE_PORT` 从 `18765` 改为其他值，还需在扩展的 Service Worker 控制台
 告知一次相同的 WebSocket 端口（见[故障排查](TROUBLESHOOTING.zh-CN.md)）。Python 环境变量
 无法直接修改已安装扩展的 storage；两端端口不一致时不会建立连接。
@@ -145,8 +164,7 @@ schema 变化后，需重启 MCP 会话或客户端以重新读取工具描述�
 ```
 
 ```text
-检查指定 session 的视觉布局，但不切换前台。使用 capture_page_screenshot；仅在需要查看
-实际显示器或原生对话框时使用 capture_desktop_screenshot。
+检查指定 session 的视觉布局，但不切换前台。使用 capture_page_screenshot。
 ```
 
 ## 9. 安全边界

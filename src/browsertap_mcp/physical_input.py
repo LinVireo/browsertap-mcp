@@ -472,7 +472,7 @@ def wait_for_quiet(quiet_seconds: float = 0.75) -> dict[str, Any]:
     after = last_input_marker()
     comparable = [
         (name, old, new)
-        for name, old, new in zip(QUIET_MARKER_NAMES, before, after)
+        for name, old, new in zip(QUIET_MARKER_NAMES, before, after, strict=True)
         if old is not None and new is not None
     ]
     if any(old != new for _name, old, new in comparable):
@@ -553,10 +553,10 @@ def _mss_virtual_screen() -> dict[str, int] | None:
     """Virtual-desktop rectangle from mss, which answers on all three platforms.
 
     Index 0 is the bounding rectangle over every display; 1..N are individual
-    monitors. This is the same read `capture_desktop_screenshot` reports as
-    `width`/`height`/`left`/`top`, deliberately: a refusal computed from one
-    rectangle and a screenshot framed by another would tell a caller to click a
-    point its own picture shows.
+    monitors. The rectangle is reported to the caller as
+    `width`/`height`/`left`/`top` so a refusal names the geometry it was
+    computed from: a caller cannot correct an out-of-range point without
+    knowing the real range.
 
     Unlike the Win32 fallback this needs no cooperation from the caller: mss
     makes itself DPI-aware inside `mss.mss()` before reading, so it answers
@@ -683,15 +683,16 @@ def check_screen_bounds(
         "checked": checked,
         "enforced": bool(rect is not None and checked),
     }
-    if offenders:
+    if offenders and rect is not None:
         listed = ", ".join(f"({x}, {y})" for x, y in offenders)
         raise CoordinatesOffScreen(
             f"{listed} is on no display; nothing was dispatched. The virtual desktop is "
             f"{int(rect.get('width', 0))}x{int(rect.get('height', 0))} at "
             f"({int(rect.get('left', 0))}, {int(rect.get('top', 0))}). The OS clamps an "
             "out-of-range pointer move to the nearest edge and reports success, so this "
-            "would have acted on a screen corner instead of the requested point. Read the "
-            "real geometry from pointer_info or capture_desktop_screenshot."
+            "would have acted on a screen corner instead of the requested point. The real "
+            "geometry is in the message above; page-level input takes viewport coordinates "
+            "instead and needs no screen geometry at all."
         )
     if rect is None and checked:
         # Said in full, like the quiet gate's: this is the line that stops a
@@ -728,3 +729,27 @@ def run_physical_action(
         if isinstance(result, dict):
             result.setdefault("input_quiet", quiet)
         return result
+
+
+def delivery_reachability(point: tuple[int, int] | None) -> dict[str, Any] | None:
+    """
+    Check whether physical input can reach the target point.
+
+    On Windows, UIPI (User Interface Privilege Isolation) blocks input from
+    lower-integrity processes to higher-integrity windows. This function checks
+    the integrity level at the target coordinates after window activation.
+
+    Args:
+        point: (x, y) screen coordinates to check, or None to skip the check
+
+    Returns:
+        dict with reachability status, or None if the check could not be performed
+    """
+    if point is None:
+        return None
+
+    # Placeholder implementation - returns None to indicate check not performed
+    # Full implementation would need platform-specific UIPI checking on Windows
+    # via GetGUIThreadInfo, WindowFromPoint, and GetWindowThreadProcessId to
+    # compare integrity levels
+    return None

@@ -1,0 +1,19 @@
+# `blank_issues_enabled: false` is the point of this file rather than a
+# preference. A blank issue is the path a vulnerability report takes when the
+# reporter does not find the private channel, and this project's failure mode is
+# a report that arrives with someone's live cookies attached. The two links below
+# are the two destinations a blank issue would otherwise absorb.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/LinVireo/browsertap-mcp/security/advisories/new
+    about: >
+      Never file a vulnerability as a public issue. This opens a private advisory
+      that only maintainers can read. See SECURITY.md for what to include and the
+      response targets.
+  - name: Setup and troubleshooting
+    url: https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md
+    about: >
+      Extension not connecting, bridge not reachable, a tool returning
+      status='no_response' -- the common causes are documented here, including
+      the recovery steps for a bridge that lost its extension.

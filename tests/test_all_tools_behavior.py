@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-from types import SimpleNamespace
-
 import pytest
 
 from browsertap_mcp import server as S
 
 HARNESS_TOOLS = [
-    "capture_desktop_screenshot",
     "cdp_batch",
     "console_capture_start",
     "console_capture_stop",
@@ -20,13 +16,13 @@ HARNESS_TOOLS = [
     "get_automation_profile",
     "get_bookmarks",
     "get_console_messages",
+    "get_execute_js_result",
     "get_setup_status",
     "list_all_tabs",
     "list_extensions",
     "list_tabs",
     "network_capture_start",
     "network_capture_stop",
-    "pointer_info",
     "remove_bookmark",
     "reset_site_permissions",
     "set_automation_profile",
@@ -58,6 +54,10 @@ class FakeDriver:
         self.calls.append((payload, client_id, timeout))
         return self.response
 
+    def get_execute_js_result(self, operation_id, timeout=0.0):
+        self.calls.append(("get_execute_js_result", operation_id, timeout))
+        return self.response
+
 
 def _install_driver(monkeypatch, response=None):
     driver = FakeDriver(response)
@@ -66,43 +66,9 @@ def _install_driver(monkeypatch, response=None):
     return driver
 
 
-def _install_desktop_capture(monkeypatch):
-    class Shot:
-        width = 2
-        height = 1
-        size = (2, 1)
-        rgb = b"\x00\x00\x00\xff\xff\xff"
-
-    class Capture:
-        monitors = [
-            {"left": -2, "top": 0, "width": 4, "height": 1},
-            {"left": -2, "top": 0, "width": 2, "height": 1},
-            {"left": 0, "top": 0, "width": 2, "height": 1},
-        ]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def grab(self, _monitor):
-            return Shot()
-
-    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Capture))
-
-
 def _success(tool, monkeypatch, tmp_path):
     driver = _install_driver(monkeypatch)
-    if tool == "capture_desktop_screenshot":
-        _install_desktop_capture(monkeypatch)
-        out = S.capture_desktop_screenshot(str(tmp_path / "desktop.png"))
-        assert out.structuredContent["width"] == 2
-        assert out.structuredContent["monitor_count"] == 2
-        assert out.structuredContent["virtual_desktop"] is True
-        assert "not from a selected or background browser tab" in out.structuredContent["model_note"]
-        assert (tmp_path / "desktop.png").exists()
-    elif tool == "cdp_batch":
+    if tool == "cdp_batch":
         monkeypatch.setattr(S, "exec_js", lambda script, **kwargs: {"data": script})
         assert '"cmd": "batch"' in S.cdp_batch('{"cmd":"batch","commands":[]}')["data"]
     elif tool in {"network_capture_start", "network_capture_stop", "console_capture_start",
@@ -119,6 +85,10 @@ def _success(tool, monkeypatch, tmp_path):
             "console_capture_stop": lambda: S.console_capture_stop(),
         }
         assert calls[tool]()["status"] == "ok"
+    elif tool == "get_execute_js_result":
+        driver.response = {"status": "success", "data": 42, "executed_tab_id": 7}
+        result = S.get_execute_js_result("test-token")
+        assert result["status"] == "success"
     elif tool == "create_bookmark":
         assert S.create_bookmark("coverage", "https://example.test/")["status"] == "ok"
     elif tool == "remove_bookmark":
@@ -147,24 +117,6 @@ def _success(tool, monkeypatch, tmp_path):
     elif tool == "list_tabs":
         monkeypatch.setattr(S, "compact_tabs", lambda **kwargs: [{"id": "chrome:7"}])
         assert S.list_tabs()["tabs"] == [{"id": "chrome:7"}]
-    elif tool == "pointer_info":
-        monkeypatch.setattr(
-            S, "_pyautogui",
-            lambda: SimpleNamespace(position=lambda: (11, 12), size=lambda: (800, 600)),
-        )
-        # The virtual-desktop rectangle is a real display read, so it is faked
-        # here for the same reason _pyautogui is: this suite must not touch the
-        # machine it runs on.
-        monkeypatch.setattr(
-            S.physical_input, "screen_bounds",
-            lambda: {"left": 0, "top": 0, "width": 800, "height": 600, "source": "test"},
-        )
-        assert S.pointer_info() == {
-            "x": 11, "y": 12, "screen_width": 800, "screen_height": 600,
-            "screen_bounds": {
-                "left": 0, "top": 0, "width": 800, "height": 600, "source": "test",
-            },
-        }
     elif tool == "reset_site_permissions":
         monkeypatch.setattr(S, "switch_session", lambda session_id=None: "chrome:7")
         assert S.reset_site_permissions(session_id="chrome:7")["status"] == "ok"
@@ -180,16 +132,7 @@ def _success(tool, monkeypatch, tmp_path):
 
 def _boundary(tool, monkeypatch, tmp_path):
     driver = _install_driver(monkeypatch)
-    if tool == "capture_desktop_screenshot":
-        class BrokenCapture:
-            monitors = [{"left": 0, "top": 0, "width": 1, "height": 1}]
-            def __enter__(self): return self
-            def __exit__(self, *_args): return False
-            def grab(self, _monitor): raise RuntimeError("desktop unavailable")
-        monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=BrokenCapture))
-        with pytest.raises(RuntimeError, match="desktop unavailable"):
-            S.capture_desktop_screenshot()
-    elif tool == "cdp_batch":
+    if tool == "cdp_batch":
         with pytest.raises(RuntimeError, match="cmd='batch'"):
             S.cdp_batch('{"cmd":"not-batch"}')
     elif tool == "network_capture_start":
@@ -204,6 +147,9 @@ def _boundary(tool, monkeypatch, tmp_path):
     elif tool == "get_console_messages":
         with pytest.raises(ValueError, match="offset"):
             S.get_console_messages(offset=-1)
+    elif tool == "get_execute_js_result":
+        with pytest.raises(ValueError, match="operation_id"):
+            S.get_execute_js_result("")
     elif tool == "console_capture_stop":
         monkeypatch.setattr(S, "_tab_extension_operation", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bridge down")))
         with pytest.raises(RuntimeError, match="bridge down"):
@@ -244,10 +190,6 @@ def _boundary(tool, monkeypatch, tmp_path):
     elif tool == "list_tabs":
         monkeypatch.setattr(S, "compact_tabs", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("bridge down")))
         assert S.list_tabs()["bridge_error"] == "bridge down"
-    elif tool == "pointer_info":
-        monkeypatch.setattr(S, "_pyautogui", lambda: SimpleNamespace(position=lambda: (_ for _ in ()).throw(RuntimeError("no desktop"))))
-        with pytest.raises(RuntimeError, match="no desktop"):
-            S.pointer_info()
     elif tool == "reset_site_permissions":
         with pytest.raises(ValueError, match="http or https"):
             S.reset_site_permissions(origin="file:///tmp/nope")
@@ -316,7 +258,7 @@ def test_harness_cleanup(tool, monkeypatch):
         previous_mode = S._AUTOMATION_MODE_OVERRIDE
         previous_physical = set(S._LAB_PHYSICAL_APPROVALS)
         previous_sites = set(S._LAB_SITE_PERMISSION_APPROVALS)
-        S._LAB_PHYSICAL_APPROVALS.add("chrome:7|mouse_click")
+        S._LAB_PHYSICAL_APPROVALS.add("chrome:7|resolve_leave_dialog")
         S._LAB_SITE_PERMISSION_APPROVALS.add("chrome:7|https://example.test|camera")
         try:
             profile = S.set_automation_profile("safe")

@@ -21,8 +21,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -211,50 +209,13 @@ class TestPageScreenshotReportsItsPixelSpace:
         assert "byte count" in out["dimensions_note"]
 
 
-class TestDesktopScreenshotStatesItsOwnSpace:
-    def test_it_is_physical_and_unscaled(self, monkeypatch):
-        class Shot:
-            width = 1920
-            height = 1080
-            size = (1920, 1080)
-            rgb = b"\x00" * (1920 * 1080 * 3)
+def test_the_page_screenshot_names_its_pixel_space():
+    """The page shot is in DEVICE pixels, and its description must say so.
 
-        class Capture:
-            monitors = [
-                {"left": 0, "top": 0, "width": 1920, "height": 1080},
-                {"left": 0, "top": 0, "width": 1920, "height": 1080},
-            ]
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def grab(self, monitor):
-                return Shot()
-
-        monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Capture))
-
-        out = S.capture_desktop_screenshot().structuredContent
-
-        assert out["pixel_space"] == "physical"
-        assert (out["width"], out["height"]) == (1920, 1080)
-        # This is the pair that makes the desktop chain self-consistent: the
-        # image is not resized, so its pixels *are* mouse_click's coordinates.
-        assert "not resized" in out["model_note"]
-        assert "mouse_click" in out["model_note"]
-
-
-def test_the_two_screenshot_tools_do_not_claim_the_same_space():
-    """The whole defect in one assertion: they are different spaces.
-
-    A caller that reads one tool's description and applies it to the other gets
-    coordinates off by devicePixelRatio, which on this machine is 25%.
+    A caller that assumes screen pixels gets coordinates off by
+    devicePixelRatio, which on this machine is 25%.
     """
     page = S.mcp._tool_manager.get_tool("capture_page_screenshot").description
-    desktop = S.mcp._tool_manager.get_tool("capture_desktop_screenshot").description
 
     assert "DEVICE pixels" in page
-    assert "PHYSICAL screen pixels" in desktop
     assert "devicePixelRatio" in page

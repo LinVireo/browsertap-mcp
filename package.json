@@ -1,0 +1,15 @@
+{
+  "name": "browsertap-mcp-lint",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only. The deliverable is the Python package on PyPI; this manifest exists so the ~4.9k lines of extension JavaScript inside it get linted by the same gate as the Python. Not shipped: MANIFEST.in names its root files individually and this is not one of them.",
+  "type": "module",
+  "scripts": {
+    "lint": "eslint"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "10.9.0",
+    "globals": "17.11.0"
+  }
+}

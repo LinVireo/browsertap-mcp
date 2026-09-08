@@ -353,6 +353,7 @@ async function sendDebuggerCommandWithTimeout(_lease, method) {{
 
 
 def test_save_pdf_validates_then_atomically_writes(monkeypatch, tmp_path):
+    monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
     raw = b"%PDF-1.7\nbody\n%%EOF\n"
     calls = []
 
@@ -366,15 +367,16 @@ def test_save_pdf_validates_then_atomically_writes(monkeypatch, tmp_path):
         }
 
     monkeypatch.setattr(S, "cdp_command", cdp)
-    path = tmp_path / "page.pdf"
     result = S.save_pdf(
-        str(path),
+        "page.pdf",
         session_id="chrome:profile:42",
         landscape=True,
         page_ranges="1-2",
         timeout=4,
     )
-    assert path.read_bytes() == raw
+    # Verify the file was written to the safe default location
+    saved_path = Path(result["saved_to"])
+    assert saved_path.read_bytes() == raw
     assert result["size"] == len(raw)
     assert result["tab_id"] == 42
     assert calls == [
@@ -396,12 +398,14 @@ def test_save_pdf_validates_then_atomically_writes(monkeypatch, tmp_path):
 def test_save_pdf_rejects_invalid_payload_without_creating_file(
     monkeypatch, tmp_path, encoded
 ):
+    monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
     monkeypatch.setattr(
         S,
         "cdp_command",
         lambda *args, **kwargs: {"data": {"data": encoded}},
     )
-    path = tmp_path / "bad.pdf"
     with pytest.raises(RuntimeError, match="save_pdf failed"):
-        S.save_pdf(str(path))
-    assert not path.exists()
+        S.save_pdf("bad.pdf")
+    # Verify nothing was written to the safe default location
+    default_path = Path.home() / "Downloads" / "browsertap" / "bad.pdf"
+    assert not default_path.exists()

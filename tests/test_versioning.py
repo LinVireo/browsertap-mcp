@@ -382,14 +382,43 @@ def test_finalizer_synchronizes_version_before_running_gates():
 def test_offline_workflow_has_explicit_quality_gates():
     workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
 
-    assert "--cov-fail-under=85" in workflow
+    assert "--cov-fail-under=95" in workflow
     assert "--junitxml=artifacts/offline-junit.xml" in workflow
-    assert "python -m ruff check src tests scripts" in workflow
+    assert "python -m scripts.lint_report" in workflow
     assert "refs/heads/release/" in workflow
     assert (
         "pull_request"
         not in workflow.split("Check SemVer bump on release branches", 1)[1].split("- name:", 1)[0]
     )
+
+
+def test_lint_runs_through_one_module_in_ci_and_in_the_finalizer():
+    """Lint was the only gate with two invocations and no evidence.
+
+    CI ran `ruff check src tests scripts` inline and the release finalizer did not
+    run it at all, so a sealed `release_ready: true` and a red CI run could both
+    be correct about the same commit. Adding a second inline call would have
+    fixed the coverage and left a second copy of the target list, where narrowing
+    one of them shows up as a green report either way. Both callers now invoke
+    `scripts/lint_report.py`, which is also what writes the sealed artifact.
+    """
+    from scripts import evidence_manifest as E
+    from scripts import lint_report as L
+
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    finalizer = (ROOT / "scripts" / "finalize_change.py").read_text(encoding="utf-8")
+
+    assert "python -m scripts.lint_report" in workflow
+    assert "scripts.lint_report" in finalizer
+    # No inline `ruff check` anywhere: that is the second copy of the target list.
+    assert "ruff check" not in workflow
+    # The targets are a policy -- production code, its tests, and the tooling that
+    # gates releases. Dropping one is how a lint gate quietly stops covering the
+    # place a defect lives.
+    assert set(L.LINT_TARGETS) == {"src", "tests", "scripts"}
+    for target in L.LINT_TARGETS:
+        assert (ROOT / target).is_dir(), f"lint target {target} does not exist"
+    assert "artifacts/lint.json" in E.OFFLINE_ARTIFACTS
 
 
 def test_the_offline_gate_runs_on_windows_as_well_as_linux():

@@ -12,6 +12,31 @@ ROOT = Path(__file__).resolve().parents[1]
 # lookbehind keeps URL schemes (`http://`, `chrome://`) out of the pattern.
 _LOCAL_PATH_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]\S*")
 
+# Every file that ships inside `chrome_extension/`. Spelled out rather than
+# globbed, so adding one is a decision recorded here instead of an unnoticed
+# arrival: anything in that directory which is not listed fails the check below.
+# A new browser-side file is the event nothing else in the suite sees, and it is
+# how two files once shipped for three releases with no test aware they existed.
+SHIPPED_EXTENSION_FILES = frozenset(
+    {
+        "background.js",
+        "content.js",
+        "disable_dialogs.js",
+        "manifest.json",
+        "popup.html",
+        "popup.js",
+        "_locales/en/messages.json",
+        "_locales/zh_CN/messages.json",
+        # Drawn here for the Chrome Web Store listing, which requires a 128x128
+        # icon inside the package. The generator that produced them is not part
+        # of the distribution.
+        "icon16.png",
+        "icon32.png",
+        "icon48.png",
+        "icon128.png",
+    }
+)
+
 
 def _shipped_skills() -> list[Path]:
     """The agent skills as the release actually carries them.
@@ -33,8 +58,8 @@ def test_tool_docs_and_caller_skill_are_synchronized():
 
 def test_documentation_contract_covers_all_registered_tools():
     report = build_report()
-    assert report["registered"] == 55
-    assert report["coverage_manifest"] == 55
+    assert report["registered"] == 49
+    assert report["coverage_manifest"] == 49
     assert not report["readme_missing"]
     assert not report["readme_extra"]
     assert not report["missing_params"]
@@ -69,8 +94,9 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
 
     assert "declarativeNetRequest" in security
     assert "three business days" in security
-    assert "python -m ruff check src tests scripts" in contributing
-    assert "--cov-fail-under=85" in contributing
+    assert "python -m scripts.lint_report" in contributing
+    assert "python -m scripts.lint_report" in contributing_zh
+    assert "--cov-fail-under=95" in contributing
     assert "release/*" in contributing
     assert "[简体中文](CONTRIBUTING.zh-CN.md)" in contributing
     assert "[English](CONTRIBUTING.md)" in contributing_zh
@@ -101,12 +127,22 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
         assert "gitleaks git . --no-banner --redact" in text
         assert "gitleaks dir . --no-banner --redact" in text
         # The live preconditions are enforced by a fixture now, so both guides
-        # have to name the override and stop telling readers to check the tab
+        # have to name the artifact and stop telling readers to check the tab
         # inventory by hand -- a guide that still asks for the manual step is a
         # guide that says the automated one does not exist.
-        assert "BTAP_LIVE_ALLOW_BUSY_BROWSER=1" in text
         assert "tests/live_preflight.py" in text
         assert "artifacts/live-preflight.json" in text
+        # And both have to say which claim the fixture actually makes. It fails a
+        # run only over a tab the suite opened itself; the user's tabs are theirs
+        # to open and close mid-run. A guide still promising "the inventory comes
+        # out the way it went in" sends the reader to blame the wrong thing, and
+        # the env var that used to downgrade that check no longer exists.
+        assert "BTAP_LIVE_ALLOW_BUSY_BROWSER" not in text
+        assert "_TAB_OWNERSHIP.outstanding()" in text
+        assert "lifecycle generation changed" in text
+        # `enforced` is the field that separates "nothing leaked" from "nothing
+        # was opened, so nothing was measured".
+        assert "own_tabs.enforced" in text
         # The third precondition is the one a reader cannot infer: two of the
         # three processes are long-lived, so a live pass can be a pass for code
         # that is not in the tree. A guide that omits it leaves the reader with
@@ -134,7 +170,12 @@ def test_the_readmes_open_with_a_three_step_start():
         block = text.split(heading, 1)[1].split(features, 1)[0]
 
         # All three steps, in the one place a stranger will actually read.
-        assert 'pip install -e ".[desktop]"' in block, name
+        # The literal is the *published* install, not the editable one it used to
+        # be: since 0.4.12 the package is on PyPI, and a first screen that opens
+        # with `git clone` tells a reader who only wants to use the server to do
+        # work they do not need. The editable install still has its own place
+        # under Getting started, for people changing the project.
+        assert 'pip install "browsertap-mcp[desktop]"' in block, name
         assert "browsertap extension-path" in block, name
         assert "claude mcp add browsertap" in block, name
         # The step that cannot be scripted has to be named as manual here; it is
@@ -325,8 +366,9 @@ def test_readme_links_survive_being_read_off_the_repository():
             if not target.startswith(("https://", "http://", "#", "mailto:"))
         ]
         assert not relative, f"{name} links to {relative} relatively, which breaks off-tree"
-        # An absolute link is only useful if it points at this repository; a link
-        # left pointing at the upstream fork would read as if this were its code.
+        # An absolute link is only useful if it points at this repository; one
+        # left pointing at some other repository sends the reader to code that
+        # is not this project's.
         in_repo = [target for target in targets if target.startswith(repository)]
         assert in_repo, f"{name} no longer links into {repository}"
         for target in in_repo:
@@ -419,7 +461,7 @@ def test_prose_tool_counts_track_the_registered_total():
 
     The count is pinned twice in `check_tool_docs` against a constant, so adding a
     tool means editing that constant -- and at that moment every sentence saying
-    "55 tools" becomes wrong with no gate between it and a reader. These are the
+    "56 tools" becomes wrong with no gate between it and a reader. These are the
     lines a stranger uses to decide whether the table they are reading is the
     whole contract.
 
@@ -527,53 +569,32 @@ def test_the_registry_listing_describes_environment_variables_that_exist(monkeyp
     assert stated.group("default") == btap_server._automation_mode()
 
 
-def test_the_upstream_mit_notice_travels_with_every_copy():
-    """Part of the browser layer is still GenericAgent's, under its MIT licence.
+def test_the_licence_travels_with_every_copy():
+    """MIT puts the obligation on the copy, not on the repository.
 
-    MIT puts the obligation on the copy, not on the repository: the notice has
-    to be included in "all copies or substantial portions". `LICENSE` here does
-    not carry it -- its body is upstream's word for word with only the copyright
-    line swapped -- so a reader of `LICENSE` alone is told the wrong holder. The
-    README credit is prose attribution, which is good practice and not the
-    notice. `THIRD-PARTY-NOTICES.md` is, and it is only worth anything if it
-    reaches the artifact, so `license-files` and the distribution gate carry it
-    too.
+    The terms have to be included in "all copies or substantial portions", and
+    the copy most people receive is the wheel -- not this repository. So the
+    licence being present in the tree proves nothing on its own; what matters is
+    that `license-files` and the distribution gate carry it into the artifact,
+    which is what this asserts.
     """
-    notices = ROOT / "THIRD-PARTY-NOTICES.md"
-    assert notices.exists(), "THIRD-PARTY-NOTICES.md is gone; upstream's notice ships nowhere"
-    text = notices.read_text(encoding="utf-8")
+    licence = ROOT / "LICENSE"
+    assert licence.exists(), "LICENSE is gone; the distribution ships no terms at all"
+    body = licence.read_text(encoding="utf-8")
 
-    assert "Copyright (c) 2025 lsdefine" in text, "upstream's copyright line is not reproduced"
-    assert "https://github.com/lsdefine/GenericAgent" in text
+    # The real MIT grant, not a paraphrase. Both sentences that carry the actual
+    # obligation, so a truncated or reworded licence fails here.
+    assert "MIT License" in body
+    assert "Permission is hereby granted, free of charge" in body
+    assert "The above copyright notice and this permission notice shall be included in all" in body
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in body
+    assert re.search(r"^Copyright \(c\) \d{4} \S+", body, re.MULTILINE), (
+        "LICENSE carries no copyright line, which is the one field MIT requires be filled in"
+    )
 
-    # The reproduced grant must be the real MIT text, not a paraphrase. Our own
-    # LICENSE body is the same text, so comparing against it needs no vendored
-    # copy and fails if either drifts.
-    licence_body = [
-        line
-        for line in (ROOT / "LICENSE").read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("Copyright (c)")
-    ]
-    notice_lines = [line.strip() for line in text.splitlines()]
-    for line in licence_body:
-        assert line in notice_lines, f"reproduced licence is missing: {line[:60]}"
-
-    # Every file the table claims is derived has to still be there under that
-    # name. A rename that skipped this file would leave the notice pointing at
-    # nothing while the code it covers kept shipping.
-    claimed = []
-    for line in text.splitlines():
-        if not line.startswith("| `src/"):
-            continue
-        first = line.split("|")[1].strip().strip("`")
-        claimed.append(first)
-        assert (ROOT / first).exists(), f"THIRD-PARTY-NOTICES.md credits a missing file: {first}"
-    assert len(claimed) >= 3, "the derived-file table stopped parsing; this check is now vacuous"
-    assert "src/browsertap_mcp/simphtml.py" in claimed
-
-    # Reaching the artifact is the whole point of the file. `tomllib` is 3.11+ and
-    # this package still supports 3.10, where the `dev` extra pins `tomli` for
-    # exactly this -- the same fallback `scripts/versioning.py` uses.
+    # Reaching the artifact is the whole point. `tomllib` is 3.11+ and this
+    # package still supports 3.10, where the `dev` extra pins `tomli` for exactly
+    # this -- the same fallback `scripts/versioning.py` uses.
     try:
         import tomllib
     except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
@@ -582,7 +603,6 @@ def test_the_upstream_mit_notice_travels_with_every_copy():
     with (ROOT / "pyproject.toml").open("rb") as handle:
         metadata = tomllib.load(handle)
     declared = metadata["project"]["license-files"]
-    assert "THIRD-PARTY-NOTICES.md" in declared, f"license-files is {declared}"
     assert "LICENSE" in declared, f"license-files dropped LICENSE: {declared}"
 
     from scripts.check_distribution import (
@@ -590,12 +610,293 @@ def test_the_upstream_mit_notice_travels_with_every_copy():
         REQUIRED_WHEEL_METADATA_SUFFIXES,
     )
 
-    assert "/licenses/THIRD-PARTY-NOTICES.md" in REQUIRED_WHEEL_METADATA_SUFFIXES
     assert "/licenses/LICENSE" in REQUIRED_WHEEL_METADATA_SUFFIXES
-    assert "/THIRD-PARTY-NOTICES.md" in REQUIRED_SDIST_SUFFIXES
     assert "/LICENSE" in REQUIRED_SDIST_SUFFIXES
 
+
+def test_the_privacy_policy_discloses_every_permission_that_reads_user_data():
+    """`PRIVACY.md` has to cover what `manifest.json` actually asks for.
+
+    The Chrome Web Store's stated penalty for a policy that is narrower than the
+    listing's data-usage answers is removal, not a review comment, and the
+    listing's answers follow the manifest. So the failure mode worth catching is
+    a permission added to the manifest without a corresponding line here -- the
+    policy keeps reading as complete, because nothing in it became false.
+
+    `alarms` and `storage` are excluded deliberately: neither reads anything
+    about the user. The rest each map to a phrase the policy has to keep.
+    """
+    policy = ROOT / "PRIVACY.md"
+    assert policy.exists(), "PRIVACY.md is gone; the Web Store listing's policy URL 404s"
+    text = policy.read_text(encoding="utf-8")
+
+    manifest = json.loads(
+        (ROOT / "src" / "browsertap_mcp" / "chrome_extension" / "manifest.json")
+        .read_text(encoding="utf-8")
+    )
+    granted = set(manifest["permissions"])
+    # Housekeeping only: `alarms` schedules the reconnect timer, `storage` is the
+    # mechanism the policy's own storage section describes rather than a source.
+    disclosable = granted - {"alarms", "storage"}
+    required_phrase = {
+        "cookies": "Cookies and site storage",
+        "tabs": "Open tabs",
+        "debugger": "Console and network activity",
+        "scripting": "Page content",
+        "contentSettings": "Site permissions",
+        "declarativeNetRequest": "Content-Security-Policy",
+        "management": "installed extensions",
+        "bookmarks": "Bookmarks",
+        "downloads": "downloads",
+    }
+    undocumented = sorted(disclosable - set(required_phrase))
+    assert not undocumented, (
+        f"manifest grants {undocumented} with no phrase mapped here; add the "
+        "disclosure to PRIVACY.md and the mapping to this test"
+    )
+    for permission in sorted(disclosable):
+        phrase = required_phrase[permission]
+        assert phrase in text, f"PRIVACY.md stopped disclosing {permission!r} (looked for {phrase!r})"
+
+    # `<all_urls>` is the breadth question a reviewer asks first, and the honest
+    # answer is that access is held continuously and used per command.
+    assert "<all_urls>" in manifest.get("host_permissions", [])
+    assert "all sites" in text and "<all_urls>" in text, (
+        "PRIVACY.md must say the extension holds all-sites access, not per-site"
+    )
+
+    # Three claims that would each be a false statement if the code changed
+    # under them. The loopback one is the policy's headline promise.
+    assert "127.0.0.1" in text
+    assert "60 to 600 seconds" in text, "the lease window in PRIVACY.md drifted from the tool"
     for name in ("README.md", "README.zh-CN.md"):
         readme = (ROOT / name).read_text(encoding="utf-8")
-        assert "THIRD-PARTY-NOTICES.md" in readme, f"{name} no longer points at the notice"
-        assert "lsdefine/GenericAgent" in readme, f"{name} dropped the upstream credit"
+        assert "PRIVACY.md" in readme, f"{name} dropped the privacy policy link"
+
+
+def test_no_browser_side_file_ships_without_the_suite_knowing():
+    """A new file under `chrome_extension/` has to be declared here.
+
+    That directory is the one place a shipped file can arrive with nothing else
+    in the suite aware of it: it is copied wholesale into the wheel by a
+    `recursive-include`, Chrome loads whatever the manifest references, and no
+    Python import would fail if a stray file appeared. Two files once shipped for
+    three releases with no test able to see them.
+
+    So the list is explicit and this compares it to the directory in both
+    directions -- an undeclared file fails, and so does a declared one that was
+    deleted or renamed without updating the list.
+    """
+    extension = ROOT / "src" / "browsertap_mcp" / "chrome_extension"
+    assert extension.is_dir(), "the packaged extension directory is gone"
+
+    present = {
+        path.relative_to(extension).as_posix()
+        for path in extension.rglob("*")
+        if path.is_file()
+    }
+    assert present == set(SHIPPED_EXTENSION_FILES), (
+        "the extension directory and SHIPPED_EXTENSION_FILES disagree. "
+        f"present but undeclared: {sorted(present - set(SHIPPED_EXTENSION_FILES))}; "
+        f"declared but absent: {sorted(set(SHIPPED_EXTENSION_FILES) - present)}"
+    )
+
+
+def test_no_published_document_repeats_a_section():
+    """A section pasted twice is invisible to every other check in this file.
+
+    `CONTRIBUTING.md` carried two verbatim copies of "Listing on the MCP
+    Registry" -- 26 lines each -- through several releases. Every fact in it was
+    correct, which is why nothing caught it: the checks here look for text that
+    is missing or stale, never for text that is present twice.
+    """
+    paths = [
+        ROOT / "README.md",
+        ROOT / "README.zh-CN.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "CONTRIBUTING.zh-CN.md",
+        ROOT / "AGENTS.md",
+        ROOT / "SECURITY.md",
+        # Both are published surfaces with the same drift exposure as the rest.
+        # `PRIVACY.md` is the exact URL the Chrome Web Store listing serves as its
+        # privacy policy, so a section pasted twice there is public.
+        ROOT / "PRIVACY.md",
+        ROOT / "CODE_OF_CONDUCT.md",
+        ROOT / "docs" / "USAGE.md",
+        ROOT / "docs" / "USAGE.zh-CN.md",
+        ROOT / "docs" / "TROUBLESHOOTING.md",
+        ROOT / "docs" / "TROUBLESHOOTING.zh-CN.md",
+    ]
+    checked = 0
+    for path in paths:
+        if not path.is_file():
+            continue
+        checked += 1
+        headings = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("## ")
+        ]
+        repeated = sorted({name for name in headings if headings.count(name) > 1})
+        assert not repeated, f"{path.relative_to(ROOT).as_posix()} repeats section(s) {repeated}"
+    # Computed from the roster rather than a literal floor. The literal was 9
+    # against a list of 11, so it kept passing while two documents were
+    # unreachable -- and removing an entry from the list widened that gap
+    # silently. Every path named here has to be readable or this is not checking
+    # what it claims.
+    assert checked == len(paths), (
+        f"only {checked} of {len(paths)} documents were reachable; this check is going vacuous"
+    )
+
+# --- scan_page has to leave the user's page as it found it --------------------
+#
+# Until 0.4.15 it did not. With `cutlist` on -- the default -- an ordinary read of
+# a page the user was looking at wrote a `data-btap-list` attribute onto the
+# container it collapsed and kept two `window.__btap*` counters, because the
+# selector it reported had to survive a second roundtrip. The page analysis now
+# derives that selector from the container's own structure, so there is nothing
+# left to mark and the tool is a read again.
+#
+# "It writes nothing" is a stronger claim than the disclosure it replaces, and a
+# stronger claim needs a check that can falsify it. A single `el.setAttribute()`
+# on a live node reinstates the old behaviour with every other test here still
+# green, and three published documents would go on promising a read-only scan. So
+# the two injected scripts are read on both axes a write can take: a global, and a
+# node.
+
+# `window.x = ...`, `window.x++`, `delete window.x`, and the `globalThis` spelling
+# of each. Reading a global is not writing one, which is why `window.CSS &&
+# CSS.escape` in `list_groups.js` is deliberately not a match.
+_GLOBAL_WRITE_RE = re.compile(
+    r"\b(?:window|globalThis)\.([A-Za-z_$][\w$]*)\s*(?:=[^=]|\+\+|--)"
+    r"|\bdelete\s+(?:window|globalThis)\.([A-Za-z_$][\w$]*)"
+)
+
+# Every way a node can be changed. Removal is in here too: taking something out of
+# the user's page is as much a write as putting something in.
+_DOM_WRITE_RE = re.compile(
+    r"\b([A-Za-z_$][\w$]*)\.(?:setAttribute|setAttributeNS|removeAttribute|"
+    r"classList|insertAdjacentHTML|insertAdjacentElement|appendChild|insertBefore|"
+    r"replaceChild|removeChild|replaceWith|append|prepend|remove)\s*\("
+    r"|\b([A-Za-z_$][\w$]*)\.(?:innerHTML|outerHTML|textContent|innerText|"
+    r"className|id|value|checked|src|href|style)\s*=[^=]"
+)
+
+# What makes a receiver clone-side. The allow-list is not a list of names -- a name
+# is a convention, and conventions are what this file exists to stop trusting. Each
+# receiver has to be *declared* in the same file from something that produces a new
+# node, so `const clone = src.cloneNode(false)` passes while a receiver fetched with
+# `querySelector` has no such declaration and fails.
+_CLONE_DECL_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;]*?"
+    r"(?:cloneNode|createElement|createTextNode|createDocumentFragment|\bcopy\()"
+)
+
+# Writes the docs used to disclose. Naming one now is a promise the code does not
+# keep -- the same failure the disclosure check this replaced was built to catch,
+# pointing the other way.
+_RETIRED_PAGE_WRITES = ("data-btap-list", "__btapListMark", "__btap_offscreen")
+
+
+def test_scan_page_does_not_write_to_the_users_page():
+    """Fail when the page analysis starts modifying the page again.
+
+    This deliberately runs while the `.md` files are being reorganised. A
+    reorganisation that drops the read-only sentence, or that leaves the retired
+    `data-btap-list` disclosure standing, is a published document disagreeing with
+    the code, and neither direction has a reader who would notice.
+    """
+    # The scan_page payload is these two files -- `simphtml._load_page_script`
+    # reads them at import and the call sites append `return pageOutline(...)` /
+    # `return listGroups(...)`.
+    page_scripts = ROOT / "src" / "browsertap_mcp" / "page_scripts"
+    scanned = ("page_outline.js", "list_groups.js")
+    # A third injected script would otherwise be silently out of scope, and what it
+    # writes to the user's page would reach them with nothing in the offline suite
+    # looking at it. Adding one has to be a decision made here.
+    present = sorted(path.name for path in page_scripts.glob("*.js"))
+    assert present == sorted(scanned), (
+        f"page_scripts holds {present}, but this check scans {sorted(scanned)}. "
+        "A new injected script has to be added to this list (and to "
+        "REQUIRED_WHEEL_SUFFIXES in scripts/check_distribution.py) in the same "
+        "change, or what it writes to the user's page goes unchecked"
+    )
+
+    for name in scanned:
+        source = (page_scripts / name).read_text(encoding="utf-8")
+
+        globals_written = {
+            first or second
+            for first, second in _GLOBAL_WRITE_RE.findall(source)
+            if first or second
+        }
+        assert not globals_written, (
+            f"{name} assigns {sorted(globals_written)} on the page's global object. "
+            "scan_page is documented as leaving the page untouched, so a global it "
+            "needs is a design change rather than an implementation detail: either "
+            "carry the value out in the returned payload the way the "
+            "`<!--btap-offscreen:-->` marker does, or change the disclosure in both "
+            "READMEs and the tool description in the same commit"
+        )
+
+        receivers = {
+            first or second
+            for first, second in _DOM_WRITE_RE.findall(source)
+            if first or second
+        }
+        clone_side = set(_CLONE_DECL_RE.findall(source))
+        live = sorted(receivers - clone_side)
+        assert not live, (
+            f"{name} mutates {live}, which that file never declares from "
+            "cloneNode/createElement, so it is a node out of the user's live "
+            f"document. Write to the clone instead ({sorted(clone_side)} are the "
+            "receivers this file established), or change the disclosure in both "
+            "READMEs and the tool description in the same commit"
+        )
+
+    # Not vacuous: the analysis does build a clone and write form state onto it, so
+    # a rewrite that stops matching `_DOM_WRITE_RE` altogether has not shown the
+    # scripts to be read-only -- it has stopped asking.
+    outline = (page_scripts / "page_outline.js").read_text(encoding="utf-8")
+    assert _DOM_WRITE_RE.search(outline), (
+        "no DOM write found anywhere in page_outline.js -- the clone it returns is "
+        "assembled by `setAttribute`/`appendChild`, so this check has lost its grip "
+        "on the file rather than found it clean"
+    )
+
+    # The one page-visible side effect that remains, and the only reason it is
+    # survivable: the console stubs are restored unconditionally. An override with
+    # no restore would outlive the call and change what the page's own scripts see.
+    assert "console.log = console.warn" in outline and "} finally {" in outline, (
+        "page_outline.js silences the console so the analysis cannot pollute an "
+        "active capture; that override has to be restored in a `finally`, or a scan "
+        "leaves the page's console replaced"
+    )
+    assert "console.log = saved.log" in outline, (
+        "page_outline.js no longer restores console.log from the saved original"
+    )
+
+    documents = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        "README.zh-CN.md": (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"),
+        # Adjacent string literals are joined first. The tool description is built by
+        # concatenation, so a phrase in it straddles a `" "` boundary and a literal
+        # search would report the sentence missing after an ordinary reflow.
+        "server.py": re.sub(
+            r'"\s*"',
+            "",
+            (ROOT / "src" / "browsertap_mcp" / "server.py").read_text(encoding="utf-8"),
+        ),
+    }
+    for name, text in documents.items():
+        stale = [write for write in _RETIRED_PAGE_WRITES if write in text]
+        assert not stale, (
+            f"{name} still discloses {stale}, which scan_page no longer writes. A "
+            "disclosure that outlives the behaviour sends the reader looking in "
+            "their own DOM for something that is not there"
+        )
+    assert "does not modify the page" in documents["README.md"]
+    assert "does not modify the page" in documents["server.py"]
+    # The Chinese table says the same thing in Chinese; sharing the English phrase
+    # would only prove that someone pasted one in.
+    assert "不修改页面" in documents["README.zh-CN.md"]
