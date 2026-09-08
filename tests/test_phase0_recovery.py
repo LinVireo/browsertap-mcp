@@ -338,12 +338,13 @@ async def test_execute_timeout_does_not_close_fastmcp_before_followup_list_tabs(
     driver = _Driver([TimeoutError("policy transport timed out")])
     _install(monkeypatch, driver)
 
+    # The fake driver raises immediately; host scheduling is not the timeout under test.
     result = await S.mcp.call_tool(
         "execute_js",
         {
             "script": "return new Promise(() => {})",
             "session_id": "chrome:profile:7",
-            "timeout": 0.01,
+            "timeout": 5,
         },
     )
     structured = result.structuredContent
