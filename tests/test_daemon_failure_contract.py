@@ -22,6 +22,12 @@ class NativeCall:
         return self.callback(*args)
 
 
+def test_missing_windows_api_does_not_prove_process_absence(monkeypatch):
+    monkeypatch.delattr(B.ctypes, "windll", raising=False)
+    with pytest.raises(B.ProcessIdentityUnavailable, match="APIs are unavailable"):
+        B._windows_process_identity(999)
+
+
 @pytest.mark.parametrize("failure", [None, "missing", "open", "times", "image"])
 def test_windows_process_identity_distinguishes_absence_and_unqueryable(monkeypatch, failure):
     from ctypes import wintypes

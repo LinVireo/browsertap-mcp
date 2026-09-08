@@ -325,9 +325,12 @@ class _LastInputInfo(ctypes.Structure):
 
 
 def _windows_pointer_position() -> tuple[int | None, int | None]:
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None, None
     point = _Point()
     try:
-        if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+        if windll.user32.GetCursorPos(ctypes.byref(point)):
             return int(point.x), int(point.y)
     except (AttributeError, OSError):
         pass
@@ -502,14 +505,17 @@ def _process_is_dpi_aware() -> bool | None:
     what keeps `_win32_virtual_screen` from reporting a scaled rectangle as if
     it were the real one.
     """
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None
     try:
         level = ctypes.c_int(-1)
-        if ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(level)) == 0:
+        if windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(level)) == 0:
             return level.value != 0
     except (AttributeError, OSError):
         pass
     try:
-        return bool(ctypes.windll.user32.IsProcessDPIAware())
+        return bool(windll.user32.IsProcessDPIAware())
     except (AttributeError, OSError):
         return None
 
@@ -531,10 +537,13 @@ def _win32_virtual_screen() -> dict[str, int] | None:
     """
     if _process_is_dpi_aware() is not True:
         return None
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return None
     sm_x_virtualscreen, sm_y_virtualscreen = 76, 77
     sm_cx_virtualscreen, sm_cy_virtualscreen = 78, 79
     try:
-        user32 = ctypes.windll.user32
+        user32 = windll.user32
         width = int(user32.GetSystemMetrics(sm_cx_virtualscreen))
         height = int(user32.GetSystemMetrics(sm_cy_virtualscreen))
         if width <= 0 or height <= 0:

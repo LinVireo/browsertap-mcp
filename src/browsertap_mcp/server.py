@@ -148,10 +148,9 @@ def _validate_safe_path(
 
     path = Path(save_path).expanduser()
 
-    # Reject absolute paths to prevent writing to arbitrary locations.
-    # ``pathlib`` on Windows turns a POSIX path such as ``/etc/passwd`` into
-    # a drive-qualified path during normalization, so test the raw input too.
-    if path.is_absolute() or path.drive or str(save_path).startswith("/"):
+    # Callers can supply either path syntax regardless of the host OS.
+    # Windows anchors also include drive-relative and root-relative paths.
+    if path.is_absolute() or PureWindowsPath(save_path).anchor:
         raise ValueError(
             f"{description} must be a relative path within {allowed_base}"
         )
