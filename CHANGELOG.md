@@ -7,6 +7,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 ## [Unreleased]
 ### Added
 
+- Task-scoped implementation guides under `docs/agent-guides/`, with a shorter
+  root `AGENTS.md` that keeps the maintainer entry points within instruction
+  loading budgets. The detailed guides are included in source distributions.
 - `PRIVACY.md`, the privacy policy the Chrome Web Store listing serves. It
   states what the extension can reach, that its only network destination is
   `127.0.0.1`, and what persists on disk. Two disclosures go beyond the
