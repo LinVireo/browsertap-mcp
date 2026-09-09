@@ -1,14 +1,13 @@
-# Privacy Policy
+# BrowserTap Bridge Privacy Policy
 
 **browsertap-mcp / BrowserTap Bridge**
-Last updated: 2026-08-31
+Last updated: 2026-09-09
 
 ## Summary
 
-browsertap-mcp runs entirely on your own computer. The extension's only network
-destination is a loopback address (`127.0.0.1`) on your own machine. There is no
-developer-operated server, no account, no analytics, and no telemetry. Nothing
-you browse is sent anywhere by this software.
+BrowserTap Bridge connects an existing Chromium browser profile to a
+`browsertap-mcp` companion running on the user's computer. The project does not
+operate a backend collection service and does not include analytics or telemetry.
 
 ## What this software is
 
@@ -20,19 +19,17 @@ of a local bridge; it is not useful on its own.
 
 ## What the software can access
 
-To do its job the extension is granted access to the following. These are
-capabilities, not collection: the extension reads them only while carrying out a
-command you or your assistant issued.
+To do its job the extension may access the following while carrying out a command
+you or your assistant issued. The data depends on the selected tab and requested
+operation and may include sensitive information already present in that page or
+profile.
 
-- **Open tabs** — their titles, URLs, and which one is frontmost.
-- **Page content** — the text and structure of a page, and screenshots of it,
-  when a command asks for them.
+- **Open tabs** — titles, URLs and connection metadata.
+- **Page content** — text, structure and screenshots when requested.
 - **Cookies and site storage** — for sites named by a command.
-- **Console and network activity** — for a tab, while a capture is running.
-- **Bookmarks, downloads, and your list of installed extensions** — for the
-  tools that manage them.
-- **Site permissions** — granted to one origin for 60 to 600 seconds at your
-  request, then restored to the previous setting.
+- **Console and network activity** — for a tab while capture is running.
+- **Bookmarks, downloads and installed extensions metadata** — for management tools.
+- **Site permissions** — granted to one origin for 60 to 600 seconds, then restored.
 
 Two things about the *breadth* of that access, stated plainly because the
 permission list is broader than any single command needs:
@@ -50,11 +47,12 @@ permission list is broader than any single command needs:
 
 ## Where that data goes
 
-To your own MCP server, over a loopback connection on `127.0.0.1`, and from
-there to the AI assistant you pointed at it.
+The extension sends results to your own MCP server over loopback on
+`127.0.0.1`, and from there to the AI assistant you configured. Requested page
+operations can also contact websites or download endpoints.
 
-**It does not go to the developer.** The extension contacts no external host.
-There is no cloud component, no crash reporting, and no usage statistics.
+**It does not go to the developer.** The extension has no developer-operated
+collection endpoint, cloud component, crash reporting or usage statistics.
 
 Two consequences worth stating plainly:
 
@@ -71,7 +69,8 @@ Two consequences worth stating plainly:
 
 ## What is stored, and where
 
-Everything below is on your own computer. Nothing is uploaded.
+The extension's own stores and the companion's state are on your computer. The
+maintainer does not receive them.
 
 - **Kept until the browser closes.** Bookkeeping for tabs the assistant opened —
   including their URLs and titles — lives in Chrome's own
@@ -93,8 +92,8 @@ Everything below is on your own computer. Nothing is uploaded.
   codes, signed links and search terms live. The origin is deliberately kept —
   the log would not answer "which tab was this?" without it. The bridge token is
   never written to the log in any form.
-- **No retention schedule, because there is no collection.** The developer holds
-  no data about you and therefore has nothing to retain, disclose, or delete.
+- **No maintainer retention schedule.** The developer holds no task database and
+  therefore has no task data to retain, disclose or delete.
 
 ## What is never done
 
