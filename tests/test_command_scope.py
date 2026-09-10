@@ -355,6 +355,130 @@ def test_multi_tab_extension_command_refuses_all_dispatch_if_one_target_is_busy(
     assert calls == []
 
 
+@pytest.mark.parametrize("child_tab_id", [42, "00042", 42.0])
+def test_batch_child_target_is_locked_before_any_remote_dispatch(
+    lock_environment, monkeypatch, child_tab_id,
+):
+    driver, calls = _remote_bridge(monkeypatch)
+    with _held(lock_environment):
+        with command_scope(), pytest.raises(TargetBusyError) as raised:
+            driver.ext_cmd({
+                "cmd": "batch", "tabId": 43,
+                "commands": [
+                    {"cmd": "cdp", "method": "Runtime.evaluate"},
+                    {"cmd": "cdp", "tabId": child_tab_id, "method": "Runtime.evaluate"},
+                ],
+            }, client_id="chrome:scope-a")
+        _assert_busy(raised.value, target=TARGET, dispatched=False)
+        assert _probe(lock_environment, [OTHER_TARGET]) == {"status": "acquired"}
+    assert calls == []
+
+
+@pytest.mark.parametrize("tab_id", ["00042", 42.0])
+def test_extension_tab_alias_uses_the_existing_remote_target_lock(
+    lock_environment, monkeypatch, tab_id,
+):
+    driver, calls = _remote_bridge(monkeypatch)
+    with _held(lock_environment):
+        with command_scope(), pytest.raises(TargetBusyError) as raised:
+            driver.ext_cmd({"cmd": "cdp", "tabId": tab_id}, client_id="chrome:scope-a")
+        _assert_busy(raised.value, target=TARGET, dispatched=False)
+    assert calls == []
+
+
+@pytest.mark.parametrize("use_default", [False, True])
+def test_multi_tab_batch_holds_all_targets_and_preserves_the_callers_payload(
+    lock_environment, monkeypatch, use_default,
+):
+    during_dispatch = []
+    driver, calls = _remote_bridge(
+        monkeypatch,
+        on_dispatch=lambda _command: during_dispatch.append([
+            _probe(lock_environment, [target])["status"] for target in (TARGET, OTHER_TARGET)
+        ]),
+    )
+    payload = {"cmd": "batch", "commands": [
+        {"cmd": "cdp", "tabId": "00042", "method": "Runtime.evaluate"},
+        {"cmd": "cdp", "method": "Runtime.evaluate"},
+    ]}
+    if use_default:
+        payload["tabId"] = "00043"
+    else:
+        payload["commands"][1]["tabId"] = "00043"
+    original = json.loads(json.dumps(payload))
+
+    with command_scope():
+        driver.ext_cmd(payload, client_id="chrome:scope-a")
+        assert during_dispatch == [["busy", "busy"]]
+        assert _probe(lock_environment, [TARGET])["status"] == "busy"
+        assert _probe(lock_environment, [OTHER_TARGET])["status"] == "busy"
+
+    assert len(calls) == 1
+    assert [child["tabId"] for child in calls[0]["payload"]["commands"]] == [42, 43]
+    assert payload == original
+    assert _probe(lock_environment, [TARGET, OTHER_TARGET]) == {"status": "acquired"}
+
+
+@pytest.mark.parametrize("tab_id", [True, False, 1.5, -1, 2147483648, "bad", float("inf"), float("nan")])
+@pytest.mark.parametrize("in_child", [False, True])
+def test_invalid_batch_targets_are_rejected_before_remote_dispatch(monkeypatch, tab_id, in_child):
+    driver, calls = _remote_bridge(monkeypatch)
+    payload = {
+        "cmd": "batch", "tabId": 43,
+        "commands": [{"cmd": "cdp", "tabId": 42, "method": "Runtime.evaluate"}],
+    }
+    target = payload["commands"][0] if in_child else payload
+    target["tabId"] = tab_id
+
+    with pytest.raises(ValueError, match="tabId"), command_scope():
+        driver.ext_cmd(payload, client_id="chrome:scope-a")
+    assert calls == []
+
+
+@pytest.mark.parametrize("outer,child", [
+    ({}, {}), ({}, {"tabId": None}), ({}, {"tabId": [42]}),
+    ({"tabId": 43}, {"tabId": 0}), ({"tabId": 0}, {}),
+    ({"tabId": [42, 43]}, {}),
+])
+def test_batch_cdp_requires_a_resolved_scalar_target(monkeypatch, outer, child):
+    driver, calls = _remote_bridge(monkeypatch)
+    payload = {"cmd": "batch", **outer, "commands": [
+        {"cmd": "cookies", "url": "https://example.test"},
+        {"cmd": "cdp", "method": "Runtime.evaluate", **child},
+    ]}
+
+    with pytest.raises(ValueError, match="tabId"), command_scope():
+        driver.ext_cmd(payload, client_id="chrome:scope-a")
+    assert calls == []
+
+
+@pytest.mark.parametrize("commands", [None, "cdp", [None]])
+def test_invalid_batch_structure_is_rejected_before_remote_dispatch(monkeypatch, commands):
+    driver, calls = _remote_bridge(monkeypatch)
+    with pytest.raises(ValueError, match="batch commands"):
+        driver.ext_cmd({"cmd": "batch", "commands": commands}, client_id="chrome:scope-a")
+    assert calls == []
+
+
+def test_batch_null_child_target_inherits_and_guards_its_canonical_target_once(monkeypatch):
+    driver, calls = _remote_bridge(monkeypatch)
+    target_sets = []
+    monkeypatch.setattr(
+        "browsertap_mcp.browser_bridge.guard_targets",
+        lambda _namespace, targets: target_sets.append(targets),
+    )
+    payload = {"cmd": "batch", "tabId": "00042", "commands": [
+        {"cmd": "cdp", "tabId": None, "method": "Runtime.evaluate"},
+        {"cmd": "cdp", "tabId": 42.0, "method": "Runtime.evaluate"},
+    ]}
+    driver.ext_cmd(payload, client_id="chrome:scope-a")
+
+    assert target_sets == [[TARGET]]
+    assert [child["tabId"] for child in calls[0]["payload"]["commands"]] == [42, 42]
+    assert payload["commands"][0]["tabId"] is None
+    assert payload["tabId"] == "00042"
+
+
 def test_local_failover_locks_the_final_target_before_dispatch(lock_environment, monkeypatch):
     driver, calls = _remote_bridge(monkeypatch)
     driver.is_remote = False

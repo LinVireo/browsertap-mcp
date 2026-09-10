@@ -5383,7 +5383,11 @@ eval(source.slice(start, end));
 
 def _cdp_exec_fallback_source() -> str:
     source = BACKGROUND.read_text(encoding="utf-8")
-    classify_start = source.index("function debuggerFailureCode(error) {")
+    # Start one declaration earlier than the classifier: the fallback now clamps
+    # the caller's forwarded budget through boundedCdpTimeout, which closes over
+    # MAX_CDP_TIMEOUT_MS. Both are lifted from the real file rather than restated
+    # here, so a changed bound cannot leave this harness testing an old one.
+    classify_start = source.index("const MAX_CDP_TIMEOUT_MS")
     classify_end = source.index("\n\nfunction clearDebuggerTabState", classify_start)
     fallback_start = source.index("async function runCdpExecFallback(")
     fallback_end = source.index("\n\nasync function navigateWithDialogPolicy", fallback_start)

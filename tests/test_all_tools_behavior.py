@@ -69,8 +69,15 @@ def _install_driver(monkeypatch, response=None):
 def _success(tool, monkeypatch, tmp_path):
     driver = _install_driver(monkeypatch)
     if tool == "cdp_batch":
-        monkeypatch.setattr(S, "exec_js", lambda script, **kwargs: {"data": script})
-        assert '"cmd": "batch"' in S.cdp_batch('{"cmd":"batch","commands":[]}')["data"]
+        # A batch is an extension command: it must reach `ext_cmd` on the `cmd`
+        # field with the tab attached, never `execute_js` as a text script.
+        monkeypatch.setattr(S, "switch_session", lambda session_id=None: "chrome:7")
+        driver.response = {"data": [{"result": {"value": 2}}], "client_id": "chrome"}
+        out = S.cdp_batch('{"cmd":"batch","commands":[]}')
+        assert out["data"] == [{"result": {"value": 2}}]
+        payload, client_id, _timeout = driver.calls[0]
+        assert payload["cmd"] == "batch" and payload["tabId"] == 7
+        assert client_id == "chrome"
     elif tool in {"network_capture_start", "network_capture_stop", "console_capture_start",
                   "get_console_messages", "console_capture_stop"}:
         monkeypatch.setattr(

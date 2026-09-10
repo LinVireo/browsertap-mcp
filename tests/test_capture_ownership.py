@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 import pytest
 
+from browsertap_mcp import pending_operations as pending_module
 from browsertap_mcp.capture_ownership import CaptureBusyError, CaptureOwnershipRegistry
+from tests.test_pending_bridge_operations import make_bridge, reply_on_send
 
 CLIENT = "chrome:capture-test"
 OWNER_A = "capture-requester-a"
@@ -273,3 +276,44 @@ def test_concurrent_recovery_from_dead_owner_grants_exactly_one_new_owner():
     assert len(winners) == 1
     stop = registry.prepare(CLIENT, command(method="stop"), winners[0])
     assert registry.finish(stop, success=True) is True
+
+
+@pytest.mark.parametrize("kind", ["network_capture", "console"])
+def test_capture_command_bookkeeping_expires_without_releasing_its_owner(monkeypatch, kind):
+    now = [1000.0]
+    monkeypatch.setattr(pending_module.time, "monotonic", lambda: now[0])
+    bridge = make_bridge()
+
+    def advance(serial, delay):
+        now[0] += delay
+        return serial
+
+    monkeypatch.setattr(bridge, "_wait_for_activity", advance)
+    monkeypatch.setattr(
+        bridge.ext_clients["browser"]["ws"], "send_message",
+        lambda message: bridge.sent.append(json.loads(message)),
+    )
+    with pytest.raises(TimeoutError) as caught:
+        bridge.ext_cmd(command(kind, tab_id=1), timeout=0.01, requester_id=OWNER_A)
+    operation_id = caught.value.operation_id
+    assert operation_id in bridge._capture_commands
+
+    now[0] += pending_module.SILENT_GRACE_SECONDS + 1
+    bridge._sync_pending_operations()
+    assert bridge._operation_state().read(operation_id, OWNER_A)["status"] == "abandoned"
+    assert operation_id in bridge._capture_commands
+
+    now[0] += pending_module.RESULT_TTL_SECONDS + 1
+    bridge._sync_pending_operations()
+    assert operation_id not in bridge._operation_state().retained_ids()
+    assert operation_id not in bridge._capture_commands
+    assert operation_id not in bridge.results
+    assert operation_id not in bridge.acks
+    for method in ("start", "stop"):
+        with pytest.raises(CaptureBusyError):
+            bridge.ext_cmd(command(kind, method, tab_id=1), requester_id=OWNER_B)
+    assert len(bridge.sent) == 1
+
+    reply_on_send(bridge, data={"ok": True})
+    bridge.ext_cmd(command(kind, "stop", tab_id=1), requester_id=OWNER_A)
+    bridge.ext_cmd(command(kind, "start", tab_id=1), requester_id=OWNER_B)

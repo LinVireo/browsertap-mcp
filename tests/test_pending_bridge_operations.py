@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import queue
 import threading
@@ -8,8 +9,16 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+from mcp.types import CallToolRequest, CallToolResult
 
-from browsertap_mcp.browser_bridge import BrowserBridge, PageExecutionError, Session
+from browsertap_mcp import pending_operations as pending_module
+from browsertap_mcp import server as S
+from browsertap_mcp.browser_bridge import (
+    BridgeNoResponseError,
+    BrowserBridge,
+    PageExecutionError,
+    Session,
+)
 from browsertap_mcp.capture_ownership import CaptureBusyError
 from browsertap_mcp.command_scope import TargetBusyError
 from browsertap_mcp.pending_operations import OperationAccessError, PendingOperations
@@ -169,6 +178,65 @@ def test_ext_command_transport_timeout_keeps_tab_busy_until_reply():
     bridge.execute_js("after", requester_id="b")
 
 
+@pytest.mark.parametrize("child_tab_id", [2, "0002", 2.0])
+def test_batch_child_pending_operation_prevents_the_whole_batch(child_tab_id):
+    bridge = make_bridge()
+    pending = bridge.execute_js("pending", wait=False, session_id="browser:2", requester_id="a")
+    sent_before = list(bridge.sent)
+
+    with pytest.raises(TargetBusyError) as caught:
+        bridge.ext_cmd({
+            "cmd": "batch", "tabId": 1,
+            "commands": [
+                {"cmd": "cdp", "method": "Runtime.evaluate"},
+                {"cmd": "cdp", "tabId": child_tab_id, "method": "Runtime.evaluate"},
+            ],
+        }, requester_id="b")
+
+    assert caught.value.diagnostics["busy_target"] == "browser:2"
+    assert caught.value.retry_safe is True
+    assert bridge.sent == sent_before
+    assert bridge._operation_state()._targets == {"browser:2": pending["operation_id"]}
+    bridge.execute_js("unreserved", session_id="browser:1", requester_id="b")
+
+
+@pytest.mark.parametrize("tab_id", ["0002", 2.0])
+def test_extension_tab_alias_cannot_bypass_a_pending_operation(tab_id):
+    bridge = make_bridge()
+    bridge.execute_js("pending", wait=False, session_id="browser:2", requester_id="a")
+    with pytest.raises(TargetBusyError):
+        bridge.ext_cmd({"cmd": "cdp", "tabId": tab_id}, requester_id="b")
+    assert len(bridge.sent) == 1
+
+
+def test_multi_tab_batch_timeout_keeps_every_target_until_the_result():
+    bridge = make_bridge()
+    payload = {
+        "cmd": "batch", "method": "pending", "tabId": "0001",
+        "commands": [
+            {"cmd": "cdp", "method": "Runtime.evaluate"},
+            {"cmd": "cdp", "tabId": "0002", "method": "Runtime.evaluate"},
+        ],
+    }
+    with pytest.raises(TimeoutError) as caught:
+        bridge.ext_cmd(payload, timeout=0.01, requester_id="a")
+    operation_id = caught.value.operation_id
+
+    assert len(bridge.sent) == 1
+    assert bridge._operation_state()._targets == {
+        "browser:1": operation_id, "browser:2": operation_id,
+    }
+    for target in ("browser:1", "browser:2"):
+        with pytest.raises(TargetBusyError):
+            bridge.execute_js("too soon", session_id=target, requester_id="b")
+    assert len(bridge.sent) == 1
+
+    finish(bridge, operation_id, {"results": [1, 2]})
+    assert bridge.get_execute_js_result(operation_id, requester_id="a")["status"] == "success"
+    for target in ("browser:1", "browser:2"):
+        bridge.execute_js("after", session_id=target, requester_id="b")
+
+
 def test_capture_owner_can_use_tab_but_other_agent_cannot_stop_or_clear():
     bridge = make_bridge()
     bridge.ext_cmd({"cmd": "console", "method": "start", "tabId": 1}, requester_id="a")
@@ -211,6 +279,75 @@ def test_remote_async_and_result_lookup_keep_the_same_requester_without_tab_lock
     assert bridge.get_execute_js_result(pending["operation_id"])["data"] == 4
     assert sent[0]["wait"] == "0"
     assert sent[0]["requesterId"] == sent[1]["requesterId"]
+
+
+@pytest.mark.parametrize("detail", [
+    "cdp_timeout: Runtime.evaluate exceeded its deadline",
+    {"code": "cdp_timeout", "message": "execution timed out", "dispatched": True},
+])
+def test_remote_result_preserves_the_abandoned_unknown_receipt(monkeypatch, detail):
+    now = [1000.0]
+    monkeypatch.setattr(pending_module.time, "monotonic", lambda: now[0])
+    daemon = make_bridge()
+    operations = daemon._operation_state()
+    operations.reserve("receipt", ["browser:1"], "owner", caller_budget=0.1)
+    daemon._complete_operation("receipt", {"success": False, "data": detail})
+    now[0] += pending_module.SILENT_GRACE_SECONDS + 1
+    expected = daemon.get_execute_js_result("receipt", requester_id="owner")
+    assert expected["status"] == "unknown"
+    assert expected["operation_status"] == "outcome_unknown"
+    assert expected["abandoned_reason"] == "unknown_outcome_reservation_ttl"
+    assert expected["reservation_held"] is False
+    assert expected["retry_safe"] is False
+    assert expected["error"]
+
+    remote = make_bridge()
+    remote.is_remote = True
+    monkeypatch.setattr(remote, "_requester", lambda requester_id: requester_id or "owner")
+
+    def remote_cmd(payload, timeout):
+        assert payload["cmd"] == "get_execute_js_result"
+        return {"r": json.loads(json.dumps(daemon.get_execute_js_result(
+            payload["operationId"], requester_id=payload["requesterId"],
+        )))}
+
+    monkeypatch.setattr(remote, "_remote_cmd", remote_cmd)
+    assert remote.get_execute_js_result("receipt", requester_id="owner") == expected
+    assert remote.get_execute_js_result("receipt", requester_id="owner") == expected
+
+    monkeypatch.setattr(S, "require_driver", lambda: remote)
+    request = CallToolRequest(params={
+        "name": "get_execute_js_result", "arguments": {"operation_id": "receipt"},
+    })
+    result = asyncio.run(S.mcp._mcp_server.request_handlers[CallToolRequest](request)).root
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    envelope = result.structuredContent
+    assert envelope["legacy"] == expected
+    assert envelope["error"]["message"] == expected["error"]
+    assert envelope["error"]["retryable"] is False
+    for key in (
+        "status", "operation_id", "operation_status", "abandoned_reason",
+        "abandoned_after_seconds", "reservation_released", "reservation_held",
+        "retry_safe", "delivery_state", "js_return_lost",
+    ):
+        assert envelope[key] == expected[key]
+    assert json.loads(result.content[0].text) == envelope
+    assert daemon.sent == []
+
+
+@pytest.mark.parametrize("error_code", ["transport_error", "operation_owner_mismatch"])
+def test_remote_result_still_raises_non_receipt_errors(monkeypatch, error_code):
+    remote = make_bridge()
+    remote.is_remote = True
+    response = {
+        "status": "unknown", "operation_id": "receipt", "error": "lookup failed",
+        "error_code": error_code, "delivery_state": "undelivered", "retry_safe": False,
+    }
+    monkeypatch.setattr(remote, "_remote_cmd", lambda *args, **kwargs: {"r": response})
+    with pytest.raises(BridgeNoResponseError) as caught:
+        remote.get_execute_js_result("receipt", requester_id="owner")
+    assert caught.value.error_code == error_code
 
 
 @pytest.mark.parametrize('detail', [

@@ -46,6 +46,56 @@ def _valid_tab_id(value: Any) -> bool:
     return type(value) is int and 0 <= value <= 2147483647
 
 
+def _normalize_tab_id(value: Any) -> int:
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        value = int(value)
+    elif type(value) is float and value.is_integer():
+        value = int(value)
+    if not _valid_tab_id(value):
+        raise ValueError('tabId must be an integer between 0 and 2147483647')
+    return int(value)
+
+
+def _normalize_ext_command(command: dict) -> tuple[dict, list[int]]:
+    """Copy the wire payload and resolve its complete target set before dispatch."""
+    command = dict(command)
+    tab_ids: list[int] = []
+
+    def collect_tab_ids(payload: dict) -> None:
+        tab_id = payload.get('tabId')
+        if tab_id is None:
+            return
+        if isinstance(tab_id, list):
+            payload['tabId'] = [_normalize_tab_id(value) for value in tab_id]
+            tab_ids.extend(payload['tabId'])
+        else:
+            payload['tabId'] = _normalize_tab_id(tab_id)
+            tab_ids.append(payload['tabId'])
+
+    collect_tab_ids(command)
+    if command['cmd'] == 'batch':
+        children = command.get('commands')
+        if not isinstance(children, list) or any(not isinstance(child, dict) for child in children):
+            raise ValueError('batch commands must be a list of JSON objects')
+        command['commands'] = [dict(child) for child in children]
+        for child in command['commands']:
+            if 'tabId' not in child and 'tabId' in command:
+                child['tabId'] = command['tabId']
+            if child.get('cmd') == 'cdp':
+                # WS batches have no sender tab. Resolve null/omitted targets
+                # here so a later child cannot fail after earlier side effects.
+                tab_id = child.get('tabId')
+                if tab_id is None:
+                    tab_id = command.get('tabId')
+                child['tabId'] = _normalize_tab_id(tab_id)
+                if child['tabId'] == 0:
+                    # The extension uses || for CDP targets; zero would silently
+                    # fall back to another tab or an absent sender.
+                    raise ValueError('batch CDP commands require a positive integer tabId')
+            collect_tab_ids(child)
+    return command, list(dict.fromkeys(tab_ids))
+
+
 def _valid_page_fields(value: dict) -> bool:
     return all(value.get(key) is None or isinstance(value[key], str)
                for key in ('url', 'title', 'generation', 'tab_identity'))
@@ -243,7 +293,12 @@ def _page_execution_metadata(
         diagnostics["retryable"] = bool(retryable)
     if csp:
         diagnostics["csp"] = True
-    for name in ("failed_command_index", "commands_dispatched", "commands_completed", "input_dispatched"):
+    for name in (
+        "failed_command_index", "commands_dispatched", "commands_completed", "input_dispatched",
+        # What became of a page script after its evaluate timed out; the
+        # extension only sets these on a dispatched cdp_timeout.
+        "zombie", "zombie_detail",
+    ):
         if field(name) is not None:
             diagnostics[name] = field(name)
 
@@ -495,6 +550,15 @@ def _execution_may_continue(result: dict[str, Any]) -> bool:
         return False
     lower = message.lower()
     if 'debugger attach exceeded' in lower:
+        return False
+    # The extension's zombie probe settles the one question this function
+    # exists to leave open. `killed` means the page script was terminated and
+    # the thread answers again: no result can arrive, and a reservation would
+    # protect nothing -- measured 2026-09-10, the next call on that tab got
+    # target_busy against a script that was already dead. The other verdicts
+    # (not_blocking: may still be awaiting async; still_running; unknown;
+    # blocked_by_dialog) leave the outcome open and the reservation held.
+    if container.get('zombie', source.get('zombie')) == 'killed':
         return False
     code = container.get('code') or source.get('code') or ''
     return str(code) in {'cdp_timeout', 'debugger_detached'} or any(
@@ -977,8 +1041,12 @@ class BrowserBridge:
             )
             if capture_operation is not None:
                 self._capture_state().finish(capture_operation, success=succeeded)
-                if not uncertain:
-                    capture_commands.pop(operation_id, None)
+                # The extension has already sent the terminal reply. Keeping
+                # this bookkeeping entry for an uncertain execution cannot
+                # reconcile a later result (the same id is rejected after the
+                # operation is settled), and otherwise leaks one object for
+                # every timed-out capture command.
+                capture_commands.pop(operation_id, None)
             operations = self._operation_state()
             if succeeded and isinstance(data, dict) and data.get('pending_execution') is False:
                 operations.observe_manual_execution(operation_id)
@@ -998,7 +1066,9 @@ class BrowserBridge:
                 if isinstance(result, dict):
                     self._complete_operation(operation_id, result)
             retained = operations.retained_ids()
-            for cache in (self.results, self.acks):
+            # Command bookkeeping follows result retention; capture ownership
+            # survives an unanswered command until a proven stop or lifecycle end.
+            for cache in (self.results, self.acks, getattr(self, '_capture_commands', {})):
                 for operation_id in list(cache):
                     if operation_id not in retained:
                         cache.pop(operation_id, None)
@@ -2199,6 +2269,17 @@ class BrowserBridge:
             raise ValueError(f"Unsupported session type: {tp}")
         exec_id = str(operation_id or uuid.uuid4())
         payload_dict: dict[str, Any] = {'id': exec_id, 'code': code}
+        # Forward what is left of the caller's budget. The extension's CSP/CDP
+        # fallback used to bound Runtime.evaluate by a ceiling of its own, so a
+        # caller-chosen timeout larger than that ceiling was truncated with a
+        # cdp_timeout that named a deadline the caller never set. ext_cmd has
+        # carried this field for the same reason; the exec path did not.
+        # One reading serves both the wire field and the dispatch decision
+        # below. Two separate reads would let the extension be told a budget
+        # that the guard then measured differently, and the gap between them is
+        # the cost of json.dumps -- not a boundary worth two clock samples.
+        dispatch_budget = remaining()
+        payload_dict['timeoutMs'] = max(1, int(dispatch_budget * 1000))
         if tp == 'ext_ws':
             # session.id is now "client_id:tab_id"; use the raw browser tab id.
             payload_dict['tabId'] = int(session.info.get('tab_id', str(session.id).rsplit(':', 1)[-1]))
@@ -2212,7 +2293,7 @@ class BrowserBridge:
         # Recovery does not renew the caller's budget: once the deadline is
         # spent, do not dispatch a side-effecting script merely because the
         # socket came back at the last instant.
-        if remaining() <= 0:
+        if dispatch_budget <= 0:
             if tp in ['ws', 'ext_ws']:
                 return _no_response_result(
                     (
@@ -2239,6 +2320,12 @@ class BrowserBridge:
             metadata={**extra, 'executed_tab_id': exec_tab_id, 'session_id': str(session.id)},
             reply_transport='http' if tp == 'http' else 'ws',
             reply_owner=str(session.id) if tp == 'http' else session.ws_client,
+            # The same budget the extension was just handed as timeoutMs. Once
+            # this caller has given up, the only question left is how long the
+            # tab stays held for a reply that may still arrive -- so the hold is
+            # sized from the caller's own deadline plus a grace margin, not from
+            # one ceiling shared with every other kind of command.
+            caller_budget=dispatch_budget,
         )
         with self._operation_state().retain_for_waiter(exec_id, requester_id):
             mark_dispatched()
@@ -2275,6 +2362,21 @@ class BrowserBridge:
                 result = self.results.pop(exec_id, missing_result)
                 if result is not missing_result:
                     break
+                # Tab lifecycle cleanup is committed under the same state lock
+                # and wakes this condition. Do not make a caller wait out its
+                # original deadline after the target is already gone.
+                try:
+                    lifecycle = self._operation_state().read(exec_id, requester_id)
+                except Exception:
+                    lifecycle = None
+                if isinstance(lifecycle, dict) and lifecycle.get('status') == 'lifecycle_ended':
+                    self.results.pop(exec_id, None)
+                    self.acks.pop(exec_id, None)
+                    return _no_response_result(
+                        'The target tab lifecycle ended before the execution result could be returned',
+                        delivery_state='navigated', executed_tab_id=exec_tab_id,
+                        extra={**extra, 'operation_id': exec_id, 'js_return_lost': True}, closed=True,
+                    )
                 if not acked and exec_id in self.acks:
                     acked = True
                     self._operation_state().acknowledge(exec_id)
@@ -2360,7 +2462,7 @@ class BrowserBridge:
             snapshot = self._operation_state().read(
                 exec_id, requester_id, consume=completed and operation_id is None and wait,
             )
-            if exec_id in self.acks: self.acks.pop(exec_id)
+            self.acks.pop(exec_id, None)
             if snapshot['status'] == 'lifecycle_ended':
                 return _no_response_result(
                     'The target tab lifecycle ended before the execution result could be returned',
@@ -2408,7 +2510,19 @@ class BrowserBridge:
             response = envelope.get('r')
             if not isinstance(response, dict):
                 raise RuntimeError('Bridge returned a malformed execution result')
-            if response.get('error') and response.get('status') not in {'failed', 'in_progress'}:
+            abandoned_receipt = (
+                response.get('status') == 'unknown'
+                and response.get('operation_id') == operation_id
+                and response.get('operation_status') == 'outcome_unknown'
+                and response.get('abandoned_reason') == 'unknown_outcome_reservation_ttl'
+                and response.get('reservation_released') is True
+                and response.get('reservation_held') is False
+                and response.get('retry_safe') is False
+                and response.get('delivery_state') == 'delivered_no_result'
+                and response.get('js_return_lost') is True
+            )
+            if (response.get('error') and response.get('status') not in {'failed', 'in_progress'}
+                    and not abandoned_receipt):
                 _raise_remote_error(response)
             return response
 
@@ -2448,6 +2562,20 @@ class BrowserBridge:
                         return snapshot
                     if snapshot['status'] == 'completed_without_result':
                         snapshot.update({'retry_safe': False, 'js_return_lost': True})
+                        return snapshot
+                    if snapshot['status'] == 'abandoned':
+                        # No reply ever arrived and the reservation has been
+                        # released. Report the unknown outcome rather than the
+                        # 'no browser result' internal error below: the caller
+                        # needs to know the script may have run before it
+                        # decides whether repeating it is safe.
+                        snapshot.update({
+                            'status': 'unknown', 'delivery_state': 'delivered_no_result',
+                            'retry_safe': False, 'js_return_lost': True,
+                        })
+                        if isinstance(result, dict) and not result.get('success'):
+                            snapshot['operation_status'] = 'outcome_unknown'
+                            snapshot.update(_error_payload(PageExecutionError(result.get('data'))))
                         return snapshot
                     if not isinstance(result, dict):
                         raise RuntimeError('Completed operation has no browser result')
@@ -2511,18 +2639,15 @@ class BrowserBridge:
                 'ext_cmd payload requires a non-empty string cmd field; '
                 'for /link use {"cmd":"ext_cmd","payload":{"cmd":"tabs",...}}'
             )
+        cmd, tab_ids = _normalize_ext_command(cmd)
         deadline = time.monotonic() + timeout
 
         def remaining():
             return max(0.0, deadline - time.monotonic())
 
         client_id = self.select_client_id(client_id, timeout=max(0.001, remaining()))
-        tab_ids = cmd.get('tabId')
-        if tab_ids is not None:
-            tab_ids = tab_ids if isinstance(tab_ids, list) else [tab_ids]
-            targets = [f"{client_id}:{tab_id}" for tab_id in tab_ids]
-        else:
-            targets = [f"{client_id}/extension/{cmd.get('cmd')}"]
+        targets = ([f"{client_id}:{tab_id}" for tab_id in tab_ids]
+                   if tab_ids else [f"{client_id}/extension/{cmd['cmd']}"])
         guard_targets(f"{getattr(self, 'host', '127.0.0.1')}:{getattr(self, 'port', 18765)}", targets)
         if self.is_remote:
             # Same margin as execute_js: the daemon raises its own TimeoutError
@@ -2577,6 +2702,10 @@ class BrowserBridge:
             recover_dead_owner=closing_tabs,
             metadata={'client_id': client_id},
             reply_transport='ws', reply_owner=entry['ws'],
+            # What is left of this caller's timeout, not the whole of it:
+            # select_client_id above may already have spent part of it, and the
+            # hold should outlive the wait that is actually still running.
+            caller_budget=remaining(),
         )
         with self._operation_state().retain_for_waiter(exec_id, requester_id):
             try:

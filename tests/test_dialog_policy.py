@@ -1136,7 +1136,11 @@ def test_manual_policy_uses_native_dialog_pause_without_rewriters_or_termination
         background.index("function manualExecutionResult"):
         background.index("// --- Scoped, temporary CSP removal")
     ]
-    assert "Runtime.terminateExecution" not in background
+    # Scoped to the manual-dialog machinery, not the whole file: the exec
+    # fallback's zombie probe (settleZombieAfterTimeout) legitimately issues
+    # Runtime.terminateExecution after a sentinel has proved the page is pinned.
+    # What this test forbids is using termination to *pause at* a native dialog.
+    assert "Runtime.terminateExecution" not in manual
     assert "__TMWD_MANUAL_DIALOG_STOP__" not in background
     assert "__TMWD_MANUAL_DIALOG_STOP__" not in wrapper
     assert "buildManualCdpScript" not in background

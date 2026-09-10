@@ -51,6 +51,7 @@ function observed(promise) {
         error: error.message, code: debuggerFailureCode(error),
         method: error.method || null, timeoutMs: error.timeoutMs || null,
         dispatched: error.dispatched,
+        ...(error.zombie ? { zombie: error.zombie } : {}),
       };
       return record.result;
     },
@@ -220,3 +221,44 @@ process.stdout.write(JSON.stringify({
         assert result["settledBeforeDetachDeadline"] is False
     assert result["detachedTabs"] == [7]
     assert result["tracked"] == result["pending"] == result["activeTimers"] == 0
+
+
+@pytest.mark.parametrize("native_reply", ["reject", "resolve"])
+def test_a_reply_during_the_probe_does_not_strip_the_probe_verdict(native_reply):
+    """Measured 2026-09-10 in a real Chrome: the command settled while the
+    beforeInvalidate hook was still running, and the caller got the timeout
+    error before the probe had written its verdict onto it -- reported as
+    'the timeout path did not run the zombie probe' while the probe was in
+    fact mid-flight. The deadline path has to be awaited to its end."""
+    result = _run_debugger("""
+const lease = await attachBtapDebugger({ tabId: 9 });
+const probeGate = deferred();
+let probeSaw = null;
+const hook = async (attachment) => {
+  probeSaw = attachment === lease.attachment;
+  await probeGate.promise;
+  return { zombie: 'killed', zombie_detail: 'probe finished' };
+};
+const expired = observed(sendDebuggerCommandWithTimeout(
+  lease, 'Runtime.evaluate', {}, 100, 100, null, hook,
+));
+await flush();
+const watchdog = timers.find(timer => !timer.cleared && timer.delay === 100);
+const cleanup = watchdog.callback();
+await flush();
+// The native command settles while the probe is still blocked.
+const native = nativeCommands.get(9);
+""" + ("native.reject(new Error('Detached while handling command.'));" if native_reply == "reject"
+       else "native.resolve({ late: true });") + """
+await flush();
+const settledDuringProbe = expired.settled;
+probeGate.resolve();
+detachGate.resolve();
+await cleanup;
+const failure = await expired.promise;
+process.stdout.write(JSON.stringify({ settledDuringProbe, probeSaw, failure }));
+""")
+    assert result["probeSaw"] is True
+    assert result["settledDuringProbe"] is False
+    assert result["failure"]["code"] == "cdp_timeout"
+    assert result["failure"]["zombie"] == "killed"

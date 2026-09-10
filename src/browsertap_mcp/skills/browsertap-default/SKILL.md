@@ -42,6 +42,17 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 `generation` 和 `owner_id`，就要保留它们用于清理；先查页面是否就绪，避免重复创建。
 页面内 `window.open()` 可能被拦，可靠开页用原生 `open_new_tab`。
 
+创建失败时按返回字段选择下一步：
+
+- `may_have_created=false,retry_safe=true`：先解决失败原因，再省略 `operation_id`
+  重新调用 `open_new_tab`；带旧句柄只会读取一个尚不存在的创建记录。
+- `retry_safe=false` 且有创建句柄：按返回的 `recovery` 传回
+  `operation_id + client_id + owner_id`，只读恢复原创建。
+- `reconciliation.resume_required=false`：停止重复恢复，调用 `list_tabs()` 检查
+  返回 `client_id` 对应的浏览器。记录缺失、URL 相同或标签页数量不变不证明未创建
+  或本任务所有权；只凭已有的精确 session/generation 和 owner 登记清理，证据不足时
+  保留未知结果。
+
 `session_id` 是当前 `client_id:tab_id` 句柄，不是永久身份。只有 Chrome
 `tabs.onReplaced` 和稳定 `tab_identity` 的直接证据允许换发：
 结果带 `rebound_from` / `replacement_session_id` 时，从下一步改用新句柄。
@@ -118,7 +129,7 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 
 | 情况 | 下一步 |
 | --- | --- |
-| 返回 `operation_id` 且结果未明 | 在发起操作的同一 MCP 会话调用 `get_execute_js_result`，不重新派发。 |
+| JS/桥命令返回 `operation_id` 且结果未明 | 在发起操作的同一 MCP 会话调用 `get_execute_js_result`，不重新派发；`open_new_tab` 创建句柄按上方创建恢复流程处理。 |
 | `undelivered` 且 `retry_safe=true` | 已证明未投递；修正目标/连接后才考虑重试。 |
 | `sent_unconfirmed`、`delivered_no_result` 或投递状态未知 | 可能已执行；先补查或检查页面，不盲目重放副作用。 |
 | `in_progress` / `operation_status=outcome_unknown` | 原操作未结案，保留句柄；detaching debugger 不等于取消页面 JS。 |

@@ -114,14 +114,97 @@ def test_nested_operation_failure_is_not_lost_during_unwrapping(create_driver):
     assert result["may_have_created"] is False
 
 
+@pytest.mark.parametrize("probe", [
+    TimeoutError("client discovery timed out"),
+    reply("unknown", operation_id="open-tab-pre-dispatch",
+          may_have_created=True, retry_safe=False),
+])
+def test_predispatch_unknown_directs_a_fresh_create(create_driver, monkeypatch, probe):
+    _, statuses, _, dispatched, _ = create_driver
+    operation_tokens = iter(["pre-dispatch", "fixture"])
+    monkeypatch.setattr(S.secrets, "token_urlsafe", lambda size: next(operation_tokens))
+    statuses.append(probe)
+
+    first = S.open_new_tab("https://created.test/", owner_id="owner")
+
+    assert first["status"] == "unknown"
+    assert first["may_have_created"] is False
+    assert first["retry_safe"] is True
+    assert [call[0] for call in dispatched] == ["status"]
+    description = S.mcp._tool_manager.get_tool("open_new_tab").description
+    assert "When retry_safe=true" in description
+    assert "retry with no operation_id" in description
+
+    statuses.append(reply("not_found"))
+    retried = S.open_new_tab("https://created.test/", owner_id="owner")
+    assert retried["status"] == "ok"
+    assert retried["operation_id"] != first["operation_id"]
+    creates = [call[1] for call in dispatched if call[0] == "create"]
+    assert len(creates) == 1
+    assert creates[0]["operation_id"] == retried["operation_id"]
+
+
+def test_missing_recovery_record_directs_inspection_without_a_safe_create_claim(create_driver):
+    _, statuses, _, dispatched, _ = create_driver
+    statuses.append(reply("not_found", id=None, generation=None,
+                          may_have_created=False, retry_safe=True))
+
+    result = S.open_new_tab("https://created.test/", operation_id="open-tab-fixture",
+                            client_id="chrome", owner_id="owner")
+
+    assert result["status"] == "unknown"
+    assert result["may_have_created"] is True
+    assert result["retry_safe"] is False
+    assert result["owner_id"] == "owner"
+    assert result["owned"] is False
+    assert result["session_id"] is None
+    assert result["reconciliation"]["may_have_created"] is True
+    assert result["reconciliation"]["retry_safe"] is False
+    assert result["reconciliation"]["resume_required"] is False
+    assert result["reconciliation"].get("new_operation_safe") is not True
+    instruction = result["recovery"]["instruction"]
+    assert "list_tabs()" in instruction
+    assert "open_new_tab again with operation_id" not in instruction
+    assert "close_tabs" in instruction
+    assert "generation" in instruction
+    assert "already registered as owned" in instruction
+    assert "owner_id alone" in instruction
+    assert "does not prove" in instruction
+    assert "new create may duplicate" in instruction
+    assert [call[0] for call in dispatched] == ["status"]
+    assert S._TAB_OWNERSHIP.outstanding() == []
+
+
+@pytest.mark.parametrize("probe", [
+    TimeoutError("operation store did not respond"),
+    reply("unknown", may_have_created=False, retry_safe=True),
+])
+def test_unreadable_recovery_record_keeps_read_only_recovery(create_driver, probe):
+    _, statuses, _, dispatched, _ = create_driver
+    statuses.append(probe)
+
+    result = S.open_new_tab("https://created.test/", operation_id="open-tab-fixture",
+                            client_id="chrome", owner_id="owner")
+
+    assert result["may_have_created"] is True
+    assert result["retry_safe"] is False
+    assert result["owner_id"] == "owner"
+    assert "open_new_tab again with operation_id" in result["recovery"]["instruction"]
+    assert result["reconciliation"].get("new_operation_safe") is not True
+    assert [call[0] for call in dispatched] == ["status"]
+
+
 @pytest.mark.parametrize("status", ["not_found", "unknown"])
 def test_pending_recovery_never_recreates_a_disappeared_operation(create_driver, status):
     _, statuses, _, dispatched, _ = create_driver
     statuses.extend([reply("pending"), reply(status)])
     result = S.open_new_tab("https://created.test/", operation_id="open-tab-fixture", owner_id="owner")
     assert result["status"] == "unknown"
+    assert result["may_have_created"] is True
     assert result["owner_id"] == "owner"
     assert result["retry_safe"] is False
+    assert "open_new_tab again with operation_id" in result["recovery"]["instruction"]
+    assert result["reconciliation"].get("new_operation_safe") is not True
     assert all(call[0] == "status" for call in dispatched)
 
 

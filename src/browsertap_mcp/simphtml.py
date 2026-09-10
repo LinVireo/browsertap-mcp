@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, NavigableString
 
@@ -267,7 +268,13 @@ def get_temp_texts(driver, timeout=15, session_id=None):
         logger.debug("Temporary monitor read failed: %s", e)
         return []
 
-from urllib.parse import urljoin
+# Which fields survive from a no-response wire reply into the exception. These
+# are routing and delivery facts, never page content: a caller needs to know
+# which operation to poll and whether the tab is still reserved.
+_OPERATION_PAYLOAD_KEYS = (
+    'operation_id', 'delivery_state', 'retry_safe', 'reservation_held',
+    'poll_with', 'operation_status', 'error_code',
+)
 
 
 class PageUnavailable(RuntimeError):
@@ -277,7 +284,33 @@ class PageUnavailable(RuntimeError):
     downstream and either divide by zero in the cutlist ratio or make the
     agent believe the page was blank, throwing away the bridge's own
     diagnosis of WHY it didn't answer.
+
+    ``payload`` carries the routing facts the bridge already reported next to
+    that diagnosis -- above all ``operation_id``. A message-only exception
+    threw the handle away, and the handle is the only way to collect a result
+    that arrives after this call gave up: without it the caller sees a tab it
+    cannot use and an operation it cannot name. The same keys are also set as
+    attributes, so the server's exception path reads them the same way it
+    reads a ``PageExecutionError``.
     """
+
+    def __init__(self, message, *, payload=None):
+        super().__init__(message)
+        # Filtered here rather than at the construction sites, so a caller that
+        # hands over a whole wire reply cannot put page content on the failure
+        # envelope. One whitelist, one reader.
+        source = payload if isinstance(payload, dict) else {}
+        self.payload = {
+            key: source[key] for key in _OPERATION_PAYLOAD_KEYS
+            if source.get(key) is not None
+        }
+        # An id with no stated way to use it is a dead end for the caller, so
+        # the pair is completed here rather than at each construction site.
+        if self.payload.get('operation_id') and not self.payload.get('poll_with'):
+            self.payload['poll_with'] = 'get_execute_js_result'
+        for key, value in self.payload.items():
+            setattr(self, key, value)
+
 
 def _collapsed_text(page):
     """One space between words, at most one blank line between blocks.
@@ -321,10 +354,22 @@ def _page_from_response(raw):
     # A timeout carries no 'data' at all, only 'result' with the reason.
     if 'data' not in raw:
         reason = raw.get('result') or 'no data returned'
+        # The whole reply is handed over; PageUnavailable keeps only the
+        # routing keys, so page content cannot ride along.
+        followup = (
+            " Collect it with get_execute_js_result before retrying."
+            if raw.get('operation_id') else ""
+        )
         raise PageUnavailable(
-            f"{reason}. Run list_tabs to see live tabs, then switch_tab to the one you meant.")
+            f"{reason}. Run list_tabs to see live tabs, then switch_tab to the one you meant."
+            f"{followup}",
+            payload=raw,
+        )
     page = raw.get('data')
     if page is None:
+        # A reply that carried 'data' reached this process, so there is no
+        # in-flight operation to collect -- the handle here would name one that
+        # is already settled.
         raise PageUnavailable(
             "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
     return page

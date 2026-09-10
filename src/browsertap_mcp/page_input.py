@@ -251,6 +251,21 @@ def _key_details(key: str) -> tuple[str, str, int]:
     raise InputValidationError(f"unsupported key: {key}")
 
 
+#: Named keys that generate a character, and therefore a `keypress`.
+_KEY_TEXT = {"Enter": "\r"}
+
+
+def _key_text(key: str, modifiers: int) -> str | None:
+    """The `text` a keyDown should carry, or None for a text-less press."""
+    if modifiers & ~_MODIFIERS["shift"]:
+        return None
+    if key in _KEY_TEXT:
+        return _KEY_TEXT[key]
+    if len(key) == 1 and key.isprintable():
+        return key
+    return None
+
+
 def press_commands(chord: str) -> list[dict[str, Any]]:
     """Build CDP keyboard events for a comma-delimited key chord."""
     if not isinstance(chord, str):
@@ -295,12 +310,25 @@ def press_commands(chord: str) -> list[dict[str, Any]]:
         "nativeVirtualKeyCode": key_code,
         "modifiers": modifiers,
     }
+    # Chrome fires `keypress` -- and with it the character, a textarea's
+    # newline and a form's implicit submission on Enter -- only for a keyDown
+    # that carries `text`. A keyDown without it is a rawKeyDown in all but
+    # name: keydown/keyup reach the page and nothing else happens, which is how
+    # `submit_key="Enter"` typed into a field and then did not submit (measured
+    # live: keys=[keydown:Enter, keyup:Enter], submitted=false). Ctrl, Alt and
+    # Meta chords deliberately stay text-less, because Ctrl+A must not insert
+    # an "a"; Shift alone still produces a character.
+    text = _key_text(key, modifiers)
+    down_params = dict(key_params)
+    if text is not None:
+        down_params["text"] = text
+        down_params["unmodifiedText"] = text
     commands.extend(
         [
             _command(
                 "Input.dispatchKeyEvent",
-                type="rawKeyDown" if modifiers else "keyDown",
-                **key_params,
+                type="keyDown" if text is not None else "rawKeyDown",
+                **down_params,
             ),
             _command("Input.dispatchKeyEvent", type="keyUp", **key_params),
         ]
@@ -965,9 +993,16 @@ class ChallengeAttemptTracker:
         current = time.monotonic() if now is None else _number(now, "now")
         with self._lock:
             state = self._states.get(session_id)
+            # `started_at` is the LAST attempt, so the window measures idleness:
+            # "nothing happened for a whole window", not "the first attempt is
+            # older than a window". The server-side counter beside this tracker
+            # already reads it that way; anchored on the first attempt, a third
+            # click landing just past the window reset here while that counter
+            # reported attempts=3, and the caller got a stall with no stall.
             if state is None or state.marker != marker or current - state.started_at >= self.window_seconds:
                 state = _ChallengeState(marker=marker, started_at=current, count=0)
                 self._states[session_id] = state
+            state.started_at = current
             state.count += 1
             return state.count >= self.max_attempts
 

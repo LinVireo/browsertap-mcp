@@ -13,6 +13,7 @@ include CONTRIBUTING.zh-CN.md
 include CHANGELOG.md
 include AGENTS.md
 recursive-include docs USAGE.md USAGE.zh-CN.md TROUBLESHOOTING.md TROUBLESHOOTING.zh-CN.md
+recursive-include docs/agent-guides *.md
 recursive-include examples *.json *.yaml
 recursive-include .github/workflows *.yml
 include .github/dependabot.yml

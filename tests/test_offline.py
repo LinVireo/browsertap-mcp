@@ -298,6 +298,9 @@ def test_page_input_tools_do_not_activate_and_restore_default(monkeypatch):
         "Input.insertText",
     ]
     assert focused_batch["commands"][2]["assertTruthy"] is True
+    # handleBatch dispatches on `cmd`; a guard without it is recorded as
+    # "unknown cmd: undefined" and skipped, which is a guard that guards nothing.
+    assert all(command["cmd"] == "cdp" for command in focused_batch["commands"])
     resolver_scripts = [script for script, _, _ in calls if script.lstrip().startswith("(() =>")]
     assert resolver_scripts
     assert all(".xterm-helper-textarea" in script for script in resolver_scripts)
@@ -734,6 +737,7 @@ def test_page_type_uses_already_validated_session_for_input(monkeypatch):
         "Input.dispatchKeyEvent",
     ]
     assert batch["commands"][2]["assertTruthy"] is True
+    assert all(command["cmd"] == "cdp" for command in batch["commands"])
     assert batch["commands"][4]["params"]["awaitPromise"] is True
     assert driver.default_session_id == "c:previous"
 
@@ -1867,19 +1871,48 @@ def test_activate_reads_onScreen_from_data_key(monkeypatch):
     assert "warning" in out
 
 
+class _BatchDriver:
+    """A driver whose `ext_cmd` answers one canned batch reply.
+
+    Batches travel on the `cmd` field of `ext_cmd`, never as a text script
+    through `execute_js`: since the extension's cmd/code split, anything in
+    `code` is evaluated as page JavaScript, and a JSON envelope sent that way
+    died with `SyntaxError: Unexpected token ':'` (measured live for
+    `upload_files`, `cdp_batch`, `set_cookies` and `delete_cookies`).
+    """
+
+    default_session_id = "chrome:7"
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def ext_cmd(self, payload, client_id=None, timeout=15.0):
+        self.calls.append((payload, client_id, timeout))
+        return self.reply
+
+    def execute_js(self, *args, **kwargs):  # pragma: no cover - the wrong route
+        raise AssertionError("a batch must not be sent as a text script")
+
+
+def _install_batch_driver(monkeypatch, reply):
+    driver = _BatchDriver(reply)
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "get_driver", lambda: driver)
+    monkeypatch.setattr(S, "switch_session", lambda session_id=None: "chrome:7")
+    return driver
+
+
 def test_upload_files_parses_a_bare_results_array(monkeypatch):
-    """handleBatch's success reply arrives as a bare array (ws.onmessage does
-    `res.data ?? res.results ?? res`), so upload_files must treat a list under
-    `data` as the results, not look for data['results'] (which never exists on
-    a list and silently dropped the selector-not-found check)."""
-    calls = []
-
-    def fake_exec_js(script, session_id=None, timeout=15.0):
-        calls.append(script)
-        # DOM.getDocument -> {root:{nodeId:1}}; DOM.querySelector -> {nodeId:42}
-        return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}, {}]}
-
-    monkeypatch.setattr(S, "exec_js", fake_exec_js)
+    """handleBatch's success reply arrives as a bare array (the WS envelope and
+    the bridge's ext_cmd both unwrap {ok, results} to the list), so upload_files
+    must treat a list under `data` as the results, not look for data['results']
+    (which never exists on a list and silently dropped the selector-not-found
+    check)."""
+    # DOM.getDocument -> {root:{nodeId:1}}; DOM.querySelector -> {nodeId:42}
+    driver = _install_batch_driver(
+        monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}, {}]},
+    )
     import os
     import tempfile
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
@@ -1888,9 +1921,13 @@ def test_upload_files_parses_a_bare_results_array(monkeypatch):
         out = S.upload_files("#file", f.name)
         assert out["status"] == "ok"
         assert out["node_id"] == 42
-        batch = json.loads(calls[0])
+        batch, client_id, _timeout = driver.calls[0]
+        assert batch["cmd"] == "batch"
+        assert batch["tabId"] == 7
+        assert client_id == "chrome"
         assert batch["deadlineEpochMs"] > 0
         assert batch["timeoutMs"] == 30000
+        assert all(command["cmd"] == "cdp" for command in batch["commands"])
     finally:
         os.unlink(f.name)
 
@@ -1906,11 +1943,7 @@ def test_upload_files_failure_leaves_the_caller_file_untouched(monkeypatch, tmp_
     upload = tmp_path / "upload.txt"
     upload.write_text("fixture", encoding="utf-8")
     before = upload.stat()
-    monkeypatch.setattr(
-        S,
-        "exec_js",
-        lambda *args, **kwargs: {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]},
-    )
+    _install_batch_driver(monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]})
 
     with pytest.raises(RuntimeError, match="matched no element"):
         S.upload_files("#missing", str(upload))
@@ -1927,10 +1960,8 @@ def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
     """DOM.querySelector returns nodeId=0 when nothing matches; that used to be
     swallowed (results was always None because data was a list, not a dict) and
     upload_files reported status:ok with node_id:null."""
-    def fake_exec_js(script, session_id=None, timeout=15.0):
-        return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]}  # 0 = no match
-
-    monkeypatch.setattr(S, "exec_js", fake_exec_js)
+    # 0 = no match
+    _install_batch_driver(monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]})
     import os
     import tempfile
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
@@ -1945,13 +1976,7 @@ def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
 def test_upload_files_refuses_an_unconfirmed_set_file_result(monkeypatch, tmp_path):
     upload = tmp_path / "upload.txt"
     upload.write_text("fixture", encoding="utf-8")
-    monkeypatch.setattr(
-        S,
-        "exec_js",
-        lambda *args, **kwargs: {
-            "data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]
-        },
-    )
+    _install_batch_driver(monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]})
 
     with pytest.raises(RuntimeError, match="state is unknown"):
         S.upload_files("#file", str(upload))

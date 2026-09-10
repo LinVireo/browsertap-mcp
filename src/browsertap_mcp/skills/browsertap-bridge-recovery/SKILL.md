@@ -140,9 +140,20 @@ Chrome/Edge/Opera 各自的扩展安装独立，一个浏览器缺失只修对�
 
 ## 结果未知与页面拒绝
 
-有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js_result`。
+JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js_result`。
 它接受 execute_js 和其他桥命令的句柄，查询不重发；完成结果可重复读取。
 保留期和容量边界见 [[browsertap-default]]；`operation_unknown` 或过期不证明未执行。
+
+`open_new_tab` 的创建句柄走该工具自己的恢复流程：
+
+- `may_have_created=false,retry_safe=true`：修正失败原因后，省略 `operation_id`
+  重新调用；该次创建没有需要恢复的已投递记录。
+- `retry_safe=false`：按 `recovery` 传回 `operation_id + client_id + owner_id`，
+  只读查询原创建，不改用 `get_execute_js_result` 查询创建记录。
+- 首次恢复查不到记录且 `reconciliation.resume_required=false`：停止重复恢复，
+  用 `list_tabs()` 检查返回 `client_id` 对应的浏览器。记录缺失、URL 相同和标签页
+  数量不变都不能证明未创建或所有权；清理仍要求已登记的精确 session/generation
+  和本任务 owner，证据不足时保留未知结果。
 
 只有 `delivery_state=undelivered` 才证明未投递。`sent_unconfirmed`、
 `delivered_no_result`、`in_progress`、`operation_status=outcome_unknown`

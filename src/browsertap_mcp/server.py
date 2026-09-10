@@ -412,7 +412,14 @@ def _result_diagnostics(payload: Any, *, tool: str) -> dict[str, Any]:
         return diagnostics
     for key in (
         "delivery_state", "switched_session", "switched_from", "closed",
-        "retry_safe", "dispatched", "may_have_executed", "operation_id", "may_have_created", "on_screen",
+        "retry_safe", "dispatched", "may_have_executed", "operation_id",
+        # An id is only actionable next to how to use it and whether the tab is
+        # still held. The exception path already reports all three; a failure
+        # returned as a dict used to keep the id and drop the other two.
+        "poll_with", "reservation_held", "operation_status", "may_have_created", "on_screen",
+        # Whether a timed-out page script is still pinning its tab. Decides the
+        # caller's next move on that tab, so it belongs next to retry_safe.
+        "zombie", "zombie_detail",
         "input_quiet", "input_reachability", "screen_bounds", "ownership",
         "owner_id", "generation", "extension_build_verdict", "status", "code",
         "hint", "directory_applied", "requested_directory", "render_state",
@@ -1360,7 +1367,7 @@ def ensure_sessions(
     if not sessions:
         raise RuntimeError(
             "No connected browser tabs. Load the unpacked extension from the reported extension path, "
-            "keep this MCP server running via Hermes, and open a normal http/https page in Chrome."
+            "keep the bridge daemon running, and open a normal http/https page in Chrome."
         )
     # Every session-scoped tool passes through here before handing an implicit
     # target to the driver, so this is where a dead remembered tab has to be
@@ -3074,7 +3081,7 @@ async def resolve_leave_dialog(
 
 
 # --- Tool: open_new_tab (owned tabs) -----------------------------------------
-@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Uses the browser selected by this MCP task unless session_id or client_id names another browser. With several browsers connected, first use switch_tab or pass a concrete session_id/client_id. Pass active=true only when foreground work is genuinely required. If the create ACK is lost, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true; after dispatch, an unresolved operation returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. An unresolved recovery preserves that uncertainty and its owner_id even when the status probe fails. Never use a URL-based guess or an unmarked create retry.")
+@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Uses the browser selected by this MCP task unless session_id or client_id names another browser. With several browsers connected, first use switch_tab or pass a concrete session_id/client_id. Pass active=true only when foreground work is genuinely required. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true. When retry_safe=true, retry with no operation_id to start a fresh create. If the create ACK is lost with retry_safe=false, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. An uncertain dispatched create returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. An unresolved recovery preserves that uncertainty and its owner_id even when the status probe fails. If recovery starts with not_found, follow its list_tabs() inspection guidance instead of repeating the same recovery read; a fresh create may duplicate the original. Never infer ownership or absence from URLs, tab counts, or missing records.")
 def open_new_tab(
     url: str,
     timeout: float = 15.0,
@@ -3155,6 +3162,7 @@ def open_new_tab(
         *,
         may_have_created: bool,
         retry_safe: bool,
+        terminal: bool = False,
     ) -> dict[str, Any]:
         # Reconciliation cannot prove that an earlier call never created a tab.
         # Keep its cleanup capability even when the first status read fails.
@@ -3192,6 +3200,16 @@ def open_new_tab(
                 "owner_id": capability_owner_id,
                 "url": url,
                 "instruction": (
+                    "The operation record is missing; stop repeating this recovery read. "
+                    "Call list_tabs() and inspect tabs for the returned client_id. "
+                    "A matching URL, an unchanged tab count, or no matching tab does not prove "
+                    "ownership or that no tab was created. For cleanup, use "
+                    "close_tabs(tab_id=<exact session_id>, owner_id=<returned owner_id>) "
+                    "only for an exact client_id/tab_id/generation already registered as owned "
+                    "by this MCP task; owner_id alone grants no ownership. If identity or "
+                    "ownership cannot be established, leave those tabs untouched and report "
+                    "the unresolved outcome; a new create may duplicate the original."
+                    if terminal else
                     "Call open_new_tab again with operation_id, client_id and owner_id; "
                     "the recovery call only reads the durable operation record."
                 ),
@@ -3282,17 +3300,22 @@ def open_new_tab(
         if probe_state == "completed":
             result = probe_response
         elif probe_state == "not_found":
+            # A readable but missing record gives this recovery call no result
+            # to poll. It is not proof of absence: completed records expire and
+            # browser restarts clear the store while tabs may be restored.
             return unknown_result(
                 {
                     **probe_info,
                     "error": (
-                        "operation_id was not found; it may have expired or belong to "
-                        "another client; do not replay tab creation"
+                        "operation_id was not found in this browser's operation store; "
+                        "it may have expired or belong to another client; inspect tabs "
+                        "without replaying tab creation"
                     ),
-                    "resume_required": True,
+                    "resume_required": False,
                 },
                 may_have_created=True,
                 retry_safe=False,
+                terminal=True,
             )
         elif probe_state != "pending":
             return unknown_result(
@@ -4305,12 +4328,21 @@ def scan_page(
         # The tab never answered. Report that as a failure with the bridge's
         # own diagnosis, instead of an empty page the agent would read as
         # "this site is blank".
-        return {
+        #
+        # The operation handle travels with it. A scan that times out may still
+        # have a page script running, and dropping the id left the caller with
+        # a reserved tab it could neither poll nor release -- the next call on
+        # that tab answered target_busy with nothing to name.
+        failed: dict[str, Any] = {
             "status": "no_response",
             "active_session_id": driver.default_session_id,
             "tabs": compact_tabs(),
             "error": str(e),
         }
+        payload = getattr(e, "payload", None)
+        if isinstance(payload, dict):
+            failed.update(payload)
+        return failed
     finally:
         if session_id is not None:
             driver.default_session_id = prev_default
@@ -5413,9 +5445,11 @@ def debugger_targets(session_id: Optional[str] = None) -> dict[str, Any]:
 @mcp.tool(description="Run a CDP bridge batch command; pass the full JSON command object as text.")
 def cdp_batch(batch_json: str, session_id: Optional[str] = None) -> dict[str, Any]:
     payload = json.loads(batch_json)
+    if not isinstance(payload, dict):
+        raise ValueError("batch_json must be a JSON object with cmd='batch'")
     if payload.get("cmd") != "batch":
         raise RuntimeError("batch_json must be a JSON object with cmd='batch'")
-    return exec_js(json.dumps(payload), session_id=session_id, timeout=30.0)
+    return _extension_batch(payload, session_id=session_id, timeout=30.0)
 
 
 _PAGE_CHALLENGES = ChallengeAttemptTracker(max_attempts=3, window_seconds=120)
@@ -5566,7 +5600,7 @@ def _resolve_page_input_session(
     if not sessions:
         raise RuntimeError(
             "No connected browser tabs. Load the unpacked extension from the "
-            "reported extension path, keep this MCP server running via Hermes, "
+            "reported extension path, keep the bridge daemon running, "
             "and open a normal http/https page in Chrome."
         )
 
@@ -6220,7 +6254,12 @@ def page_type(
         # Xterm forwards insertText to its backend asynchronously, so yield once
         # before Enter without breaking the single attached CDP batch.
         target_script = _page_type_target_script(selector, clear)
+        # `cmd` is what handleBatch dispatches on. Without it the guard was
+        # recorded as `unknown cmd: undefined` and the batch carried on typing,
+        # so the re-resolution below protected nothing -- measured live: result
+        # [{ok:false, error:"unknown cmd: undefined"}, {}, {}, {}].
         guard = {
+            "cmd": "cdp",
             "method": "Runtime.evaluate",
             "params": {
                 "expression": (
@@ -6362,11 +6401,11 @@ def upload_files(
              "params": {"nodeId": "$1.nodeId", "files": files}},
         ],
     }
-    result = exec_js(json.dumps(batch), session_id=session_id, timeout=timeout)
-    # The extension's batch reply arrives as a BARE ARRAY — ws.onmessage does
-    # `res.data ?? res.results ?? res` and handleBatch returns {ok, results},
-    # so `data` here is the results list, not a wrapper dict. Only the error
-    # path (handleBatch catch) surfaces as {ok:false, error, results}.
+    result = _extension_batch(batch, session_id=session_id, timeout=timeout)
+    # The extension's batch reply arrives as a BARE ARRAY — handleBatch returns
+    # {ok, results} and both the WS envelope and the bridge's ext_cmd unwrap it
+    # to the results list, so `data` here is the list, not a wrapper dict. Only
+    # the error path (handleBatch catch) surfaces as {ok:false, error, results}.
     data = result.get("data")
     if isinstance(data, dict) and data.get("ok") is False:
         raise RuntimeError(f"upload failed: {data.get('error')}")
@@ -6758,13 +6797,70 @@ def reset_site_permissions(
 
 
 # --- Cookie writes: CDP path with a document.cookie fallback -----------------
+def _resolve_cdp_target(
+    session_id: Optional[str], tab_id: Optional[int],
+) -> tuple[str, str, int]:
+    """Resolve ``(session_id, client_id, tab_id)`` for an extension-routed CDP call.
+
+    An explicit composite session names both the browser client and the tab; a
+    bare ``tab_id`` borrows the client of the current default (or the only
+    connected browser); neither means the remembered default, re-picked when
+    stale exactly like every other implicit page call.
+    """
+    if session_id is not None:
+        client_id, session_tab = _split_session_target(str(session_id))
+    else:
+        client_id, session_tab = _split_session_target(switch_session())
+    target_tab = int(tab_id) if tab_id is not None else session_tab
+    return f"{client_id}:{target_tab}", client_id, target_tab
+
+
 def _cdp(method: str, params: dict[str, Any], session_id: Optional[str],
          tab_id: Optional[int], timeout: float) -> Any:
-    payload: dict[str, Any] = {"cmd": "cdp", "method": method, "params": params}
-    if tab_id is not None:
-        payload["tabId"] = tab_id
-    return exec_js(json.dumps(payload), session_id=session_id,
-                   timeout=timeout).get("data")
+    # Routed through ext_cmd, never as a text script: since the cmd/code split
+    # the extension evaluates whatever arrives in `code` as page JavaScript, so
+    # a JSON envelope sent that way died with `SyntaxError: Unexpected token ':'`
+    # and every cookie write silently took the document.cookie fallback --
+    # HttpOnly dropped, `status: ok` reported. `_direct_cdp` keeps the text
+    # fallback for the one case it is safe in: an old router that answers
+    # `unknown cmd`.
+    target_sid, client_id, target_tab = _resolve_cdp_target(session_id, tab_id)
+    return _direct_cdp(
+        method, params, session_id=target_sid, client_id=client_id,
+        tab_id=target_tab, timeout=timeout,
+    )
+
+
+def _extension_batch(
+    payload: dict[str, Any], *, session_id: Optional[str], timeout: float,
+) -> dict[str, Any]:
+    """Send one ``batch`` envelope to the extension's command router.
+
+    Same reason as ``_cdp``: a batch is an extension command, so it travels on
+    the ``cmd`` field. ``exec_js`` remains only for a driver without ``ext_cmd``
+    (embedded/fake drivers) or a router that explicitly reports ``unknown cmd``;
+    a timeout or transport failure is never replayed through the text route,
+    because the batch may already have run. The reply keeps the historical
+    shape: ``{"data": <results list | {ok: false, ...}>}``.
+    """
+    timeout = _positive_timeout(timeout)
+    deadline = time.monotonic() + timeout
+    driver = require_driver()
+    ext_cmd = getattr(driver, "ext_cmd", None)
+    if not callable(ext_cmd):
+        return exec_js(json.dumps(payload), session_id=session_id, timeout=timeout)
+    target_sid, client_id, target_tab = _resolve_cdp_target(session_id, None)
+    wire = dict(payload)
+    wire.setdefault("tabId", target_tab)
+    try:
+        return ext_cmd(wire, client_id=client_id, timeout=timeout)
+    except BaseException as exc:
+        fallback_budget = max(0.0, deadline - time.monotonic())
+        if isinstance(exc, TimeoutError) or fallback_budget <= 0:
+            raise
+        if not _unknown_command_error(exc):
+            raise
+        return exec_js(json.dumps(payload), session_id=target_sid, timeout=fallback_budget)
 
 
 def _cookie_via_document(cookie: dict[str, Any], session_id: Optional[str],

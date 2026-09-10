@@ -5,8 +5,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
 ### Added
 
+- Task-scoped implementation guides under `docs/agent-guides/`, with a shorter
+  root `AGENTS.md` that keeps the maintainer entry points within instruction
+  loading budgets. The detailed guides are included in source distributions.
 - `PRIVACY.md`, the privacy policy the Chrome Web Store listing serves. It
   states what the extension can reach, that its only network destination is
   `127.0.0.1`, and what persists on disk. Two disclosures go beyond the
@@ -75,6 +79,55 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Reserve every CDP target in a cross-tab batch before dispatch. Child target
+  overrides and numeric-string IDs now use the same identities as ordinary
+  commands, so another call's busy tab cannot be reached through a batch.
+- Preserve expired unknown-operation receipts through the remote bridge,
+  including their timeout diagnosis, abandonment reason and `retry_safe=false`.
+- Reclaim capture-command bookkeeping after its operation expires even when no
+  reply arrives. Capture ownership remains protected until a confirmed stop or
+  the tab lifecycle ends.
+- Release tab reservations after a bounded unknown-outcome window while keeping
+  the original timeout diagnosis and `retry_safe=false`. Manual-dialog recovery
+  starts that window at the first unknown observation, so a late observation
+  still has time to be inspected; repeated observations do not extend it.
+- Give `open_new_tab` callers an exit when the first recovery probe finds no
+  operation record: inspect the browser instead of polling the same missing
+  record indefinitely. Pre-dispatch failures now explicitly direct a fresh call
+  without `operation_id`; uncertain creates retain their owner capability and
+  remain unsafe to replay.
+- **`set_cookies`, `delete_cookies`, `cdp_batch` and `upload_files` work again
+  on the current extension.** The cmd/code protocol split below made the
+  extension evaluate whatever arrives in `code` as page JavaScript, but these
+  four still sent their `{"cmd": ...}` envelope as a text script. Measured live:
+  `cdp_batch` and `upload_files` failed with `SyntaxError: Unexpected token
+  ':'`, and both cookie tools silently took the `document.cookie` fallback --
+  HttpOnly dropped, `status: ok` reported, and the live suite green because it
+  read `status` rather than `method`. The envelopes now travel on `ext_cmd`'s
+  `cmd` field like every other command; the text route remains only for a
+  router that explicitly answers `unknown cmd`. The live cookie tests assert
+  `method == "cdp"`, and `cdp_batch` / `upload_files` have live coverage.
+- **`page_type`'s focus guard now guards.** The re-resolution command that
+  should stop the batch when the target loses focus or editability was sent
+  without `"cmd": "cdp"`, so `handleBatch` recorded `unknown cmd: undefined`
+  and typed anyway; `batch_guard_failed` could never fire. The offline shape
+  test now checks `cmd` on every batch command.
+- **Enter submits, printable keys type.** `page_press` and the `submit_key` of
+  `page_type` dispatched `keyDown` without `text`, which Chrome treats as a raw
+  key event: `keydown`/`keyup` reached the page, but no `keypress`, so
+  `submit_key="Enter"` typed into a form and never submitted it, Enter inserted
+  no newline in a textarea, and `page_press("a")` inserted nothing. Presses
+  without Ctrl/Alt/Meta now carry `text` (`"\r"` for Enter, the character for a
+  printable key); modifier chords stay text-less so Ctrl+A still selects
+  instead of inserting an "a".
+- The challenge-stall window now measures idleness in both places that count
+  attempts. `ChallengeAttemptTracker` expired on age since the first attempt
+  while the server-side counter expired on idleness, so a third click just
+  past the window reported `attempts=3` without a stall.
+- `cdp_batch` rejects a non-object document with `invalid_request` instead of
+  an `AttributeError` reported as `internal_error`.
+- Two "no connected tabs" messages told every client to keep the server
+  running "via Hermes"; they now name the bridge daemon.
 - **Documented the write sandbox for the file-writing tools.** `save_pdf` and
   `capture_page_screenshot` route `save_path` through `_validate_safe_path`, which takes a *relative* path under
   `~/Downloads/browsertap` and rejects absolute paths and `..` escapes — but the

@@ -766,6 +766,11 @@ class TestBackgroundPageInput:
                   event.preventDefault();
                   window.__pageInputEvents.push({type: 'submit', id: event.target.id, key: ''});
                 });
+                // xterm.js consumes Enter on its hidden input and prevents the
+                // textarea default action from appending a newline.
+                document.querySelector('#page-input-xterm-helper').addEventListener('keydown', event => {
+                  if (event.key === 'Enter') event.preventDefault();
+                });
                 const rect = document.querySelector('#page-input-drag').getBoundingClientRect();
                 return JSON.stringify({
                   x1: rect.left + 10, y1: rect.top + 20,
@@ -1119,6 +1124,9 @@ class TestCookiesAndStorage:
                 session_id=scratch_session,
             )
             assert result["status"] == "ok", result
+            # `ok` alone also described the document.cookie fallback, which is
+            # how a broken CDP route stayed green here for a week.
+            assert result["results"][0]["method"] == "cdp", result
         finally:
             S.delete_cookies(name, session_id=scratch_session)
 
@@ -1220,3 +1228,126 @@ class TestWaitForUrl:
         assert r["status"] == "timeout"
         # It must actually have waited, not returned instantly.
         assert r["waited_ms"] >= 2500, r["waited_ms"]
+
+
+class TestCommandEnvelopeRouting:
+    """Envelopes that used to ride `execute_js` as text and died on eval.
+
+    Each of these passed -- or was never covered -- while the tool was broken:
+    `set_cookies` reported `status: ok` from the document.cookie fallback, and
+    `cdp_batch` / `upload_files` had no live test at all. The assertions here
+    read the *route*, so a degradation cannot pass as success again.
+    """
+
+    def test_set_cookies_writes_through_cdp_and_keeps_http_only(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        name = "btap_route_httponly"
+        try:
+            result = S.set_cookies(
+                {"name": name, "value": "v1", "path": "/", "httpOnly": True},
+                session_id=scratch_session,
+            )
+            assert result["status"] == "ok", result
+            entry = result["results"][0]
+            assert entry["method"] == "cdp", entry
+            assert "cdp_error" not in entry, entry
+            stored = [
+                cookie for cookie in S.get_cookies(session_id=scratch_session).get("data", [])
+                if cookie["name"] == name
+            ]
+            assert stored and stored[0].get("httpOnly") is True, stored
+        finally:
+            deleted = S.delete_cookies(name, session_id=scratch_session)
+        assert deleted["method"] == "cdp", deleted
+
+    def test_cdp_batch_evaluates_through_the_command_channel(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        result = S.cdp_batch(
+            json.dumps({
+                "cmd": "batch",
+                "commands": [
+                    {"cmd": "cdp", "method": "Runtime.evaluate",
+                     "params": {"expression": "40 + 2", "returnByValue": True}},
+                ],
+            }),
+            session_id=scratch_session,
+        )
+        data = result["data"]
+        assert isinstance(data, list) and data[0]["result"]["value"] == 42, result
+
+    def test_upload_files_sets_a_real_file_input(self, scratch_session, tmp_path):
+        goto(scratch_session, STATIC, "h1")
+        upload = tmp_path / "btap-upload.txt"
+        upload.write_text("fixture", encoding="utf-8")
+        S.execute_js(
+            "document.body.insertAdjacentHTML('beforeend',"
+            " '<input type=\"file\" id=\"btap-upload\">'); return true",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )
+        result = S.upload_files("#btap-upload", str(upload), session_id=scratch_session)
+        assert result["status"] == "ok", result
+        state = S.execute_js(
+            "const el = document.querySelector('#btap-upload');"
+            " return JSON.stringify({count: el.files.length, name: el.files[0] && el.files[0].name})",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )
+        assert json.loads(state["js_return"]) == {"count": 1, "name": "btap-upload.txt"}
+
+
+class TestKeyPressText:
+    """A keyDown with `text` is what turns a key into a character."""
+
+    def test_page_type_submit_enter_submits_the_form(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        S.execute_js(
+            """
+            document.body.innerHTML = '<form id="f"><input id="q" name="q"></form>'
+              + '<textarea id="ta"></textarea>';
+            window.__btapSubmitted = 0;
+            window.__btapKeypress = [];
+            document.addEventListener('keypress', e => window.__btapKeypress.push(e.key), true);
+            document.querySelector('#f').addEventListener('submit', e => {
+              e.preventDefault(); window.__btapSubmitted += 1;
+            });
+            return true
+            """,
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )
+        typed = S.page_type("hello", selector="#q", submit_key="Enter", session_id=scratch_session)
+        assert typed["status"] == "success", typed
+        state = json.loads(S.execute_js(
+            "return JSON.stringify({submitted: window.__btapSubmitted,"
+            " keypress: window.__btapKeypress, value: document.querySelector('#q').value})",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )["js_return"])
+        assert state == {"submitted": 1, "keypress": ["Enter"], "value": "hello"}, state
+
+    def test_page_press_enter_inserts_a_newline_in_a_textarea(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        S.execute_js(
+            "document.body.innerHTML = '<textarea id=\"ta\"></textarea>'; return true",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )
+        S.page_type("ab", selector="#ta", session_id=scratch_session)
+        pressed = S.page_press("Enter", session_id=scratch_session)
+        assert pressed["status"] == "success", pressed
+        S.page_press("c", session_id=scratch_session)
+        value = S.execute_js(
+            "return document.querySelector('#ta').value",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )["js_return"]
+        assert value == "ab\nc", repr(value)
+
+    def test_page_press_ctrl_a_does_not_insert_a_character(self, scratch_session):
+        goto(scratch_session, STATIC, "h1")
+        S.execute_js(
+            "document.body.innerHTML = '<input id=\"i\" value=\"xy\">'; return true",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )
+        assert S.page_click(selector="#i", session_id=scratch_session)["status"] == "success"
+        S.page_press("ctrl,a", session_id=scratch_session)
+        value = S.execute_js(
+            "return document.querySelector('#i').value",
+            session_id=scratch_session, no_monitor=True, timeout=15,
+        )["js_return"]
+        assert value == "xy", repr(value)
