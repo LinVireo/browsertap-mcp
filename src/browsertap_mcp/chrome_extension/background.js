@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '3e2a82fe69ed629d';
+const BTAP_BUILD = 'edd16646791a4c63';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -2708,6 +2708,15 @@ async function navigateWithDialogPolicy(msg) {
   const deadlineEpochMs = Date.now() + boundedCdpTimeout(msg.timeoutMs, 15000);
   let debuggerLease = null;
   let pending = null;
+  // Nothing before Page.navigate can change the page, so a failure in that
+  // window is reported as not dispatched and the bridge releases the tab at
+  // once instead of holding it for a navigation that was never issued
+  // (measured 2026-09-10: one Page.enable timeout cost every later call on
+  // the tab a target_busy for the grace period). The flag flips before the
+  // send rather than inside it: sendDebuggerCommandWithTimeout dispatches on
+  // a microtask, and a deadline throw in that gap must still count the
+  // navigation as issued.
+  const navigationState = { dispatched: false };
   try {
     const beforeTab = await chrome.tabs.get(tabId);
     debuggerLease = await enablePageForNavigation(tabId, deadlineEpochMs);
@@ -2736,6 +2745,7 @@ async function navigateWithDialogPolicy(msg) {
     const navigationBudget = navigationDeadlineRemaining(
       deadlineEpochMs, 'before Page.navigate',
     );
+    navigationState.dispatched = true;
     const navigationPromise = sendDebuggerCommandWithTimeout(
       debuggerLease, 'Page.navigate', { url: msg.url },
       navigationBudget,
@@ -2833,7 +2843,20 @@ async function navigateWithDialogPolicy(msg) {
       },
     };
   } catch (error) {
-    return { ok: false, error: error.message || String(error), dialog: pending?.dialog || null };
+    return {
+      ok: false,
+      // Object form, as the exec path returns it: the bridge reads
+      // `dispatched` from the error source and `code` names the failure
+      // class. A Page.enable timeout carries its own dispatched=true for
+      // Page.enable itself, which is not the question here.
+      error: {
+        name: 'Error',
+        message: error.message || String(error),
+        code: debuggerFailureCode(error),
+        dispatched: navigationState.dispatched,
+      },
+      dialog: pending?.dialog || null,
+    };
   } finally {
     const retainManualOwner = Boolean(
       pending && pending.action === 'manual' && pending.manualOwned &&
