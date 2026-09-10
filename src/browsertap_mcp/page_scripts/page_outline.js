@@ -77,13 +77,20 @@ function pageOutline(textOnly = false) {
   // Live form state lives in properties, not attributes, so a clone loses it.
   const carryState = (src, clone) => {
     const tag = src.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      if (src.value) clone.setAttribute('value', src.value);
-      if ((src.type === 'radio' || src.type === 'checkbox') && src.checked) {
-        clone.setAttribute('checked', '');
+    if (tag === 'INPUT') {
+      clone.setAttribute('value', src.value || '');
+      if (src.type === 'radio' || src.type === 'checkbox') {
+        if (src.checked) clone.setAttribute('checked', '');
+        else clone.removeAttribute('checked');
       }
-    } else if (tag === 'SELECT' && src.value) {
-      clone.setAttribute('data-selected', src.value);
+    } else if (tag === 'TEXTAREA') {
+      clone.removeAttribute('value');
+      clone.textContent = src.value || '';
+    } else if (tag === 'SELECT') {
+      clone.setAttribute('data-selected', src.value || '');
+    } else if (tag === 'OPTION') {
+      if (src.selected) clone.setAttribute('selected', '');
+      else clone.removeAttribute('selected');
     }
     try {
       if (src.matches(':-webkit-autofill')) {
@@ -126,7 +133,7 @@ function pageOutline(textOnly = false) {
     // clones fine and made the parent look non-empty.
     let keptElements = 0;
     let keptAny = 0;
-    for (const child of src.childNodes) {
+    for (const child of (src.tagName === 'TEXTAREA' ? [] : src.childNodes)) {
       const sub = copy(child);
       if (!sub) continue;
       clone.appendChild(sub);

@@ -107,9 +107,8 @@ branch = true
 # is measured too. Note that a `--cov=<pkg>` flag on the pytest command line
 # REPLACES this list rather than adding to it: the release and CI commands pass
 # `--cov=browsertap_mcp` explicitly, so they measure only the package. Adding
-# `--cov=scripts` there would fold the release tooling into `--cov-fail-under`,
-# which currently lands at 82.53% combined (package 89.1%, scripts 67.5%) and
-# would fail the 85 gate; ~185 more covered units are needed first.
+# `--cov=scripts` there would also fold release tooling into the package's
+# coverage gate. The 95% requirement below measures shipped Python behavior.
 source = ["browsertap_mcp", "scripts"]
 omit = ["*/chrome_extension/*"]
 
@@ -118,7 +117,7 @@ exclude_also = [
   "if TYPE_CHECKING:",
   "raise NotImplementedError",
 ]
-fail_under = 85
+fail_under = 95
 show_missing = true
 
 [tool.ruff]

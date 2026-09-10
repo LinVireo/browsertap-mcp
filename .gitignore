@@ -67,6 +67,9 @@ docs/superpowers/
 /_*.json
 /_*.txt
 /_*.md
+/.tmp_*.txt
+/PLAN.md
+/JSON_PARSE_TIGHTEN.md
 
 # local MCP client wiring
 #

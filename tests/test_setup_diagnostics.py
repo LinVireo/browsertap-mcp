@@ -48,7 +48,10 @@ def test_setup_status_reports_all_equal_components_as_healthy(monkeypatch):
             "bridge_version": __version__,
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         },
     )
 
@@ -73,7 +76,10 @@ def test_setup_status_surfaces_bridge_startup_without_requesting_reload(monkeypa
             "bridge_version": __version__,
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
             "bridge_uptime_seconds": 2.0,
             "startup_grace_seconds": 10.0,
         },
@@ -94,7 +100,10 @@ def test_setup_status_classifies_old_bridge_before_extension(monkeypatch):
             "bridge_version": "0.2.9",
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         },
     )
 
@@ -145,7 +154,8 @@ def test_setup_status_requires_removed_content_command_channel(monkeypatch):
     assert result["status"] == "stale_extension"
     assert result["reload_extension_required"] is True
     assert result["missing_extension_capabilities"] == [
-        "content_command_channel_removed"
+        "batch_result_guard",
+        "content_command_channel_removed",
     ]
 
 
@@ -167,7 +177,10 @@ def test_setup_status_blames_this_process_when_components_are_newer(monkeypatch)
             "bridge_version": "99.0.0",
             "extension_version": "99.0.0",
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         },
     )
 
@@ -190,7 +203,10 @@ def test_setup_status_still_blames_an_older_component_not_this_process(monkeypat
             "bridge_version": "0.0.1",
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         },
     )
 
@@ -207,7 +223,10 @@ def test_setup_status_blames_this_process_for_a_newer_protocol(monkeypatch):
         {
             "extension_version": __version__,
             "protocol_version": S._EXTENSION_PROTOCOL_VERSION + 1,
-            "capabilities": {"content_command_channel_removed": True},
+            "capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         },
     )
 
@@ -227,7 +246,10 @@ def test_setup_status_falls_back_to_inequality_for_unorderable_versions(monkeypa
             "bridge_version": "not-a-version",
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         },
     )
 
@@ -264,7 +286,10 @@ def test_setup_status_resurrects_cached_remote_bridge(monkeypatch):
             "bridge_version": __version__,
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {"content_command_channel_removed": True},
+            "extension_capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
         }
     )
     spawned = []
@@ -310,7 +335,10 @@ def _healthy(**extra):
         "bridge_version": __version__,
         "extension_version": __version__,
         "protocol_version": 3,
-        "extension_capabilities": {"content_command_channel_removed": True},
+        "extension_capabilities": {
+            "content_command_channel_removed": True,
+            "batch_result_guard": True,
+        },
     }
     diagnosis.update(extra)
     return diagnosis
@@ -434,7 +462,10 @@ def _healthy_diagnosis(**overrides):
         "bridge_version": __version__,
         "extension_version": __version__,
         "protocol_version": 3,
-        "extension_capabilities": {"content_command_channel_removed": True},
+        "extension_capabilities": {
+            "content_command_channel_removed": True,
+            "batch_result_guard": True,
+        },
     }
     base.update(overrides)
     return base
@@ -589,7 +620,10 @@ def test_the_fallback_probe_fills_a_stamp_an_older_bridge_did_not_forward(monkey
         runtime={
             "extension_version": __version__,
             "protocol_version": 3,
-            "capabilities": {"content_command_channel_removed": True},
+            "capabilities": {
+                "content_command_channel_removed": True,
+                "batch_result_guard": True,
+            },
             "build_stamp": stamp,
         },
     )

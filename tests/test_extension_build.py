@@ -85,7 +85,7 @@ def test_normalising_touches_only_the_two_generated_lines():
         raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
         normalised = _normalised(relative, raw)
         assert len(normalised) == len(raw), f"normalising {relative} changed its line count"
-        differing = [(a, b) for a, b in zip(raw, normalised) if a != b]
+        differing = [(a, b) for a, b in zip(raw, normalised, strict=True) if a != b]
         if relative not in expected:
             assert not differing, (
                 f"normalising {relative} rewrote {len(differing)} line(s), and it holds "

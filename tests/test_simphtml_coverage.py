@@ -547,7 +547,7 @@ def test_execute_js_rich_only_settles_for_a_started_monitor(monkeypatch):
 def test_execute_js_rich_retries_undelivered_and_reports_switch_and_tabs(monkeypatch):
     driver = QueueDriver(
         [
-            {"result": "No response data in 2s (no ACK, script may not have been delivered)"},
+            {"delivery_state": "undelivered", "result": "script not polled"},
             {
                 "data": 7,
                 "executed_tab_id": 42,

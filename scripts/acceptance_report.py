@@ -27,6 +27,7 @@ from scripts.evidence_manifest import validate_manifest
 # away. Raise it when the weakest module improves; do not lower it to turn a
 # red gate green.
 PER_FILE_COVERAGE_FLOOR = 60.0
+TOTAL_COVERAGE_FLOOR = 95.0
 
 GATE_WEIGHTS = {
     "tool_contract": 15,
@@ -130,7 +131,7 @@ def _junit(relative: str, manifest: dict[str, object] | None) -> dict[str, objec
         }
     path = ROOT / relative
     try:
-        root = ET.parse(path).getroot()
+        root = ET.parse(path).getroot()  # noqa: S314 - local pytest JUnit artifact
     except (OSError, ET.ParseError) as exc:
         return {
             "status": "not-run",
@@ -290,10 +291,38 @@ def _lint_status(manifest: dict[str, object] | None) -> tuple[bool, str]:
         return False, f"{js_violations} JavaScript lint violation(s) from eslint {js_version}"
     if not js_enforced or js_files <= 0:
         return False, "eslint reported no violations without enforcing anything"
+    types = payload.get("types")
+    if not isinstance(types, dict):
+        return False, "lint artifact records no type-check section"
+    if types.get("status") == "unavailable":
+        return False, f"type checking was not enforced: {types.get('unavailable_reason')}"
+    try:
+        type_status = types["status"]
+        type_count = types["violation_count"]
+        type_files = types["files"]
+        type_version = types["tool_version"]
+        type_problems = types["problems"]
+        if (type(type_count) is not int or type_count < 0 or not isinstance(type_files, list)
+                or not all(isinstance(path, str) and path for path in type_files)
+                or not isinstance(type_problems, list) or not isinstance(type_version, str)
+                or type_version in ("", "unknown") or types["tool"] != "mypy"):
+            raise ValueError("invalid type-check fields")
+    except (KeyError, TypeError, ValueError):
+        return False, "lint artifact's type-check section is malformed"
+    if type_problems:
+        return False, "; ".join(str(problem) for problem in type_problems)
+    if type_status != "clean" or type_count or types.get("exit_code") != 0:
+        return False, f"{type_count} type-check violation(s) from {type_version}"
+    if (types.get("available") is not True or types.get("enforced") is not True
+            or types.get("check_untyped_defs") is not True or not type_files
+            or len(set(type_files)) != len(type_files)
+            or types.get("files_scanned") != len(type_files)
+            or types.get("files_expected") != len(type_files)):
+        return False, "type checking reported no violations without checking all source files"
     return True, (
         f"{tool_version} clean over {files_scanned} file(s) in "
         f"{', '.join(map(str, targets))}; eslint {js_version} clean over "
-        f"{js_files} extension file(s)"
+        f"{js_files} extension file(s); {type_version} clean over {len(type_files)} source file(s)"
     )
 
 
@@ -479,7 +508,7 @@ def build_report_data() -> dict[str, object]:
         offline_execution = {}
     per_file_summary = _per_file_summary(per_file_coverage)
     coverage_text = (
-        f"{code_coverage:.2f}% total from `{code_coverage_source}` (gate 85.00%); "
+        f"{code_coverage:.2f}% total from `{code_coverage_source}` (gate {TOTAL_COVERAGE_FLOOR:.2f}%); "
         f"per-file floor {PER_FILE_COVERAGE_FLOOR:.2f}%, {per_file_summary}"
         if code_coverage is not None
         else f"no total coverage: {code_coverage_source}; {per_file_summary}"
@@ -502,7 +531,7 @@ def build_report_data() -> dict[str, object]:
     code_coverage_ok = (
         evidence_fresh
         and code_coverage is not None
-        and code_coverage >= 85.0
+        and code_coverage >= TOTAL_COVERAGE_FLOOR
         and per_file_coverage["status"] == "ok"
         and not per_file_coverage["below"]
     )
@@ -616,16 +645,16 @@ def render_report(data: dict[str, object]) -> str:
         ),
         (
             f"- Code coverage: `{_status(bool(gates['code_coverage']))}` "
-            f"({float(code_coverage):.2f}% from `{data['code_coverage_source']}`, gate 85.00%; "
+            f"({float(code_coverage):.2f}% from `{data['code_coverage_source']}`, gate {TOTAL_COVERAGE_FLOOR:.2f}%; "
             f"per-file floor {float(per_file['floor']):.2f}%, {per_file_summary})"
             if code_coverage is not None
             else (
-                "- Code coverage: `FAIL` (coverage artifact missing, gate 85.00%; "
+                f"- Code coverage: `FAIL` (coverage artifact missing, gate {TOTAL_COVERAGE_FLOOR:.2f}%; "
                 f"per-file floor {float(per_file['floor']):.2f}%, {per_file_summary})"
             )
         ),
         f"- Documentation contract: `{_status(bool(gates['documentation']))}`",
-        f"- Lint (Python + extension JS): `{_status(bool(gates['lint']))}` "
+        f"- Lint (Python + JavaScript + types): `{_status(bool(gates['lint']))}` "
         f"({data['lint_summary']})",
         f"- Unified versions: `{_status(bool(gates['versions']))}` ({data['versions']})",
         (

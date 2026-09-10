@@ -382,7 +382,7 @@ def test_finalizer_synchronizes_version_before_running_gates():
 def test_offline_workflow_has_explicit_quality_gates():
     workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
 
-    assert "--cov-fail-under=85" in workflow
+    assert "--cov-fail-under=95" in workflow
     assert "--junitxml=artifacts/offline-junit.xml" in workflow
     assert "python -m scripts.lint_report" in workflow
     assert "refs/heads/release/" in workflow

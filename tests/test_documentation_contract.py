@@ -96,7 +96,7 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
     assert "three business days" in security
     assert "python -m scripts.lint_report" in contributing
     assert "python -m scripts.lint_report" in contributing_zh
-    assert "--cov-fail-under=85" in contributing
+    assert "--cov-fail-under=95" in contributing
     assert "release/*" in contributing
     assert "[简体中文](CONTRIBUTING.zh-CN.md)" in contributing
     assert "[English](CONTRIBUTING.md)" in contributing_zh

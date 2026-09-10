@@ -168,7 +168,7 @@ def test_type_without_selector_autofocuses_the_single_xterm_helper():
     commands = type_commands("", "pwd")
     expression = commands[0]["params"]["expression"]
 
-    assert "document.activeElement" in expression
+    assert "deepActiveElement(document)" in expression
     assert ".xterm-helper-textarea" in expression
     assert commands[1]["method"] == "Input.insertText"
 
@@ -209,3 +209,76 @@ def test_changed_or_expired_challenge_marker_resets_count():
     assert tracker.record("c:1", "turnstile:b", now=3) is False
     tracker.record("c:1", "turnstile:b", now=4)
     assert tracker.record("c:1", "turnstile:b", now=125) is False
+
+
+# --- keyDown text: the difference between keydown and a character ---------
+# Chrome fires `keypress` -- the character, a textarea newline, a form's
+# implicit submission -- only for a keyDown that carries `text`. Measured live
+# before this contract existed: page_type(submit_key="Enter") produced
+# keydown/keyup and submitted nothing.
+
+def test_press_enter_carries_carriage_return_text():
+    down, up = press_commands("Enter")
+    assert down["params"]["type"] == "keyDown"
+    assert down["params"]["text"] == "\r"
+    assert down["params"]["unmodifiedText"] == "\r"
+    assert "text" not in up["params"]
+
+
+@pytest.mark.parametrize("key", ["a", "Z", "5", "ß"])
+def test_press_printable_key_carries_its_character(key):
+    down, _up = press_commands(key)
+    assert down["params"]["type"] == "keyDown"
+    assert down["params"]["text"] == key
+
+
+def test_press_shift_chord_still_produces_a_character():
+    commands = press_commands("shift,Enter")
+    down = commands[1]
+    assert down["params"]["type"] == "keyDown"
+    assert down["params"]["text"] == "\r"
+    assert down["params"]["modifiers"] == 8
+
+
+@pytest.mark.parametrize("chord", ["ctrl,a", "alt,Enter", "meta,c", "ctrl,shift,p"])
+def test_press_non_shift_chords_stay_text_less(chord):
+    """Ctrl+A must select all, not insert an 'a'."""
+    key = chord.rsplit(",", 1)[-1]
+    down = next(
+        c for c in press_commands(chord)
+        if c["params"]["key"] == key and c["params"]["type"] != "keyUp"
+    )
+    assert down["params"]["type"] == "rawKeyDown"
+    assert "text" not in down["params"]
+
+
+@pytest.mark.parametrize("key", ["Tab", "Escape", "ArrowDown", "Backspace"])
+def test_press_named_non_character_keys_stay_text_less(key):
+    down, _up = press_commands(key)
+    assert "text" not in down["params"]
+
+
+def test_type_submit_enter_is_a_character_press():
+    commands = type_commands("#name", "hello", submit_key="Enter")
+    enter_down = commands[-2]
+    assert enter_down["params"]["type"] == "keyDown"
+    assert enter_down["params"]["text"] == "\r"
+
+
+# --- challenge window measures idleness, matching the server-side counter ---
+
+def test_challenge_window_is_anchored_on_the_last_attempt():
+    tracker = ChallengeAttemptTracker(max_attempts=3, window_seconds=120)
+    assert tracker.record("c:1", "turnstile:a", now=0) is False
+    assert tracker.record("c:1", "turnstile:a", now=100) is False
+    # 130s after the first attempt but only 30s after the last one: still the
+    # same stall. Age-anchored, this reset to attempt 1 while the server-side
+    # copy reported attempts=3.
+    assert tracker.record("c:1", "turnstile:a", now=130) is True
+
+
+def test_challenge_window_expires_after_a_full_idle_window():
+    tracker = ChallengeAttemptTracker(max_attempts=3, window_seconds=120)
+    tracker.record("c:1", "turnstile:a", now=0)
+    tracker.record("c:1", "turnstile:a", now=100)
+    assert tracker.record("c:1", "turnstile:a", now=221) is False

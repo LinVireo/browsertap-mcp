@@ -146,7 +146,7 @@ def _install_page_driver(monkeypatch, *, default_session_id="client:old"):
 
 def _monotonic(monkeypatch, values):
     timeline = iter(values)
-    monkeypatch.setattr(S.time, "monotonic", lambda: next(timeline))
+    monkeypatch.setattr(S.time, "monotonic", lambda: next(timeline, values[-1]))
 
 
 @pytest.mark.parametrize("error", [PermissionError("denied"), OSError("read-only")])
@@ -512,7 +512,7 @@ def test_wait_for_caps_a_lost_page_chunk_and_retries_within_the_total_deadline(m
 
     assert result["status"] == "success"
     assert calls == [pytest.approx(6.0), pytest.approx(6.0)]
-    assert "start + 4000.0" in scripts[0]
+    assert "new Promise" not in scripts[0]
     assert clock.now == pytest.approx(6.3)
 
 
@@ -624,7 +624,7 @@ def test_wait_for_url_caps_a_lost_page_chunk_and_retries_within_the_total_deadli
 
     assert result["status"] == "success"
     assert calls == [pytest.approx(6.0), pytest.approx(6.0)]
-    assert "Date.now() + 4000.0" in scripts[0]
+    assert "new Promise" not in scripts[0]
     assert clock.now == pytest.approx(6.3)
 
 

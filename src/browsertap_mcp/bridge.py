@@ -65,6 +65,8 @@ def rotate_own_log(*, max_bytes: int = LOG_MAX_BYTES) -> bool:
     a better trade than either unbounded growth or a second handle.
     """
     stream = getattr(sys, "stderr", None)
+    if stream is None:
+        return False
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError):
@@ -207,7 +209,7 @@ def _darwin_process_identity(pid: int) -> Optional[dict[str, Any]]:
     """
     env = {**os.environ, "LC_ALL": "C"}
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # noqa: S603 - fixed executable; pid is numeric
             ["/bin/ps", "-o", "lstart=", "-o", "comm=", "-p", str(pid)],
             capture_output=True, text=True, timeout=10, check=False, env=env,
         )

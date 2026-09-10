@@ -338,7 +338,7 @@ async def test_execute_timeout_does_not_close_fastmcp_before_followup_list_tabs(
     driver = _Driver([TimeoutError("policy transport timed out")])
     _install(monkeypatch, driver)
 
-    _, structured = await S.mcp.call_tool(
+    result = await S.mcp.call_tool(
         "execute_js",
         {
             "script": "return new Promise(() => {})",
@@ -346,7 +346,9 @@ async def test_execute_timeout_does_not_close_fastmcp_before_followup_list_tabs(
             "timeout": 0.01,
         },
     )
+    structured = result.structuredContent
 
+    assert result.isError is True
     assert structured["ok"] is False
     assert structured["result_contract"] == "btap.result.v1"
     assert structured["version"] == 1
@@ -355,7 +357,7 @@ async def test_execute_timeout_does_not_close_fastmcp_before_followup_list_tabs(
     assert structured["target"]["session_id"] == "chrome:profile:7"
 
     _, structured = await S.mcp.call_tool("list_tabs", {})
-    assert structured["tabs"][0]["id"] == "chrome:profile:7"
+    assert structured["data"]["tabs"][0]["id"] == "chrome:profile:7"
 
 
 def test_storage_get_dump_has_item_and_byte_bounds(monkeypatch):
@@ -2663,7 +2665,7 @@ const live = new Map([[8, {{id: 8}}], [9, {{id: 9}}]]);
 const generations = new Map([[8, 'generation-live'], [9, 'generation-new']]);
 const removed = [];
 const chrome = {{ tabs: {{
-  get: async tabId => live.has(tabId) ? live.get(tabId) : Promise.reject(new Error('No tab')),
+  get: async tabId => live.has(tabId) ? live.get(tabId) : Promise.reject(new Error(`No tab with id: ${{tabId}}.`)),
   remove: async tabIds => removed.push(...tabIds),
 }} }};
 async function tabGenerationFor(tabId) {{ return generations.get(tabId); }}
@@ -2692,7 +2694,7 @@ async function tabGenerationFor(tabId) {{ return generations.get(tabId); }}
 
 def test_bridge_replaces_same_session_id_when_tab_generation_changes():
     driver = BrowserBridge.__new__(BrowserBridge)
-    driver.sessions = {}
+    driver.sessions, driver.results, driver.acks = {}, {}, {}
     driver.default_session_id = "chrome:profile:9"
     driver.latest_session_id = "chrome:profile:9"
     old_client = object()
@@ -4564,6 +4566,50 @@ eval(source.slice(start, end));
     assert outcome["result"] == {"value": 2}
 
 
+def test_manual_dialog_reuses_the_execution_lease_without_reenabling_page():
+    """Handling a paused manual evaluation must not queue a second Page.enable."""
+    script = f"""
+const fs = require('fs');
+const source = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
+const start = source.indexOf('async function handleProtocolDialog');
+const end = source.indexOf('\\n\\nfunction classifyNavigationOutcome', start);
+if (start < 0 || end < 0) throw new Error('dialog handler not found');
+const pendingManualExecutions = new Map();
+const pendingNavigations = new Map();
+const protocolDialogStates = new Map([[42, {{ type: 'confirm', message: 'Continue?' }}]]);
+const lease = {{ released: false, attachment: {{ invalidated: false }} }};
+pendingManualExecutions.set(42, {{ debuggerLease: lease, released: false }});
+let attachCalls = 0;
+let detachCalls = 0;
+const commands = [];
+function validDialogPolicy(action) {{
+  return action === 'dismiss' || action === 'accept' || action === 'manual';
+}}
+function currentProtocolDialog(tabId) {{ return protocolDialogStates.get(tabId) || null; }}
+function boundedCdpTimeout(value, fallback) {{ return Number(value) || fallback; }}
+async function attachBtapDebugger() {{ attachCalls += 1; return lease; }}
+async function detachBtapDebugger() {{ detachCalls += 1; }}
+async function sendDebuggerCommandWithTimeout(_lease, method) {{
+  commands.push(method);
+  return {{}};
+}}
+eval(source.slice(start, end));
+(async () => {{
+  const result = await handleProtocolDialog({{ tabId: 42, action: 'dismiss' }});
+  process.stdout.write(JSON.stringify({{ result, attachCalls, detachCalls, commands }}));
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+    completed = subprocess.run(
+        ["node", "-"], input=script, text=True, capture_output=True, timeout=5, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    outcome = json.loads(completed.stdout)
+    assert outcome["attachCalls"] == 0
+    assert outcome["detachCalls"] == 0
+    assert outcome["commands"] == ["Page.handleJavaScriptDialog"]
+    assert outcome["result"]["ok"] is True
+
+
 # The two tests below hand `attachBtapDebugger` a single-digit-millisecond
 # budget, and the code re-reads `Date.now()` between fixing the deadline and
 # arming the watchdog. Real milliseconds spent starting Node or resolving the
@@ -5336,7 +5382,11 @@ eval(source.slice(start, end));
 
 def _cdp_exec_fallback_source() -> str:
     source = BACKGROUND.read_text(encoding="utf-8")
-    classify_start = source.index("function debuggerFailureCode(error) {")
+    # Start one declaration earlier than the classifier: the fallback now clamps
+    # the caller's forwarded budget through boundedCdpTimeout, which closes over
+    # MAX_CDP_TIMEOUT_MS. Both are lifted from the real file rather than restated
+    # here, so a changed bound cannot leave this harness testing an old one.
+    classify_start = source.index("const MAX_CDP_TIMEOUT_MS")
     classify_end = source.index("\n\nfunction clearDebuggerTabState", classify_start)
     fallback_start = source.index("async function runCdpExecFallback(")
     fallback_end = source.index("\n\nasync function navigateWithDialogPolicy", fallback_start)
@@ -5593,7 +5643,7 @@ eval(source.slice(start, end));
   const fastTimers = timers.filter(t => !t.cleared).length;
   let failure = null;
   const pending = withCspOff(5, () => new Promise(() => {{}}));
-  await Promise.resolve();
+  await new Promise(setImmediate);
   const watchdog = timers.find(t => !t.cleared);
   if (!watchdog) throw new Error('CSP watchdog was not armed');
   watchdog.callback();

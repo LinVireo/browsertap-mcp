@@ -48,6 +48,17 @@ def _fake_ruff(monkeypatch, *, files: list[str], check: subprocess.CompletedProc
         return check
 
     monkeypatch.setattr(L, "_ruff", run)
+    monkeypatch.setattr(L, "build_type_lint_report", _passing_types)
+
+
+def _passing_types():
+    return {
+        "tool": "mypy", "tool_version": "mypy 1.11.2", "available": True,
+        "enforced": True, "unavailable_reason": None, "check_untyped_defs": True,
+        "targets": list(L.TYPE_LINT_TARGETS), "files_scanned": 1, "files_expected": 1,
+        "files": ["src/browsertap_mcp/server.py"], "exit_code": 0, "status": "clean",
+        "violation_count": 0, "violations": [], "violations_truncated": False, "problems": [],
+    }
 
 
 def _eslint_run(
@@ -137,6 +148,11 @@ def test_a_clean_run_records_what_it_scanned():
     if javascript["status"] == "clean":
         assert javascript["files_scanned"] > 0
         assert javascript["rules_applied"] > 0
+    types = report["types"]
+    assert types["enforced"] == (types["status"] in ("clean", "violations"))
+    if types["status"] == "clean":
+        assert types["files_scanned"] == types["files_expected"] > 0
+        assert len(types["files"]) == types["files_scanned"]
 
 
 def test_violations_are_recorded_with_repository_relative_paths(monkeypatch):
@@ -322,7 +338,7 @@ def test_a_javascript_run_records_the_rules_it_would_enforce(monkeypatch):
     assert report["available"] is True
     assert report["enforced"] is True
     assert report["files_scanned"] == 2
-    assert report["rules_applied"] == 2
+    assert report["rules_applied"] == 1
     assert report["problems"] == []
 
 
@@ -546,3 +562,55 @@ def test_javascript_violations_fail_the_command_even_when_python_is_clean(monkey
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "clean"
     assert payload["javascript"]["status"] == "violations"
+
+
+@pytest.mark.parametrize("status", ["violations", "error", "unavailable"])
+def test_type_check_failures_fail_the_command(monkeypatch, tmp_path, status):
+    _fake_ruff(monkeypatch, files=["src/a.py", "tests/b.py", "scripts/c.py"], check=_completed("[]"))
+    _absent_eslint(monkeypatch)
+    types = _passing_types()
+    types.update(status=status, enforced=status == "violations")
+    monkeypatch.setattr(L, "build_type_lint_report", lambda: types)
+    output = tmp_path / "lint.json"
+    assert L.main(["--output", str(output)]) == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["types"]["status"] == status
+
+
+@pytest.mark.parametrize("stdout,exit_code", [("[]", 2), ("[]", 1), ("", 0), ("[null]", 0)])
+def test_ruff_cannot_pass_on_invalid_or_inconsistent_output(monkeypatch, stdout, exit_code):
+    _fake_ruff(monkeypatch, files=["src/a.py"], check=_completed(stdout, returncode=exit_code))
+    _absent_eslint(monkeypatch)
+    assert L.build_lint_report(("src",))["status"] == "error"
+
+
+@pytest.mark.parametrize("exit_code", [1, 2])
+def test_eslint_failure_with_a_result_list_is_not_clean(monkeypatch, exit_code):
+    _fake_node(monkeypatch, lint=_eslint_run((f"{_EXT}/background.js", []), returncode=exit_code))
+    assert L.build_js_lint_report((_EXT,))["status"] == "error"
+
+
+def test_disabled_eslint_rules_do_not_count_as_enforcement(monkeypatch):
+    _fake_node(
+        monkeypatch, lint=_eslint_run((f"{_EXT}/background.js", [])),
+        print_config=_completed(json.dumps({"rules": {"a": [0], "b": "off", "c": ["off"]}})),
+    )
+    report = L.build_js_lint_report((_EXT,))
+    assert report["status"] == "error" and report["enforced"] is False
+    assert report["rules_applied"] == 0
+
+
+def test_failed_print_config_does_not_certify_rules(monkeypatch):
+    _fake_node(
+        monkeypatch, lint=_eslint_run((f"{_EXT}/background.js", [])),
+        print_config=_completed(json.dumps({"rules": {"no-undef": [2]}}), returncode=2),
+    )
+    assert L.build_js_lint_report((_EXT,))["status"] == "error"
+
+
+def test_missing_node_executable_reports_unavailable(monkeypatch):
+    monkeypatch.setattr(L, "ESLINT_BIN", Path("pyproject.toml"))
+    def absent(*args):
+        raise FileNotFoundError("node")
+    monkeypatch.setattr(L, "_node", absent)
+    report = L.build_js_lint_report((_EXT,))
+    assert report["status"] == "unavailable" and report["enforced"] is False

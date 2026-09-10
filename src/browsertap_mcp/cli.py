@@ -4,6 +4,7 @@ import argparse
 import json
 import socket
 import sys
+from typing import Any
 
 from . import __version__
 from .server import (
@@ -57,6 +58,7 @@ def _port_open(host: str, port: int) -> bool:
 
 
 def cmd_doctor() -> int:
+    payload: dict[str, Any]
     try:
         driver = get_driver()
     except Exception as init_error:

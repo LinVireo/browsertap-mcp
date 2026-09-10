@@ -7,6 +7,7 @@ import base64
 import json
 from types import SimpleNamespace
 
+import pytest
 from mcp.types import CallToolResult, ImageContent
 
 from browsertap_mcp import server as S
@@ -56,7 +57,7 @@ def test_page_success_has_common_envelope_and_target(monkeypatch):
 
     result = _call(
         "wait_for",
-        {"text": "ready", "session_id": "chrome:profile:1", "timeout": 0.2},
+        {"text": "ready", "session_id": "chrome:profile:1", "timeout": 1},
     )
     structured = _structured(result)
 
@@ -83,7 +84,7 @@ def test_browser_success_without_target_is_enveloped(monkeypatch):
 
     assert structured["ok"] is True
     assert structured["data"]["tabs"] == [{"id": "chrome:profile:1"}]
-    assert structured["tabs"] == structured["data"]["tabs"]
+    assert "tabs" not in structured
     assert structured["target"] is None
     assert structured["diagnostics"]["tool"] == "list_tabs"
 
@@ -118,10 +119,10 @@ def test_cdp_success_preserves_explicit_target(monkeypatch):
 def test_legacy_failed_payload_is_error_with_full_legacy_copy(monkeypatch):
     _install_page(monkeypatch, response={"data": {"ok": False, "error": "quota exceeded"}})
 
-    _, structured = _call(
+    structured = _structured(_call(
         "storage_set",
         {"key": "setting", "value": "x", "session_id": "chrome:profile:1"},
-    )
+    ))
 
     assert structured["ok"] is False
     assert structured["error_code"] == "failed"
@@ -231,25 +232,59 @@ def test_bridge_no_response_keeps_delivery_diagnostics(monkeypatch):
                 "command was delivered but no result arrived",
                 delivery_state="delivered_no_result",
                 retry_safe=False,
+                operation_id="op-123",
+                reservation_held=True,
+                poll_with="get_execute_js_result",
             )
 
     monkeypatch.setattr(S, "require_driver", lambda: Driver())
 
-    _, structured = _call(
+    structured = _structured(_call(
         "cdp_command",
         {
             "method": "Runtime.evaluate",
             "extension_id": "btap-extension",
             "session_id": "chrome:profile:1",
         },
-    )
+    ))
 
     assert structured["ok"] is False
     assert structured["error_code"] == "no_response"
     assert structured["retryable"] is False
     assert structured["delivery_state"] == "delivered_no_result"
     assert structured["diagnostics"]["delivery_state"] == "delivered_no_result"
+    assert structured["operation_id"] == "op-123"
+    assert structured["reservation_held"] is True
+    assert structured["poll_with"] == "get_execute_js_result"
+    assert structured["diagnostics"]["operation_id"] == "op-123"
     assert structured["target"]["session_id"] == "chrome:profile:1"
+
+
+def test_exec_js_preserves_bridge_operation_handle_on_no_response(monkeypatch):
+    class Driver:
+        default_session_id = "chrome:profile:1"
+
+        def execute_js(self, script, *, timeout, session_id):
+            return {
+                "result": "delivered but no result",
+                "error_code": "no_response",
+                "delivery_state": "delivered_no_result",
+                "retry_safe": False,
+                "operation_id": "op-timeout",
+                "reservation_held": True,
+                "poll_with": "get_execute_js_result",
+                "diagnostics": {"operation_id": "op-timeout"},
+            }
+
+    monkeypatch.setattr(S, "require_driver", lambda: Driver())
+
+    with pytest.raises(S.BridgeNoResponseError) as caught:
+        S.exec_js("return 1", session_id="chrome:profile:1", timeout=0.2)
+
+    assert caught.value.operation_id == "op-timeout"
+    assert caught.value.reservation_held is True
+    assert caught.value.poll_with == "get_execute_js_result"
+    assert caught.value.diagnostics["operation_id"] == "op-timeout"
 
 
 def test_explicit_dead_session_is_refused_with_stable_code(monkeypatch):
@@ -257,14 +292,14 @@ def test_explicit_dead_session_is_refused_with_stable_code(monkeypatch):
     monkeypatch.setattr(S, "require_driver", lambda: driver)
     monkeypatch.setattr(S, "ensure_sessions", lambda *args, **kwargs: [{"id": "chrome:profile:1"}])
 
-    _, structured = _call(
+    structured = _structured(_call(
         "execute_js",
         {"script": "1", "session_id": "chrome:profile:99", "timeout": 0.2},
-    )
+    ))
 
     assert structured["ok"] is False
     assert structured["error_code"] == "session_not_connected"
-    assert structured["retryable"] is True
+    assert structured["retryable"] is False
     assert structured["target"] == {
         "session_id": "chrome:profile:99",
         "client_id": "chrome:profile",
@@ -279,7 +314,7 @@ def test_generic_timeout_is_structured(monkeypatch):
         lambda: (_ for _ in ()).throw(TimeoutError("slow")),
     )
 
-    _, structured = _call("get_automation_profile", {})
+    structured = _structured(_call("get_automation_profile", {}))
 
     assert structured["ok"] is False
     assert structured["error_code"] == "timeout"

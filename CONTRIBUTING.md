@@ -2,6 +2,11 @@
 
 English | [简体中文](CONTRIBUTING.zh-CN.md)
 
+This guide is for people and coding agents changing or releasing BTAP. To
+install and use it, start with [README.md](README.md). Agents calling browser
+tools use the packaged skills; agents editing this repository also read
+[AGENTS.md](AGENTS.md) for implementation invariants.
+
 Contributions should preserve BTAP's defining behavior: operate the user's real
 browser session, prefer background page/CDP work, and use foreground physical
 input only as an explicit last resort.
@@ -13,27 +18,38 @@ a reproduction in an issue or pull request.
 
 ## Development setup
 
-```text
+From the repository root, create and activate a virtual environment:
+
+```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,desktop]"  # Windows PowerShell
-python -m pip install -e ".[dev,desktop]"                  # other activated venvs
+.\.venv\Scripts\Activate.ps1
+```
+
+On Linux/macOS, use `python -m venv .venv` followed by `. .venv/bin/activate`.
+Then install the development dependencies in that environment:
+
+```text
+python -m pip install -e ".[dev,desktop]"
 browsertap extension-path
 ```
 
-Load the printed directory as an unpacked extension. Python server changes are
-picked up by an editable install; bridge changes require a bridge restart, and
+If activation is unavailable, use the virtual environment's full executable
+paths for the commands below. Load the printed directory as an unpacked
+extension. The editable install points at this checkout; restart the MCP session
+to load Python server changes. Bridge changes require a bridge restart, and
 extension source changes require a manual reload from the browser's extensions
 page.
 
 ## Tests
 
-The normal suite is offline and does not touch a browser:
+The default suite is offline: it does not drive the user's browser. Run these
+checks from the repository root with the development environment's Python:
 
 ```text
-npm ci                                                      # once, for the JS half
+npm ci
 python -m scripts.lint_report
 python -m pytest tests -q
-python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=85
+python -m pytest tests -q --cov=browsertap_mcp --cov-fail-under=95
 python -m scripts.tool_coverage_report --format markdown
 python -m scripts.check_tool_docs --format markdown
 python -m scripts.versioning check
@@ -42,141 +58,74 @@ python -m scripts.check_distribution artifacts/dist
 python -m scripts.check_install artifacts/dist --no-deps
 ```
 
-This is the order `scripts/finalize_change.py` and `.github/workflows/test.yml`
-use, and the last three lines belong together: the build writes the archives that
-`check_distribution` reads and `check_install` installs, so running either on its
-own reports `no wheel found` rather than a pass.
+Use an empty build output directory. Build before checking or installing the
+archives; `check_distribution` expects exactly one wheel and one sdist and
+compares their package-file sets. This catches retired files left in a stale
+`build/` tree as well as files omitted from either archive.
 
-Build into an empty output directory. `check_distribution` requires exactly one
-wheel/source archive pair and compares their installable package-file sets. Extra
-archives from an older build are rejected, as is a wheel polluted by retired files
-left in a stale `build/` tree.
+The last command is a **layout-only** check for environments without dependency
+downloads. With index access, also run
+`python -m scripts.check_install artifacts/dist`: it installs dependencies in a
+fresh environment, outside the checkout, then exercises the CLI and packaged
+paths. Check `mode` and `proves_cli`; a `--no-deps` pass does not prove the CLI runs.
 
-`check_distribution` and `check_install` answer different questions.
-`check_distribution` reads what is *inside* the archive; `check_install` puts the
-wheel into a throwaway virtual environment with no repository on the path and
-exercises it there, which is the only way "does `pip install browsertap-mcp`
-leave a stranger with something that runs" stops being a guess. Locally it is
-`--no-deps`: no index access, so it proves the layout only -- metadata version,
-console script, packaged skills, extension files. CI runs it without that flag
-and really executes `browsertap --version`, `skill-path` and `extension-path`.
-The report's `mode` and `proves_cli` fields say which of the two ran, so a
-layout-only pass is never read as "the CLI works".
+### What the gates prove
 
-`--cov-fail-under=85` is a *total*, and a total is an average that hides a
-module which has stopped being tested. `scripts/acceptance_report.py`
-therefore also reads the per-file percentages out of the sealed
-`artifacts/coverage.json` and fails the same `code_coverage` gate when any one
-file drops below `PER_FILE_COVERAGE_FLOOR`, which coverage.py itself cannot
-express. It is a rot detector, not a target: it sits below the weakest module
-today, so raise it when that module improves rather than lowering it to turn a
-red gate green. A coverage payload with no per-file section fails too, instead
-of passing for want of data.
+| Gate | Acceptance |
+| --- | --- |
+| Tests | Success, failure and cleanup paths behave as asserted. Add regression cases for changed behavior. |
+| Coverage | The combined line-and-branch total is at least 95%; this is not a promise that each metric or file reaches 95%. Acceptance also checks `PER_FILE_COVERAGE_FLOOR` and rejects missing per-file data. |
+| Ruff | Python lint over `src/`, `tests/`, and `scripts/`. Each target must contribute files. |
+| ESLint | Both extension and injected page JavaScript are scanned; enabled rules are checked per target. |
+| mypy | Every shipped Python source is checked, including unannotated function bodies. Missing or incomplete checks fail. |
+| Documentation | Registered tools, parameters, defaults, both READMEs, caller skills, and versions agree. |
+| Distribution / installation | Required files are packaged, local data is excluded, and the installed package is usable when the full install check runs. |
 
-`ruff check` is the enforced rule set, and `scripts/lint_report.py` is how it is
-run -- by this file, by `scripts/finalize_change.py` and by
-`.github/workflows/test.yml`, so the target list exists once. It writes
-`artifacts/lint.json`, which the evidence manifest binds like every other
-measurement: without it CI could fail lint on the very commit whose sealed report
-said `release_ready: true`, and neither verdict would have been wrong. The
-artifact also records how many files were scanned, because `ruff check` over a
-path that matches nothing exits 0 with an empty diagnostic list -- so the gate
-requires that each target really contributed files. Calling `ruff` directly still
-works for a quick local pass; it just leaves nothing behind to seal.
+`scripts/lint_report.py` is the shared entry point for Ruff, ESLint and mypy.
+It records separate results in `artifacts/lint.json` (`javascript` and
+`types` alongside Python lint), including file counts and enforcement.
+Run `npm ci` for ESLint and install `.[dev]` for mypy. Missing JavaScript
+tooling reports `unavailable`; the command can still pass the Python checks,
+but release acceptance rejects an unenforced JavaScript gate. Missing mypy,
+type errors or an incomplete type check make the command fail.
 
-**The same gate lints the extension JavaScript**, which is about a third of the
-shipped code and had no linter at all until it was wired in. `eslint` runs from
-`node_modules`, so it needs `npm ci` once; `package.json` is dev-only and is not
-shipped in the wheel. Its result is a `javascript` section inside the same
-`artifacts/lint.json`, deliberately beside ruff's rather than averaged into it,
-so every existing reader of that file keeps working.
+Use `python -m mypy src` for a focused type check. Match the surrounding code
+style; `ruff format` is not a gate and whole-file formatting obscures small
+changes in this codebase.
 
-Without node the JavaScript half reports `status: unavailable` with the command
-that fixes it, and `python -m scripts.lint_report` still **exits 0** -- refusing
-would take the Python gate away from a contributor to punish a missing optional
-dependency. What that costs is paid at the other end: `acceptance_report.py`
-will not seal a release over a lint gate that did not run, so `unavailable`
-cannot reach a `release_ready: true`. It also records `rules_applied`, for a
-failure mode ruff does not have: a flat config whose `files:` pattern stops
-matching still walks the directory, still exits 0, and reports every file clean
-having enforced nothing at all.
-
-**The type-check half is mypy**, wired the same way and reported in the
-`types` section of the same `artifacts/lint.json`. It comes from the dev extra
-(`pip install -e ".[dev]"`), so a contributor who skipped that gets
-`status: unavailable` with exactly that hint, and exactly like the JS half a
-release cannot seal over it. CI enforces it, so commit only what
-`python -m mypy src` accepts locally.
-
-`ruff format` is not a gate and most of the existing sources are not
-format-clean, so running it across a file you are only editing buries the change
-in unrelated reflows. Match the surrounding style instead.
-
-Live tests are opt-in:
+### Live tests
 
 ```text
 python -m pytest tests -q -m live
 ```
 
-They drive a real connected browser and may temporarily affect the foreground.
-Run them only on a prepared machine and use the shared scratch fixture rather
-than opening a tab per test. Do not add headless or Playwright fallback paths to
-live tests; those would test a different product contract.
+Live tests require a prepared real browser and can affect its foreground.
+Use the shared scratch fixture, not one tab per test; headless or Playwright
+fallbacks would test a different product.
 
-Two preconditions used to be written here and left to a human to keep: nobody may
-be using the browser while the suite runs, and the tab inventory has to come out
-the way it went in. A third was written in the agent notes instead: the bridge
-daemon and the extension have to be running this checkout. The session fixture in
-`tests/conftest.py` now enforces all three (`tests/live_preflight.py` holds the
-reasoning):
+The session fixture uses `get_setup_status()` and `tests/live_preflight.py` to
+check that the MCP process, bridge and extension match the tested tree. Stale
+components fail the run and name the required restart or manual reload.
+Browser activity is recorded as context, not used to forbid the user from
+opening, closing or navigating their own tabs.
 
-- Before anything else it asks `get_setup_status()` what build each of the three
-  processes is running. The bridge daemon and the extension are long-lived and
-  keep whatever build they started with, so a live pass can certify code that is
-  not in the tree -- and until this check existed, no gate and no sealed artifact
-  recorded which build had answered. A skew fails the run before the browser is
-  even sampled, naming every stale component with the one step that fixes it.
-  This one has no override: reloading the extension is a single click and
-  restarting the bridge is a single command.
-- Before the first live test it samples the tab list twice, 1.5s apart. If a tab
-  was opened, closed, navigated or focused in between, someone is using that
-  browser -- which is recorded and changes nothing else. It used to skip the
-  whole live layer, and that was wrong twice over: it read the user's tabs to
-  decide whether the suite may run at all, and on a machine whose browser is
-  never idle it meant the live layer never ran. The observation is kept because
-  a browser in use makes the timing-sensitive cases noisier, which is the first
-  thing to check beside an odd failure.
-- After the last one, the only thing that fails the run is a tab **the suite
-  itself opened and never closed**, read from the product's own ownership
-  registry (`server._TAB_OWNERSHIP.outstanding()`). The user's tabs are theirs:
-  opening, closing and navigating them during a run is expected and is recorded
-  as context under `tab_activity`. An inventory diff cannot tell those apart --
-  a person opening a tab, a person closing one, and the suite leaking its own
-  scratch tab all produced the identical verdict before this, so the verdict
-  attributed nothing. Both causes of a real leak are named in the failure: a
-  forgotten `close_tabs(..., owner_id=...)`, or a close that was refused with
-  `lifecycle generation changed` after Chrome discarded the suite's own tab.
-- Every verdict, the build each of the three processes was running, whether the
-  browser was idle at all, and `own_tabs.counters` are written to
-  `artifacts/live-preflight.json`, which `live.yml` uploads with the junit and
-  the evidence manifest hashes alongside it. Read `own_tabs.enforced` before
-  reading the leak check as a pass: it is False when this process opened no tabs
-  at all, which is not the same fact as nothing having leaked. That binding is
-  what stops a seal pairing a passing suite with a preflight record left over
-  from an older run: a live seal with no such file fails naming it rather than
-  sealing the half that happens to exist.
+Cleanup checks `server._TAB_OWNERSHIP.outstanding()`: only tabs opened by the
+suite count as leaks. A failure names both possible causes: missing owner-aware
+cleanup or a close refused with `lifecycle generation changed`.
+`own_tabs.enforced` distinguishes a real check from a run that owned no tabs.
+Build identity, activity and ownership counters are written to
+`artifacts/live-preflight.json` and bound alongside the live JUnit evidence.
 
-The public `test.yml` workflow runs only offline gates on GitHub-hosted runners.
-`live.yml` is manual-only and targets a prepared self-hosted Windows runner. Set
-the repository variable `BTAP_LIVE_PYTHON` when that runner does not expose the
-intended interpreter as `python`. Do not schedule the live workflow on a desktop
-that is also used interactively. The live job is restricted to the canonical
-repository and the `btap-live` GitHub environment. Configure that environment
-with required-reviewer protection before registering the runner; the workflow
-file cannot create or enforce repository environment protection rules itself.
+`test.yml` runs offline on GitHub-hosted runners. `live.yml` is manual-only,
+restricted to the canonical repository and the `btap-live` environment on a
+prepared self-hosted Windows runner. Configure required reviewers before using
+that runner; the workflow cannot create environment protection rules. Set
+`BTAP_LIVE_PYTHON` when `python` resolves to the wrong interpreter.
 
-For a local release candidate, run the complete offline pipeline on the exact
-tree that will be published:
+### Release evidence
+
+Use the finalizer when preparing a release candidate, not while iterating on a
+moving worktree:
 
 ```text
 python -m scripts.finalize_change --bump none --skip-live
@@ -184,31 +133,20 @@ python -m scripts.evidence_manifest --check
 python -m scripts.check_release_tag --allow-missing-tag
 ```
 
-The finalizer first moves prior evidence into a timestamped
-`artifacts/archive/` directory, then writes one canonical set containing offline
-JUnit, coverage, tool evidence, and exactly one wheel/source archive pair.
-`artifacts/evidence-manifest.json` binds those files to the Git HEAD, dirty
-state, and public source-tree content hash. Any source edit or commit after that
-run makes the evidence stale. Re-run the pipeline on the final commit before
-publishing.
+The version must already be appropriate for `--bump none`; see
+[Version and release hygiene](#version-and-release-hygiene).
+`--skip-live` does not establish live verification or release readiness.
 
-Two properties of that binding decide whether a report can be trusted:
+The finalizer archives previous evidence under `artifacts/archive/`, then
+generates the canonical reports and distribution pair.
+`artifacts/evidence-manifest.json` binds them to the Git HEAD, dirty state and
+public file hashes. Commit the intended release surface before sealing:
+`git_dirty: true` cannot reach `release_ready`. Any later edit or commit requires
+new evidence; a manifest schema mismatch also requires regeneration with the
+current tooling.
 
-- The manifest records a `schema_version`. When the fields that make up the
-  fingerprint change, the checker rejects the older manifest **by version**
-  instead of reporting a content mismatch, because a fingerprint computed from
-  different inputs is not comparable. `re-seal with the current tooling` in the
-  output means exactly that: rebuild the evidence, do not go looking for the
-  edit that "changed" a file.
-- A seal taken over a dirty tree records `git_dirty: true`, and the acceptance
-  report treats that as an evidence problem. `git_head` alone does not identify
-  the code that produced the artifacts when files are uncommitted or untracked,
-  so a dirty seal can never reach `release_ready`. Commit the release surface
-  first, then seal.
-
-Let the finalizer write those artifacts. Running a gate by hand with
-`--junitxml`/`--cov` pointed at `artifacts/` overwrites part of a sealed set and
-leaves the rest, which `--check` then reports as a mismatch.
+Preserve existing sealed artifacts. For ad hoc runs, write reports under a new
+`out/` subdirectory rather than overwriting individual files in `artifacts/`.
 
 ## Tool contract changes
 
@@ -325,11 +263,9 @@ verify.
 
 ## Publishing to PyPI
 
-The package is published as
-[`browsertap-mcp`](https://pypi.org/project/browsertap-mcp/); 0.4.12 was the
-first upload. Both READMEs now present `pip install "browsertap-mcp[desktop]"`
-as *the* install path, so anything that breaks that command breaks the
-documented entry point, not just a convenience.
+Publish the package as [`browsertap-mcp`](https://pypi.org/project/browsertap-mcp/).
+Verify the core installation and the optional `desktop` extra separately;
+ordinary page and browser workflows must work without desktop dependencies.
 
 `.github/workflows/release.yml` builds, gates, and uploads. It never runs on a
 push: the triggers are a manual run and a published GitHub Release. The reason

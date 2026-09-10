@@ -324,7 +324,7 @@ def test_download_file_rejects_malformed_explicit_session(monkeypatch):
     assert driver.calls == []
 
 
-def test_registered_download_tool_only_locks_while_pinning_implicit_browser(monkeypatch):
+def test_registered_download_tool_pins_implicit_browser_without_global_lock(monkeypatch):
     class RecordingLock:
         held = False
         entries = 0
@@ -361,7 +361,7 @@ def test_registered_download_tool_only_locks_while_pinning_implicit_browser(monk
     )
 
     assert result["status"] == "in_progress"
-    assert lock.entries == 1
+    assert lock.entries == 0
     assert driver.calls[0][1] == "chrome:personal"
 
 

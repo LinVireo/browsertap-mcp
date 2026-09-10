@@ -472,7 +472,7 @@ def wait_for_quiet(quiet_seconds: float = 0.75) -> dict[str, Any]:
     after = last_input_marker()
     comparable = [
         (name, old, new)
-        for name, old, new in zip(QUIET_MARKER_NAMES, before, after)
+        for name, old, new in zip(QUIET_MARKER_NAMES, before, after, strict=True)
         if old is not None and new is not None
     ]
     if any(old != new for _name, old, new in comparable):
@@ -683,7 +683,7 @@ def check_screen_bounds(
         "checked": checked,
         "enforced": bool(rect is not None and checked),
     }
-    if offenders:
+    if offenders and rect is not None:
         listed = ", ".join(f"({x}, {y})" for x, y in offenders)
         raise CoordinatesOffScreen(
             f"{listed} is on no display; nothing was dispatched. The virtual desktop is "

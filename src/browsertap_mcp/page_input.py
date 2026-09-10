@@ -99,6 +99,43 @@ _HIT_TEST_JS = r"""
 """
 
 
+_TYPE_TARGET_HELPERS_JS = r"""
+  const deepActiveElement = root => {
+    let active = root && root.activeElement;
+    for (let depth = 0; depth < 64 && active; depth += 1) {
+      let nested = active.shadowRoot && active.shadowRoot.activeElement;
+      if (!nested && /^(IFRAME|FRAME)$/.test(active.tagName || '')) {
+        try { nested = active.contentDocument && active.contentDocument.activeElement; }
+        catch (_) {}
+      }
+      if (!nested || nested === active) break;
+      active = nested;
+    }
+    return active || null;
+  };
+  const typingTarget = node => {
+    let helper = node && node.matches && node.matches('.xterm-helper-textarea') ? node : null;
+    const terminal = node && node.matches && node.matches('.xterm')
+      ? node : (node && node.closest && node.closest('.xterm'));
+    if (!helper && terminal) helper = terminal.querySelector('.xterm-helper-textarea');
+    return {element: helper || node, helper: !!helper};
+  };
+  const editableTarget = node => {
+    if (!node || node.disabled || node.readOnly) return false;
+    const ariaDisabled = String(node.getAttribute && node.getAttribute('aria-disabled') || '').trim().toLowerCase();
+    if (ariaDisabled === 'true') return false;
+    try { if (node.matches && node.matches(':disabled')) return false; }
+    catch (_) {}
+    if (node.isContentEditable) return true;
+    const tag = String(node.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA') return true;
+    if (tag !== 'INPUT') return false;
+    const type = String(node.type || (node.getAttribute && node.getAttribute('type')) || 'text').toLowerCase();
+    return ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(type);
+  };
+"""
+
+
 def _number(value: Any, name: str) -> float | int:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise InputValidationError(f"{name} must be a finite number")
@@ -214,6 +251,21 @@ def _key_details(key: str) -> tuple[str, str, int]:
     raise InputValidationError(f"unsupported key: {key}")
 
 
+#: Named keys that generate a character, and therefore a `keypress`.
+_KEY_TEXT = {"Enter": "\r"}
+
+
+def _key_text(key: str, modifiers: int) -> str | None:
+    """The `text` a keyDown should carry, or None for a text-less press."""
+    if modifiers & ~_MODIFIERS["shift"]:
+        return None
+    if key in _KEY_TEXT:
+        return _KEY_TEXT[key]
+    if len(key) == 1 and key.isprintable():
+        return key
+    return None
+
+
 def press_commands(chord: str) -> list[dict[str, Any]]:
     """Build CDP keyboard events for a comma-delimited key chord."""
     if not isinstance(chord, str):
@@ -258,12 +310,25 @@ def press_commands(chord: str) -> list[dict[str, Any]]:
         "nativeVirtualKeyCode": key_code,
         "modifiers": modifiers,
     }
+    # Chrome fires `keypress` -- and with it the character, a textarea's
+    # newline and a form's implicit submission on Enter -- only for a keyDown
+    # that carries `text`. A keyDown without it is a rawKeyDown in all but
+    # name: keydown/keyup reach the page and nothing else happens, which is how
+    # `submit_key="Enter"` typed into a field and then did not submit (measured
+    # live: keys=[keydown:Enter, keyup:Enter], submitted=false). Ctrl, Alt and
+    # Meta chords deliberately stay text-less, because Ctrl+A must not insert
+    # an "a"; Shift alone still produces a character.
+    text = _key_text(key, modifiers)
+    down_params = dict(key_params)
+    if text is not None:
+        down_params["text"] = text
+        down_params["unmodifiedText"] = text
     commands.extend(
         [
             _command(
                 "Input.dispatchKeyEvent",
-                type="rawKeyDown" if modifiers else "keyDown",
-                **key_params,
+                type="keyDown" if text is not None else "rawKeyDown",
+                **down_params,
             ),
             _command("Input.dispatchKeyEvent", type="keyUp", **key_params),
         ]
@@ -347,7 +412,7 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
     select_all_json = json.dumps(select_all)
     return f"""(() => {{
   const selector = {selector_json};
-  const selectAll = {select_all_json};
+  const selectAll = {select_all_json};{_TYPE_TARGET_HELPERS_JS}
   const describe = node => node ? {{
     tagName: node.tagName || '',
     id: node.id || '',
@@ -359,7 +424,7 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
     className: String(node.className || ''),
     contentEditable: !!node.isContentEditable,
   }} : null;
-  const activeBefore = describe(document.activeElement);
+  const activeBefore = describe(deepActiveElement(document));
   let el = null;
   if (selector) {{
     try {{
@@ -376,9 +441,10 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
         return style.display !== 'none' && style.visibility !== 'hidden' &&
           style.visibility !== 'collapse' && style.opacity !== '0';
       }};
-      const rendered = candidates.filter(node =>
-        (node.matches && node.matches('.xterm-helper-textarea')) || isRendered(node)
-      );
+      const rendered = candidates.filter(node => {{
+        const target = typingTarget(node);
+        return editableTarget(target.element) && (target.helper || isRendered(node));
+      }});
       if (rendered.length > 1) return {{found:false, status:'ambiguous', matches:rendered.length, activeElement:activeBefore}};
       if (rendered.length) el = rendered[0];
       else if (candidates.length) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:activeBefore}};
@@ -386,7 +452,7 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
     catch (error) {{
       return {{found:false, status:'invalid_selector', error:String(error && error.message || error), stage:'selector', activeElement:activeBefore}};
     }}
-  }} else el = document.activeElement;
+  }} else el = deepActiveElement(document);
   if (selector && !el) return {{found:false, targetKind:'missing', activeElement:activeBefore}};
   const helpers = [...document.querySelectorAll('.xterm-helper-textarea')];
   let xtermRoot = null;
@@ -402,18 +468,21 @@ def type_target_script(selector: str, *, select_all: bool = False) -> str:
   if (!el || el === document.body || el === document.documentElement) {{
     return {{found:false, targetKind:'missing', activeElement:activeBefore}};
   }}
+  if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:activeBefore}};
   try {{ el.focus({{preventScroll:true}}); }} catch (_) {{ el.focus(); }}
   if (selectAll) {{
     if (typeof el.select === 'function') el.select();
     else if (el.isContentEditable) {{
-      const range = document.createRange();
+      const range = el.ownerDocument.createRange();
       range.selectNodeContents(el);
-      const selection = window.getSelection();
+      const selection = el.ownerDocument.defaultView.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
     }}
   }}
-  const activeAfter = document.activeElement;
+  const activeAfter = deepActiveElement(document);
+  if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
+  if (activeAfter !== el) return {{found:false, status:'focus_failed', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
   return {{
     found:true,
     targetKind: helper ? 'xterm' : 'element',
@@ -552,7 +621,7 @@ def structured_locator_script(
   const verifyHit = {json.dumps(verify_hit)};
   const centerX = {json.dumps(center_x)};
   const centerY = {json.dumps(center_y)};
-  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS}
+  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS}{_TYPE_TARGET_HELPERS_JS if purpose == "type" else ""}
   const clean = value => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
   const same = (actual, expected, exact) => exact ? clean(actual) === clean(expected) : clean(actual).includes(clean(expected));
   const accessibleText = node => {{
@@ -688,10 +757,10 @@ def structured_locator_script(
         style.visibility !== 'collapse' && style.opacity !== '0';
     }};
     const usable = found.matches.filter(node => {{
-      let helper = node && node.matches && node.matches('.xterm-helper-textarea') ? node : null;
-      const xtermRoot = node && node.matches && node.matches('.xterm') ? node : (node && node.closest && node.closest('.xterm'));
-      if (!helper && xtermRoot) helper = xtermRoot.querySelector('.xterm-helper-textarea');
-      if (purpose === 'type' && helper) return true;
+      if (purpose === 'type') {{
+        const target = typingTarget(node);
+        return editableTarget(target.element) && (target.helper || isRendered(node));
+      }}
       const ariaDisabled = clean(node.getAttribute && node.getAttribute('aria-disabled')).toLowerCase() === 'true';
       return isRendered(node) && !node.disabled && !ariaDisabled;
     }});
@@ -705,10 +774,8 @@ def structured_locator_script(
     const xtermRoot = el.matches && el.matches('.xterm') ? el : (el.closest && el.closest('.xterm'));
     if (!helper && xtermRoot) helper = xtermRoot.querySelector('.xterm-helper-textarea');
     if (helper) el = helper;
-    const textCapable = /^(INPUT|TEXTAREA)$/.test(el.tagName || '') || el.isContentEditable || !!helper;
-    const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
-    if (!textCapable || el.disabled || el.readOnly || ariaDisabled) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
-    const activeBefore = el.ownerDocument && el.ownerDocument.activeElement;
+    if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
+    const activeBefore = deepActiveElement(document);
     try {{ el.focus({{preventScroll:true}}); }} catch (_) {{ el.focus(); }}
     if (selectAll) {{
       if (typeof el.select === 'function') el.select();
@@ -717,7 +784,7 @@ def structured_locator_script(
         const selection = el.ownerDocument.defaultView.getSelection(); selection.removeAllRanges(); selection.addRange(range);
       }}
     }}
-    const activeAfter = (el.ownerDocument && el.ownerDocument.activeElement) || null;
+    const activeAfter = deepActiveElement(document);
     const describe = node => node ? {{
       tagName: node.tagName || '', id: node.id || '',
       name: node.getAttribute ? (node.getAttribute('name') || '') : '',
@@ -727,6 +794,8 @@ def structured_locator_script(
       placeholder: node.getAttribute ? (node.getAttribute('placeholder') || '') : '',
       className: String(node.className || ''), contentEditable: !!node.isContentEditable,
     }} : null;
+    if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
+    if (activeAfter !== el) return {{found:false, status:'focus_failed', targetKind:'unusable', activeElement:describe(activeAfter), focusConfirmed:false}};
     return {{found:true, status:'found', targetKind:helper ? 'xterm' : 'element', tagName:el.tagName || '',
       activeElement:describe(activeAfter), focusConfirmed:activeAfter === el,
       previousActiveElement:describe(activeBefore)}};
@@ -924,9 +993,16 @@ class ChallengeAttemptTracker:
         current = time.monotonic() if now is None else _number(now, "now")
         with self._lock:
             state = self._states.get(session_id)
+            # `started_at` is the LAST attempt, so the window measures idleness:
+            # "nothing happened for a whole window", not "the first attempt is
+            # older than a window". The server-side counter beside this tracker
+            # already reads it that way; anchored on the first attempt, a third
+            # click landing just past the window reset here while that counter
+            # reported attempts=3, and the caller got a stall with no stall.
             if state is None or state.marker != marker or current - state.started_at >= self.window_seconds:
                 state = _ChallengeState(marker=marker, started_at=current, count=0)
                 self._states[session_id] = state
+            state.started_at = current
             state.count += 1
             return state.count >= self.max_attempts
 

@@ -25,7 +25,7 @@ from browsertap_mcp.browser_bridge import BrowserBridge, Session
     ({"data": ""}, None),                         # falsy but still a return
     ({"result": "Session a:1 reloaded.", "closed": 1}, "navigated"),
     ({"result": "Session a:1 reloaded and new page is loading...", "closed": 1}, "navigated"),
-    ({"result": "No response data in 15s (no ACK, script may not have been delivered)"}, "undelivered"),
+    ({"result": "No response data in 15s (no ACK, script may not have been delivered)"}, "after_ack"),
     ({"result": "Session a:1 no response in 15s (script not polled)"}, "undelivered"),
     ({"result": "No response data in 15s (ACK received, script may still be running)"}, "after_ack"),
     ({"result": "Session a:1 no response in 15s (delivered but no result)"}, "after_ack"),
@@ -250,7 +250,7 @@ def test_page_input_tools_do_not_activate_and_restore_default(monkeypatch):
 
     monkeypatch.setattr(S, "require_driver", lambda: driver)
     monkeypatch.setattr(S, "active_sessions", lambda timeout=None, fresh=False: [
-        {"id": "c:target", "url": "https://example.test/"},
+        {"id": "c:7", "url": "https://example.test/"},
     ])
     monkeypatch.setattr(S, "_activate", lambda *args, **kwargs: activated.append((args, kwargs)))
 
@@ -260,37 +260,47 @@ def test_page_input_tools_do_not_activate_and_restore_default(monkeypatch):
             return {"data": {"found": True, "targetKind": "element"}}
         return {"data": {"ok": True}}
 
+    driver.ext_cmd = lambda payload, client_id=None, timeout=15: (
+        {"data": {"capabilities": {"batch_result_guard": True}}}
+        if payload["cmd"] == "bridge_status"
+        else fake_exec_js(json.dumps(payload), "c:7", timeout)
+    )
     monkeypatch.setattr(S, "exec_js", fake_exec_js)
 
     results = [
-        S.page_click(x=10, y=20, session_id="c:target"),
+        S.page_click(x=10, y=20, session_id="c:7"),
         S.page_type("hello", selector="#field", clear=True,
-                    session_id="c:target"),
-        S.page_type("replacement", clear=True, session_id="c:target"),
-        S.page_press("ctrl,a", session_id="c:target"),
-        S.page_drag(1, 2, 30, 40, session_id="c:target"),
+                    session_id="c:7"),
+        S.page_type("replacement", clear=True, session_id="c:7"),
+        S.page_press("ctrl,a", session_id="c:7"),
+        S.page_drag(1, 2, 30, 40, session_id="c:7"),
     ]
 
     assert activated == []
     assert driver.default_session_id == "c:previous"
     assert all(result["input_mode"] == "cdp" for result in results)
     assert all(result["foreground_changed"] is False for result in results)
-    assert all(result["session_id"] == "c:target" for result in results)
+    assert all(result["session_id"] == "c:7" for result in results)
     batches = [
         json.loads(script) for script, _, _ in calls
         if script.lstrip().startswith("{")
     ]
     assert all(batch["cmd"] == "batch" for batch in batches)
-    assert all(session_id == "c:target" for _, session_id, _ in calls)
+    assert all(session_id == "c:7" for _, session_id, _ in calls)
     focused_batch = next(
         batch for batch in batches
         if any(command["method"] == "Input.insertText" for command in batch["commands"])
     )
-    assert [command["method"] for command in focused_batch["commands"][:3]] == [
+    assert [command["method"] for command in focused_batch["commands"][:4]] == [
         "Emulation.setFocusEmulationEnabled",
+        "Runtime.evaluate",
         "Runtime.evaluate",
         "Input.insertText",
     ]
+    assert focused_batch["commands"][2]["assertTruthy"] is True
+    # handleBatch dispatches on `cmd`; a guard without it is recorded as
+    # "unknown cmd: undefined" and skipped, which is a guard that guards nothing.
+    assert all(command["cmd"] == "cdp" for command in focused_batch["commands"])
     resolver_scripts = [script for script, _, _ in calls if script.lstrip().startswith("(() =>")]
     assert resolver_scripts
     assert all(".xterm-helper-textarea" in script for script in resolver_scripts)
@@ -360,7 +370,7 @@ def test_execute_js_rich_uses_one_total_deadline_for_retry_and_grace(monkeypatch
             assert session_id == "c:42"
             self.timeouts.append(timeout)
             clock[0] += max(0.0, timeout)
-            return {"result": f"No response data in {timeout}s (no ACK, script may not have been delivered)"}
+            return {"delivery_state": "undelivered", "result": f"No response data in {timeout}s (script not polled)"}
 
     driver = SlowDriver()
     monkeypatch.setattr(simphtml.time, "monotonic", lambda: clock[0])
@@ -549,14 +559,17 @@ def test_remote_ext_cmd_preserves_bridge_selected_client_id(monkeypatch):
     seen = {}
 
     def remote(payload, timeout=30):
-        seen["payload"] = payload
+        seen.setdefault("payloads", []).append(payload)
+        if payload.get("cmd") == "get_clients":
+            return {"r": [{"client_id": "chrome:profile"}]}
         return {"r": {"data": {"id": 9}, "client_id": "chrome:profile"}}
 
     monkeypatch.setattr(driver, "_remote_cmd", remote)
 
     result = driver.ext_cmd({"cmd": "tabs", "method": "create"}, timeout=0.1)
 
-    assert seen["payload"]["clientId"] is None
+    assert seen["payloads"][-1]["clientId"] == "chrome:profile"
+    assert seen["payloads"][0]["cmd"] == "get_clients"
     assert result == {"data": {"id": 9}, "client_id": "chrome:profile"}
 
 
@@ -616,6 +629,7 @@ def test_exec_js_undelivered_retry_stays_inside_total_timeout(monkeypatch):
             self.calls.append(timeout)
             clock[0] += timeout
             return {
+                "delivery_state": "undelivered",
                 "result": (
                     f"No response data in {timeout}s "
                     "(no ACK, script may not have been delivered)"
@@ -676,7 +690,7 @@ def test_page_type_uses_already_validated_session_for_input(monkeypatch):
         S,
         "ensure_sessions",
         lambda timeout=None, fresh=False, prune_default=True: [
-            {"id": "c:target", "url": "https://example.test/"}
+            {"id": "c:7", "url": "https://example.test/"}
         ],
     )
     monkeypatch.setattr(
@@ -693,30 +707,38 @@ def test_page_type_uses_already_validated_session_for_input(monkeypatch):
             return {"data": {"found": True, "targetKind": "xterm"}}
         return {"data": [{"ok": True}]}
 
+    driver.ext_cmd = lambda payload, client_id=None, timeout=15: (
+        {"data": {"capabilities": {"batch_result_guard": True}}}
+        if payload["cmd"] == "bridge_status"
+        else fake_exec_js(json.dumps(payload), "c:7", timeout)
+    )
     monkeypatch.setattr(S, "exec_js", fake_exec_js)
 
     result = S.page_type(
         "pwd",
         selector=".xterm",
         submit_key="enter",
-        session_id="c:target",
+        session_id="c:7",
         timeout=0.2,
     )
 
     assert result["status"] == "success"
     assert result["target_kind"] == "xterm"
     assert len(calls) == 2
-    assert all(call[1] == "c:target" for call in calls)
+    assert all(call[1] == "c:7" for call in calls)
     batch = json.loads(calls[1][0])
     assert [command["method"] for command in batch["commands"]] == [
         "Emulation.setFocusEmulationEnabled",
+        "Runtime.evaluate",
         "Runtime.evaluate",
         "Input.insertText",
         "Runtime.evaluate",
         "Input.dispatchKeyEvent",
         "Input.dispatchKeyEvent",
     ]
-    assert batch["commands"][3]["params"]["awaitPromise"] is True
+    assert batch["commands"][2]["assertTruthy"] is True
+    assert all(command["cmd"] == "cdp" for command in batch["commands"])
+    assert batch["commands"][4]["params"]["awaitPromise"] is True
     assert driver.default_session_id == "c:previous"
 
 
@@ -1849,19 +1871,48 @@ def test_activate_reads_onScreen_from_data_key(monkeypatch):
     assert "warning" in out
 
 
+class _BatchDriver:
+    """A driver whose `ext_cmd` answers one canned batch reply.
+
+    Batches travel on the `cmd` field of `ext_cmd`, never as a text script
+    through `execute_js`: since the extension's cmd/code split, anything in
+    `code` is evaluated as page JavaScript, and a JSON envelope sent that way
+    died with `SyntaxError: Unexpected token ':'` (measured live for
+    `upload_files`, `cdp_batch`, `set_cookies` and `delete_cookies`).
+    """
+
+    default_session_id = "chrome:7"
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def ext_cmd(self, payload, client_id=None, timeout=15.0):
+        self.calls.append((payload, client_id, timeout))
+        return self.reply
+
+    def execute_js(self, *args, **kwargs):  # pragma: no cover - the wrong route
+        raise AssertionError("a batch must not be sent as a text script")
+
+
+def _install_batch_driver(monkeypatch, reply):
+    driver = _BatchDriver(reply)
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "get_driver", lambda: driver)
+    monkeypatch.setattr(S, "switch_session", lambda session_id=None: "chrome:7")
+    return driver
+
+
 def test_upload_files_parses_a_bare_results_array(monkeypatch):
-    """handleBatch's success reply arrives as a bare array (ws.onmessage does
-    `res.data ?? res.results ?? res`), so upload_files must treat a list under
-    `data` as the results, not look for data['results'] (which never exists on
-    a list and silently dropped the selector-not-found check)."""
-    calls = []
-
-    def fake_exec_js(script, session_id=None, timeout=15.0):
-        calls.append(script)
-        # DOM.getDocument -> {root:{nodeId:1}}; DOM.querySelector -> {nodeId:42}
-        return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}, {}]}
-
-    monkeypatch.setattr(S, "exec_js", fake_exec_js)
+    """handleBatch's success reply arrives as a bare array (the WS envelope and
+    the bridge's ext_cmd both unwrap {ok, results} to the list), so upload_files
+    must treat a list under `data` as the results, not look for data['results']
+    (which never exists on a list and silently dropped the selector-not-found
+    check)."""
+    # DOM.getDocument -> {root:{nodeId:1}}; DOM.querySelector -> {nodeId:42}
+    driver = _install_batch_driver(
+        monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}, {}]},
+    )
     import os
     import tempfile
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
@@ -1870,9 +1921,13 @@ def test_upload_files_parses_a_bare_results_array(monkeypatch):
         out = S.upload_files("#file", f.name)
         assert out["status"] == "ok"
         assert out["node_id"] == 42
-        batch = json.loads(calls[0])
+        batch, client_id, _timeout = driver.calls[0]
+        assert batch["cmd"] == "batch"
+        assert batch["tabId"] == 7
+        assert client_id == "chrome"
         assert batch["deadlineEpochMs"] > 0
         assert batch["timeoutMs"] == 30000
+        assert all(command["cmd"] == "cdp" for command in batch["commands"])
     finally:
         os.unlink(f.name)
 
@@ -1888,11 +1943,7 @@ def test_upload_files_failure_leaves_the_caller_file_untouched(monkeypatch, tmp_
     upload = tmp_path / "upload.txt"
     upload.write_text("fixture", encoding="utf-8")
     before = upload.stat()
-    monkeypatch.setattr(
-        S,
-        "exec_js",
-        lambda *args, **kwargs: {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]},
-    )
+    _install_batch_driver(monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]})
 
     with pytest.raises(RuntimeError, match="matched no element"):
         S.upload_files("#missing", str(upload))
@@ -1909,10 +1960,8 @@ def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
     """DOM.querySelector returns nodeId=0 when nothing matches; that used to be
     swallowed (results was always None because data was a list, not a dict) and
     upload_files reported status:ok with node_id:null."""
-    def fake_exec_js(script, session_id=None, timeout=15.0):
-        return {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]}  # 0 = no match
-
-    monkeypatch.setattr(S, "exec_js", fake_exec_js)
+    # 0 = no match
+    _install_batch_driver(monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 0}]})
     import os
     import tempfile
     f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
@@ -1927,13 +1976,7 @@ def test_upload_files_raises_when_selector_matches_nothing(monkeypatch):
 def test_upload_files_refuses_an_unconfirmed_set_file_result(monkeypatch, tmp_path):
     upload = tmp_path / "upload.txt"
     upload.write_text("fixture", encoding="utf-8")
-    monkeypatch.setattr(
-        S,
-        "exec_js",
-        lambda *args, **kwargs: {
-            "data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]
-        },
-    )
+    _install_batch_driver(monkeypatch, {"data": [{"root": {"nodeId": 1}}, {"nodeId": 42}]})
 
     with pytest.raises(RuntimeError, match="state is unknown"):
         S.upload_files("#file", str(upload))
@@ -1991,7 +2034,7 @@ def test_spawn_lock_recycled_when_owner_pid_is_dead(tmp_path, monkeypatch):
     # should recycle it.
     fresh = time.time()
     _os.utime(lock, (fresh, fresh))
-    assert S._acquire_spawn_lock() is not None  # recycled because pid 0 is dead
+    assert S._acquire_spawn_lock() is not None
 
 
 def test_session_table_readers_survive_concurrent_registration_churn(monkeypatch):
@@ -2059,13 +2102,20 @@ def test_session_table_readers_survive_concurrent_registration_churn(monkeypatch
     def read() -> None:
         try:
             while not stop.is_set():
-                d.find_session("example.test")
-                d.find_session("")
-                d.get_all_sessions()
-                d.get_session_dict()
-                d.clean_sessions()
-                d.diagnose(timeout=1)
-                d._live_default_session_id()
+                try:
+                    d.find_session("example.test")
+                    d.find_session("")
+                    d.get_all_sessions()
+                    d.get_session_dict()
+                    d.clean_sessions()
+                    d.diagnose(timeout=1)
+                    d._live_default_session_id()
+                except _bb.AmbiguousBrowserError:
+                    # Two churn workers deliberately create two client
+                    # namespaces. An implicit default pick is expected to
+                    # refuse that ambiguity; all other concurrent errors are
+                    # still reported below.
+                    continue
         except BaseException as exc:  # noqa: BLE001
             failures.append(exc)
 
@@ -2164,7 +2214,7 @@ def test_undirected_execute_js_keeps_the_default_it_had_to_pick(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_registered_async_tool_shares_lock_and_offloads_blocking_io(monkeypatch):
+async def test_registered_async_tool_offloads_io_without_serializing_other_tools(monkeypatch):
     from types import SimpleNamespace
 
     order = []
@@ -2185,10 +2235,6 @@ async def test_registered_async_tool_shares_lock_and_offloads_blocking_io(monkey
     monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
     monkeypatch.setattr(S, "require_driver", lambda: Driver())
     monkeypatch.setattr(S, "switch_session", lambda **kwargs: "chrome:7")
-    # switch_tab, deliberately not one of the read-only diagnostics: those run
-    # unserialized now, so driving one here would assert the opposite invariant
-    # and this test would pass for the wrong reason. Their side is
-    # `test_read_only_diagnostics_answer_while_the_serial_gate_is_held`.
     monkeypatch.setattr(S, "compact_tabs", lambda **kwargs: order.append("switch_tab") or [])
     permission_fn = S.mcp._tool_manager.get_tool("set_site_permission").fn
     switch_tab_fn = S.mcp._tool_manager.get_tool("switch_tab").fn
@@ -2205,33 +2251,19 @@ async def test_registered_async_tool_shares_lock_and_offloads_blocking_io(monkey
         tasks.start_soon(permission_call)
         assert await anyio.to_thread.run_sync(entered.wait, 2)
         tasks.start_soon(switch_tab_call)
-        # The event loop remains responsive while ext_cmd blocks in a worker,
-        # but the second registered tool cannot enter the shared serial gate.
-        await anyio.sleep(0.05)
-        assert "switch_tab" not in order
+        for _ in range(100):
+            if "switch_tab" in order:
+                break
+            await anyio.sleep(0.01)
+        assert "switch_tab" in order
         release.set()
 
-    assert order == ["permission_start", "permission_end", "switch_tab"]
+    assert order == ["permission_start", "switch_tab", "permission_end"]
 
 
 @pytest.mark.anyio
-async def test_read_only_diagnostics_answer_while_the_serial_gate_is_held(monkeypatch):
-    """A wedged tool must not take the diagnostics down with it.
-
-    The gate is held for the whole of a serialized call, so a 120-second
-    scan_page used to make `get_setup_status` and `list_tabs` unavailable for 120
-    seconds -- the one question worth asking became the one
-    that could not be asked. `browsertap doctor` reaches the bridge over HTTP
-    and kept answering, which is exactly what hid this: the documented
-    workaround bypassed the defect instead of surfacing it.
-
-    The other side of
-    `test_registered_async_tool_shares_lock_and_offloads_blocking_io` above,
-    which asserts the opposite for a tool that really is serialized. Neither
-    test can be satisfied by the other. Mutation-checked: dropping
-    `serialize=False` from either tool driven here makes the `"diagnostics" in
-    order` assertion fail.
-    """
+async def test_read_only_diagnostics_answer_while_another_tool_is_running(monkeypatch):
+    """A slow browser command cannot make its own diagnostics unavailable."""
     from types import SimpleNamespace
 
     order = []
@@ -2280,18 +2312,13 @@ async def test_read_only_diagnostics_answer_while_the_serial_gate_is_held(monkey
             if "diagnostics" in order:
                 break
             await anyio.sleep(0.05)
-        assert "diagnostics" in order, "a read-only diagnostic queued behind the serial gate"
+        assert "diagnostics" in order, "a read-only diagnostic queued behind another tool"
         release.set()
 
     assert order == ["holder_start", "diagnostics", "holder_end"]
     assert observed["path"]["extension_path"].endswith("extension")
     assert observed["tabs"]["default_session_id"] == "chrome:7"
-    # The bounded read could not settle while another tool held the gate, and it
-    # says so rather than passing a possible mid-call transient off as the
-    # caller's own default.
-    assert observed["tabs"]["default_session_settled"] is False
-
-    # And that field is computed, not a constant: with the gate free it settles.
+    assert observed["tabs"]["default_session_settled"] is True
     assert (await tabs_fn())["default_session_settled"] is True
 
 @pytest.mark.anyio
@@ -2307,14 +2334,17 @@ async def test_cancelled_tool_never_walks_away_holding_the_tool_lock(monkeypatch
     """
     holding = threading.Event()
     release = threading.Event()
-    from types import SimpleNamespace
+    from mcp.server.fastmcp import FastMCP
 
-    tool = S.mcp._tool_manager.get_tool("set_site_permission").fn
-    # The body is unreachable: the lock is held for the entire cancel window, so
-    # anything touching a driver here means the cancellation lost its race.
-    monkeypatch.setattr(
-        S, "require_driver", lambda: pytest.fail("the tool body must not run")
-    )
+    mcp = FastMCP("serialized-cancellation")
+    monkeypatch.setattr(S, "_mcp_tool", mcp.tool)
+
+    @S._threaded_tool(serialize=True)
+    async def probe() -> dict:
+        await anyio.lowlevel.checkpoint()
+        pytest.fail("the cancelled tool body must not run beyond its checkpoint")
+
+    tool = mcp._tool_manager.get_tool("probe").fn
 
     def hold():
         S._TOOL_LOCK.acquire()
@@ -2330,10 +2360,7 @@ async def test_cancelled_tool_never_walks_away_holding_the_tool_lock(monkeypatch
 
     async def cancelled_call():
         with anyio.move_on_after(0.05) as scope:
-            await tool(
-                SimpleNamespace(), "camera", "block", "https://example.test", 300,
-                "chrome:7",
-            )
+            await tool()
         cancelled.append(scope.cancelled_caught)
 
     try:

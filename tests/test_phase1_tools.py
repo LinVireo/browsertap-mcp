@@ -353,6 +353,7 @@ async function sendDebuggerCommandWithTimeout(_lease, method) {{
 
 
 def test_save_pdf_validates_then_atomically_writes(monkeypatch, tmp_path):
+    monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
     raw = b"%PDF-1.7\nbody\n%%EOF\n"
     calls = []
 
@@ -397,6 +398,7 @@ def test_save_pdf_validates_then_atomically_writes(monkeypatch, tmp_path):
 def test_save_pdf_rejects_invalid_payload_without_creating_file(
     monkeypatch, tmp_path, encoded
 ):
+    monkeypatch.setattr(S.Path, "home", staticmethod(lambda: tmp_path))
     monkeypatch.setattr(
         S,
         "cdp_command",

@@ -166,7 +166,7 @@ def _mentions_default(block: str, parameter: str, value: Any) -> bool:
 
 def _skill_hashes(paths: Iterable[Path]) -> dict[str, str]:
     return {
-        str(path): hashlib.md5(path.read_bytes()).hexdigest()
+        str(path): hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()
         for path in paths
     }
 

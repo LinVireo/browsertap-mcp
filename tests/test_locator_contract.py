@@ -19,6 +19,10 @@ from browsertap_mcp.page_input import (
 class _Driver:
     default_session_id = "chrome:test:7"
 
+    def ext_cmd(self, payload, **kwargs):
+        assert payload["cmd"] == "bridge_status"
+        return {"data": {"capabilities": {"batch_result_guard": True}}}
+
 
 def test_css_locator_keeps_legacy_value_and_structured_fields_normalize():
     assert normalize_locator("button.submit") == "button.submit"
@@ -143,6 +147,23 @@ def test_page_click_ambiguous_locator_dispatches_nothing(monkeypatch):
 
     assert result["status"] == "ambiguous"
     assert result["matches"] == 2
+
+
+@pytest.mark.parametrize("field", ["x", "y", "width", "height"])
+@pytest.mark.parametrize("value", [None, True, "12", [], float("nan"), float("inf")])
+def test_page_click_rejects_invalid_resolver_geometry(monkeypatch, field, value):
+    driver = _Driver()
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(
+        S, "active_sessions",
+        lambda *args, **kwargs: [{"id": "chrome:test:7", "url": "https://example.test/"}],
+    )
+    geometry = {"found": True, "x": 10, "y": 20, "width": 30, "height": 40, field: value}
+    monkeypatch.setattr(S, "_page_selector_info", lambda *args, **kwargs: geometry)
+    monkeypatch.setattr(S, "_run_page_input", lambda *args, **kwargs: pytest.fail("input dispatched"))
+
+    with pytest.raises(RuntimeError, match="selector resolver returned invalid geometry"):
+        S.page_click(selector="#pay", session_id="chrome:test:7")
 
 
 def test_page_click_frame_relative_point_dispatches_at_resolved_top_coordinates(monkeypatch):

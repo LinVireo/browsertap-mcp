@@ -7,7 +7,6 @@ import base64
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent

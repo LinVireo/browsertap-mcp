@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '2f6f84299dab0ec2';
+const BTAP_BUILD = '3e2a82fe69ed629d';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -476,9 +476,20 @@ async function closeTabsWithGenerations(tabIds, expected) {
   const liveIds = [];
   const alreadyGone = [];
   for (const tabId of tabIds) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (tab) liveIds.push(tabId);
-    else alreadyGone.push(tabId);
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (message !== `No tab with id: ${tabId}.` &&
+          message !== `No tab with id: ${tabId}`) throw error;
+      alreadyGone.push(tabId);
+      continue;
+    }
+    if (!tab || tab.id !== tabId) {
+      throw new Error(`Tab lookup returned no matching tab for ${tabId}`);
+    }
+    liveIds.push(tabId);
   }
   // Delegate rather than repeat: this used to carry its own copy of the
   // comparison above, and `validateTabCloseGenerations` -- the copy the offline
@@ -1010,6 +1021,33 @@ function boundedCaptureInteger(value, fallback, minimum, maximum) {
     : fallback;
 }
 
+const captureCommandsInFlight = new Set();
+
+async function withCaptureCommandLock(tabId, work) {
+  // Refuse overlapping work immediately so an expired caller cannot leave a
+  // queued start/stop that changes the browser after its timeout.
+  if (captureCommandsInFlight.has(tabId)) {
+    return {
+      ok: false,
+      code: 'capture_busy',
+      error: {
+        code: 'capture_busy',
+        message: `A capture operation is already in progress on tab ${tabId}`,
+        retryable: true,
+        dispatched: false,
+      },
+      retryable: true,
+      dispatched: false,
+    };
+  }
+  captureCommandsInFlight.add(tabId);
+  try {
+    return await work();
+  } finally {
+    captureCommandsInFlight.delete(tabId);
+  }
+}
+
 function truncateCaptureText(value, maxBytes) {
   const text = String(value ?? '');
   const bytes = new TextEncoder().encode(text);
@@ -1260,6 +1298,10 @@ async function handleNetworkCaptureCommand(msg, sender) {
   if (!Number.isInteger(tabId)) {
     return { ok: false, code: 'invalid_tab_id', error: 'network_capture requires tabId' };
   }
+  return await withCaptureCommandLock(tabId, () => runNetworkCaptureCommand(msg, tabId));
+}
+
+async function runNetworkCaptureCommand(msg, tabId) {
   if (msg.method === 'start') {
     const existing = networkCaptures.get(tabId);
     if (existing?.active) {
@@ -1342,6 +1384,10 @@ async function handleConsoleCaptureCommand(msg, sender) {
   if (!Number.isInteger(tabId)) {
     return { ok: false, code: 'invalid_tab_id', error: 'console requires tabId' };
   }
+  return await withCaptureCommandLock(tabId, () => runConsoleCaptureCommand(msg, tabId));
+}
+
+async function runConsoleCaptureCommand(msg, tabId) {
   if (msg.method === 'start') {
     const existing = consoleCaptures.get(tabId);
     if (existing?.active) {
@@ -2142,9 +2188,15 @@ async function forceInvalidateDebuggerAttachment(
 }
 
 // --- CDP command dispatch with a deadline ---------------------------------
+// `beforeInvalidate(attachment)` runs on the deadline, on the still-live
+// attachment, before it is torn down. It exists for one caller: the exec
+// fallback's zombie probe, which has to reach the pinned renderer through the
+// session that is already set up there -- a fresh attach cannot (its renderer
+// side is created on the main thread the zombie is holding). Whatever it
+// returns is copied onto the timeout error.
 async function sendDebuggerCommandWithTimeout(
   lease, method, params = {}, timeoutMs = 20000, minimumTimeoutMs = 100,
-  dispatchState = null,
+  dispatchState = null, beforeInvalidate = null,
 ) {
   if (!lease?.attachment || lease.released || lease.attachment.invalidated ||
       lease.generation !== lease.attachment.generation) {
@@ -2175,24 +2227,58 @@ async function sendDebuggerCommandWithTimeout(
       return chrome.debugger.sendCommand(attachment.target, method, params || {});
     },
   );
+  let timeoutError = null;
+  // Resolves once the deadline handler has finished everything it does after
+  // deciding the command timed out -- the probe and the invalidation. The
+  // command promise itself may settle in the middle of that (measured
+  // 2026-09-10: it did, and the caller received the timeout error before the
+  // probe had written its verdict onto it), so the catch below waits on this,
+  // not on the command.
+  let settleTimeout = () => {};
+  const timeoutSettled = new Promise(resolve => { settleTimeout = resolve; });
   const watchdog = new Promise((_, reject) => {
     commandState.reject = reject;
     commandState.timer = setTimeout(async () => {
-      if (commandState.settled) return;
+      if (commandState.settled) { settleTimeout(); return; }
       const reason = `cdp_timeout: ${method} exceeded ${bounded}ms`;
-      await forceInvalidateDebuggerAttachment(attachment, reason, commandState);
-      if (commandState.settled) return;
       const error = new Error(reason);
       error.code = 'cdp_timeout';
       error.method = method;
       error.timeoutMs = bounded;
       error.dispatched = Boolean(commandState.dispatched);
+      // Chrome may resolve or reject sendCommand while detach is in flight.
+      // The deadline has already won; neither reply can replace its outcome.
+      timeoutError = error;
+      if (typeof beforeInvalidate === 'function') {
+        try {
+          Object.assign(error, await beforeInvalidate(attachment) || {});
+        } catch (probeError) {
+          // A probe that throws must still leave a verdict, and say why:
+          // silence here read as "the timeout path did not run the probe",
+          // which sent the diagnosis in the wrong direction once already.
+          error.zombie = 'unknown';
+          error.zombie_detail = `the zombie probe threw (${probeError?.message || probeError})`;
+        }
+      }
+      try {
+        await forceInvalidateDebuggerAttachment(attachment, reason, commandState);
+      } finally {
+        settleTimeout();
+      }
+      if (commandState.settled) return;
       reject(error);
     }, bounded);
   });
   try {
-    return await Promise.race([command, watchdog]);
+    const result = await Promise.race([command, watchdog]);
+    if (timeoutError) throw timeoutError;
+    return result;
   } catch (error) {
+    if (timeoutError) {
+      await timeoutSettled;
+      await attachment.invalidatingPromise;
+      throw timeoutError;
+    }
     if (error && typeof error === 'object' && error.dispatched === undefined) {
       error.dispatched = Boolean(commandState.dispatched);
     }
@@ -2230,10 +2316,17 @@ async function handleProtocolDialog(msg) {
     // command" while that navigation command is still paused.  Route the
     // explicit accept/dismiss through the owning lease instead; it already has
     // Page enabled and is released only after navigation + handledSignal settle.
-    if (owningNavigation?.action === 'manual' && owningNavigation.dialog &&
-        owningNavigation.debuggerLease && !owningNavigation.released &&
-        !owningNavigation.debuggerLease.attachment?.invalidated) {
-      debuggerLease = owningNavigation.debuggerLease;
+    const retainedLease = owningNavigation?.action === 'manual' &&
+      owningNavigation.dialog && owningNavigation.debuggerLease &&
+      !owningNavigation.released &&
+      !owningNavigation.debuggerLease.attachment?.invalidated
+      ? owningNavigation.debuggerLease
+      : owningManual?.debuggerLease && !owningManual.released &&
+          !owningManual.debuggerLease.attachment?.invalidated
+        ? owningManual.debuggerLease
+        : null;
+    if (retainedLease) {
+      debuggerLease = retainedLease;
       borrowedNavigationLease = true;
     } else {
       debuggerLease = await attachBtapDebugger({ tabId });
@@ -2415,7 +2508,19 @@ async function enablePageForNavigation(tabId, deadlineEpochMs) {
 // page the caller never named. That case reports the code instead, so the
 // caller can tell "the page navigated out from under this" from "CDP is broken"
 // and decide for itself whether repeating is safe.
-async function runCdpExecFallback(tabId, wrappedCode) {
+// `budgetMs` is the caller's own remaining budget, forwarded by the bridge. It
+// used to be a fixed DEFAULT_CDP_TIMEOUT_MS ceiling declared here, which meant
+// this path silently overrode the timeout the caller asked for: execute_js with
+// a 60 s timeout on a CSP page came back `cdp_timeout: Runtime.evaluate exceeded
+// 20000ms` at 20 s, and nothing in that reply said a second deadline -- one the
+// caller never set and cannot see -- had ended the call. A bridge that sends no
+// budget (older install) still gets the old ceiling, so this only ever widens a
+// deadline the caller already chose.
+//
+// The budget is a deadline rather than a per-attempt timeout: the retry below
+// must not double it.
+async function runCdpExecFallback(tabId, wrappedCode, budgetMs = null) {
+  const deadline = Date.now() + boundedCdpTimeout(budgetMs, DEFAULT_CDP_TIMEOUT_MS);
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let lease = null;
@@ -2427,7 +2532,8 @@ async function runCdpExecFallback(tabId, wrappedCode) {
       const cdpRes = await sendDebuggerCommandWithTimeout(
         lease, 'Runtime.evaluate', {
           expression: wrappedCode, awaitPromise: true, returnByValue: true,
-        }, DEFAULT_CDP_TIMEOUT_MS, 100, dispatchState,
+        }, Math.max(100, deadline - Date.now()), 100, dispatchState,
+        (attachment) => settleZombieAfterTimeout(tabId, attachment),
       );
       // A successful command necessarily reached Chrome. This also keeps the
       // helper correct in small test/integration shims that do not implement the
@@ -2457,7 +2563,16 @@ async function runCdpExecFallback(tabId, wrappedCode) {
           message += ' (the tab navigated while the script was in flight; BTAP did'
             + ' not re-run it because it may already have executed)';
         }
-        return { ok: false, error: { name: 'Error', message, stack: '', code, dispatched } };
+        const failure = { name: 'Error', message, stack: '', code, dispatched };
+        if (dispatched && code === 'cdp_timeout') {
+          // The deadline detached the debugger; it did not stop the script.
+          // The probe ran on the live attachment before that teardown (see
+          // settleZombieAfterTimeout) and left its verdict on the error.
+          failure.zombie = cdpErr.zombie || 'unknown';
+          failure.zombie_detail = cdpErr.zombie_detail
+            || 'the timeout path did not run the zombie probe';
+        }
+        return { ok: false, error: failure };
       }
       console.log('[BTAP-WS] CDP fallback attach failed (' + code + '), one retry for tab', tabId);
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -2475,6 +2590,114 @@ async function runCdpExecFallback(tabId, wrappedCode) {
       dispatched: false,
     },
   };
+}
+
+// After a Runtime.evaluate timeout the debugger is detached but the page script
+// is not stopped: a synchronous loop keeps the main thread pinned, a pending
+// fetch keeps running. The caller was told outcome_unknown and nothing else, so
+// its next call on that tab could collide with the zombie or time out for the
+// same reason without knowing it.
+//
+// Runtime.terminateExecution would end that -- but it terminates the running
+// script *or, if none is running, the next one*, the page's own handler
+// included. So it is only issued when a script is provably running, and the
+// proof is a sentinel evaluate: if `1` cannot be evaluated inside a short
+// window, the thread is pinned and there is something to terminate. If the
+// sentinel returns, the thread is free (the script finished, or is idle awaiting
+// something asynchronous) and nothing is killed, because there is nothing that
+// could be killed safely.
+//
+// A pinned thread has one non-zombie cause, a native dialog, which gets its
+// own verdict (`blocked_by_dialog`) and is never terminated: alert() blocks
+// inside whichever script called it, possibly the page's own.
+//
+// Every verdict leaves retry_safe false. Even `killed` does not undo whatever
+// the script did before the kill.
+const ZOMBIE_PROBE_BUDGET_MS = 6000;
+const ZOMBIE_SENTINEL_TIMEOUT_MS = 1500;
+
+// Runs on the attachment whose evaluate just timed out, *before* that
+// attachment is invalidated. Measured 2026-09-10: a fresh attach to a renderer
+// pinned by `while(true){}` succeeds browser-side, but its renderer session is
+// created on the pinned main thread, so even Runtime.terminateExecution --
+// normally handled off the main thread -- never got a reply (1500 ms, verdict
+// still_running). The session that is already set up is the only one that can
+// deliver the interrupt.
+//
+// Every command here is a raw sendCommand raced against a timer. Going through
+// sendDebuggerCommandWithTimeout would invalidate this very attachment on the
+// sentinel's expected timeout and take the kill path down with it.
+async function settleZombieAfterTimeout(tabId, attachment) {
+  const startedAt = Date.now();
+  const remaining = () => ZOMBIE_PROBE_BUDGET_MS - (Date.now() - startedAt);
+  const verdict = (zombie, zombie_detail) => ({ zombie, zombie_detail });
+  if (!attachment?.target) {
+    return verdict('unknown', 'no live attachment was available for the probe');
+  }
+
+  // 'responsive' | 'pinned' | 'failed'. A pinned command is left dangling on
+  // purpose: the attachment is about to be torn down by the caller anyway.
+  const raw = async (method, params) => {
+    const budget = Math.min(ZOMBIE_SENTINEL_TIMEOUT_MS, Math.max(100, remaining()));
+    let timer = null;
+    const clock = new Promise(resolve => {
+      timer = setTimeout(() => resolve({ state: 'pinned' }), budget);
+    });
+    const send = Promise.resolve()
+      .then(() => chrome.debugger.sendCommand(attachment.target, method, params || {}))
+      .then(() => ({ state: 'responsive' }), error => ({ state: 'failed', error }));
+    try { return await Promise.race([send, clock]); } finally { clearTimeout(timer); }
+  };
+  const sentinel = () => raw('Runtime.evaluate', { expression: '1', returnByValue: true });
+
+  const before = await sentinel();
+  if (before.state === 'responsive') {
+    return verdict('not_blocking',
+      'the page answered a sentinel evaluate after the timeout; the script is finished'
+      + ' or idle awaiting something asynchronous, and nothing was terminated');
+  }
+  if (before.state !== 'pinned') {
+    return verdict('unknown', 'could not probe the page after the timeout'
+      + ` (${before.error?.message || before.error})`);
+  }
+
+  // The sentinel could not run: the main thread is pinned by a script, which is
+  // exactly the precondition terminateExecution needs.
+  //
+  // One pinned-thread cause is not a zombie: a native dialog. alert() blocks the
+  // renderer inside whichever script called it -- possibly the page's own,
+  // opened before the caller's evaluate ever started -- and terminating that
+  // script is not what the caller asked for. The dialog tools own that case.
+  const dialog = currentProtocolDialog(tabId);
+  if (dialog) {
+    return verdict('blocked_by_dialog', `a native ${dialog.type || 'dialog'} is open on the tab`
+      + ' and is what pins it; nothing was terminated -- settle it with handle_dialog first');
+  }
+  if (remaining() < ZOMBIE_SENTINEL_TIMEOUT_MS) {
+    return verdict('still_running', 'the page is pinned by the script and the probe budget'
+      + ' ran out before it could be terminated');
+  }
+
+  const kill = await raw('Runtime.terminateExecution', {});
+  if (kill.state !== 'responsive') {
+    return verdict('still_running', 'the page is pinned by the script and'
+      + ' Runtime.terminateExecution '
+      + (kill.state === 'pinned'
+        ? 'did not answer in time'
+        : `failed (${kill.error?.message || kill.error})`));
+  }
+
+  const after = await sentinel();
+  if (after.state === 'responsive') {
+    return verdict('killed', 'the page was pinned by the script; Runtime.terminateExecution'
+      + ' freed it and a sentinel evaluate now answers');
+  }
+  if (after.state === 'pinned') {
+    return verdict('still_running', 'Runtime.terminateExecution was acknowledged but a sentinel'
+      + ' evaluate still cannot run; the page remains pinned');
+  }
+  return verdict('unknown', 'Runtime.terminateExecution was acknowledged but the page could'
+    + ` not be re-probed (${after.error?.message || after.error})`);
 }
 
 async function navigateWithDialogPolicy(msg) {
@@ -3276,6 +3499,7 @@ async function handleExtMessage(msg, sender) {
       build_stamp: BTAP_BUILD,
       protocol_version: 3,
       capabilities: {
+        batch_result_guard: true,
         structured_locator: true,
         console_user_filter: true,
         network_stop_filter: true,
@@ -3467,15 +3691,23 @@ async function handleBatch(msg, sender) {
         const commandDispatch = { dispatched: false };
         dispatchStates.push(commandDispatch);
         try {
-          R.push(await sendDebuggerCommandWithTimeout(
+          const result = await sendDebuggerCommandWithTimeout(
             debuggerLease, c.method, resolve$N(c.params),
             remaining === null ? requestedTimeout : Math.min(requestedTimeout, remaining),
             remaining === null ? 100 : 1,
             commandDispatch,
-          ));
+          );
+          R.push(result);
           // A resolved CDP call has completed in Chrome, even when a thin test
           // shim ignores the optional state parameter.
           commandDispatch.dispatched = true;
+          if (c.assertTruthy === true &&
+              (result?.exceptionDetails || result?.result?.value !== true)) {
+            const error = new Error('batch_guard_failed: guarded evaluation did not return true');
+            error.code = 'batch_guard_failed';
+            error.failedCommandIndex = R.length - 1;
+            throw error;
+          }
         } catch (error) {
           if (error?.dispatched !== undefined) {
             commandDispatch.dispatched = Boolean(error.dispatched);
@@ -3488,7 +3720,8 @@ async function handleBatch(msg, sender) {
     }
     return { ok: true, results: R };
   } catch (e) {
-    const code = debuggerFailureCode(e);
+    const guardFailed = e?.code === 'batch_guard_failed';
+    const code = guardFailed ? e.code : debuggerFailureCode(e);
     const commandsDispatched = dispatchStates.reduce(
       (total, state) => total + (state.dispatched ? 1 : 0), 0,
     );
@@ -3496,7 +3729,9 @@ async function handleBatch(msg, sender) {
     const retryable = !dispatched &&
       (code === 'cdp_timeout' || code === 'debugger_detached');
     let hint;
-    if (code === 'debugger_conflict') {
+    if (guardFailed) {
+      hint = 'The guarded evaluation failed; subsequent batch commands were not dispatched. Refresh the target before retrying.';
+    } else if (code === 'debugger_conflict') {
       hint = dispatched
         ? 'Close DevTools or the competing debugger, then inspect the completed batch results before deciding whether to rebuild the remaining commands.'
         : 'Close DevTools or the competing debugger on this tab, then retry.';
@@ -3507,8 +3742,20 @@ async function handleBatch(msg, sender) {
     } else {
       hint = 'No batch command was dispatched. Fix the command or target before retrying.';
     }
+    // The WebSocket envelope preserves error and results, but not arbitrary
+    // fields beside them. Carry guard details inside error as well.
+    const error = guardFailed ? {
+      code,
+      message: e.message,
+      failed_command_index: e.failedCommandIndex,
+      commands_completed: R.length,
+      commands_dispatched: commandsDispatched,
+      dispatched,
+      retryable: false,
+    } : e.message || String(e);
     return {
-      ok: false, code, error: e.message || String(e), results: R,
+      ok: false, code, error, results: R,
+      ...(guardFailed ? { failed_command_index: e.failedCommandIndex } : {}),
       commands_completed: R.length,
       commands_dispatched: commandsDispatched,
       dispatched,
@@ -4114,7 +4361,7 @@ async function executeManualScript(tabId, code, dialogScope) {
 // commands on different tabs; a refcount keeps nested calls on the SAME tab
 // from tearing the rule down early.
 const CSP_RULE_BASE = 90000;
-// tabId -> {depth, ruleId}. A single tab can have nested withCspOff calls
+// tabId -> {depth, ruleId, ready}. A single tab can have nested withCspOff calls
 // (e.g. a retry inside the original); the depth refcount keeps the rule alive
 // until the LAST nested call exits. ruleId is allocated once per tab so two
 // different tabs never share an id (tabId % 9000 collided once tabId >= 9000).
@@ -4123,7 +4370,7 @@ let cspNextRuleId = CSP_RULE_BASE;
 function cspRuleIdFor(tabId) {
   let entry = cspRefs.get(tabId);
   if (!entry) {
-    entry = { depth: 0, ruleId: cspNextRuleId++ };
+    entry = { depth: 0, ruleId: cspNextRuleId++, ready: null };
     cspRefs.set(tabId, entry);
   }
   return entry;
@@ -4133,8 +4380,9 @@ function cspRuleIdFor(tabId) {
 // rule means CSP stays off for that tab. Session rules die with the browser,
 // but the worker restarts far more often than the browser does — so sweep a
 // generous id range on every startup. cspNextRuleId resets on SW restart, so
-// the sweep range must not depend on the in-memory counter.
-(async () => {
+// the sweep range must not depend on the in-memory counter. New scopes wait
+// for this sweep before reusing ids that it may still be removing.
+const cspStartupCleanup = (async () => {
   try {
     const rules = await chrome.declarativeNetRequest.getSessionRules();
     // Sweep every rule in our namespace. tabId is unbounded and ruleId grows
@@ -4191,6 +4439,7 @@ function cspRuleIdFor(tabId) {
 })();
 
 async function withCspOff(tabId, fn) {
+  await cspStartupCleanup;
   const entry = cspRuleIdFor(tabId);
   const ruleId = entry.ruleId;
   // Increment the refcount BEFORE the await. Doing it after let two concurrent
@@ -4198,26 +4447,30 @@ async function withCspOff(tabId, fn) {
   // finally — even while the other call's fn() was still relying on it.
   entry.depth += 1;
   if (entry.depth === 1) {
-    try {
-      await chrome.declarativeNetRequest.updateSessionRules({
-        removeRuleIds: [ruleId],
-        addRules: [{
-          id: ruleId, priority: 1,
-          action: { type: 'modifyHeaders', responseHeaders: [
-            { header: 'content-security-policy', operation: 'remove' },
-            { header: 'content-security-policy-report-only', operation: 'remove' }
-          ]},
-          // tabIds confines this to the automated tab only.
-          condition: { urlFilter: '*', resourceTypes: ['main_frame', 'sub_frame'], tabIds: [tabId] }
-        }]
-      });
-    } catch (e) {
-      // Not fatal: injection may still succeed on pages without CSP, and the
-      // CDP fallback bypasses CSP entirely.
-      console.log('[BTAP] CSP rule add failed:', e.message);
-    }
+    entry.ready = (async () => {
+      try {
+        await chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [ruleId],
+          addRules: [{
+            id: ruleId, priority: 1,
+            action: { type: 'modifyHeaders', responseHeaders: [
+              { header: 'content-security-policy', operation: 'remove' },
+              { header: 'content-security-policy-report-only', operation: 'remove' }
+            ]},
+            // tabIds confines this to the automated tab only.
+            condition: { urlFilter: '*', resourceTypes: ['main_frame', 'sub_frame'], tabIds: [tabId] }
+          }]
+        });
+      } catch (e) {
+        // Not fatal: injection may still succeed on pages without CSP, and the
+        // CDP fallback bypasses CSP entirely.
+        console.log('[BTAP] CSP rule add failed:', e.message);
+      }
+    })();
   }
   try {
+    // A refcount protects removal, but every caller also needs installation.
+    await entry.ready;
     // Never let a hung injection keep CSP off: race the work against a cap so
     // `finally` always runs and the rule always comes back.
     let timeoutId = null;
@@ -4604,13 +4857,11 @@ async function handleWsExec(data) {
     }
     return false;
   };
-  // The ACK is the bridge's ONLY signal that the script was delivered: no ACK
-  // means it classifies the command "undelivered" and retries it as
-  // side-effect-free. So if the ACK can't go out, we must NOT run the script —
-  // otherwise a form submit / purchase executes here, the retry runs it again,
-  // and the agent sees a clean success on a double execution.
+  // Do not execute when the ACK cannot even be sent. A successful send only
+  // queues it locally; if that ACK is lost, the bridge must still treat the
+  // command as sent_unconfirmed, never as safe to replay.
   if (!send({ type: 'ack', id: data.id })) {
-    console.log('[BTAP-WS] ACK undeliverable, skipping exec so the retry stays safe', data.id);
+    console.log('[BTAP-WS] ACK send failed, skipping this execution', data.id);
     return;
   }
   if (!tabId) {
@@ -4773,7 +5024,9 @@ async function handleWsExec(data) {
       // CDP fallback for CSP-restricted pages
       if (res && !res.ok && res.csp) {
         console.log('[BTAP-WS] CDP fallback for tab', tabId);
-        res = await runCdpExecFallback(tabId, buildCdpScript(data.code, dialogScope));
+        res = await runCdpExecFallback(
+          tabId, buildCdpScript(data.code, dialogScope), data.timeoutMs,
+        );
       }
     }
     // Grace period for async tab creation (e.g. link click with target=_blank)

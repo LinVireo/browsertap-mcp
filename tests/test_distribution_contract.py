@@ -742,6 +742,29 @@ def test_manifest_ships_the_packaged_agent_skills():
     assert "include CONTRIBUTING.zh-CN.md" in manifest
 
 
+@pytest.mark.parametrize("relative, ignored", [
+    (".tmp_browser_bridge_diff.txt", True),
+    (".tmp_server_diff.txt", True),
+    ("PLAN.md", True),
+    ("JSON_PARSE_TIGHTEN.md", True),
+    ("tests/fixtures/.tmp_expected.txt", False),
+    ("tests/fixtures/PLAN.md", False),
+    ("tests/fixtures/JSON_PARSE_TIGHTEN.md", False),
+    ("src/browsertap_mcp/_version.py", False),
+    ("tests/test_http_operation_recovery.py", False),
+    ("package-lock.json", False),
+])
+def test_root_scratch_rules_preserve_public_sources_and_fixtures(tmp_path, relative, ignored):
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / ".gitignore").write_bytes((root / ".gitignore").read_bytes())
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    result = subprocess.run(
+        ["git", "-c", "core.excludesFile=", "check-ignore", "--no-index", "--", relative],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == (0 if ignored else 1), result.stderr or result.stdout
+
+
 def test_repository_hygiene_rules_do_not_hide_python_sources_or_mutate_import_paths():
     root = Path(__file__).resolve().parents[1]
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
@@ -892,7 +915,7 @@ def test_publish_workflow_cannot_fire_by_accident_and_stores_no_upload_token():
     build_stage = workflow.split("publish:", 1)[0]
     assert "python -m scripts.check_distribution dist" in build_stage
     assert "python -m twine check --strict dist/*" in build_stage
-    assert "--cov-fail-under=85" in build_stage
+    assert "--cov-fail-under=95" in build_stage
     assert build_stage.index("python -m build --wheel --sdist") < build_stage.index(
         "python -m scripts.check_distribution dist"
     )

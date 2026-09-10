@@ -37,13 +37,8 @@ from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field, StrictBool
 
-# All tools share one BrowserBridge whose target (default_session_id) is mutable
-# state. When the MCP lowlevel server dispatches concurrent requests, two tools
-# running in parallel both save/restore that global and race each other — a
-# scan_page and an execute_js in the same turn can read/write different tabs
-# than the ones they named. Serialize tool execution with a single lock; the
-# cost is lost parallelism, the win is that directed calls stay directed.
-#
+# Only explicitly serialized process-wide tools take this lock. Page tools use
+# request-local defaults and per-tab command locks instead.
 # It must be a plain Lock, never an RLock: the async path in _threaded_tool
 # acquires it on an anyio worker thread and releases it on the event-loop
 # thread, and RLock refuses a release from a thread that does not own it
@@ -61,11 +56,15 @@ from . import (
 )
 from . import bridge as bridge_module  # noqa: E402
 from .browser_bridge import (  # noqa: E402
+    AmbiguousBrowserError,
     BridgeNoResponseError,
     BrowserBridge,
+    ExtensionNotConnectedError,
+    PageExecutionError,
     is_scriptable_url,
     state_paths_report,
 )
+from .command_scope import command_scope  # noqa: E402
 from .extension_build import (  # noqa: E402
     ExtensionStampError,
     compute_extension_stamp,
@@ -198,6 +197,7 @@ def _atomic_write_bytes(path: Path, data: bytes, *, max_size: Optional[int] = No
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Create temporary file in same directory (ensures same filesystem for atomic rename)
+    fd: Optional[int]
     fd, tmp_path = tempfile.mkstemp(
         dir=path.parent,
         prefix=".tmp_",
@@ -215,24 +215,13 @@ def _atomic_write_bytes(path: Path, data: bytes, *, max_size: Optional[int] = No
 
         # Flush to disk before rename
         os.fsync(fd)
-        os.close(fd)
+        closing_fd, fd = fd, None
+        os.close(closing_fd)
 
         # Atomic rename
         os.replace(tmp_path, path)
 
     except OSError as exc:
-        # Close fd if still open
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-
-        # Clean up temporary file
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
         # Provide user-friendly error messages for common issues
         if exc.errno == errno.ENOSPC:
             raise RuntimeError(f"Failed to save {path.name}: disk full") from exc
@@ -242,6 +231,17 @@ def _atomic_write_bytes(path: Path, data: bytes, *, max_size: Optional[int] = No
             ) from exc
         else:
             raise RuntimeError(f"Failed to save {path.name}: {exc}") from exc
+    finally:
+        # A closed descriptor can already belong to another request.
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # --- Stdio logging -----------------------------------------------------------
@@ -341,6 +341,7 @@ _XTERM_SUBMIT_DELAY_MS = 75
 # The registered FastMCP functions pass through this adapter, which gives MCP
 # clients one stable shape without forcing a breaking rewrite of every tool.
 _RESULT_ENVELOPE_VERSION = 1
+_RESULT_COMPAT_TEXT_LIMIT = 256
 _RESULT_RESERVED_KEYS = frozenset({
     "ok", "data", "error", "error_code", "retryable", "target",
     "diagnostics", "legacy", "result_contract", "version",
@@ -353,6 +354,8 @@ _RESULT_FAILURE_STATUSES = frozenset({
     "blocked_by_beforeunload", "blocked_by_dialog", "challenge_stalled", "unknown",
     "unsupported", "unsupported_frame_transform", "partial", "bridge_unreachable", "stale_bridge", "stale_extension",
     "stale_package",
+    "not_interactable", "focus_failed", "ambiguous", "invalid_selector",
+    "cross_origin_frame", "closed_shadow_root",
 })
 _SETUP_DIAGNOSTIC_STATUSES = frozenset({
     "healthy", "starting", "stale_bridge", "stale_extension", "stale_package",
@@ -410,7 +413,14 @@ def _result_diagnostics(payload: Any, *, tool: str) -> dict[str, Any]:
         return diagnostics
     for key in (
         "delivery_state", "switched_session", "switched_from", "closed",
-        "retry_safe", "operation_id", "may_have_created", "on_screen",
+        "retry_safe", "dispatched", "may_have_executed", "operation_id",
+        # An id is only actionable next to how to use it and whether the tab is
+        # still held. The exception path already reports all three; a failure
+        # returned as a dict used to keep the id and drop the other two.
+        "poll_with", "reservation_held", "operation_status", "may_have_created", "on_screen",
+        # Whether a timed-out page script is still pinning its tab. Decides the
+        # caller's next move on that tab, so it belongs next to retry_safe.
+        "zombie", "zombie_detail",
         "input_quiet", "input_reachability", "screen_bounds", "ownership",
         "owner_id", "generation", "extension_build_verdict", "status", "code",
         "hint", "directory_applied", "requested_directory", "render_state",
@@ -486,16 +496,35 @@ def _resolve_session_target(driver: BrowserBridge, session_id: str) -> Optional[
     return result
 
 
+def _result_retryable(*sources: dict[str, Any], default: bool = False) -> bool:
+    """Delivery facts and explicit refusals override optimistic retry hints."""
+    for source in sources:
+        if any(source.get(key) is False for key in ("retry_safe", "retryable")):
+            return False
+        if any(source.get(key) is True for key in ("dispatched", "may_have_executed", "may_have_created")):
+            return False
+        delivery_state = source.get("delivery_state")
+        if delivery_state is not None and delivery_state != "undelivered":
+            return False
+    if any(source.get(key) is True for source in sources for key in ("retry_safe", "retryable")):
+        return True
+    return default
+
+
 def _legacy_failure(
     payload: Any, *, tool: Optional[str] = None,
 ) -> Optional[tuple[str, str, bool]]:
     """Classify explicit operation failures that did not raise an exception."""
     if not isinstance(payload, dict):
         return None
+    diagnostics = payload.get("diagnostics")
+    retryable = _result_retryable(
+        payload, diagnostics if isinstance(diagnostics, dict) else {},
+    )
     if payload.get("ok") is False:
         code = str(payload.get("code") or payload.get("error_code") or "operation_failed")
         message = str(payload.get("error") or payload.get("message") or f"{code} failed")
-        return code, message, bool(payload.get("retryable") or payload.get("retry_safe"))
+        return code, message, retryable
     status = str(payload.get("status") or "").strip().lower()
     # Setup diagnostics report the health of their dependencies in `status`.
     # A stale component is actionable data from a successful diagnostic call,
@@ -506,10 +535,9 @@ def _legacy_failure(
     if status in _RESULT_FAILURE_STATUSES:
         code = str(payload.get("code") or payload.get("error_code") or status)
         message = str(payload.get("error") or payload.get("message") or status)
-        return code, message, bool(payload.get("retryable") or payload.get("retry_safe"))
+        return code, message, retryable
     if payload.get("error") and status not in {"ok", "success", "completed", "stopped"}:
         code = str(payload.get("code") or payload.get("error_code") or "operation_failed")
-        retryable = bool(payload.get("retryable") or payload.get("retry_safe"))
         return code, str(payload["error"]), retryable
     return None
 
@@ -541,17 +569,24 @@ def _exception_result_metadata(exc: Exception) -> tuple[str, str, bool, dict[str
         and lower_message.endswith(" not found")
     ):
         code = "session_not_connected"
-    retryable = bool(getattr(exc, "retry_safe", False)) or code in _RESULT_RETRYABLE_CODES
-    diagnostics: dict[str, Any] = {}
-    delivery_state = getattr(exc, "delivery_state", None)
-    if delivery_state is not None:
-        diagnostics["delivery_state"] = delivery_state
-    retry_safe_value = exc.__dict__.get("retry_safe")
-    if retry_safe_value is not None:
-        diagnostics["retry_safe"] = bool(retry_safe_value)
     extra_diagnostics = getattr(exc, "diagnostics", None)
-    if isinstance(extra_diagnostics, dict):
-        diagnostics.update(extra_diagnostics)
+    diagnostics = dict(extra_diagnostics) if isinstance(extra_diagnostics, dict) else {}
+    attributes: dict[str, Any] = {}
+    for key in (
+        "delivery_state", "retry_safe", "retryable", "operation_id",
+        "reservation_held", "poll_with", "operation_status", "dispatched",
+        "may_have_executed", "may_have_created",
+    ):
+        value = getattr(exc, key, None)
+        if value is not None:
+            attributes[key] = value
+    retryable = _result_retryable(
+        attributes, diagnostics, default=code in _RESULT_RETRYABLE_CODES,
+    )
+    diagnostics.update(attributes)
+    for key in ("retry_safe", "retryable"):
+        if key in diagnostics:
+            diagnostics[key] = retryable
     return code, message, retryable, diagnostics
 
 
@@ -562,8 +597,9 @@ def _result_envelope(
     exc: Optional[Exception] = None,
     target: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Build the v1 envelope and retain a shallow legacy compatibility view."""
+    """Build the v1 envelope and retain small scalar compatibility fields."""
     payload_target = _result_target(payload)
+    resolved_target: Optional[dict[str, Any]]
     if target is not None:
         resolved_target = dict(payload_target or {})
         resolved_target.update(target)
@@ -584,7 +620,10 @@ def _result_envelope(
         # These were part of the transport-specific failure shape before the
         # common envelope. Keep them readable for callers that have not yet
         # migrated while the canonical copy remains in diagnostics/error.
-        for key in ("delivery_state", "retry_safe"):
+        for key in (
+            "delivery_state", "retry_safe", "operation_id", "reservation_held",
+            "poll_with", "operation_status",
+        ):
             if key in error_diagnostics:
                 envelope[key] = error_diagnostics[key]
         return envelope
@@ -592,6 +631,9 @@ def _result_envelope(
     failure = _legacy_failure(payload, tool=tool)
     if failure is not None:
         code, message, retryable = failure
+        diagnostics = _result_diagnostics(payload, tool=tool)
+        if "retry_safe" in diagnostics:
+            diagnostics["retry_safe"] = retryable
         envelope = {
             "ok": False,
             "result_contract": "btap.result.v1",
@@ -600,7 +642,7 @@ def _result_envelope(
             "error_code": code,
             "retryable": retryable,
             "target": resolved_target,
-            "diagnostics": _result_diagnostics(payload, tool=tool),
+            "diagnostics": diagnostics,
             "legacy": payload,
         }
     else:
@@ -616,12 +658,18 @@ def _result_envelope(
             "diagnostics": _result_diagnostics(payload, tool=tool),
         }
 
-    # Keep established operation keys readable at the top level. Reserved
-    # envelope fields remain authoritative; the full value is always in data
-    # (or legacy for a classified failure).
+    # Collections and long bodies belong only in data/legacy. Copying HTML,
+    # script results or tab lists here doubles the agent's context consumption.
     if isinstance(payload, dict):
         for key, value in payload.items():
-            if key not in _RESULT_RESERVED_KEYS and key not in envelope:
+            if key == "retry_safe" and failure is not None:
+                value = envelope["retryable"]
+            compact_scalar = (
+                value is None
+                or isinstance(value, (bool, int, float))
+                or isinstance(value, str) and len(value) <= _RESULT_COMPAT_TEXT_LIMIT
+            )
+            if compact_scalar and key not in _RESULT_RESERVED_KEYS and key not in envelope:
                 envelope[key] = value
     return envelope
 
@@ -647,9 +695,10 @@ def _call_target(
 
 def _adapt_tool_result(
     tool: str,
-    value: Any,
+    value: Any = None,
     *,
     target: Optional[dict[str, Any]] = None,
+    exc: Optional[Exception] = None,
 ) -> Any:
     if isinstance(value, CallToolResult):
         legacy = value.structuredContent
@@ -660,7 +709,16 @@ def _adapt_tool_result(
             structuredContent=envelope,
             isError=bool(value.isError) or not envelope["ok"],
         )
-    return _result_envelope(tool, value, target=target)
+    envelope = _result_envelope(tool, value, exc=exc, target=target)
+    if envelope["ok"]:
+        return envelope
+    # FastMCP treats ordinary dictionaries as transport successes, regardless
+    # of their fields. An explicit result carries the failure to MCP clients.
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(envelope, ensure_ascii=False))],
+        structuredContent=envelope,
+        isError=True,
+    )
 
 
 # --- Tab ownership: which tabs this process opened ---------------------------
@@ -937,54 +995,26 @@ async def _acquire_tool_lock() -> None:
         raise
 
 
-# A read-only diagnostic that queues behind the tool lock is the one call you
-# cannot make when you most need it: the reason to ask is that something is
-# wedged, and a serialized tool holds the gate for its whole duration -- a
-# 120-second scan_page makes `get_setup_status` unavailable for 120 seconds. The
-# diagnostics below therefore run unserialized. `browsertap doctor` talks to the
-# bridge directly and so was never affected, which is exactly what hid this: the
-# documented workaround bypassed the defect instead of showing it.
-#
-# The two that report the mutable default target still have to read it somehow,
-# and taking the lock would put the wait straight back, because the lock is held
-# for the whole of the serialized call rather than only around its own
-# save/restore. A bounded acquire is the only shape that both respects the
-# invariant and answers while the gate is held.
-_DEFAULT_TARGET_SNAPSHOT_TIMEOUT = 0.25
-
-
 def _default_target_snapshot(driver: Any) -> tuple[Any, bool]:
-    """Read the mutable default target, bounded, and say whether it was settled.
-
-    `settled` is False when another serialized tool held the lock for the whole
-    window, which means the value may be that tool's temporary save/restore
-    rather than the caller's own default. Reporting it beats both alternatives:
-    blocking makes the diagnostic unavailable exactly when it is wanted, and
-    omitting it lets a transient read as settled -- the vacuous-pass shape this
-    repository has had to correct in the quiet-input gate, the own-tabs check
-    and the lint rule count.
-    """
-    acquired = _TOOL_LOCK.acquire(timeout=_DEFAULT_TARGET_SNAPSHOT_TIMEOUT)
-    try:
-        return driver.default_session_id, acquired
-    finally:
-        if acquired:
-            _TOOL_LOCK.release()
+    """Temporary target changes belong to the current request's scope."""
+    return driver.default_session_id, True
 
 
 def _threaded_tool(*d_args: Any, **d_kwargs: Any):
-    serialize = bool(d_kwargs.pop("serialize", True))
+    # Target locks protect the complete call; unrelated tabs can run together.
+    serialize = bool(d_kwargs.pop("serialize", False))
     decorator = _mcp_tool(*d_args, **d_kwargs)
 
     def wrap(fn):
         def invoke_sync(*args: Any, **kwargs: Any) -> Any:
             target = _call_target(fn, args, kwargs)
             try:
-                value = fn(*args, **kwargs)
+                with command_scope(persist_defaults=target is None):
+                    value = fn(*args, **kwargs)
             except UrlElicitationRequiredError:
                 raise
             except Exception as exc:
-                return _result_envelope(fn.__name__, exc=exc, target=target)
+                return _adapt_tool_result(fn.__name__, exc=exc, target=target)
             return _adapt_tool_result(fn.__name__, value, target=target)
 
         if inspect.iscoroutinefunction(fn):
@@ -993,20 +1023,22 @@ def _threaded_tool(*d_args: Any, **d_kwargs: Any):
                 target = _call_target(fn, args, kwargs)
                 if not serialize:
                     try:
-                        value = await fn(*args, **kwargs)
+                        with command_scope(persist_defaults=target is None):
+                            value = await fn(*args, **kwargs)
                     except UrlElicitationRequiredError:
                         raise
                     except Exception as exc:
-                        return _result_envelope(fn.__name__, exc=exc, target=target)
+                        return _adapt_tool_result(fn.__name__, exc=exc, target=target)
                     return _adapt_tool_result(fn.__name__, value, target=target)
                 await _acquire_tool_lock()
                 try:
                     try:
-                        value = await fn(*args, **kwargs)
+                        with command_scope(persist_defaults=target is None):
+                            value = await fn(*args, **kwargs)
                     except UrlElicitationRequiredError:
                         raise
                     except Exception as exc:
-                        return _result_envelope(fn.__name__, exc=exc, target=target)
+                        return _adapt_tool_result(fn.__name__, exc=exc, target=target)
                     return _adapt_tool_result(fn.__name__, value, target=target)
                 finally:
                     _TOOL_LOCK.release()
@@ -1118,37 +1150,7 @@ def _pid_alive(pid: int) -> bool:
     waiting the full _SPAWN_LOCK_STALE window — that window blocks a real
     recovery for 30s after a daemon that died seconds in.
     """
-    if not pid or pid <= 0:
-        return False
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            STILL_ACTIVE = 259
-            h = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            if not h:
-                return False
-            try:
-                exit_code = ctypes.c_ulong()
-                if not ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
-                    return False
-                return exit_code.value == STILL_ACTIVE
-            finally:
-                ctypes.windll.kernel32.CloseHandle(h)
-        except OSError:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # The process exists but is not ours; treat it as alive so we don't
-        # steal a lock another instance legitimately holds.
-        return True
-    except OSError:
-        return False
+    return physical_input._pid_alive(pid)
 
 
 def _acquire_spawn_lock() -> Optional[Path]:
@@ -1349,8 +1351,9 @@ def invalidate_sessions_cache() -> None:
 
 def active_sessions(timeout: Optional[float] = None, fresh: bool = False) -> list[dict[str, Any]]:
     global _sessions_cache
-    if not fresh and _sessions_cache and time.monotonic() - _sessions_cache[0] < _SESSIONS_TTL:
-        return _sessions_cache[1]
+    cached = _sessions_cache
+    if not fresh and cached and time.monotonic() - cached[0] < _SESSIONS_TTL:
+        return cached[1]
     sessions = require_driver().get_all_sessions(timeout=timeout)
     _sessions_cache = (time.monotonic(), sessions)
     return sessions
@@ -1365,7 +1368,7 @@ def ensure_sessions(
     if not sessions:
         raise RuntimeError(
             "No connected browser tabs. Load the unpacked extension from the reported extension path, "
-            "keep this MCP server running via Hermes, and open a normal http/https page in Chrome."
+            "keep the bridge daemon running, and open a normal http/https page in Chrome."
         )
     # Every session-scoped tool passes through here before handing an implicit
     # target to the driver, so this is where a dead remembered tab has to be
@@ -1383,7 +1386,7 @@ def normalize_session_id(session_id: Optional[str]) -> Optional[str]:
 
 
 def prune_stale_default() -> Optional[str]:
-    """Forget a remembered target tab that no longer exists.
+    """Refresh a remembered tab while preserving its browser selection.
 
     Tab ids are not stable — they change on browser restart, extension reload,
     and whenever a tab is closed — so a default session id goes stale routinely.
@@ -1409,10 +1412,41 @@ def prune_stale_default() -> Optional[str]:
         return str(cur)
     # The session cache can simply be out of date; confirm against the bridge
     # before discarding a default that is actually fine.
-    if any(str(s.get("id")) == str(cur) for s in active_sessions(fresh=True)):
+    sessions = active_sessions(fresh=True)
+    if any(str(s.get("id")) == str(cur) for s in sessions):
         return str(cur)
+    if ":" in str(cur):
+        client_id = str(cur).rsplit(":", 1)[0]
+        candidates = [s for s in sessions if str(s.get("id", "")).rsplit(":", 1)[0] == client_id]
+        if candidates:
+            candidates = [s for s in candidates if is_scriptable_url(s.get("url"))] or candidates
+            selected = str(next((s for s in candidates if s.get("active")), candidates[0])["id"])
+            driver.default_session_id = selected
+            return selected
+        # Keep the client prefix even when it has no tabs. Browser-level
+        # commands can still open one, and tab commands must not cross clients.
+        return None
     driver.default_session_id = None
     return None
+
+
+def _browser_candidates(
+    sessions: list[dict[str, Any]], *, current: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Keep implicit tab selection inside one unambiguous browser client."""
+    client_id = str(current).rsplit(":", 1)[0] if current and ":" in str(current) else None
+    if client_id:
+        candidates = [s for s in sessions if str(s.get("id", "")).rsplit(":", 1)[0] == client_id]
+        if not candidates:
+            raise ExtensionNotConnectedError(f"Selected browser {client_id} has no connected tabs; select a browser explicitly.")
+        return candidates
+    preferred = os.environ.get("BROWSERTAP_PREFERRED_BROWSER", "").strip().lower()
+    candidates = [s for s in sessions if str(s.get("browser", "")).lower() == preferred] if preferred else []
+    candidates = candidates or sessions
+    clients = {str(s.get("id", "")).rsplit(":", 1)[0] for s in candidates if ":" in str(s.get("id", ""))}
+    if len(clients) > 1:
+        raise AmbiguousBrowserError(list(clients))
+    return candidates
 
 
 def switch_session(
@@ -1459,6 +1493,9 @@ def switch_session(
                     f"URL pattern {url_pattern!r} matched {len(cands)} tabs in browser "
                     f"'{want}': {choices}. Pass the full session_id to select one."
                 )
+        clients = {str(s["id"]).rsplit(":", 1)[0] for s in cands}
+        if len(clients) > 1:
+            raise AmbiguousBrowserError(list(clients))
         sid = str(cands[0]["id"])
         driver.default_session_id = sid
         return sid
@@ -1479,6 +1516,7 @@ def switch_session(
         preferred = [s for s in sessions if str(s.get("browser", "")).lower() == pref]
         if preferred:
             sessions = preferred
+    sessions = _browser_candidates(sessions)
     driver.default_session_id = str(sessions[0]["id"])
     return str(driver.default_session_id)
 
@@ -1527,6 +1565,10 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
             error_code=str(response.get("error_code") or "no_response"),
             delivery_state=delivery_state,
             retry_safe=bool(response.get("retry_safe", kind == "undelivered")),
+            operation_id=response.get("operation_id"),
+            reservation_held=response.get("reservation_held"),
+            poll_with=response.get("poll_with") or "get_execute_js_result",
+            diagnostics=response.get("diagnostics"),
         )
     return response
 
@@ -1554,7 +1596,7 @@ def compact_tabs(timeout: Optional[float] = None, fresh: bool = False) -> list[d
 # they use this short timeout and degrade instead of raising.
 _STATUS_TIMEOUT = 5.0
 _EXTENSION_PROTOCOL_VERSION = 3
-_REQUIRED_EXTENSION_CAPABILITIES = {"content_command_channel_removed"}
+_REQUIRED_EXTENSION_CAPABILITIES = {"content_command_channel_removed", "batch_result_guard"}
 
 
 # The capability registry is deliberately kept beside the public tool surface.
@@ -1581,7 +1623,7 @@ _BROWSER_TOOLS = frozenset({
     "delete_cookies", "storage_get", "storage_set", "set_site_permission",
     "reset_site_permissions", "save_pdf",
 })
-_DESKTOP_TOOLS = frozenset()
+_DESKTOP_TOOLS: frozenset[str] = frozenset()
 _CAPABILITY_GROUPS = ("page", "browser", "desktop")
 
 # Targeting is intentionally coarse in S1: it describes whether a caller must
@@ -1740,7 +1782,8 @@ def get_automation_profile() -> dict[str, Any]:
     description=(
         "Set the safe or lab automation profile for this MCP process. This does not persist or "
         "reload the extension; BROWSERTAP_MODE controls the next process."
-    )
+    ),
+    serialize=True,
 )
 def set_automation_profile(mode: str) -> dict[str, Any]:
     normalized = str(mode).strip().lower()
@@ -1762,8 +1805,7 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
         "it cannot tell (stamp_not_regenerated / unverifiable); it is decisive where "
         "version equality is not. extension_build_enforced=false means no comparison "
         "happened, so treat it as unknown rather than as a pass. Answers while another tool "
-        "is still running, which is when it is usually wanted; default_session_settled=false "
-        "then means default_session_id may be that call's temporary value rather than yours. "
+        "is still running; default_session_id is isolated from other calls' temporary targets. "
         "capability_registry is the runtime page/browser/desktop inventory; each entry includes "
         "target (none/optional/required), side_effect (read/write/mixed), result_contract, and "
         "desktop_opt_in."
@@ -2070,9 +2112,8 @@ def get_setup_status() -> dict[str, Any]:
     description=(
         "List connected tabs across all connected browsers; each tab has a browser field "
         "(chrome/edge/opera) and a session id to pass verbatim. Answers while another tool is "
-        "still running. default_session_settled=false means another tool held the target "
-        "while this ran, so default_session_id may be that call's temporary value rather "
-        "than yours -- name a session explicitly instead of trusting it."
+        "still running. The default_session_id snapshot is isolated from other calls' "
+        "temporary targets. Pass session_id explicitly when agents share one MCP process."
     ),
     serialize=False,
 )
@@ -2257,6 +2298,9 @@ def switch_tab(
 ) -> dict[str, Any]:
     requested_sid = str(session_id) if session_id is not None else None
     sid = switch_session(session_id=session_id, url_pattern=url_pattern, browser=browser)
+    publish_default = getattr(require_driver(), "publish_default_session_id", None)
+    if callable(publish_default):
+        publish_default(sid)
     out: dict[str, Any] = {"active_session_id": sid}
     if requested_sid is not None and requested_sid != sid:
         current = next(
@@ -2417,6 +2461,7 @@ def open_url(
                 ]
                 if preferred:
                     candidates = preferred
+            candidates = _browser_candidates(candidates, current=current_sid)
             target_session = candidates[0]
         target_sid = str(target_session["id"])
         driver.default_session_id = target_sid
@@ -2606,6 +2651,7 @@ def _implicit_client_id(session_id: Optional[str] = None) -> Optional[str]:
     except Exception:
         sessions = []
     if sessions:
+        sessions = _browser_candidates(sessions)
         sid = str(sessions[0].get("id") or "")
         if ":" in sid:
             return sid.rsplit(":", 1)[0]
@@ -2726,43 +2772,37 @@ def _direct_cdp(
         "tabId": tab_id,
         "timeoutMs": max(1, int(first_budget * 1000)),
     }
-    first_error: Optional[BaseException] = None
     try:
         response = driver.ext_cmd(
             payload, client_id=client_id, timeout=first_budget
         )
     except BaseException as exc:
-        first_error = exc
         fallback_budget = remaining()
         # A timed-out mutation is ambiguous: it may already be running in the
         # extension. Never send the same CDP command through a second route,
         # and never dispatch anything after the shared deadline.
         if isinstance(exc, TimeoutError) or fallback_budget <= 0:
-            raise TimeoutError(
-                f"CDP command did not complete within its total deadline: {exc}"
-            ) from exc
+            # Keep the operation handle and reservation facts on the original
+            # error so a timed-out command remains observable and recoverable.
+            raise
+        if not _unknown_command_error(exc):
+            raise
         execute = getattr(driver, "execute_js", None)
         if not callable(execute):
             raise
         fallback_payload = dict(payload)
         fallback_payload["timeoutMs"] = max(1, int(fallback_budget * 1000))
-        try:
-            response = execute(
-                json.dumps(fallback_payload),
-                timeout=fallback_budget,
-                session_id=session_id,
-            )
-        except BaseException as fallback_error:
-            raise RuntimeError(
-                f"CDP fallback failed after extension command error ({first_error}): "
-                f"{fallback_error}. Run get_setup_status/list_tabs and restart the bridge "
-                "if it reports an older command router."
-            ) from fallback_error
+        response = execute(
+            json.dumps(fallback_payload),
+            timeout=fallback_budget,
+            session_id=session_id,
+        )
     result = _extension_data(response)
     if result.get("ok") is False:
         code = result.get("code") or "cdp_error"
         hint = result.get("hint") or (
-            "A cdp_timeout forces BTAP to detach; retry once after list_tabs. "
+            "A cdp_timeout detaches the debugger but may leave page code running; "
+            "inspect the operation result before considering a retry. "
             "A debugger_conflict requires closing DevTools or the competing debugger."
         )
         raise RuntimeError(f"{code}: {result.get('error') or 'CDP command failed'}. {hint}")
@@ -3042,7 +3082,7 @@ async def resolve_leave_dialog(
 
 
 # --- Tool: open_new_tab (owned tabs) -----------------------------------------
-@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Pass active=true only when foreground work is genuinely required. If the create ACK is lost, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true; after dispatch, an unresolved operation returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. Never use a URL-based guess or an unmarked create retry.")
+@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Uses the browser selected by this MCP task unless session_id or client_id names another browser. With several browsers connected, first use switch_tab or pass a concrete session_id/client_id. Pass active=true only when foreground work is genuinely required. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true. When retry_safe=true, retry with no operation_id to start a fresh create. If the create ACK is lost with retry_safe=false, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. An uncertain dispatched create returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. An unresolved recovery preserves that uncertainty and its owner_id even when the status probe fails. If recovery starts with not_found, follow its list_tabs() inspection guidance instead of repeating the same recovery read; a fresh create may duplicate the original. Never infer ownership or absence from URLs, tab counts, or missing records.")
 def open_new_tab(
     url: str,
     timeout: float = 15.0,
@@ -3073,6 +3113,8 @@ def open_new_tab(
         client_id = session_client_id
     else:
         client_id = requested_client_id
+        if client_id is None and driver.default_session_id is not None:
+            client_id = _split_session_target(str(driver.default_session_id))[0]
 
     capability_owner_id = str(owner_id).strip() if owner_id is not None else None
     if owner_id is not None and not capability_owner_id:
@@ -3121,7 +3163,13 @@ def open_new_tab(
         *,
         may_have_created: bool,
         retry_safe: bool,
+        terminal: bool = False,
     ) -> dict[str, Any]:
+        # Reconciliation cannot prove that an earlier call never created a tab.
+        # Keep its cleanup capability even when the first status read fails.
+        if resuming:
+            may_have_created = True
+            retry_safe = False
         detail = dict(info or {})
         detail.setdefault("status", "unknown")
         detail.setdefault("operation_status", "unknown")
@@ -3153,6 +3201,16 @@ def open_new_tab(
                 "owner_id": capability_owner_id,
                 "url": url,
                 "instruction": (
+                    "The operation record is missing; stop repeating this recovery read. "
+                    "Call list_tabs() and inspect tabs for the returned client_id. "
+                    "A matching URL, an unchanged tab count, or no matching tab does not prove "
+                    "ownership or that no tab was created. For cleanup, use "
+                    "close_tabs(tab_id=<exact session_id>, owner_id=<returned owner_id>) "
+                    "only for an exact client_id/tab_id/generation already registered as owned "
+                    "by this MCP task; owner_id alone grants no ownership. If identity or "
+                    "ownership cannot be established, leave those tabs untouched and report "
+                    "the unresolved outcome; a new create may duplicate the original."
+                    if terminal else
                     "Call open_new_tab again with operation_id, client_id and owner_id; "
                     "the recovery call only reads the durable operation record."
                 ),
@@ -3205,6 +3263,11 @@ def open_new_tab(
     try:
         probe_response = status_call()
         probe_info, routed_client = response_info(probe_response)
+    except AmbiguousBrowserError:
+        # Several browser clients with no explicit target is a caller routing
+        # error, not an uncertain tab create. Preserve the structured choice
+        # prompt instead of hiding it inside an `unknown` reconciliation result.
+        raise
     except Exception as exc:
         return unknown_result(
             {"error": str(exc), "phase": "client_discovery"},
@@ -3238,17 +3301,22 @@ def open_new_tab(
         if probe_state == "completed":
             result = probe_response
         elif probe_state == "not_found":
+            # A readable but missing record gives this recovery call no result
+            # to poll. It is not proof of absence: completed records expire and
+            # browser restarts clear the store while tabs may be restored.
             return unknown_result(
                 {
                     **probe_info,
                     "error": (
-                        "operation_id was not found; it may have expired or belong to "
-                        "another client; do not replay tab creation"
+                        "operation_id was not found in this browser's operation store; "
+                        "it may have expired or belong to another client; inspect tabs "
+                        "without replaying tab creation"
                     ),
-                    "resume_required": True,
+                    "resume_required": False,
                 },
                 may_have_created=True,
                 retry_safe=False,
+                terminal=True,
             )
         elif probe_state != "pending":
             return unknown_result(
@@ -3552,9 +3620,9 @@ def _extension_operation_result(
         }
     else:
         payload = result
-    failure = _legacy_failure(payload)
-    if failure is not None:
-        code, message, retryable = failure
+    legacy_failure = _legacy_failure(payload)
+    if legacy_failure is not None:
+        code, message, retryable = legacy_failure
         failed = dict(payload) if isinstance(payload, dict) else {}
         failed.setdefault("status", "error")
         failed.setdefault("code", code)
@@ -3700,11 +3768,7 @@ def download_file(
         if not any(str(item.get("id")) == explicit_session_id for item in sessions):
             raise _session_target_not_found(explicit_session_id, sessions)
     else:
-        # Pin the implicit browser while other serialized tools have their
-        # temporary default-session mutations restored. Release immediately:
-        # the potentially long native download wait must not block other tools.
-        with _TOOL_LOCK:
-            client_id = _implicit_client_id()
+        client_id = _implicit_client_id()
 
     payload: dict[str, Any] = {
         "cmd": "downloads",
@@ -3969,7 +4033,8 @@ def _tab_extension_operation(
     description=(
         "Start bounded CDP Network capture on a real-browser tab. Captures requests, responses, "
         "and optionally response bodies without foregrounding the tab. Call network_capture_stop "
-        "to return the buffer and release the debugger lease."
+        "from this same MCP session to return the buffer and release the debugger lease. "
+        "Another session's capture returns capture_busy; use a separate tab per agent."
     )
 )
 def network_capture_start(
@@ -4006,7 +4071,8 @@ def network_capture_start(
     description=(
         "Stop Network capture on a real-browser tab, optionally filter returned records by URL, "
         "resource type, HTTP status range, or response-body inclusion, and release its debugger lease. "
-        "url_pattern uses the browser's JavaScript RegExp syntax and invalid patterns return a structured error."
+        "url_pattern uses the browser's JavaScript RegExp syntax and invalid patterns return a structured error. "
+        "Only the MCP session that started the capture may stop it; another session gets capture_busy."
     )
 )
 def network_capture_stop(
@@ -4043,7 +4109,8 @@ def network_capture_stop(
 @mcp.tool(
     description=(
         "Start a bounded Runtime console and exception capture on a real-browser tab without "
-        "foregrounding it. Use get_console_messages while running and console_capture_stop when done."
+        "foregrounding it. Use get_console_messages while running and console_capture_stop when done, "
+        "from this same MCP session. Another session's capture returns capture_busy; use a separate tab per agent."
     )
 )
 def console_capture_start(
@@ -4069,7 +4136,8 @@ def console_capture_start(
 @mcp.tool(
     description=(
         "Read a page of captured console messages and exceptions from a real-browser tab. "
-        "Set clear=true to clear the full buffer after reading. "
+        "Set clear=true to clear the full buffer after reading; only the capture's originating MCP session "
+        "may clear it, otherwise capture_busy is returned. Non-clearing reads are shared. "
         "Set filter='user' to exclude extension service-worker / content-script logs "
         "and keep only the page's own main-world console output."
     )
@@ -4109,7 +4177,8 @@ def get_console_messages(
 @mcp.tool(
     description=(
         "Stop console capture on a real-browser tab, return the remaining bounded message "
-        "buffer, and release its debugger lease."
+        "buffer, and release its debugger lease. Only the MCP session that started the capture "
+        "may stop it; another session gets capture_busy."
     )
 )
 def console_capture_stop(
@@ -4260,12 +4329,21 @@ def scan_page(
         # The tab never answered. Report that as a failure with the bridge's
         # own diagnosis, instead of an empty page the agent would read as
         # "this site is blank".
-        return {
+        #
+        # The operation handle travels with it. A scan that times out may still
+        # have a page script running, and dropping the id left the caller with
+        # a reserved tab it could neither poll nor release -- the next call on
+        # that tab answered target_busy with nothing to name.
+        failed: dict[str, Any] = {
             "status": "no_response",
             "active_session_id": driver.default_session_id,
             "tabs": compact_tabs(),
             "error": str(e),
         }
+        payload = getattr(e, "payload", None)
+        if isinstance(payload, dict):
+            failed.update(payload)
+        return failed
     finally:
         if session_id is not None:
             driver.default_session_id = prev_default
@@ -4337,23 +4415,79 @@ def _offscreen_note(content: Any) -> Optional[dict[str, int]]:
 
 
 # --- Tools: wait_for, wait_for_url, scroll_page ------------------------------
-_WAIT_PAGE_CHUNK_SECONDS = 4.0
-_WAIT_CALL_SLACK_SECONDS = 2.0
+_WAIT_CALL_TIMEOUT_SECONDS = 6.0
 _WAIT_RESULT_MARGIN_SECONDS = 0.5
+_WAIT_POLL_INTERVAL_SECONDS = 0.1
 
 
-def _wait_attempt_windows(remaining: float) -> tuple[float, float]:
-    """Return the in-page chunk and bridge budget for one wait attempt."""
-    call_timeout = min(
-        max(0.0, remaining),
-        _WAIT_PAGE_CHUNK_SECONDS + _WAIT_CALL_SLACK_SECONDS,
-    )
-    first_budget, _reserved = simphtml.undelivered_retry_split(call_timeout)
-    page_chunk = min(
-        _WAIT_PAGE_CHUNK_SECONDS,
-        max(0.0, first_budget - _WAIT_RESULT_MARGIN_SECONDS),
-    )
-    return page_chunk, call_timeout
+def _poll_wait_condition(
+    script: str, target_session: Optional[str], timeout: float,
+) -> tuple[dict[str, Any], Optional[str], dict[str, Any], int]:
+    """Poll synchronously; a delayed reply is collected without replaying JS."""
+    started = time.monotonic()
+    deadline = started + timeout
+    info: dict[str, Any] = {}
+    pending: dict[str, Any] = {}
+    last_error: Optional[str] = None
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            break
+        delay = _WAIT_POLL_INTERVAL_SECONDS
+        try:
+            response = None
+            if pending:
+                collect = getattr(require_driver(), "get_execute_js_result", None)
+                if not callable(collect):
+                    break
+                snapshot = collect(
+                    pending["operation_id"], timeout=min(remaining, _WAIT_CALL_TIMEOUT_SECONDS),
+                )
+                if snapshot.get("status") == "in_progress":
+                    if "reservation_held" in snapshot:
+                        pending["reservation_held"] = snapshot["reservation_held"]
+                else:
+                    pending = {}
+                    if snapshot.get("status") == "success":
+                        response = snapshot
+                    else:
+                        last_error = str(snapshot.get("error") or snapshot.get("status"))
+            else:
+                call_timeout = min(remaining, _WAIT_CALL_TIMEOUT_SECONDS)
+                first_budget, _reserved = simphtml.undelivered_retry_split(call_timeout)
+                # The worker needs time to publish the result after evaluation.
+                # A tiny final probe would leave a reservation past this timeout.
+                if first_budget <= _WAIT_RESULT_MARGIN_SECONDS:
+                    time.sleep(remaining)
+                    break
+                response = exec_js(script, session_id=target_session, timeout=call_timeout)
+            if response is not None:
+                raw = response.get("data")
+                decoded = json.loads(raw) if isinstance(raw, str) else raw
+                if not isinstance(decoded, dict):
+                    raise ValueError("wait probe returned no condition snapshot")
+                info = decoded
+        except Exception as exc:
+            last_error = str(exc)
+            info = {}
+            delay = 0.3
+            _code, _message, _retryable, details = _exception_result_metadata(exc)
+            if pending:
+                break
+            if details.get("operation_id") and details.get("delivery_state") != "undelivered":
+                pending = {
+                    "operation_id": details["operation_id"],
+                    "delivery_state": details.get("delivery_state", "sent_unconfirmed"),
+                    "reservation_held": details.get("reservation_held"),
+                    "retry_safe": False,
+                    "poll_with": "get_execute_js_result",
+                }
+        if info.get("met"):
+            break
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining > 0:
+            time.sleep(min(delay, remaining))
+    return info, last_error, pending, int((time.monotonic() - started) * 1000)
 
 
 @mcp.tool(
@@ -4362,8 +4496,9 @@ def _wait_attempt_windows(remaining: float) -> tuple[float, float]:
         "polling scan_page (each scan re-serializes the whole DOM). Exactly one of "
         "selector / text / url_pattern / js must be given: selector waits for a CSS "
         "match, text for a substring in body text, url_pattern for a regex on the URL, "
-        "js for a JS expression to become truthy. Polls inside the page, so it costs "
-        "one bridge roundtrip regardless of how long the wait takes."
+        "js for a JS expression to become truthy. The server schedules short synchronous "
+        "page checks under one deadline. A delayed reply returns its operation_id for "
+        "get_execute_js_result; it is never replayed while pending."
     )
 )
 def wait_for(
@@ -4397,9 +4532,8 @@ def wait_for(
     target_session = None
     if session_id is not None:
         target_session = switch_session(session_id=session_id)
-    # The condition is evaluated in-page on a 100ms interval, so a 30s wait is
-    # still one roundtrip. Deadline is enforced on both sides: the page resolves
-    # with timedOut, and the bridge call gets a few seconds of slack on top.
+    # Only condition evaluation runs in-page; scheduling belongs to the server
+    # so background-tab timer throttling cannot strand a page promise.
     probe = {
         "selector": "!!document.querySelector(SEL)",
         "text": "(document.body ? document.body.innerText : '').includes(SEL)",
@@ -4413,74 +4547,31 @@ def wait_for(
         structured_probe = locator_query_script(normalized_selector)
     if gone and structured_probe is None:
         expr = f"!({expr})"
-    # Wait in short in-page chunks rather than one long promise. A promise that
-    # outlives its page dies with it: injected while the tab is still navigating,
-    # it never resolves and the bridge reports ACK-but-no-result. Chunking means
-    # an unload costs one chunk, and the next chunk lands on the new document.
-    deadline = time.monotonic() + timeout
-    started = time.monotonic()
-    info: dict[str, Any] = {}
-    last_error = None
+    structured_check = ""
+    detail_fields = ""
+    if structured_probe is not None:
+        located_condition = "located.status === 'not_found'" if gone else "!!located.found"
+        structured_check = (
+            f"const located = ({structured_probe}); "
+            f"ok = {located_condition}; detail = located;"
+        )
+        detail_fields = (
+            ", locator_status: detail && detail.status, "
+            "matches: detail && detail.matches, stage: detail && detail.stage"
+        )
+    script = f"""
+    return (() => {{
+      let ok = false, err = null, detail = null;
+      try {{ {structured_check or f'ok = !!({expr});'} }} catch (e) {{ err = String(e && e.message || e); }}
+      return JSON.stringify({{met: ok, error: err, url: location.href,
+        title: document.title, ready: document.readyState{detail_fields}}});
+    }})()
+    """
     try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            chunk, call_timeout = _wait_attempt_windows(remaining)
-            structured_check = ""
-            detail_fields = ""
-            if structured_probe is not None:
-                located_condition = "located.status === 'not_found'" if gone else "!!located.found"
-                structured_check = (
-                    f"const located = ({structured_probe}); "
-                    f"ok = {located_condition}; "
-                    "detail = located;"
-                )
-                detail_fields = (
-                    ", locator_status: detail && detail.status, "
-                    "matches: detail && detail.matches, stage: detail && detail.stage"
-                )
-            script = f"""
-            return new Promise(resolve => {{
-              const start = Date.now();
-              const deadline = start + {chunk * 1000};
-              const check = () => {{
-                let ok = false, err = null, detail = null;
-                try {{ {structured_check or f'ok = !!({expr});'} }} catch (e) {{ err = String(e && e.message || e); }}
-                if (ok) return resolve(JSON.stringify({{met: true,
-                  url: location.href, title: document.title{detail_fields}}}));
-                if (Date.now() >= deadline) return resolve(JSON.stringify({{met: false,
-                  error: err, url: location.href, title: document.title,
-                  ready: document.readyState{detail_fields}}}));
-                setTimeout(check, 100);
-              }};
-              check();
-            }})
-            """
-            try:
-                # A navigation can discard an acknowledged page promise. Cap
-                # that loss to one chunk while keeping the call inside the
-                # caller's total deadline. The page chunk is derived from the
-                # first-dispatch budget so exec_js's safe undelivered reserve
-                # never makes the promise longer than the transport window.
-                resp = exec_js(script, session_id=target_session, timeout=call_timeout)
-                raw = resp.get("data")
-                info = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            except Exception as e:
-                # Page unloaded mid-wait, or the session blinked. Waiting is
-                # side-effect-free, so just try the next chunk.
-                last_error = str(e)
-                info = {}
-                retry_delay = min(0.3, max(0.0, deadline - time.monotonic()))
-                if retry_delay > 0:
-                    time.sleep(retry_delay)
-                continue
-            if info.get("met"):
-                break
+        info, last_error, pending, waited_ms = _poll_wait_condition(script, target_session, timeout)
     finally:
         if session_id is not None:
             driver.default_session_id = prev_default
-    waited_ms = int((time.monotonic() - started) * 1000)
     met = bool(info.get("met"))
     out: dict[str, Any] = {
         "status": "success" if met else "timeout",
@@ -4488,6 +4579,7 @@ def wait_for(
         "waited_ms": waited_ms,
         "url": info.get("url"),
         "title": info.get("title"),
+        **pending,
     }
     if not met:
         if info.get("locator_status"):
@@ -4510,8 +4602,8 @@ def wait_for(
         "(regex, or plain substring) and — unless wait_ready=false — document.readyState is "
         "'complete', then returns the final url, title and readyState. Use this after a click "
         "or open_url that navigates; wait_for(url_pattern=...) only checks the URL and can "
-        "return while the new document is still blank. Polls in-page, so a long wait is "
-        "still cheap."
+        "return while the new document is still blank. The server schedules short synchronous "
+        "page checks. Delayed replies retain their operation_id for get_execute_js_result."
     )
 )
 def wait_for_url(
@@ -4534,9 +4626,6 @@ def wait_for_url(
     target_session = None
     if session_id is not None:
         target_session = switch_session(session_id=session_id)
-    # 与 wait_for 同样的分块策略：一个 promise 活不过它所在的 document，导航中注入的
-    # 等待会随页面卸载一起死掉、永不 resolve。分块后卸载只损失一块，下一块落在新
-    # 文档里 —— 这对"等导航落定"尤其重要，因为这里本来就预期页面会换。
     # 正则匹配不上时退一步按子串匹配：调用方多半直接贴了一个 URL 进来（'?'、'.'
     # 在正则里另有含义），静默等不到不如两种都试。
     pattern_json = json.dumps(pattern)
@@ -4547,49 +4636,16 @@ def wait_for_url(
     )
     if wait_ready:
         probe = f"({probe} && document.readyState === 'complete')"
-    deadline = time.monotonic() + timeout
-    started = time.monotonic()
-    info: dict[str, Any] = {}
-    last_error = None
+    script = f"""
+    return (() => {{
+      let ok = false, err = null;
+      try {{ ok = !!{probe}; }} catch (e) {{ err = String(e && e.message || e); }}
+      return JSON.stringify({{met: ok, error: err, url: location.href,
+        title: document.title, ready: document.readyState}});
+    }})()
+    """
     try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            chunk, call_timeout = _wait_attempt_windows(remaining)
-            script = f"""
-            return new Promise(resolve => {{
-              const deadline = Date.now() + {chunk * 1000};
-              const snap = (met) => JSON.stringify({{met, url: location.href,
-                title: document.title, ready: document.readyState}});
-              const check = () => {{
-                let ok = false, err = null;
-                try {{ ok = !!{probe}; }} catch (e) {{ err = String(e && e.message || e); }}
-                if (ok) return resolve(snap(true));
-                if (Date.now() >= deadline) {{
-                  const out = JSON.parse(snap(false));
-                  if (err) out.error = err;
-                  return resolve(JSON.stringify(out));
-                }}
-                setTimeout(check, 100);
-              }};
-              check();
-            }})
-            """
-            try:
-                resp = exec_js(script, session_id=target_session, timeout=call_timeout)
-                raw = resp.get("data")
-                info = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            except Exception as e:
-                # 页面在等待中卸载，或会话眨了一下眼。等待本身没有副作用，下一块重试。
-                last_error = str(e)
-                info = {}
-                retry_delay = min(0.3, max(0.0, deadline - time.monotonic()))
-                if retry_delay > 0:
-                    time.sleep(retry_delay)
-                continue
-            if info.get("met"):
-                break
+        info, last_error, pending, waited_ms = _poll_wait_condition(script, target_session, timeout)
     finally:
         if session_id is not None:
             driver.default_session_id = prev_default
@@ -4597,11 +4653,12 @@ def wait_for_url(
     out: dict[str, Any] = {
         "status": "success" if met else "timeout",
         "url_pattern": pattern,
-        "waited_ms": int((time.monotonic() - started) * 1000),
+        "waited_ms": waited_ms,
         "url": info.get("url"),
         "title": info.get("title"),
         "ready_state": info.get("ready"),
         "waited_for_ready": bool(wait_ready),
+        **pending,
     }
     if not met:
         if info.get("error"):
@@ -4709,22 +4766,25 @@ def _serialize_execute_js_value(value: Any) -> bytes:
 
 def _write_execute_js_payload(payload: bytes) -> tuple[Path, int, str]:
     """Write a completed, private JSON payload to a unique temporary file."""
+    descriptor: Optional[int]
     descriptor, filename = tempfile.mkstemp(
         prefix="browsertap-execute-js-",
         suffix=".json",
     )
     path = Path(filename)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
+        stream = os.fdopen(descriptor, "wb")
+        descriptor = None
+        with stream as output:
+            output.write(payload)
+            output.flush()
     except BaseException:
-        # os.fdopen may have taken ownership before the write failed; closing
-        # again is harmlessly guarded, and the partial file is never published.
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+        # fdopen owns the descriptor once it returns, even if writing fails.
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
             path.unlink()
         except OSError:
@@ -4789,6 +4849,9 @@ def _normalize_execute_js_dialog_result(result: dict[str, Any]) -> dict[str, Any
         normalized["handled"] = bool(wrapped.get("handled"))
     if "pending_execution" in wrapped:
         normalized["pending_execution"] = bool(wrapped.get("pending_execution"))
+        if normalized["pending_execution"] and normalized.get("operation_id"):
+            normalized["reservation_held"] = True
+            normalized["poll_with"] = "get_execute_js_result"
     if isinstance(wrapped.get("error"), dict):
         normalized["error"] = dict(wrapped["error"])
     dialogs = wrapped.get("dialogs")
@@ -4998,6 +5061,7 @@ def execute_js(
                 ]
                 if preferred:
                     candidates = preferred
+            candidates = _browser_candidates(candidates, current=prev_default)
             target_sid = str(candidates[0]["id"])
             dispatch_sid = target_sid
             driver.default_session_id = target_sid
@@ -5006,6 +5070,7 @@ def execute_js(
     tab_id: Optional[int] = None
     ext_cmd = getattr(driver, "ext_cmd", None)
     primary_error: Optional[BaseException] = None
+    execution_pending = False
     try:
         if dispatch_sid is not None and callable(ext_cmd):
             client_id, tab_id = _split_session_target(dispatch_sid)
@@ -5110,6 +5175,9 @@ def execute_js(
                 session_id=target_sid,
                 wait=False,
             )
+            execution_pending = bool(raw.get("reservation_held")) or raw.get("status") == "in_progress" or raw.get("delivery_state") in {
+                "sent_unconfirmed", "delivered_no_result",
+            }
             if raw.get("status") == "in_progress":
                 result = dict(raw)
                 result["tab_id"] = result.get("executed_tab_id")
@@ -5117,15 +5185,13 @@ def execute_js(
                 result["monitoring"] = False
                 return result
             if "data" in raw:
-                result = {
-                    "status": "success",
-                    "js_return": raw.get("data"),
-                    "tab_id": raw.get("executed_tab_id"),
-                }
-                if raw.get("operation_id"):
-                    result["operation_id"] = raw["operation_id"]
-                if raw.get("newTabs"):
-                    result["newTabs"] = raw["newTabs"]
+                result = {key: value for key, value in raw.items()
+                          if key not in {"data", "executed_tab_id"}}
+                result.update({"status": "success", "js_return": raw.get("data"),
+                               "tab_id": raw.get("executed_tab_id")})
+                execution_pending = execution_pending or bool(
+                    isinstance(raw["data"], dict) and raw["data"].get("pending_execution")
+                )
                 return _externalize_execute_js_result(
                     _normalize_execute_js_dialog_result(result)
                 )
@@ -5143,15 +5209,24 @@ def execute_js(
             session_id=target_sid,
             deadline=deadline,
         )
+        execution_pending = bool(result.get("reservation_held")) or result.get("delivery_state") in {
+            "sent_unconfirmed", "delivered_no_result",
+        }
         return _externalize_execute_js_result(
             _normalize_execute_js_dialog_result(result)
         )
     except BaseException as exc:
         primary_error = exc
+        error_diagnostics = getattr(exc, "diagnostics", None) or {}
+        execution_pending = execution_pending or bool(
+            getattr(exc, "reservation_held", False) or error_diagnostics.get("reservation_held")
+        ) or (getattr(exc, "delivery_state", None) or error_diagnostics.get("delivery_state")) in {
+            "sent_unconfirmed", "delivered_no_result",
+        }
         raise
     finally:
         try:
-            if (scope_token is not None and tab_id is not None
+            if (not execution_pending and scope_token is not None and tab_id is not None
                     and client_id is not None and callable(ext_cmd)):
                 clear: dict[str, Any] = {"cmd": "clear_dialog_policy", "tabId": tab_id}
                 if scope_token is not None:
@@ -5177,7 +5252,7 @@ def execute_js(
                 driver.default_session_id = prev_default
 
 
-@mcp.tool(description="Read or briefly wait for the result of one execute_js operation_id returned by wait=false or by an acknowledged synchronous timeout. This call never replays the script. Results are retained for 10 minutes and consumed once; timeout may be 0-120 seconds.")
+@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. A pending operation keeps its tab reserved while other tabs remain usable.")
 def get_execute_js_result(
     operation_id: str,
     timeout: float = 0.0,
@@ -5313,8 +5388,7 @@ def save_pdf(
     page_ranges: str = "",
     timeout: float = 30.0,
 ) -> dict[str, Any]:
-    if not str(save_path).strip():
-        raise ValueError("save_path must not be empty")
+    path = _validate_safe_path(save_path, description="save_path")
     if not 0.1 <= float(scale) <= 2.0:
         raise ValueError("scale must be between 0.1 and 2.0")
     if not 0.1 <= float(timeout) <= 120.0:
@@ -5344,17 +5418,7 @@ def save_pdf(
     if len(raw) < 8 or not raw.startswith(b"%PDF-"):
         raise RuntimeError("save_pdf failed: decoded data is not a valid PDF document")
 
-    # Validate path to prevent traversal outside allowed directory
-    path = _validate_safe_path(save_path, description="save_path")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        temporary.write_bytes(raw)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    _atomic_write_bytes(path, raw)
     return {
         "status": "success",
         "saved_to": str(path),
@@ -5382,9 +5446,11 @@ def debugger_targets(session_id: Optional[str] = None) -> dict[str, Any]:
 @mcp.tool(description="Run a CDP bridge batch command; pass the full JSON command object as text.")
 def cdp_batch(batch_json: str, session_id: Optional[str] = None) -> dict[str, Any]:
     payload = json.loads(batch_json)
+    if not isinstance(payload, dict):
+        raise ValueError("batch_json must be a JSON object with cmd='batch'")
     if payload.get("cmd") != "batch":
         raise RuntimeError("batch_json must be a JSON object with cmd='batch'")
-    return exec_js(json.dumps(payload), session_id=session_id, timeout=30.0)
+    return _extension_batch(payload, session_id=session_id, timeout=30.0)
 
 
 _PAGE_CHALLENGES = ChallengeAttemptTracker(max_attempts=3, window_seconds=120)
@@ -5535,27 +5601,17 @@ def _resolve_page_input_session(
     if not sessions:
         raise RuntimeError(
             "No connected browser tabs. Load the unpacked extension from the "
-            "reported extension path, keep this MCP server running via Hermes, "
+            "reported extension path, keep the bridge daemon running, "
             "and open a normal http/https page in Chrome."
         )
 
     # A caller that named no tab expressed no preference, so avoid pages Chrome
     # cannot script when another live target exists. Preserve the old fallback
     # when every connected page is restricted.
+    candidates = _browser_candidates(sessions, current=current)
     candidates = [
-        item for item in sessions if is_scriptable_url(item.get("url"))
-    ] or sessions
-    preferred_browser = os.environ.get(
-        "BROWSERTAP_PREFERRED_BROWSER", ""
-    ).strip().lower()
-    if preferred_browser:
-        preferred = [
-            item
-            for item in candidates
-            if str(item.get("browser", "")).lower() == preferred_browser
-        ]
-        if preferred:
-            candidates = preferred
+        item for item in candidates if is_scriptable_url(item.get("url"))
+    ] or candidates
     target = str(candidates[0]["id"])
     driver.default_session_id = target
     return target
@@ -5658,10 +5714,7 @@ def _run_page_input(
                 )
             unwrapped = response.get("data") if isinstance(response, dict) else response
             if isinstance(unwrapped, dict) and unwrapped.get("ok") is False:
-                raise RuntimeError(
-                    "page input batch failed: "
-                    f"{unwrapped.get('error') or 'unknown extension error'}"
-                )
+                raise PageExecutionError(unwrapped)
             return unwrapped
 
         result = dispatch(input_commands)
@@ -5759,6 +5812,17 @@ def _page_selector_info(
     return raw
 
 
+def _page_type_target_script(selector: str | dict[str, Any], clear: bool) -> str:
+    normalized = selector if selector == "" else normalize_locator(selector)
+    return (
+        type_target_script(normalized, select_all=clear)
+        if isinstance(normalized, str)
+        else structured_locator_script(
+            normalized, purpose="type", select_all=clear
+        )
+    )
+
+
 def _page_type_target_info(
     selector: str | dict[str, Any],
     clear: bool,
@@ -5767,16 +5831,8 @@ def _page_type_target_info(
 ) -> dict[str, Any]:
     # An empty selector is the legacy focused-element mode. Structured locator
     # validation only applies when the caller actually supplied a selector.
-    normalized = selector if selector == "" else normalize_locator(selector)
-    script = (
-        type_target_script(normalized, select_all=clear)
-        if isinstance(normalized, str)
-        else structured_locator_script(
-            normalized, purpose="type", select_all=clear
-        )
-    )
     response = exec_js(
-        script,
+        _page_type_target_script(selector, clear),
         session_id=session_id,
         timeout=timeout,
     )
@@ -5932,12 +5988,19 @@ def page_click(
                 ),
             }
 
-        resolved_x = before.get("x")
-        resolved_y = before.get("y")
+        geometry: dict[str, float] = {}
+        for name in ("x", "y", "width", "height"):
+            value = before.get(name, 0) if name in ("width", "height") else before.get(name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or (name in ("width", "height") and value < 0)):
+                raise RuntimeError(f"selector resolver returned invalid geometry: {name}")
+            geometry[name] = value
+        resolved_x = geometry["x"]
+        resolved_y = geometry["y"]
         if offset_x is None:
-            resolved_x += before.get("width", 0) / 2
+            resolved_x += geometry["width"] / 2
         if offset_y is None:
-            resolved_y += before.get("height", 0) / 2
+            resolved_y += geometry["height"] / 2
         before_marker = before.get("challengeMarker")
         if before_marker is not None:
             blocked_attempts = _blocked_page_challenge_attempts(
@@ -6108,18 +6171,10 @@ def page_type(
             ):
                 target_session = current
             else:
-                candidates = sessions
-                preferred_browser = os.environ.get(
-                    "BROWSERTAP_PREFERRED_BROWSER", ""
-                ).strip().lower()
-                if preferred_browser:
-                    preferred = [
-                        session for session in sessions
-                        if str(session.get("browser", "")).lower()
-                        == preferred_browser
-                    ]
-                    if preferred:
-                        candidates = preferred
+                candidates = _browser_candidates(sessions, current=previous_default)
+                candidates = [
+                    item for item in candidates if is_scriptable_url(item.get("url"))
+                ] or candidates
                 target_session = str(candidates[0]["id"])
                 driver.default_session_id = target_session
         resolution_budget = max(0.0, deadline - time.monotonic())
@@ -6139,15 +6194,20 @@ def page_type(
             focus_info["focus_confirmed"] = bool(target_info.get("focusConfirmed"))
         if "previousActiveElement" in target_info:
             focus_info["previous_active_element"] = target_info.get("previousActiveElement")
-        if not target_info.get("found"):
+        if not target_info.get("found") or target_info.get("focusConfirmed") is False:
             return {
-                "status": target_info.get("status", "not_found"),
+                "status": (
+                    "focus_failed" if target_info.get("found")
+                    else target_info.get("status", "not_found")
+                ),
                 "session_id": target_session,
                 "input_mode": "cdp",
                 "foreground_changed": False,
                 "target": target,
                 "target_kind": target_info.get("targetKind", "missing"),
                 "typed_chars": 0,
+                "input_dispatched": False,
+                "retryable": False,
                 **focus_info,
                 **({"matches": target_info["matches"]} if target_info.get("matches") is not None else {}),
                 **({"stage": target_info["stage"]} if target_info.get("stage") else {}),
@@ -6165,24 +6225,84 @@ def page_type(
             raise TimeoutError(
                 "page_type deadline cannot fit the xterm submit delay"
             )
-        # The resolver above focused/selected the exact sink. Dispatch only the
-        # trusted text/key portion after it positively identified a target.
+        ext_cmd = getattr(driver, "ext_cmd", None)
+        runtime = {}
+        if callable(ext_cmd):
+            client_id, _ = _split_session_target(target_session)
+            runtime = _extension_data(ext_cmd(
+                {"cmd": "bridge_status"}, client_id=client_id, timeout=input_budget
+            ))
+        capabilities = runtime.get("capabilities")
+        if not isinstance(capabilities, dict) or capabilities.get("batch_result_guard") is not True:
+            return {
+                "status": "stale_extension",
+                "error_code": "batch_result_guard_required",
+                "session_id": target_session,
+                "input_mode": "cdp",
+                "foreground_changed": False,
+                "target": target,
+                "target_kind": target_kind,
+                "typed_chars": 0,
+                "input_dispatched": False,
+                "required_capability": "batch_result_guard",
+                "next_action": "reload_extension",
+            }
+        input_budget = max(0.0, deadline - time.monotonic())
+        if input_budget <= 0:
+            raise TimeoutError("page_type deadline exhausted during capability check")
+        # Re-resolve immediately before input in the same attached CDP batch.
+        # The extension must stop the batch if focus or editability was lost.
         # Xterm forwards insertText to its backend asynchronously, so yield once
         # before Enter without breaking the single attached CDP batch.
-        commands = type_commands(
+        target_script = _page_type_target_script(selector, clear)
+        # `cmd` is what handleBatch dispatches on. Without it the guard was
+        # recorded as `unknown cmd: undefined` and the batch carried on typing,
+        # so the re-resolution below protected nothing -- measured live: result
+        # [{ok:false, error:"unknown cmd: undefined"}, {}, {}, {}].
+        guard = {
+            "cmd": "cdp",
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": (
+                    f"(() => {{ const target = {target_script}; "
+                    "return target.found === true && target.focusConfirmed === true; })()"
+                ),
+                "returnByValue": True,
+            },
+            "assertTruthy": True,
+        }
+        commands = [guard, *type_commands(
             selector if isinstance(selector, str) else "",
             text,
             select_all=clear,
             submit_key=submit_key or None,
             submit_delay_ms=submit_delay_ms,
-        )[1:]
-        out = _run_page_input(
-            commands,
-            target_session,
-            input_budget,
-            session_validated=True,
-            deadline=deadline,
-        )
+        )[1:]]
+        try:
+            out = _run_page_input(
+                commands,
+                target_session,
+                input_budget,
+                session_validated=True,
+                deadline=deadline,
+            )
+        except PageExecutionError as exc:
+            if exc.error_code != "batch_guard_failed":
+                raise
+            return {
+                "status": "focus_failed",
+                "error_code": exc.error_code,
+                "session_id": target_session,
+                "input_mode": "cdp",
+                "foreground_changed": False,
+                "target": target,
+                "target_kind": target_kind,
+                "typed_chars": 0,
+                "input_dispatched": False,
+                "focus_confirmed": False,
+                "retryable": False,
+                "diagnostics": exc.diagnostics,
+            }
         out["target"] = target
         out["target_kind"] = target_kind
         out["typed_chars"] = len(text)
@@ -6282,11 +6402,11 @@ def upload_files(
              "params": {"nodeId": "$1.nodeId", "files": files}},
         ],
     }
-    result = exec_js(json.dumps(batch), session_id=session_id, timeout=timeout)
-    # The extension's batch reply arrives as a BARE ARRAY — ws.onmessage does
-    # `res.data ?? res.results ?? res` and handleBatch returns {ok, results},
-    # so `data` here is the results list, not a wrapper dict. Only the error
-    # path (handleBatch catch) surfaces as {ok:false, error, results}.
+    result = _extension_batch(batch, session_id=session_id, timeout=timeout)
+    # The extension's batch reply arrives as a BARE ARRAY — handleBatch returns
+    # {ok, results} and both the WS envelope and the bridge's ext_cmd unwrap it
+    # to the results list, so `data` here is the list, not a wrapper dict. Only
+    # the error path (handleBatch catch) surfaces as {ok:false, error, results}.
     data = result.get("data")
     if isinstance(data, dict) and data.get("ok") is False:
         raise RuntimeError(f"upload failed: {data.get('error')}")
@@ -6678,13 +6798,70 @@ def reset_site_permissions(
 
 
 # --- Cookie writes: CDP path with a document.cookie fallback -----------------
+def _resolve_cdp_target(
+    session_id: Optional[str], tab_id: Optional[int],
+) -> tuple[str, str, int]:
+    """Resolve ``(session_id, client_id, tab_id)`` for an extension-routed CDP call.
+
+    An explicit composite session names both the browser client and the tab; a
+    bare ``tab_id`` borrows the client of the current default (or the only
+    connected browser); neither means the remembered default, re-picked when
+    stale exactly like every other implicit page call.
+    """
+    if session_id is not None:
+        client_id, session_tab = _split_session_target(str(session_id))
+    else:
+        client_id, session_tab = _split_session_target(switch_session())
+    target_tab = int(tab_id) if tab_id is not None else session_tab
+    return f"{client_id}:{target_tab}", client_id, target_tab
+
+
 def _cdp(method: str, params: dict[str, Any], session_id: Optional[str],
          tab_id: Optional[int], timeout: float) -> Any:
-    payload: dict[str, Any] = {"cmd": "cdp", "method": method, "params": params}
-    if tab_id is not None:
-        payload["tabId"] = tab_id
-    return exec_js(json.dumps(payload), session_id=session_id,
-                   timeout=timeout).get("data")
+    # Routed through ext_cmd, never as a text script: since the cmd/code split
+    # the extension evaluates whatever arrives in `code` as page JavaScript, so
+    # a JSON envelope sent that way died with `SyntaxError: Unexpected token ':'`
+    # and every cookie write silently took the document.cookie fallback --
+    # HttpOnly dropped, `status: ok` reported. `_direct_cdp` keeps the text
+    # fallback for the one case it is safe in: an old router that answers
+    # `unknown cmd`.
+    target_sid, client_id, target_tab = _resolve_cdp_target(session_id, tab_id)
+    return _direct_cdp(
+        method, params, session_id=target_sid, client_id=client_id,
+        tab_id=target_tab, timeout=timeout,
+    )
+
+
+def _extension_batch(
+    payload: dict[str, Any], *, session_id: Optional[str], timeout: float,
+) -> dict[str, Any]:
+    """Send one ``batch`` envelope to the extension's command router.
+
+    Same reason as ``_cdp``: a batch is an extension command, so it travels on
+    the ``cmd`` field. ``exec_js`` remains only for a driver without ``ext_cmd``
+    (embedded/fake drivers) or a router that explicitly reports ``unknown cmd``;
+    a timeout or transport failure is never replayed through the text route,
+    because the batch may already have run. The reply keeps the historical
+    shape: ``{"data": <results list | {ok: false, ...}>}``.
+    """
+    timeout = _positive_timeout(timeout)
+    deadline = time.monotonic() + timeout
+    driver = require_driver()
+    ext_cmd = getattr(driver, "ext_cmd", None)
+    if not callable(ext_cmd):
+        return exec_js(json.dumps(payload), session_id=session_id, timeout=timeout)
+    target_sid, client_id, target_tab = _resolve_cdp_target(session_id, None)
+    wire = dict(payload)
+    wire.setdefault("tabId", target_tab)
+    try:
+        return ext_cmd(wire, client_id=client_id, timeout=timeout)
+    except BaseException as exc:
+        fallback_budget = max(0.0, deadline - time.monotonic())
+        if isinstance(exc, TimeoutError) or fallback_budget <= 0:
+            raise
+        if not _unknown_command_error(exc):
+            raise
+        return exec_js(json.dumps(payload), session_id=target_sid, timeout=fallback_budget)
 
 
 def _cookie_via_document(cookie: dict[str, Any], session_id: Optional[str],

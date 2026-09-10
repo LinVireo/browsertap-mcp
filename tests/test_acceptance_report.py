@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts import acceptance_report as A
 from scripts import evidence_manifest as E
 
@@ -76,6 +78,18 @@ def _passing_lint_report():
         "violations_truncated": False,
         "problems": [],
         "javascript": _passing_js_lint_report(),
+        "types": _passing_type_lint_report(),
+    }
+
+
+def _passing_type_lint_report():
+    return {
+        "tool": "mypy", "tool_version": "mypy 1.11.2", "available": True,
+        "enforced": True, "unavailable_reason": None, "check_untyped_defs": True,
+        "targets": ["src/browsertap_mcp"], "files_scanned": 2, "files_expected": 2,
+        "files": ["src/browsertap_mcp/server.py", "src/browsertap_mcp/browser_bridge.py"],
+        "exit_code": 0, "status": "clean", "violation_count": 0, "violations": [],
+        "violations_truncated": False, "problems": [],
     }
 
 
@@ -120,7 +134,7 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
     (artifacts / "coverage.json").write_text(
         json.dumps(
             {
-                "totals": {"percent_covered": 89.12},
+                "totals": {"percent_covered": 96.12},
                 "files": {
                     "src\\browsertap_mcp\\server.py": {
                         "summary": {"percent_covered": 83.56}
@@ -201,7 +215,7 @@ def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
     assert data["objective_score_total"] == sum(A.GATE_WEIGHTS.values())
     assert data["release_ready"] is True
     assert data["version"] == "9.9.9"
-    assert data["code_coverage"] == 89.12
+    assert data["code_coverage"] == 96.12
     assert data["per_file_coverage"]["status"] == "ok"
     assert data["per_file_coverage"]["below"] == []
     assert data["per_file_coverage"]["weakest"] == {
@@ -350,7 +364,7 @@ def test_a_structural_problem_forfeits_the_release_even_with_every_gate_green(
 
 
 def test_a_module_rotting_away_fails_the_coverage_gate(monkeypatch, tmp_path):
-    """The 85% gate is an average, and an average hides a dead module.
+    """The total gate is an average, and an average hides a dead module.
 
     `bridge.py` is where the platform-specific daemon code lives and the least
     covered file in the package; the total stayed comfortably above the line the
@@ -361,7 +375,7 @@ def test_a_module_rotting_away_fails_the_coverage_gate(monkeypatch, tmp_path):
     (tmp_path / "artifacts" / "coverage.json").write_text(
         json.dumps(
             {
-                "totals": {"percent_covered": 89.12},
+                "totals": {"percent_covered": 96.12},
                 "files": {
                     "src\\browsertap_mcp\\server.py": {
                         "summary": {"percent_covered": 97.0}
@@ -377,7 +391,7 @@ def test_a_module_rotting_away_fails_the_coverage_gate(monkeypatch, tmp_path):
 
     data = A.build_report_data()
 
-    assert data["code_coverage"] == 89.12
+    assert data["code_coverage"] == 96.12
     per_file = data["per_file_coverage"]
     assert per_file["status"] == "ok"
     assert per_file["floor"] == A.PER_FILE_COVERAGE_FLOOR
@@ -407,6 +421,18 @@ def test_coverage_without_per_file_data_is_not_a_pass(monkeypatch, tmp_path):
     assert data["per_file_coverage"]["measured"] == 0
     assert data["gates"]["code_coverage"] is False
     assert "per-file coverage unavailable" in A.render_report(data)
+
+
+@pytest.mark.parametrize("percent,passes", [(94.99, False), (95.0, True), (98.0, True)])
+def test_total_coverage_requires_ninety_five_percent(monkeypatch, tmp_path, percent, passes):
+    _seal_release_evidence(monkeypatch, tmp_path)
+    path = tmp_path / "artifacts" / "coverage.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["totals"]["percent_covered"] = percent
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    report = A.build_report_data()
+    assert report["gates"]["code_coverage"] is passes
+    assert "gate 95.00%" in A.render_report(report)
 
 
 def test_dirty_sealed_tree_forfeits_every_evidence_bound_gate(monkeypatch, tmp_path):
@@ -790,3 +816,37 @@ def test_a_lint_artifact_with_no_javascript_half_fails_the_gate(monkeypatch, tmp
 
     assert data["gates"]["lint"] is False
     assert "records no JavaScript half" in data["lint_summary"]
+
+
+@pytest.mark.parametrize("types", [
+    None,
+    {"status": "clean"},
+    {"status": "unavailable", "unavailable_reason": 'pip install -e ".[dev]"'},
+])
+def test_a_release_requires_type_check_evidence(monkeypatch, tmp_path, types):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    if types is not None:
+        report["types"] = types
+    else:
+        report.pop("types", None)
+    (tmp_path / "artifacts/lint.json").write_text(json.dumps(report), encoding="utf-8")
+    ok, reason = A._lint_status(manifest)
+    assert ok is False
+    assert "type" in reason.lower()
+
+
+@pytest.mark.parametrize("changes", [
+    {"status": "violations", "violation_count": 1, "exit_code": 1},
+    {"exit_code": 2}, {"enforced": False}, {"enforced": "true"},
+    {"available": False}, {"check_untyped_defs": False},
+    {"files_scanned": 0}, {"files_expected": 3}, {"files": []},
+    {"files": ["src/a.py", "src/a.py"]}, {"violation_count": "0"},
+    {"problems": ["type check did not finish"]},
+])
+def test_type_check_result_cannot_be_a_vacuous_pass(monkeypatch, tmp_path, changes):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    report = _passing_lint_report()
+    report["types"].update(changes)
+    (tmp_path / "artifacts/lint.json").write_text(json.dumps(report), encoding="utf-8")
+    assert A._lint_status(manifest)[0] is False

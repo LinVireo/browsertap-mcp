@@ -61,7 +61,7 @@ jobs:
         run: >-
           python -m pytest tests -q
           --cov=browsertap_mcp
-          --cov-fail-under=85
+          --cov-fail-under=95
           --cov-report=term-missing
           --cov-report=xml
           --cov-report=json:artifacts/coverage.json

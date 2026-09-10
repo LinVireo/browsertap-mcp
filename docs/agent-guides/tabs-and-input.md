@@ -146,6 +146,29 @@ Three things must survive an edit here:
   probe, and scrolling can move an ancestor frame too, which invalidates them.
   Framed targets refuse instead, which is why the scroll is guarded by `!framed`.
 
+Two wire-shape rules, each learned from a tool that reported success while doing
+nothing (measured live, 2026-09-10):
+
+- **Every batch command carries `"cmd": "cdp"`, and every command envelope goes
+  through `ext_cmd`, never through `exec_js` as text.** `handleBatch` dispatches
+  on `c.cmd`; the `page_type` guard was sent without it, recorded as
+  `unknown cmd: undefined`, and the batch typed anyway -- `batch_guard_failed`
+  could not fire. Since the cmd/code split the extension evaluates whatever
+  arrives in `code` as page JavaScript, so `set_cookies`, `delete_cookies`,
+  `cdp_batch` and `upload_files` sent as `json.dumps(payload)` died with
+  `SyntaxError: Unexpected token ':'` -- the cookie tools silently through the
+  `document.cookie` fallback. Route with `_cdp` / `_extension_batch`; the text
+  route is only for a router that explicitly answers `unknown cmd`. Tests that
+  fake only `exec_js` reach the *real* bridge once the route moves; fake
+  `ext_cmd` and make `execute_js` raise.
+- **A keyDown without `text` is a rawKeyDown in all but name.** Chrome fires
+  `keypress` -- the character, a textarea newline, implicit form submission on
+  Enter -- only when `text` is present. `press_commands` attaches it for
+  presses without Ctrl/Alt/Meta (`"\r"` for Enter, the character otherwise) and
+  deliberately not for modifier chords, so Ctrl+A selects instead of inserting
+  an "a". Live assertions must read `keypress` / `submit`, not `keydown`: the
+  suite was green on `keydown` while `submit_key="Enter"` submitted nothing.
+
 ## 8. Odds and ends
 
 - If a manual `execute_js` debugging session left a CDP debugger attached, the

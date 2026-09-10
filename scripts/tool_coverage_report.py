@@ -118,7 +118,7 @@ def _run_evidence(node_ids: Iterable[str], *, timeout: int) -> dict[str, Any]:
         results: dict[tuple[str, str], str] = {}
         if junit_path.is_file():
             try:
-                root = ET.parse(junit_path).getroot()
+                root = ET.parse(junit_path).getroot()  # noqa: S314 - local pytest JUnit artifact
             except (ET.ParseError, OSError):
                 root = None
             if root is not None:

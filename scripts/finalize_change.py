@@ -97,7 +97,7 @@ def _run_gates(skip_live: bool) -> None:
         "tests",
         "-q",
         "--cov=browsertap_mcp",
-        "--cov-fail-under=85",
+        "--cov-fail-under=95",
         "--cov-report=term-missing",
         "--cov-report=json:artifacts/coverage.json",
         "--junitxml=artifacts/offline-junit.xml",

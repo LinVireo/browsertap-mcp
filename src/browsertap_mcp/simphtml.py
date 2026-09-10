@@ -1,9 +1,12 @@
 import difflib
+import html as html_module
 import json
 import logging
 import re
 import time
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, NavigableString
 
@@ -103,7 +106,7 @@ def _href_ref(url, link_refs, base_url):
         # open_url can navigate to.
         try:
             url = urljoin(base_url, url)
-        except Exception:
+        except Exception:  # noqa: S110 - malformed base URLs fall back to the original href
             pass
     ref = link_refs.get(url)
     if ref is None:
@@ -205,7 +208,7 @@ def start_temp_monitor(driver, timeout=15, session_id=None, ttl=None):
     """
     if ttl is None: ttl = float(timeout) + TEMP_MONITOR_TTL_GRACE
     try: _execute_in_session(driver, build_temp_monitor_js(ttl), timeout, session_id=session_id)
-    except Exception: pass
+    except Exception: pass  # noqa: S110 - monitor cleanup is best-effort
 
 
 # Stopping the monitor and reading what it collected are two different needs: the
@@ -265,7 +268,13 @@ def get_temp_texts(driver, timeout=15, session_id=None):
         logger.debug("Temporary monitor read failed: %s", e)
         return []
 
-from urllib.parse import urljoin
+# Which fields survive from a no-response wire reply into the exception. These
+# are routing and delivery facts, never page content: a caller needs to know
+# which operation to poll and whether the tab is still reserved.
+_OPERATION_PAYLOAD_KEYS = (
+    'operation_id', 'delivery_state', 'retry_safe', 'reservation_held',
+    'poll_with', 'operation_status', 'error_code',
+)
 
 
 class PageUnavailable(RuntimeError):
@@ -275,7 +284,33 @@ class PageUnavailable(RuntimeError):
     downstream and either divide by zero in the cutlist ratio or make the
     agent believe the page was blank, throwing away the bridge's own
     diagnosis of WHY it didn't answer.
+
+    ``payload`` carries the routing facts the bridge already reported next to
+    that diagnosis -- above all ``operation_id``. A message-only exception
+    threw the handle away, and the handle is the only way to collect a result
+    that arrives after this call gave up: without it the caller sees a tab it
+    cannot use and an operation it cannot name. The same keys are also set as
+    attributes, so the server's exception path reads them the same way it
+    reads a ``PageExecutionError``.
     """
+
+    def __init__(self, message, *, payload=None):
+        super().__init__(message)
+        # Filtered here rather than at the construction sites, so a caller that
+        # hands over a whole wire reply cannot put page content on the failure
+        # envelope. One whitelist, one reader.
+        source = payload if isinstance(payload, dict) else {}
+        self.payload = {
+            key: source[key] for key in _OPERATION_PAYLOAD_KEYS
+            if source.get(key) is not None
+        }
+        # An id with no stated way to use it is a dead end for the caller, so
+        # the pair is completed here rather than at each construction site.
+        if self.payload.get('operation_id') and not self.payload.get('poll_with'):
+            self.payload['poll_with'] = 'get_execute_js_result'
+        for key, value in self.payload.items():
+            setattr(self, key, value)
+
 
 def _collapsed_text(page):
     """One space between words, at most one blank line between blocks.
@@ -286,7 +321,7 @@ def _collapsed_text(page):
     cells and a trailing space after a heading exactly where they were, and text
     lifted off a real page is full of both.
     """
-    kept = []
+    kept: list[str] = []
     for line in page.split('\n'):
         text = ' '.join(line.split())
         # A blank line survives only if the last kept line was not blank: the
@@ -319,10 +354,22 @@ def _page_from_response(raw):
     # A timeout carries no 'data' at all, only 'result' with the reason.
     if 'data' not in raw:
         reason = raw.get('result') or 'no data returned'
+        # The whole reply is handed over; PageUnavailable keeps only the
+        # routing keys, so page content cannot ride along.
+        followup = (
+            " Collect it with get_execute_js_result before retrying."
+            if raw.get('operation_id') else ""
+        )
         raise PageUnavailable(
-            f"{reason}. Run list_tabs to see live tabs, then switch_tab to the one you meant.")
+            f"{reason}. Run list_tabs to see live tabs, then switch_tab to the one you meant."
+            f"{followup}",
+            payload=raw,
+        )
     page = raw.get('data')
     if page is None:
+        # A reply that carried 'data' reached this process, so there is no
+        # in-flight operation to collect -- the handle here would name one that
+        # is already settled.
         raise PageUnavailable(
             "page returned null instead of HTML. Run list_tabs / switch_tab to confirm the target tab.")
     return page
@@ -413,7 +460,7 @@ def find_changed_elements(before_html, after_html):
         appeared.extend(after[new_start:new_end])
         vanished += old_end - old_start
 
-    summary = {"changed": len(appeared) + vanished}
+    summary: dict[str, Any] = {"changed": len(appeared) + vanished}
     if appeared:
         rendered = str(max(appeared, key=lambda element: len(str(element))))
         summary["top_change"] = (
@@ -509,6 +556,8 @@ def _collapse_list(soup, selector, instruction):
 
 def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
              text_only=False, timeout=15, link_refs=None, session_id=None):
+    if isinstance(maxchars, bool) or not isinstance(maxchars, int) or maxchars < 0:
+        raise ValueError("maxchars must be a non-negative integer")
     if cutlist and not text_only and not extra_js.strip():
         rr, page = _get_cutlist_page(driver, extra_js, timeout, session_id)
         if page is _CUTLIST_FALLBACK:
@@ -543,7 +592,7 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
     # Hard cap before parsing: BeautifulSoup on a multi-MB page dominates the
     # call's latency, and callers only ever see maxchars of it anyway.
     if isinstance(page, str) and len(page) > 1_500_000: page = page[:1_500_000]
-    if text_only: return page
+    if text_only: return _limit_chars(page, maxchars)
     base_url = None
     if isinstance(page, str):
         m = re.search(r'<!--btap-base:(.*?)-->', page)
@@ -559,7 +608,9 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
         del div['data-tag']
     html = str(soup)
     if not cutlist:
-        return html
+        if len(html) > maxchars:
+            html = str(smart_truncate(soup, maxchars))
+        return _limit_chars(html, maxchars, markup=True)
     # `listGroups` answers with one entry per repeated block, but a single dict
     # and a non-answer are both shapes this has had to read, so the reply is
     # normalised before anything looks for a selector inside it.
@@ -585,7 +636,28 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
         html = cut
     if len(html) > maxchars:
         html = str(smart_truncate(soup, maxchars))
-    return html
+    return _limit_chars(html, maxchars, markup=True)
+
+
+def _limit_chars(text, budget, *, markup=False):
+    """Enforce the serialized cap, including tag overhead and preserved hints."""
+    if len(text) <= budget:
+        return text
+    marker = '...[TRUNCATED]'
+    if markup:
+        # Wrapper tags or preserved hints can exhaust even the smallest cap.
+        # A bounded text fragment remains readable without emitting a cut tag.
+        plain = BeautifulSoup(text, 'html.parser').get_text(' ', strip=True)
+        room = max(0, budget - len(marker))
+        lower, upper = 0, min(len(plain), room)
+        while lower < upper:
+            middle = (lower + upper + 1) // 2
+            if len(html_module.escape(plain[:middle], quote=False)) <= room:
+                lower = middle
+            else:
+                upper = middle - 1
+        return html_module.escape(plain[:lower], quote=False) + marker[:budget]
+    return text[:max(0, budget - len(marker))] + marker[:budget]
 
 # A child bigger than this keeps its own structure: it is subdivided by another
 # round of allocation rather than having its serialised text sliced, so the
@@ -652,6 +724,7 @@ def smart_truncate(soup, budget, _depth=0):
         return soup
     children = [node for node in soup.children if node.name and not _is_hint(node)]
     if not children:
+        _clip_markup(soup, budget)
         return soup
 
     sizes = [len(str(node)) for node in children]
@@ -670,7 +743,7 @@ def smart_truncate(soup, budget, _depth=0):
         smart_truncate(children[0], inner_budget, _depth)
         return soup
 
-    for node, size, keep in zip(children, sizes, _allocate(sizes, inner_budget)):
+    for node, size, keep in zip(children, sizes, _allocate(sizes, inner_budget), strict=True):
         if keep >= size:
             continue
         logger.debug(
@@ -698,29 +771,25 @@ MONITOR_MAXCHARS = 300000
 def no_response_kind(response):
     """Classify a driver timeout pseudo-result.
 
-    'undelivered' is the retry-safe class: either the script provably never left
-    the bridge, or it was written to a live socket and never acknowledged, which
-    the ACK-before-execute protocol makes overwhelmingly likely to mean "did not
-    run". These two are one *kind* on purpose — every caller's retry policy is
-    the same for both — but the driver keeps them apart in ``delivery_state``
-    ('undelivered' vs 'sent_unconfirmed') for callers whose work is
-    irreversible. 'after_ack' means it was delivered and may still be running,
-    so retrying could double side effects.
+    'undelivered' is retry-safe only when the bridge proves that the payload
+    never left or its HTTP queue was never polled. The 'after_ack' bucket also
+    covers a lost ACK: delivery is unknown, so retrying could repeat a mutation.
     """
     if not isinstance(response, dict) or 'data' in response: return None
     delivery_state = response.get('delivery_state')
     structured = {
         'undelivered': 'undelivered',
-        'sent_unconfirmed': 'undelivered',
+        'sent_unconfirmed': 'after_ack',
         'delivered_no_result': 'after_ack',
         'navigated': 'navigated',
-    }.get(delivery_state)
+    }.get(delivery_state) if isinstance(delivery_state, str) else None
     if structured: return structured
     # Compatibility with bridge versions that predate structured delivery
     # metadata. New callers must not derive policy from this human text.
     msg = response.get('result')
     if not isinstance(msg, str): return None
-    if 'no ACK' in msg or 'script not polled' in msg: return 'undelivered'
+    if 'script not polled' in msg: return 'undelivered'
+    if 'no ACK' in msg: return 'after_ack'
     if 'ACK received' in msg or 'delivered but no result' in msg: return 'after_ack'
     # The page unloaded before the result came back (click -> navigation, the
     # single most common action). This is NOT a timeout and NOT a success: the
@@ -809,6 +878,10 @@ def _execution_error_metadata(exc, script):
         code = 'page_access_denied' if access_denied else 'page_execution_failed'
 
     diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+    for name in ('delivery_state', 'operation_id', 'reservation_held', 'poll_with', 'operation_status'):
+        value = getattr(exc, name, None)
+        if value is not None:
+            diagnostics[name] = value
     if dispatched is not None:
         diagnostics['dispatched'] = bool(dispatched)
     if may_have_executed is not None:
@@ -930,6 +1003,7 @@ def execute_js_rich(
     newTabs = []
     response = {}
     blocked_dialog = False
+    execution_pending = False
     retried = False
     error_code = None
     error_retryable = False
@@ -946,15 +1020,16 @@ def execute_js_rich(
             )
         else:
             response = {
+                'delivery_state': 'undelivered',
                 'result': (
                     f"No response data in {configured_timeout}s "
-                    "(no ACK, total execute_js deadline exhausted)"
+                    "(script not sent, total execute_js deadline exhausted)"
                 )
             }
         if no_response_kind(response) == 'undelivered' and phase_timeout():
             # Never reached the page (session asleep / SW reconnecting): retry
             # only with the time still left in the original budget.
-            logger.warning("No ACK; retrying once within the remaining deadline")
+            logger.warning("Script not delivered; retrying once within the remaining deadline")
             retried = True
             response = _execute_in_session(
                 driver,
@@ -968,12 +1043,16 @@ def execute_js_rich(
             and result.get('__btap_dialog_result') is True
             and result.get('status') == 'blocked_by_dialog'
         )
+        execution_pending = bool(response.get('reservation_held')) or bool(
+            isinstance(result, dict) and result.get('__btap_dialog_result') is True
+            and result.get('pending_execution') is True
+        )
         if response.get('closed', 0) == 1:
             reloaded = True
         # Only the transient monitor consumes this settling window. A
         # no-monitor call returns immediately after the result, and a failed
         # baseline or a reloaded page has no post-call monitor/diff to sample.
-        if monitor_started and not reloaded and not blocked_dialog and not no_response_kind(response):
+        if monitor_started and not reloaded and not execution_pending and not no_response_kind(response):
             time.sleep(min(1.0, _remaining(deadline)))
     except Exception as e:
         error_msg = _error_text(e)
@@ -1002,12 +1081,29 @@ def execute_js_rich(
         "js_return": result,
         "tab_id": tab_id_field,
     }
+    if response.get('operation_id'):
+        rr['operation_id'] = response['operation_id']
+    for key in ('reservation_held', 'operation_status', 'delivery_state', 'session_id'):
+        if key in response:
+            rr[key] = response[key]
+    if execution_pending:
+        rr['reservation_held'] = True
+        if rr.get('operation_id'):
+            rr['poll_with'] = 'get_execute_js_result'
     if error_code:
         rr['error_code'] = error_code
         rr['retryable'] = bool(error_retryable)
         rr['retry_safe'] = bool(error_retryable)
     if error_diagnostics:
         rr['diagnostics'] = error_diagnostics
+        for key in ('delivery_state', 'operation_id', 'reservation_held', 'poll_with', 'operation_status'):
+            if key in error_diagnostics:
+                rr[key] = error_diagnostics[key]
+        if error_diagnostics.get('reservation_held'):
+            rr.setdefault('delivery_state', 'delivered_no_result')
+            rr.setdefault('operation_status', 'outcome_unknown')
+        if rr.get('operation_id'):
+            rr.setdefault('poll_with', 'get_execute_js_result')
     if error_hint:
         rr['hint'] = error_hint
     if reloaded: rr['reloaded'] = reloaded
@@ -1042,14 +1138,20 @@ def execute_js_rich(
         rr['suggestion'] = "The script ran and the page navigated. Verify landed_url; rerun only a read operation on the new page if a result is needed."
     elif kind and not error_msg:
         rr['status'] = 'no_response'
-        # Pass the driver's own verdict through when it has one: 'undelivered'
-        # and 'sent_unconfirmed' share a retry policy but not a guarantee, and
-        # collapsing them here would hide that from the caller. Derive from kind
-        # only for pre-structured bridges.
-        rr['delivery_state'] = response.get('delivery_state') or (
-            'undelivered' if kind == 'undelivered' else 'delivered_no_result'
-        )
+        # Preserve transport evidence; a lost ACK proves neither delivery nor
+        # non-delivery. Only pre-structured bridges need the text fallback.
+        delivery_state = response.get('delivery_state')
+        if not delivery_state:
+            if kind == 'undelivered':
+                delivery_state = 'undelivered'
+            elif 'no ACK' in response.get('result', ''):
+                delivery_state = 'sent_unconfirmed'
+            else:
+                delivery_state = 'delivered_no_result'
+        rr['delivery_state'] = delivery_state
         rr['retry_safe'] = kind == 'undelivered'
+        if rr.get('operation_id'):
+            rr['poll_with'] = 'get_execute_js_result'
         # Report whether the in-deadline retry actually ran instead of asking the
         # caller to trust prose about it. False means the budget was too small to
         # reserve a retry window, so a caller-side retry is the only one there is.
@@ -1063,12 +1165,21 @@ def execute_js_rich(
             )
         else:
             rr['suggestion'] = (
-                "The script was delivered but did not return before timeout. If it only waited "
+                ("Delivery was not confirmed; the script may already have executed. "
+                 if delivery_state == 'sent_unconfirmed' else
+                 "The script was delivered but did not return before timeout. ")
+                + "If it only waited "
                 "with setTimeout/sleep, replace that wait with wait_for or wait_for_url; do not "
                 "embed waits in execute_js. Otherwise inspect with scan_page before retrying side "
                 "effects; only retry read operations with a longer timeout."
             )
-    if blocked_dialog:
+            if rr.get('operation_id'):
+                rr['suggestion'] = (
+                    "The script may still be running and its tab remains reserved. "
+                    "Use get_execute_js_result with this operation_id to collect its result; "
+                    "do not replay the script."
+                )
+    if blocked_dialog or execution_pending:
         if response.get('newTabs'):
             rr['newTabs'] = response['newTabs']
         return rr

@@ -10,66 +10,76 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 
 [Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Privacy](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
-A Model Context Protocol (MCP) server that drives **the real Chrome you are already using — without taking the screen away from you.** It attaches to your running browser through a Chrome extension and the Chrome DevTools Protocol, so logins, cookies, and open tabs are already there. Three things follow from being an extension on your own machine rather than a browser someone launched for automation: a *selected* tab is not a *foreground* tab, so page work runs in the tab you named while you keep using the screen; `page_click`, `page_type`, `page_press`, and `page_drag` dispatch trusted input events *inside that tab*, without moving your cursor or raising a window; and the whole `chrome.*` surface is in scope — extension management, bookmarks, scoped site-permission leases, downloads through Chrome's own manager with your profile's cookies.
+**Browser automation for the Chrome, Edge, or Opera you already use.**
+BTAP connects your MCP client to a browser extension, reusing your open tabs and
+logged-in profile. Your agent can read pages, fill forms, download attachments,
+and inspect network activity. Page input runs in the selected tab in the
+background by default, without moving your desktop cursor.
 
-If what you need is a clean, disposable browser — headless, Docker, CI, Firefox or WebKit — this is the wrong tool and [playwright-mcp](https://github.com/microsoft/playwright-mcp) is the right one. See [When to use something else](#when-to-use-something-else).
-
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
-
-There is no OS-level mouse or keyboard surface. The seven tools that drove the whole desktop were removed in **0.5.0**; input goes through the `page_*` tools, which dispatch trusted CDP events inside a named tab without moving your cursor. One narrowly scoped physical path is left: `resolve_leave_dialog` can send Enter after two protocol-level attempts fail, and only in `lab`. It stays gated, not casual — the cross-process lock, quiet-input gate, target activation, and on-screen confirmation all still apply, and `safe` asks first.
+BTAP controls a real browser profile, not a disposable sandbox. Give it access
+only to accounts and data that the connected agent may use. First-time extension
+installation is manual; [setup](#start-in-60-seconds) and [security](#disclaimers)
+are below.
 
 ## Start in 60 seconds
 
-Three steps. Each one is spelled out in full under **Getting started** below,
-with the Windows PowerShell paths and the config for every supported client.
+Three setup steps; the manual browser step may take longer than a minute.
 
-```bash
-# 1. Install from PyPI into a virtual environment.
-python -m venv .venv && ./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
-./.venv/bin/browsertap extension-path   # prints the directory step 2 needs
+1. **Install** in a virtual environment and locate the extension:
 
-# 2. Load that directory into Chrome by hand -- no command for this one; see below.
+   ```bash
+   python -m venv .venv
+   ./.venv/bin/python -m pip install browsertap-mcp
+   ./.venv/bin/browsertap extension-path
+   ```
 
-# 3. Point your MCP client at that same executable (Claude Code shown).
-claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
-```
+   On Windows PowerShell, use `.\.venv\Scripts\python.exe` and
+   `.\.venv\Scripts\browsertap.exe`. The optional desktop fallback requires
+   `pip install "browsertap-mcp[desktop]"` in that same environment; ordinary
+   page and browser tools do not need it.
 
-On Windows the same three commands use `.\.venv\Scripts\python.exe` and
-`.\.venv\Scripts\browsertap.exe`.
+2. **Load the extension manually.** Open `chrome://extensions`, enable
+   **Developer mode**, choose **Load unpacked**, and select the printed
+   directory. Open a normal `http://` or `https://` page for page tools.
 
-**Nothing here needs the virtual environment activated.** The commands above
-spell out `./.venv/bin/browsertap` on purpose, and that explicit form works
-everywhere. Later sections write it as plain `browsertap` for brevity — read
-those as the same explicit path unless you happen to have the venv activated,
-in which case the bare name resolves too. MCP client config must *always* carry
-the full path either way, because your client does not inherit your shell — see
-[Add the server to your client](#3-add-the-server-to-your-client).
+3. **Connect your MCP client** to the installed executable. For Claude Code:
 
-**Step 2 is manual, and it is the slow one.** There is no Chrome Web Store
-listing yet, so the extension is loaded by hand: open `chrome://extensions`, turn
-on **Developer mode**, click **Load unpacked**, and pick the directory
-`extension-path` printed. Then open an ordinary `http://` or `https://` page --
-`about:blank` runs no content script, so no session is established.
+   ```bash
+   claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
+   ```
 
-Then ask your agent *what tabs do I have open?* If the list comes back empty, run
-`browsertap doctor`: it names one `cause` and the one matching `advice`.
+   Other clients and Windows paths are covered in
+   [Getting started](#getting-started). Virtual-environment activation is not
+   required when using explicit executable paths.
+
+Ask the agent: **"List my open tabs, then summarize the page I select without
+navigating or closing it."** If the connection fails or no expected tab appears,
+run `browsertap doctor` from the installed environment and follow its `action`.
+Later commands use the short name `browsertap`; use its full path when it is not
+on your `PATH`.
+
+## Documentation by audience
+
+| Reader | Start here |
+| --- | --- |
+| Installing or using BTAP | This README, then the [usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) for workflows and boundaries. |
+| Diagnosing a local setup | [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md), with the output of `browsertap doctor`. |
+| An agent calling BTAP tools | The client's live tool schemas and the optional [caller skills](#agent-skills-optional). |
+| A human or agent changing BTAP | [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md); coding agents also read [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md). |
+
+The [Tools](#tools) section is the complete parameter reference for this source
+tree. For an installed release, use documentation from its matching tag;
+development checkouts can contain unreleased changes. Runtime capabilities
+come from the connected server, not from a different version of the README.
 
 ## Key features
 
-- **Real browser, real session** — attaches to your running Chrome/Edge/Opera. Logged-in sites, cookies, and page context are preserved.
-- **Background by default** — a *selected* tab is not a *foreground* tab. `switch_tab` retargets without raising anything, and page work runs in the tab you named while you keep using the screen.
-- **Page reading** — scan any page into simplified HTML or text, sized for a model's context. Long links are shortened to `#r1` refs and the real URLs come back alongside, so a results page stays both small and navigable.
-- **JavaScript execution** — run arbitrary JS in the page.
-- **Background page input** — `page_click`, `page_type`, `page_press`, and `page_drag` dispatch trusted CDP input events at *viewport* coordinates inside one named tab, without moving your cursor or changing which tab is visible.
-- **Destructive confirmation forms** — For repository deletion, payment, account closure, and similar multi-stage dialogs, re-scan after every stage click because sites may replace the DOM and reuse button ids. Enter exact confirmation text with `page_type` and finish with `page_click`; do not set `.value` or call `.click()` through `execute_js`. Locators skip hidden template matches and require a visible, interactable candidate. The CDP input is trusted in-page (`isTrusted=true`), so OS-level keyboard or mouse is not required.
-- **Waiting and scrolling** — wait for a selector, text, URL, or JS condition; scroll and re-scan long pages. `scan_page` reports how much it left outside the viewport instead of dropping it silently.
-- **Explicit dialog policies** — `alert`, `confirm`, `prompt`, and `beforeunload` each get a per-call `dismiss`/`accept`/`manual` policy and are reported truthfully; `handle_dialog` resolves one that is left open.
-- **Temporary site permissions** — grant notifications, geolocation, camera, or microphone to one origin for 60–600 seconds; the prior setting is restored automatically.
-- **Native CDP access** — single commands or batches. Addressable by tab, extension id, or target id.
-- **Authenticated native downloads** — download attachments through Chrome's download manager with the active browser profile's cookies, wait for completion, and receive the verified local path.
-- **Tab-less operation** — extension management, CDP target listing, and tab listing/closing go straight to the extension's service worker, so they work even with zero tabs open.
-- Page **screenshots** — page capture via CDP is returned as MCP image content and can also be saved to disk, under `~/Downloads/browsertap` by default. A model without image support must use `scan_page`, page APIs, or OCR to inspect content.
-- **Multi-browser** — Chrome, Edge, and Opera can all connect to one bridge at the same time without clobbering each other's sessions.
+- **Read and inspect pages:** simplified HTML/text, JavaScript, screenshots, and bounded network/console captures.
+- **Interact in a background tab:** `page_click`, `page_type`, `page_press`, and `page_drag` use trusted CDP input without moving the desktop cursor.
+- **Use the existing profile:** authenticated downloads, cookies, storage, bookmarks, extensions, and temporary site-permission leases.
+- **Control interruptions:** explicit dialog policies, condition-based waiting, and operation handles for collecting delayed results without replaying an action.
+- **Separate concurrent tasks:** explicit browser/tab targets and owner-aware cleanup. Different tabs can run concurrently; shared-profile state is not isolated.
+- **Connect multiple browsers:** one bridge can serve Chrome, Edge, Opera, and multiple profiles. Browser-level operations can work without a page tab.
 
 ## Capability model
 
@@ -92,7 +102,7 @@ interface that matches the task:
 
 `resolve_leave_dialog` remains a page-scoped, lab-only recovery workflow; its
 final Enter fallback is a restricted exception, not a general desktop surface.
-The live registry is returned by `get_setup_status().capability_registry`, so a
+The live registry is returned in `get_setup_status`'s `data.capability_registry`, so a
 client can inspect the actual tool inventory instead of guessing from package
 extras or documentation. Each entry also reports whether a target is none,
 optional, or required, whether the operation reads, writes, or may do either,
@@ -100,49 +110,25 @@ and whether desktop opt-in is involved. Every public tool now returns the
 `btap.result.v1` envelope without renaming tools: successful operation data is
 in `data`, explicit legacy failure payloads remain in `legacy`, and
 `error`/`error_code`, `retryable`, `target`, and `diagnostics` provide stable
-machine-readable status. Established operation keys are still projected at
-the top level for compatibility.
+machine-readable status. Failures also set MCP `isError=true`. Arrays, objects,
+HTML, and other large bodies are read from `data` or `legacy`; only small scalar
+operation fields are projected at the top level for compatibility. Use the
+envelope's retry verdict: an explicit `retry_safe=false` or possible execution
+overrides a connection error's usual retry hint.
 
 ## When to use something else
 
-Reusing the browser you are already logged into is **not** unique to this
-project, and a comparison that pretended otherwise would waste your time.
-[playwright-mcp](https://github.com/microsoft/playwright-mcp) has an
-`--extension` mode that attaches to your running Chrome for the same reason, and
-it is the better tool for most jobs:
+Use BTAP when the task depends on your existing Chromium profile and should
+normally stay in a background tab. It is not a headless test runner, does not
+support Firefox/WebKit, and does not provide general desktop automation.
 
-- **You want it installed in one step.** playwright-mcp's extension comes from
-  the Chrome Web Store. This one is `Load unpacked` from a directory, by hand,
-  and Chrome shows a developer-mode warning for as long as it stays that way.
-- **Headless, Docker, or CI.** Deliberately out of scope here — the premise is a
-  browser a person is sitting in front of, which is why there is no Docker image
-  (see *Requirements*).
-- **Firefox or WebKit.** Chromium only here; this is a Chrome extension plus CDP.
-- **An accessibility-tree snapshot with stable `ref` handles.** playwright-mcp's
-  snapshots are its main way of reading a page. `scan_page` gives you simplified
-  HTML or text with `#r1`-style link refs instead, which is a different trade.
-- **A smaller default tool surface.** playwright-mcp ships roughly two dozen
-  tools by default and puts the rest behind `--caps`. This server registers all
-  49 unconditionally, with no way to trim them, so a client whose tool list
-  grows past its context budget must filter them itself. If that is a blocker
-  for you, this is one point where [playwright-mcp](https://github.com/microsoft/playwright-mcp)
-  has the more flexible design.
-
-What is left, and what this project is actually for:
-
-- **Background by default.** `switch_tab` retargets without raising anything, so
-  the agent works in one tab while you keep using the screen. A tool that
-  launched its own browser has no reason to offer this.
-- **Trusted input into a tab that is not in front.** `page_click`, `page_type`,
-  `page_press`, and `page_drag` dispatch CDP input events at viewport
-  coordinates in the named tab, so a click lands on a page you are not looking
-  at and your cursor never moves. This is the input path; the desktop-level
-  tools were removed in 0.5.0.
-- **The whole `chrome.*` surface** — extension management, `call_extension`,
-  bookmarks, timed site-permission leases, and downloads through Chrome's own
-  manager with your profile's cookies. Playwright is not an extension and cannot
-  reach these.
-- **Work with zero tabs open**, because the service worker is enough.
+For isolated browser tests or accessibility-snapshot-based workflows, compare
+[Playwright MCP](https://github.com/microsoft/playwright-mcp). For DevTools-led
+debugging and performance analysis, compare
+[Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp).
+Reusing a live browser is not unique to BTAP; choose by the task and the APIs
+you need. BTAP exposes all 49 tools, so clients that need a smaller tool set
+must filter it themselves.
 
 ## Requirements
 
@@ -167,7 +153,7 @@ extra is only needed for the remaining lab-only physical fallback:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install "browsertap-mcp[desktop]"
+.\.venv\Scripts\python.exe -m pip install browsertap-mcp
 .\.venv\Scripts\browsertap.exe extension-path
 ```
 
@@ -175,7 +161,7 @@ python -m venv .venv
 
 ```bash
 python -m venv .venv
-./.venv/bin/python -m pip install "browsertap-mcp[desktop]"
+./.venv/bin/python -m pip install browsertap-mcp
 ./.venv/bin/browsertap extension-path
 ```
 
@@ -192,7 +178,7 @@ straight out of the tree:
 git clone https://github.com/LinVireo/browsertap-mcp.git
 cd browsertap-mcp
 python -m venv .venv
-./.venv/bin/python -m pip install -e ".[desktop]"
+./.venv/bin/python -m pip install -e ".[dev,desktop]"
 ./.venv/bin/browsertap extension-path
 ```
 
@@ -400,6 +386,11 @@ That directory contains:
 | `browsertap-default/SKILL.md` | The calling contract: pick a target before acting, open your own tab for anything that mutates a page, close it in cleanup, and how to react to `no_response` / `switched_session` / `bridge_error`. |
 | `browsertap-bridge-recovery/SKILL.md` | Recovery when the transport itself is down: which of the three components is stale, and the one restart or reload that fixes it. |
 
+These are instructions for an agent using BTAP, not for an agent editing BTAP's
+source. Coding rules and test commands belong in
+[AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md) and
+[Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md).
+
 Point your client's skill manager **at that directory** rather than copying the
 files. A copy looks correct for as long as the contents happen to agree, then
 silently stops receiving updates when you upgrade the package. If you keep copies
@@ -408,16 +399,20 @@ DIR` compares them against the shipped originals and names whichever one drifted
 
 ### Upgrade
 
-An upgrade is three steps, not one: the three parts do not become current at the
-same moment, and step 3 fails silently if you skip it.
+The marker below is maintained with this source tree. It is not proof that a
+development checkout has been published; compare the installed package with its
+release tag before using new tool signatures or the 0.5.0 migration notes.
 
-1. Update the package — `pip install -U "browsertap-mcp[desktop]"`, or `git pull`
-   in a source checkout. A new MCP session picks this up immediately.
-2. `browsertap bridge --restart`. The daemon is long-lived and outlives
-   every MCP session, so until it restarts it keeps serving the old code.
-3. Open `chrome://extensions` and press **Reload** on the extension. Its files
-   were replaced on disk, but Chrome keeps running the build it already loaded,
-   and no command can make it re-read them.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
+
+The three components load updates separately:
+
+1. Update the installed package with `pip install -U browsertap-mcp` (keep
+   `[desktop]` if you use that extra), then restart its MCP session.
+2. Run `browsertap doctor`. If it requests `restart_bridge`, use
+   `browsertap bridge --restart` to load the daemon's updated code.
+3. If it requests `reload_extension`, open `chrome://extensions` and press
+   **Reload** on BrowserTap Bridge. Extension source changes require that manual step.
 
 `browsertap doctor` reports which part is stale and names the one action
 that fixes it: `reload_extension`, `restart_bridge`, or `restart_mcp_session`.
@@ -441,8 +436,8 @@ The other two will not help, so read the field rather than doing all three.
 Three layers:
 
 1. **Chrome extension** (MV3) — injected into real pages, reaches `tabs`, `cookies`, `debugger`, and `management` through Chrome APIs.
-2. **BrowserBridge** — a local daemon on `127.0.0.1:18765` (WebSocket) and `:18766` (HTTP). It owns the extension connections, tracks sessions, and relays results. It runs detached from any MCP instance, and the MCP server starts it on demand with no console window. A `session_id` is the current `clientId:tabId` handle, not a permanent tab identity; connected rows may also carry `tab_identity`. Several browsers and profiles coexist.
-3. **MCP server** — exposes the whole thing as MCP tools.
+2. **BrowserBridge** — a local daemon on `127.0.0.1:18765` (WebSocket) and `:18766` (HTTP). It owns the extension connections, tracks sessions, and relays results. It runs detached from any MCP instance, and the MCP server starts it on demand with no console window. `client_id` identifies one connected browser/profile instance; `session_id` is its current composite `clientId:tabId` handle, not a permanent tab identity. Connected rows may also carry `tab_identity`. Several browsers and profiles coexist.
+3. **MCP server** — exposes the whole thing as MCP tools. Each agent's MCP process keeps its own selected target and tab ownership registry.
 
 Two channels reach the browser: a per-tab session channel, and a direct channel to the extension's service worker. The second one is why some tools keep working when every tab is closed.
 
@@ -454,7 +449,7 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Two pixel units, and the screenshot does not use the one you click with.** Viewport coordinates are **CSS pixels** — the space `getBoundingClientRect` reports. A page screenshot comes back in **device pixels**, which is CSS × `devicePixelRatio`, so at 125% display scaling a point read off the picture is 25% too large for `page_click`; `capture_page_screenshot` reports `image_width`/`image_height` and `pixel_space: "device"` so the factor is visible instead of assumed. Reading a point off a picture is the one path with no hit test — prefer a `scan_page` selector, which is checked against the page before anything is dispatched.
 
-**Automation profiles.** With `BROWSERTAP_MODE` unset, BTAP defaults to `lab` with `BROWSERTAP_LAB_NO_ELICIT=1` semantics: physical input and site `allow` proceed without elicitation. `safe` prompts for every action. Both profiles keep the cross-process lock, quiet-input gate, target activation, ownership protection, and `on_screen` check, so higher authority never means stale or misdirected input. The quiet gate's reach is bounded by what the OS exposes rather than by the profile; `input_quiet.enforced` in the result says whether it could observe this machine at all.
+**Automation profiles.** With `BROWSERTAP_MODE` unset, BTAP defaults to `lab` with `BROWSERTAP_LAB_NO_ELICIT=1` semantics. Lab permits site `allow` and the restricted leave-dialog fallback without elicitation; `safe` prompts for each site `allow` and refuses the physical Enter fallback. Neither profile is a confirmation prompt for every browser action. Ownership and target checks still apply, and the physical path keeps its OS lock, quiet-input gate and `on_screen` check. `input_quiet.enforced` says whether comparable input markers were available.
 
 **Dialogs are explicit.** `execute_js(dialog_policy=...)`, `open_url(beforeunload=...)`, and `handle_dialog(action=...)` take `dismiss` (default), `accept`, or `manual`. The global default still preserves the page; only an explicit accept or lab's configured shell/IDE host heuristic leaves automatically. `handle_dialog` answers within three seconds or reports `no_dialog`/an explicit error. `resolve_leave_dialog` tries protocol accept twice and uses physical Enter only as a final, lab-approved fallback.
 
@@ -466,15 +461,49 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 ### Tab ownership in concurrent tasks
 
-Classify every tab before using it. A **U (user) tab** existed in the first `list_tabs` snapshot; do not close it or navigate it by default. An **A (agent) tab** is created by this task's `open_new_tab`; save its `session_id`, `generation`, and `owner_id`, pass that explicit session to every operation, and call `close_tabs(..., owner_id=...)` in cleanup. A **B (borrowed) tab** is a temporarily used U tab; record its `original_url`, restore that URL when the tab still exists, and never close it.
+Classify every tab before using it. A **U (user) tab** existed in the first `list_tabs` snapshot; do not close it or navigate it by default. An **A (agent) tab** is created by this task's `open_new_tab`; save its `session_id`, `generation`, and `owner_id`, pass that explicit session to every operation, and call `close_tabs(..., owner_id=...)` in cleanup. A **B (borrowed) tab** is a temporarily used U tab; record its `original_url` and never close it. Restore a URL changed by this task only after confirming the same tab lifecycle still exists and the user has not since navigated it elsewhere.
 
-Decision order: run `list_tabs`; borrow an existing match only for read-only/light work; open an A tab for searches, filters, sorting, pagination, scrolling, expand/collapse, navigation, forms, or other actions that change the page view or state; open an A tab when no match exists; finally close only A tabs. Never register the initial tab snapshot as owned, close a U/B tab, depend on the shared default session, reuse an old native tab id, omit generation-aware cleanup, or leak an A tab. Separate concurrent tasks should use separate A tabs instead of competing for the same U tab.
+Decision order: run `list_tabs`; borrow an existing match only for read-only/light work; open an A tab for searches, filters, sorting, pagination, scrolling, expand/collapse, navigation, forms, or other actions that change the page view or state; open an A tab when no match exists; finally close only A tabs. Never register the initial tab snapshot as owned, close a U/B tab, omit the explicit target for state changes, reuse an old native tab id, omit generation-aware cleanup, or leak an A tab.
+
+For parallel agents, use **a separate A tab per agent and explicit `session_id`
+on each call**. Different tabs can run concurrently both within one MCP process
+and across independent MCP processes. Each process has its own default tab;
+agents sharing a process also share that default, so `switch_tab` is not an
+agent identity. Each call snapshots its target, and an explicitly targeted call
+does not change another call's target or the process default.
+
+A cooperative target lock covers each complete MCP call and its internal browser
+roundtrips. A competing call to the same tab returns `target_busy`. The bridge
+also reserves the target of each dispatched command: `wait=false` and response
+timeouts keep that reservation until a definitive browser result or a confirmed tab
+lifecycle end. Claim an `execute_js` result with `get_execute_js_result` from the
+same MCP session; do not replay a script whose result is pending. Direct `/link`
+and Python driver calls receive the bridge's per-command reservation, but need
+an MCP command scope for the lock across multiple browser roundtrips.
+
+A debugger timeout or detach can leave JavaScript running. Polling then reports
+`status=in_progress`, `operation_status=outcome_unknown`, and
+`reservation_held=true`; it does not permit replay. Manual dialogs keep the same
+reservation, and only the originating MCP session can call `handle_dialog`.
+Handling a dialog does not prove the script finished: when the extension cannot
+return its final result, the operation remains `outcome_unknown`. The caller can
+close its own tab with `close_tabs(..., owner_id=...)` to end that lifecycle.
+
+Console and network capture mutations belong to the MCP session that started
+them. Another session cannot restart, stop, or clear that capture (`capture_busy`);
+ordinary page operations and non-clearing console reads remain available. After
+the owning MCP process has exited, another session can reclaim its capture.
+Process exit alone does not cancel page JavaScript or release a pending target;
+the tab owner can close its own tab to recover. Agents
+sharing one MCP process share this ownership too. These guards do not make a
+multi-step workflow atomic or isolate cookies/storage shared by a profile.
 
 ### Structured statuses and recovery fields
 
-Expected interruptions come back as a `status` field, not an exception:
+Read `ok` and `error_code` first; operation statuses remain in `data`/`legacy`
+and as small top-level compatibility fields. Failures set MCP `isError=true`:
 
-| `status` | Meaning |
+| `status` / `error_code` | Meaning |
 |---|---|
 | `ok` / `success` | Completed and verified as far as the protocol allows. |
 | `redirected` | Navigation landed on a different URL than requested (login wall, SSO, canonical rewrite). |
@@ -486,6 +515,9 @@ Expected interruptions come back as a `status` field, not an exception:
 | `triggered` with `type="download"` | `open_url` was replaced by a browser download. `ERR_ABORTED` can be normal only when CDP also reports `isDownload=true`; use `download_file` for completion and the local path. |
 | `requires_user_action` | Approval was declined, cancelled, or unavailable — nothing was done. |
 | `busy` | Another BTAP process holds the physical-input lock, or the tab already has a pending manual execution. Returned immediately, never queued. |
+| `target_busy` | This tab is reserved by another call or a still-pending browser command. Check `delivery_state` and `retry_safe`; a call involving multiple tabs may have completed earlier steps. |
+| `capture_busy` | Another MCP session owns this console/network capture. Its owner must stop it before another session can restart, stop, or clear it. |
+| `ambiguous_browser` | Several browser/profile instances match and no unique browser was selected. Use `list_tabs`, then pass the chosen full `session_id` (or `client_id` where supported). |
 | `input_activity_detected` | You used the mouse or keyboard during the post-approval quiet window, so no physical input was sent. |
 | `activation_failed` | The target tab could not be confirmed on screen, so no physical input was sent. |
 | `unsupported` | The browser or extension API cannot provide this (e.g. clipboard permission leases). |
@@ -495,9 +527,17 @@ Expected interruptions come back as a `status` field, not an exception:
 | `bridge_error` | A bridge call failed. It may appear as `error_code` or a diagnostic field rather than the top-level status; run `list_tabs`/`doctor` before retrying. |
 | `switched_session` | Supplemental field indicating that only an implicit dead default was replaced with another live tab. Verify the new target before continuing; explicitly directed dead sessions are never substituted. |
 
+For delivery failures, only `delivery_state="undelivered"` proves the operation
+was not sent. `sent_unconfirmed` means its ACK or HTTP response is missing, so it
+must not trigger an automatic replay. Treat `delivered_no_result`, `navigated`,
+and unknown delivery as potentially executed; recover by operation ID when one
+is available and inspect the page before deciding the next action.
+
 ## Disclaimers
 
-This server drives your real browser and your real desktop. Anything it can do, you can do — and it inherits every session you are logged into.
+This server exposes your real browser profile to the connected MCP client,
+including logged-in sessions. Its scope is browser automation, with only the
+restricted physical leave-dialog fallback described below.
 
 - One physical-input path is left after 0.5.0: `resolve_leave_dialog`'s Enter fallback, `lab` only, and only after two protocol-level attempts fail. It is real OS-level input rather than a synthetic page event, so it lands on whatever is on screen; `safe` refuses to send it at all. The `page_*` tools carry none of this exposure.
 - Page content is untrusted input. A page your agent reads can attempt prompt injection, and the tools available make that consequential.
@@ -515,19 +555,31 @@ permission and loopback threat model.
 
 ## Tools
 
-Most tools accept an optional `session_id` to target one specific tab; omitting it uses the current target. Pass it explicitly for anything that changes state — the shared default is a single value every task on this bridge sees, and another task retargeting it is exactly how a click lands on the wrong page. Session ids look like `chrome_a1b2c3:456`; they are current handles, so pass them verbatim and never split them. If Chrome reports an evidence-backed replacement for that same tab, BTAP returns `rebound_from`, `replacement_session_id`, and `tab_identity`; otherwise an explicit stale handle is refused. Tools marked **no tab needed** talk to the extension's service worker and work with zero tabs open.
+Most tools accept an optional `session_id` to target one specific tab; omitting it
+uses this MCP process's current target. Pass it explicitly for state changes.
+`client_id` distinguishes connected browser/profile instances; `session_id` is a
+composite handle such as `chrome_a1b2c3:456`. Pass returned handles verbatim.
+With multiple instances connected and no browser selected, routing returns
+`ambiguous_browser`. Select a full `session_id` from `list_tabs` with `switch_tab`,
+or supply it to the operation; `open_new_tab` also accepts `client_id`.
+`browser="chrome"` alone is insufficient when multiple Chrome profiles match.
+If Chrome reports an evidence-backed replacement for the same tab, BTAP returns
+`rebound_from`, `replacement_session_id`, and `tab_identity`; otherwise an
+explicit stale handle is refused. Tools marked **no tab needed** use the
+extension's service worker and work with zero tabs, but still need a unique
+browser/profile selection.
 
 <details>
 <summary><b>Tabs and navigation</b></summary>
 
-- **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `browsertap bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload; a version number that differs on its own no longer sets it, because Chrome parses `manifest.json` at load time and never re-parses it without a Reload, so a release bump would otherwise demand a click whose only effect is on that number. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. `extension_build_stamp` is the stronger signal and answers the question the four version fields cannot: it is a hash of the extension sources compiled into `background.js`, reported by the worker actually running, so comparing it to `expected_extension_build_stamp` (a fresh hash of the directory) is decisive in both directions where version equality was measured wrong twice. Read the answer from `extension_build_verdict`: `matches_tree` (the worker is running this code), `stale_worker` (it is not -- Reload), `stamp_not_regenerated` (an extension file was edited without running `python -m scripts.extension_stamp --write`, so the comparison proves nothing either way) or `unverifiable` (the extension predates the stamp, or the directory could not be read -- see `extension_build_error`). `extension_build_enforced=false` means no comparison happened, so treat it as unknown rather than as a pass. Answers while another tool is still running, which is when it is usually wanted; `default_session_settled=false` then means `default_session_id` may be that call's temporary value rather than yours. No parameters.
+- **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `browsertap bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload; a version number that differs on its own no longer sets it, because Chrome parses `manifest.json` at load time and never re-parses it without a Reload, so a release bump would otherwise demand a click whose only effect is on that number. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. `extension_build_stamp` is the stronger signal and answers the question the four version fields cannot: it is a hash of the extension sources compiled into `background.js`, reported by the worker actually running, so comparing it to `expected_extension_build_stamp` (a fresh hash of the directory) is decisive in both directions where version equality was measured wrong twice. Read the answer from `extension_build_verdict`: `matches_tree` (the worker is running this code), `stale_worker` (it is not -- Reload), `stamp_not_regenerated` (an extension file was edited without running `python -m scripts.extension_stamp --write`, so the comparison proves nothing either way) or `unverifiable` (the extension predates the stamp, or the directory could not be read -- see `extension_build_error`). `extension_build_enforced=false` means no comparison happened, so treat it as unknown rather than as a pass. Answers while another tool is still running; `default_session_id` is this request's snapshot of the MCP process default and `default_session_settled=true` because another call's temporary target is isolated. No parameters.
 - **get_automation_profile** — inspect whether the current MCP process uses `lab` or `safe`.
 - **set_automation_profile** — switch the current MCP process between `lab|safe`; the override is not persisted and does not reload the extension.
   - `mode` (string): `lab` or `safe`
-- **list_tabs** — list connected tabs. Each carries a `browser` field. Answers while another tool is still running; `default_session_settled=false` means that call held the default target while this ran, so `default_session_id` may be its temporary value rather than yours. No parameters.
+- **list_tabs** — list connected tabs under `data.tabs`, including their full session handles and `browser` fields. Answers while another tool is still running; `default_session_id` is this request's snapshot of the MCP process default and `default_session_settled=true`. Parallel agents should still pass an explicit target. No parameters.
 - **list_all_tabs** — *(no tab needed)* list every open tab, including `chrome-extension://` pages that `list_tabs` hides. Those never become sessions, so they have no session id; drive them with `cdp_command(tab_id=...)`.
-  - `session_id` (string, optional): which browser to ask.
-- **switch_tab** — set the *target* tab for later calls. A `url_pattern` must match exactly one tab; if several match, select one with its full `session_id`. It does **not** raise the tab or focus the browser: `activate` defaults to `false`, so retargeting never disturbs what you are looking at. Pass `activate=true`, or call `activate_tab`, when you actually need the tab in front.
+  - `session_id` (string, optional): which browser/profile to ask.
+- **switch_tab** — set this MCP process's *target* tab for later calls. A `url_pattern` must match exactly one tab; if several match, select one with its full `session_id`. A `browser` filter matching multiple profiles also requires an explicit `session_id`. It does **not** raise the tab or focus the browser: `activate` defaults to `false`. Pass `activate=true`, or call `activate_tab`, when you need the tab in front.
   - `session_id` (string, optional), `url_pattern` (string, optional): substring match, `browser` (string, optional): `chrome`, `edge`, or `opera`, `activate` (boolean, optional): default `false`.
 - **activate_tab** — bring a tab to the foreground and focus its window. This is the explicit way to raise a tab, and the only one that does not involve approving physical input. Check `on_screen` in the reply: BTAP first asks Windows to restore a minimised browser, but `on_screen=false` means visibility still could not be confirmed and screen-coordinate input must not be sent.
   - `session_id` (string, optional)
@@ -535,8 +587,8 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
   - `url` (string), `session_id` (string, optional), `timeout` (number, optional): default `15`, `beforeunload` (string, optional): default `dismiss`, `intent_leave` (boolean, optional): `false` forces page preservation
 - **download_file** — download an HTTP(S) URL through Chrome's native download manager, using that browser profile's cookies and authenticated session. It waits by default and returns `status="completed"` plus a verified absolute `path`; interrupted downloads return `failed`, while a timeout or `wait=false` returns `in_progress` with `download_id`. An explicit `session_id` must still be live and is never replaced with another profile. Use this for attachments instead of page `fetch`.
   - `url` (string), `filename` (string, optional): relative download name, `directory` (string, optional): arbitrary absolute destination directory; creates parents, `wait` (boolean, optional): default `true`; `directory` requires `true`, `timeout` (number, optional): default 60 seconds, maximum 1800, `session_id` (string, optional): selects the browser profile, `overwrite` (boolean, optional): default `false`; an existing final destination raises an error unless explicitly `true`. If a directory download times out, `directory_applied=false`: the move is no longer tracked and Chrome may finish into its default download directory.
-- **open_new_tab** — open a background tab by default with a unique `operation_id` and wait a bounded time for exact session/generation registration; pass `active=true` only when foreground work is genuinely required. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates repeated requests with the same operation id. Ownership is registered only from a completed record containing the exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only says whether session-scoped tools can be used immediately. A pre-create registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after create dispatch, an unresolved ACK/reconciliation returns `status="unknown",may_have_created=true,retry_safe=false`. Keep the returned `owner_id` capability and use it only for that task's cleanup. For an unresolved dispatched create, call `open_new_tab` again with the same `operation_id`, the returned `client_id`, and the same `owner_id`; that recovery call only reads the durable operation record and never replays `tabs/create`. If the record is not found, do not guess by URL or issue a replacement create. Page JavaScript such as `window.open()` or anchor clicks may be silently blocked without a user gesture; use this native tab API when a new tab must be reliable.
-  - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner), `operation_id` (optional recovery handle), `client_id` (optional browser client selector for recovery)
+- **open_new_tab** — open a background tab in this MCP process's selected browser/profile, unless `session_id` or `client_id` selects another. Creates a unique `operation_id` and waits a bounded time for exact session/generation registration; pass `active=true` for foreground work. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates by operation id. Ownership requires a completed record with exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only reports immediate availability for session tools. Before create dispatch, registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after dispatch, uncertainty returns `may_have_created=true,retry_safe=false`. With `may_have_created=false,retry_safe=true`, resolve the reported failure and retry without `operation_id`. To recover a dispatched create with `retry_safe=false`, pass the same `operation_id`, returned `client_id`, and `owner_id`: recovery reads the durable record without replaying `tabs/create`. A failed recovery probe preserves that uncertainty and owner capability. If the initial recovery probe finds no record, `reconciliation.resume_required=false` directs the caller to `list_tabs()` and inspection of that browser instead of another recovery call. Missing records, matching URLs, or unchanged tab counts cannot prove non-creation or ownership; keep the outcome unknown unless exact identity and task ownership resolve it. Keep `owner_id` for cleanup of registered task-owned tabs with their exact session/generation. Use this native API for reliable new tabs; page `window.open()` or anchor clicks may be blocked without a user gesture.
+  - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner), `operation_id` (optional recovery handle), `client_id` (optional browser/profile client selector for creation or recovery)
 - **close_tabs** — *(no tab needed)* accept native numeric tab ids or full `client:tabId` session ids, including `chrome-extension://` tabs. The default `only_if_agent_owned=true` requires the `owner_id` returned by `open_new_tab` and verifies the current lifecycle generation before closing, so pre-existing user tabs and another agent's tabs are refused. If the user already closed an owned tab, cleanup returns `status=already_gone, closed_by=user` without reusing its native id. An actual owned close returns `closed_by=agent`; an explicit unowned/operator override returns `closed_by=none` so it is not counted as task-owned cleanup. If `already_gone` is returned but a page with the same work is still visible, call `list_all_tabs` and verify URL/title before deciding whether a new session/generation should be closed; BTAP never auto-transfers ownership by URL. A Chrome `tabs.onReplaced` identity mapping is safe and also migrates the ownership claim. Set `only_if_agent_owned=false` only when the operator explicitly asked to close an unowned/user tab.
   - `tab_id`, `session_id` (optional browser constraint), `owner_id` (required by the safe default), `only_if_agent_owned` (boolean, default `true`)
 </details>
@@ -546,16 +598,16 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
 
 - **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. A background tab may report viewport height zero; ordinary DOM/text/API work still continues there, and only visual/layout fidelity requires explicit `activate_tab`. When the page can be probed, `render_state`/`content_ready` distinguish real content from a loading, hydrating, or shell-only SPA; retry or use `wait_for` before treating an empty shell as final content. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. This tool does not modify the page -- no attribute, no id, no `window` global -- so a scan is invisible to the page's own scripts.
   - `session_id` (string, optional), `text_only` (boolean, optional): default `false`, `cutlist` (boolean, optional): default `true`; collapse repetitive lists, `maxchars` (integer, optional): default `35000`, `instruction` (string, optional), `extra_js` (string, optional), `timeout` (number, optional): default `15`
-- **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. Polling happens inside the page, so a 30s wait still costs one bridge roundtrip. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input.
+- **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. The server schedules short synchronous page checks under one deadline, avoiding background-page timer throttling. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input. A timeout with `operation_id` retains a pending check: query `get_execute_js_result` before issuing another operation; the expression is not replayed while that check is pending.
   - `selector` (string/object, optional): CSS or structured locator, `text` (string, optional): substring of body text, `url_pattern` (string, optional): regex on the URL, `js` (string, optional): expression to become truthy, `gone` (boolean, optional): wait for the condition to stop holding; default `false`, `timeout` (number, optional): default `15`, `session_id` (string, optional)
-- **wait_for_url** — wait for navigation to settle: blocks until the tab URL matches `url_pattern` (regex, or plain substring — both are tried) and, unless `wait_ready=false`, `document.readyState` is `complete`; then returns final `url`, `title` and `ready_state`. Use after a click or `open_url` that navigates; `wait_for(url_pattern=...)` only checks the URL and can return while the new document is still blank. Polls in-page across navigation chunks, so a long wait is still cheap.
+- **wait_for_url** — wait for navigation to settle: blocks until the tab URL matches `url_pattern` (regex, or plain substring — both are tried) and, unless `wait_ready=false`, `document.readyState` is `complete`; then returns final `url`, `title` and `ready_state`. Use after a click or `open_url` that navigates; `wait_for(url_pattern=...)` only checks the URL and can return while the new document is still blank. Uses the same bounded synchronous checks and pending-operation recovery as `wait_for`.
   - `url_pattern` (string): regex or substring to match against the URL, `timeout` (number, optional): default 15, `wait_ready` (boolean, optional): require `readyState === 'complete'`, default `true`, `session_id` (string, optional)
 - **scroll_page** — scroll and report the new position, so a long page can be read in passes.
   - `to` (string, optional): default `bottom`; also accepts `top`, a pixel offset, or a CSS selector to bring into view, `session_id` (string, optional), `timeout` (number, optional): default `15`
-- **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the shared default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
+- **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the process default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
   - A `Cannot access contents of the page` error must be classified before retrying: if the script attempted `window.open` or navigation, use `open_new_tab` (Chrome may block it without a user gesture); if injection into the current tab is forbidden, choose a normal scriptable `http/https` tab or the supported CDP route. Do not treat the message as proof that reading the current page failed.
   - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`, `wait` (boolean, optional): default `true`
-- **get_execute_js_result** — read or briefly wait for one `execute_js` operation by `operation_id`. This is a read-only claim: it never replays the script. A completed result is consumed once; pending and unknown/expired handles return explicit statuses. Results are retained for 10 minutes. Large values use the same lossless `result_file` metadata as `execute_js`.
+- **get_execute_js_result** — read or briefly wait for an `operation_id`, from the same MCP session that submitted it. Accepts handles from `execute_js` and other timed-out bridge commands. Querying never replays the operation. A completed result can be read repeatedly, including after a lost query response; pending, unknown/expired, and foreign handles return explicit statuses or errors. Results are retained for up to 10 minutes, with at most 512 completed operation records; capacity pressure can evict them earlier. A missing result does not prove the operation was never executed. Large values use the same lossless `result_file` metadata as `execute_js`.
   - `operation_id` (string), `timeout` (number, optional): default `0`, range `0`–`120`
 - **handle_dialog** — inspect or answer a dialog left open on a tab. `action="manual"` reports it without choosing (`blocked_by_dialog`, or `no_dialog` if nothing is open); `accept`/`dismiss` answer it and release any paused `execute_js` or `open_url`. `prompt_text` supplies the text for an accepted `prompt`.
   - `action` (string), `prompt_text` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `3`, capped at three seconds
@@ -580,7 +632,7 @@ Most tools accept an optional `session_id` to target one specific tab; omitting 
 
 Trusted CDP input events delivered to one named tab. They do **not** activate the tab, focus its window, or move the desktop cursor — every reply carries `foreground_changed: false` and `input_mode: "cdp"`. All coordinates are **viewport CSS pixels** (relative to the top-left of the page area, the space `getBoundingClientRect` reports), never desktop pixels and never the device pixels `capture_page_screenshot` returns.
 
-Pass `session_id` explicitly: the call binds the driver to that tab for its duration and restores the shared default afterwards, so a directed call cannot leave another task's target moved. A `session_id` naming a dead tab is refused rather than redirected to a live one.
+Pass `session_id` explicitly: the call holds that target in its own context without changing this MCP process's default. A stale handle without evidence of a same-tab replacement is refused. Another MCP call using the same tab can return `target_busy`; see the concurrent-task boundaries above.
 
 `selector` remains backward-compatible with CSS strings and also accepts a locator object with exactly one primary key: `css`, `role` (optional `name`), `text`, or `label`. Inside a locator object, `selector` is accepted as a compatibility alias for the `css` primary key. `exact` applies to role/name or text matching; `frame` walks one or more same-origin iframe locators; `shadow` walks open Shadow DOM hosts. A click-only frame-relative point can use `{"frame": [...], "x": 20, "y": 30}`; `x`/`y` are CSS coordinates in the final same-origin frame's viewport and are converted to top-document coordinates before dispatch. Zero matches return `not_found`, multiple matches return `ambiguous`, and cross-origin or closed roots are reported without dispatching input. Selector clicks that cross an iframe chain with a non-identity CSS transform return `unsupported_frame_transform` for the same reason; query/type paths remain available.
 
@@ -686,10 +738,11 @@ locator. Browser chrome, native file pickers, extension popups and OS dialogs
 are outside what a page-level protocol event can reach, and are unsupported
 rather than served by a desktop path.
 
-One physical path survives: `resolve_leave_dialog` sends Enter after two
-protocol accepts fail, in `lab` only. `safe` asks through MCP elicitation, and a
-declined, cancelled, or unavailable prompt returns `requires_user_action`. Either
-way the gate is unchanged — cross-process lock (contended → `busy`, returned
+One physical path survives: `resolve_leave_dialog` may send Enter after its two
+protocol attempts fail, in `lab` only; pure probe timeouts do not trigger it.
+`safe` returns `requires_user_action` without sending Enter. Lab skips elicitation
+by default; when lab approval prompts are enabled, a declined, cancelled or
+unavailable prompt also prevents input. The physical gate keeps its cross-process lock (contended → `busy`, returned
 immediately, never queued), a short quiet window (you touched the mouse or
 keyboard → `input_activity_detected`, nothing sent), then raise the target tab,
 then act. What that window can detect depends on the OS: only Windows exposes a

@@ -14,3 +14,6 @@
 # `text=auto` still detects binaries by content, so an image added later is left
 # alone without needing a line here.
 * text=auto eol=lf
+
+# Trellis journals are append-only; workspace indexes retain normal merge rules.
+.trellis/workspace/*/journal-*.md merge=union
