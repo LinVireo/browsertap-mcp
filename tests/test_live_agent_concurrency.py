@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
 from contextlib import AsyncExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -87,7 +88,7 @@ async def _ok(client, name, **arguments):
     return payload.get("data", payload)
 
 
-async def _owned_tab(client, url, browser_id, owned):
+async def _owned_tab(client, url, browser_id, owned, *, registration_timeout=10.0):
     result, payload = await _call(client, "open_new_tab", url=url, client_id=browser_id)
     created = payload.get("legacy", payload.get("data", payload))
     # Retain recovery capabilities before asserting: create can succeed even
@@ -106,7 +107,28 @@ async def _owned_tab(client, url, browser_id, owned):
         created.update(recovered)
     assert created.get("owned") and created.get("session_id"), json.dumps(created)
     assert created["session_id"].startswith(browser_id + ":"), created
-    return created
+    assert created.get("generation"), "owned tab create returned no lifecycle generation"
+    deadline = time.monotonic() + registration_timeout
+    observed_generations = []
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            inventory = await asyncio.wait_for(_ok(client, "list_tabs"), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+        observed_generations = [
+            str(tab.get("generation") or "") for tab in inventory.get("tabs", [])
+            if str(tab.get("id")) == created["session_id"]
+        ]
+        if str(created["generation"]) in observed_generations:
+            return created
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining:
+            await asyncio.sleep(min(0.1, remaining))
+    raise AssertionError(
+        "owned tab never registered its exact session/generation: "
+        f"{created['session_id']} generation={created['generation']} "
+        f"ready={created.get('ready')}, observed_generations={observed_generations}"
+    )
 
 
 async def _js(client, script, session_id=None, *, timeout=15):
