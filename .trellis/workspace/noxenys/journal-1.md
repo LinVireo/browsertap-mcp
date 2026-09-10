@@ -82,3 +82,43 @@ Closed source-review and zombie-timeout recovery gaps, independently re-reviewed
 
 - The serial finalize_change --bump none and evidence_manifest --check run after this journal commit at version 0.4.20; read their actual outcome from artifacts/acceptance-report.json and artifacts/evidence-manifest.json.
 - Legacy SPEC rev 7 remains delivered_stub: A7 desktop manual acceptance affects R2/R6. Report-only low-priority bridge findings remain in the archived closure record.
+
+
+## Session 3: Pending wait and navigation recovery closure
+<!-- trellis-session: v=2 fp=ded20f9d48391afc -->
+
+**Date**: 2026-09-11
+**Task**: Pending wait and navigation recovery closure
+**Branch**: `local`
+
+### Summary
+
+Integrated the wait/receipt/fixture handoff, repaired R4-NAV-001, and passed independent r5 source review. Formal finalization follows this journal commit; read its actual outcome from the canonical artifacts.
+
+### Main Changes
+
+- Committed eight source/test files at 744e4e9: preserve pending wait receipts, exact session/generation readiness, and structured unknown navigation outcomes without replay or grace changes.
+- Recorded r5 PASS with no findings and passed the bound source/SPEC final gate; preserved the earlier r2 and r4 records under out/reviews/archive/.
+- Preserved all three authors' research records in a separate archive-bookkeeping commit; both tasks were already archived and were not archived again.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `744e4e9` | fix: preserve pending wait and navigation recovery |
+
+### Testing
+
+- [OK] Strengthened navigation tests reproduced six false-success paths before the fix; the final related suite passed 200 tests with zero skips. Evidence: out/review-inputs/source-review-closure-20260911-r5/.
+- [OK] Ruff scanned 115 files, ESLint 6, and mypy all 15 shipped Python files; all clean and enforced. The independent reviewer confirmed all 161 bound source paths stayed frozen.
+- [OK] Staged source gitleaks: 28.75 KB, no leaks; archive research: 12.75 KB, no leaks. Diff checks passed and all new research files use LF.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- After this journal commit, verify worker stamp 2878475f7d821497 after manual Reload, restart the bridge, and run finalize_change --bump none plus evidence_manifest --check on the clean 0.4.20 tree. The authoritative outcome is artifacts/acceptance-report.json and artifacts/evidence-manifest.json; do not rewrite tracked journal files after sealing.
+- Run full check_install against artifacts/dist and save its result under out/review-inputs/source-review-closure-20260911-r5/full-install.json; clear this session's claims and update the shared knowledge vault.
+- Preserve the unresolved original delayed-reply cause and report-only findings. Legacy SPEC rev 7 remains delivered_stub for A7 manual evidence. No push, tag, publication, or changes to the separate cross-platform worktree.
