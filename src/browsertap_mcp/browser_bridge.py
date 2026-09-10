@@ -2411,6 +2411,12 @@ class BrowserBridge:
                     result = self.results.pop(exec_id, missing_result)
                     if result is not missing_result:
                         break
+                    snapshot = self._operation_state().read(exec_id, requester_id)
+                    pending_extra = {
+                        **extra, 'operation_id': exec_id,
+                        'reservation_held': snapshot['reservation_held'],
+                        'poll_with': 'get_execute_js_result',
+                    }
                     if tp in ['ws', 'ext_ws']:
                         if hasjump:
                             return _no_response_result(
@@ -2425,7 +2431,7 @@ class BrowserBridge:
                                 f"No response data in {timeout}s (ACK received, script may still be running)",
                                 delivery_state="delivered_no_result",
                                 executed_tab_id=exec_tab_id,
-                                extra={**extra, 'operation_id': exec_id},
+                                extra=pending_extra,
                             )
                         return _no_response_result(
                             (
@@ -2437,7 +2443,7 @@ class BrowserBridge:
                             # ACK is likewise not proof that execution never began.
                             delivery_state="sent_unconfirmed",
                             executed_tab_id=exec_tab_id,
-                            extra={**extra, 'operation_id': exec_id},
+                            extra=pending_extra,
                         )
                     elif tp == 'http':
                         if acked:
@@ -2445,13 +2451,13 @@ class BrowserBridge:
                                 f"Session {session_id} no response in {timeout}s (delivered but no result)",
                                 delivery_state="delivered_no_result",
                                 executed_tab_id=exec_tab_id,
-                                extra={**extra, 'operation_id': exec_id},
+                                extra=pending_extra,
                             )
                         return _no_response_result(
                             f"Session {session_id} no response in {timeout}s (queued; a later poll may still execute it)",
                             delivery_state="sent_unconfirmed",
                             executed_tab_id=exec_tab_id,
-                            extra={**extra, 'operation_id': exec_id},
+                            extra=pending_extra,
                         )
 
             if not isinstance(result, dict):

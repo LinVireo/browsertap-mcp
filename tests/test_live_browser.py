@@ -32,6 +32,24 @@ def goto(sid, url, selector, timeout=30):
     return nav
 
 
+def _collect_wait_result(result, request, *, timeout=5.0):
+    """Settle a timed-out probe before another test reuses the scratch tab."""
+    operation_id = result.get("operation_id")
+    if not operation_id:
+        return None
+    try:
+        receipt = S.get_execute_js_result(operation_id, timeout=timeout)
+        assert receipt.get("operation_id") == operation_id, receipt
+        assert receipt.get("status") == "success", receipt
+        assert receipt.get("reservation_held") is False, receipt
+    except Exception as exc:
+        reason = f"Timed-out wait operation {operation_id} did not settle safely: {exc}"
+        # Fail this test, stop later scratch-tab users, and still run fixture cleanup.
+        request.session.shouldstop = reason
+        pytest.fail(reason)
+    return receipt
+
+
 def current_tab_id(remembered, session_id):
     """The remembered tab's id *now*, or None if the browser retired it.
 
@@ -233,21 +251,23 @@ class TestWaitFor:
                        session_id=scratch_session)
         assert r["status"] == "success"
 
-    def test_absent_selector_times_out(self, scratch_session):
+    def test_absent_selector_times_out(self, scratch_session, request):
         goto(scratch_session, STATIC, "h1")
         r = S.wait_for(selector="#definitely-not-here-xyz", timeout=3,
                        session_id=scratch_session)
+        _collect_wait_result(r, request)
         assert r["status"] == "timeout"
         # It must actually have waited, not returned instantly.
         assert r["waited_ms"] >= 2500, r["waited_ms"]
 
-    def test_gone_on_a_permanent_element_times_out(self, scratch_session):
+    def test_gone_on_a_permanent_element_times_out(self, scratch_session, request):
         goto(scratch_session, STATIC, "h1")
         r = S.wait_for(selector="body", gone=True, timeout=3,
                        session_id=scratch_session)
+        _collect_wait_result(r, request)
         assert r["status"] == "timeout"
 
-    def test_a_long_wait_stays_within_its_total_deadline(self, scratch_session):
+    def test_a_long_wait_stays_within_its_total_deadline(self, scratch_session, request):
         """Server-side checks stay within one bounded total deadline.
 
         The page probe is synchronous so background timer throttling cannot keep
@@ -259,6 +279,7 @@ class TestWaitFor:
         t0 = time.time()
         r = S.wait_for(selector="#nope-xyz", timeout=4, session_id=scratch_session)
         elapsed = time.time() - t0
+        _collect_wait_result(r, request)
         assert r["status"] == "timeout"
         assert elapsed < 12, f"took {elapsed:.1f}s for a 4s wait"
 
@@ -1221,10 +1242,11 @@ class TestWaitForUrl:
         r = S.wait_for_url("example.org", timeout=20, session_id=scratch_session)
         assert r["status"] == "success", r
 
-    def test_times_out_when_pattern_never_matches(self, scratch_session):
+    def test_times_out_when_pattern_never_matches(self, scratch_session, request):
         goto(scratch_session, STATIC, "h1")
         r = S.wait_for_url(r"definitely-not-here\.xyz", timeout=3,
                            session_id=scratch_session)
+        _collect_wait_result(r, request)
         assert r["status"] == "timeout"
         # It must actually have waited, not returned instantly.
         assert r["waited_ms"] >= 2500, r["waited_ms"]

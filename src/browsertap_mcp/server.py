@@ -1522,6 +1522,12 @@ def switch_session(
 
 
 # --- exec_js: the one bridge roundtrip every tool goes through ---------------
+_PENDING_OPERATION_HINT = (
+    "The operation is still unresolved. Call get_execute_js_result with its "
+    "operation_id from the same MCP session before another command on this tab."
+)
+
+
 def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0) -> dict[str, Any]:
     timeout = _positive_timeout(timeout)
     deadline = time.monotonic() + timeout
@@ -1559,9 +1565,13 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
             "after_ack": "delivered_no_result",
             "navigated": "navigated",
         }[kind]
+        hint = (
+            _PENDING_OPERATION_HINT
+            if response.get("operation_id") and delivery_state not in {"undelivered", "navigated"}
+            else "Session may be asleep or disconnected; run list_tabs, switch_tab to a live session, then retry."
+        )
         raise BridgeNoResponseError(
-            f"Bridge no-response ({kind}): {response.get('result')}. "
-            "Session may be asleep or disconnected; run list_tabs, switch_tab to a live session, then retry.",
+            f"Bridge no-response ({kind}): {response.get('result')}. {hint}",
             error_code=str(response.get("error_code") or "no_response"),
             delivery_state=delivery_state,
             retry_safe=bool(response.get("retry_safe", kind == "undelivered")),
@@ -4467,6 +4477,7 @@ def _poll_wait_condition(
                 if not isinstance(decoded, dict):
                     raise ValueError("wait probe returned no condition snapshot")
                 info = decoded
+                last_error = None
         except Exception as exc:
             last_error = str(exc)
             info = {}
@@ -4592,7 +4603,10 @@ def wait_for(
             out["error"] = info["error"]
         elif last_error:
             out["error"] = f"The page was repeatedly unavailable while waiting: {last_error}"
-        out["hint"] = "The condition was not met before timeout. Verify the selector or text, or inspect the page with scan_page."
+        out["hint"] = (
+            _PENDING_OPERATION_HINT if pending else
+            "The condition was not met before timeout. Verify the selector or text, or inspect the page with scan_page."
+        )
     return out
 
 
@@ -4667,6 +4681,7 @@ def wait_for_url(
             out["error"] = f"The page was repeatedly unavailable while waiting: {last_error}"
         landed = info.get("url")
         out["hint"] = (
+            _PENDING_OPERATION_HINT if pending else
             f"Timed out: current URL {landed} (readyState={info.get('ready')}) does not match url_pattern"
             if landed else
             "Timed out and could not read the current URL. The tab may be suspended or disconnected; confirm it with list_tabs first.")
