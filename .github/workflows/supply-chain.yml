@@ -111,6 +111,11 @@ jobs:
           python -m pip install --quiet pip-audit==2.10.1
           pip-audit --requirement runtime-requirements.txt --no-deps --strict --desc \
             --format markdown --output pip-audit.md
+          # A clean audit can exit successfully without creating Markdown.
+          # set -e above prevents this fallback after an audit failure.
+          if [ ! -f pip-audit.md ]; then
+            printf 'No known vulnerabilities found.\n' > pip-audit.md
+          fi
           cat pip-audit.md
       - name: Describe the closure as a CycloneDX SBOM
         run: |
