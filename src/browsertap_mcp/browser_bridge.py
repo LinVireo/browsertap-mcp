@@ -1498,7 +1498,7 @@ class BrowserBridge:
                     'error_code': 'unknown_command',
                 }},
                 ensure_ascii=False)
-        from socketserver import ThreadingMixIn
+        from socketserver import TCPServer, ThreadingMixIn
         from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
         self.http_server: Optional[WSGIServer] = None
@@ -1508,6 +1508,17 @@ class BrowserBridge:
                 # A request thread must never outlive shutdown: server_close()
                 # would otherwise join a long-poll that still has seconds to go.
                 daemon_threads = True
+
+                def server_bind(self):
+                    # HTTPServer reverse-resolves the bind address before
+                    # listen(), which can stall on the macOS system resolver.
+                    # This local JSON bridge only needs the bound address in
+                    # its WSGI environment, not a DNS-derived server name.
+                    TCPServer.server_bind(self)
+                    self.server_name = str(self.server_address[0])
+                    self.server_port = self.server_address[1]
+                    self.setup_environ()
+
             class _H(WSGIRequestHandler):
                 def log_request(self, *a): pass
             # Keep the listener reachable. The daemon never needs this — it dies
