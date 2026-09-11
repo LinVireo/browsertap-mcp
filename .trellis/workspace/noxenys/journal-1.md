@@ -122,3 +122,41 @@ Integrated the wait/receipt/fixture handoff, repaired R4-NAV-001, and passed ind
 - After this journal commit, verify worker stamp 2878475f7d821497 after manual Reload, restart the bridge, and run finalize_change --bump none plus evidence_manifest --check on the clean 0.4.20 tree. The authoritative outcome is artifacts/acceptance-report.json and artifacts/evidence-manifest.json; do not rewrite tracked journal files after sealing.
 - Run full check_install against artifacts/dist and save its result under out/review-inputs/source-review-closure-20260911-r5/full-install.json; clear this session's claims and update the shared knowledge vault.
 - Preserve the unresolved original delayed-reply cause and report-only findings. Legacy SPEC rev 7 remains delivered_stub for A7 manual evidence. No push, tag, publication, or changes to the separate cross-platform worktree.
+
+
+## Session 4: Accepted navigation deadline repair after live failure
+<!-- trellis-session: v=2 fp=9110cb19ea57311d -->
+
+**Date**: 2026-09-11
+**Task**: Accepted navigation deadline repair after live failure
+**Branch**: `local`
+
+### Summary
+
+Reproduced the accepted-navigation 3-second cutoff, committed the minimal deadline repair, and passed independent r6 source review. Runtime Reload and the final seal remain pending.
+
+### Main Changes
+
+- Accepted dialogs keep the original remaining navigation deadline; unknown-result, receipt, reservation and no-replay protections are unchanged.
+- Preserved the failed r5 finalizer and controlled local HTTP evidence; saved the separate Claude copy-only research handoff with its original authorship.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e18007c` | fix: honor caller deadline after accepting navigation dialogs |
+
+### Testing
+
+- [OK] New slow-navigation regression first failed on r5; six related suites passed 202 tests with zero skips after the repair.
+- [OK] Ruff 115, ESLint 6 and mypy 15 files clean; r6 bound source/SPEC final review PASS with no findings; staged source gitleaks scanned 1.22 KB with no leaks.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- Manually Reload BrowserTap Bridge, then verify cf99c8ef9dc76da6 matches_tree and enforced with doctor action none; no bridge restart is needed for this extension-only repair.
+- Run the preserved local live probe from the r6 directory, then serial finalize_change --bump none, evidence_manifest --check and full check_install; write outcomes to ignored r6 state and knowledge without editing tracked files after sealing.
+- Legacy SPEC rev7 delivered_stub/A7 and report-only issues remain; no push, tag, publication or changes to the independent cross-platform worktree.
