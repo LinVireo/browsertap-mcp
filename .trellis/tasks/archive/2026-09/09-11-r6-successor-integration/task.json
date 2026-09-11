@@ -1,0 +1,32 @@
+{
+  "id": "r6-successor-integration",
+  "name": "r6-successor-integration",
+  "title": "Integrate F1/LOW-5 on r6 and close wait recovery gaps",
+  "description": "Integrate committed recovery and cross-platform fixes onto sealed r6, verify read-only wait release, diagnose delayed wait replies, and record remaining manual/platform acceptance.",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "codex-resume-01a0881c",
+  "assignee": "codex-resume-01a0881c",
+  "createdAt": "2026-09-11",
+  "completedAt": "2026-09-11",
+  "branch": "codex/r6-integration-20260911",
+  "base_branch": "local",
+  "worktree_path": null,
+  "commit": "7d7d5d2c2e44d4fc7675559648fdf87167985fc4",
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Reviewed local integration complete. SPEC rev7 remains delivered_stub; A7, native macOS/Linux observation and the historical wait-delay cause remain open. See closure.md and out/integration-20260911/verification.json. No push, tag, publication or release finalizer.",
+  "meta": {
+    "review_id": "r6-integration-20260911-r2",
+    "review_subject_sha256": "d686f961e276034c0858582ffecfb05ec931b659470bb6aee0543737814efffc",
+    "scope_result": "local_integration_complete",
+    "spec_status": "delivered_stub",
+    "evidence_root": "out/integration-20260911"
+  }
+}
