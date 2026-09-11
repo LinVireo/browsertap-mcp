@@ -1,0 +1,4 @@
+{"file":".trellis/spec/guides/collaboration.md","reason":"Verify the session binding, file ownership, and peer handoff"}
+{"file":".trellis/tasks/09-12-coverage-handoff/prd.md","reason":"Check acceptance without treating candidate results as original-tree coverage"}
+{"file":"docs/agent-guides/validation.md","reason":"Check tests against current validation contracts"}
+{"file":".trellis/tasks/09-11-setup-diagnostics/research/setup-verification-from-01a09113-20260912.md","reason":"Verify peer preservation and integration agreement"}

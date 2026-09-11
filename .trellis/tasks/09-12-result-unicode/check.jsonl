@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Independent Python verification"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Success, error and no-replay preservation"}
+{"file":"docs/agent-guides/tool-contracts.md","reason":"Caller-visible encoding fallback and lossless recovery"}
+{"file":"docs/agent-guides/validation.md","reason":"Real MCP wire evidence and stable source snapshots"}
+{"file":".trellis/tasks/09-12-result-unicode/prd.md","reason":"Bounded scope and acceptance criteria"}

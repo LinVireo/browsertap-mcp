@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Python implementation and required checks"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Preserve truthful result and retry classification"}
+{"file":"docs/agent-guides/tool-contracts.md","reason":"Keep caller representation and four-place documentation in sync"}
+{"file":"docs/agent-guides/validation.md","reason":"Synthetic offline regression and evidence contracts"}
+{"file":".trellis/tasks/09-12-result-unicode/design.md","reason":"Observed Python and Pydantic Unicode boundaries"}

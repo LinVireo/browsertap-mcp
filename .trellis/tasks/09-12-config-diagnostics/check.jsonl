@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Full slice Python quality checks"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Structured failures and retained operations"}
+{"file":"docs/agent-guides/runtime-lifecycle.md","reason":"Process and connection lifetime correctness"}
+{"file":"docs/agent-guides/transport-auth.md","reason":"Preserved token protections"}
+{"file":".trellis/tasks/09-12-btap-defect-cleanup/research/config-repair-request-from-root-20260912.md","reason":"Review allocated scope and integration overlap"}
