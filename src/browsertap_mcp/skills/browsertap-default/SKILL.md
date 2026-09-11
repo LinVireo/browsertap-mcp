@@ -145,6 +145,10 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 `get_execute_js_result` 接受异步 JS、同步超时和其他桥命令的句柄。
 同一会话可重复读取完成结果，查询不重发；结果最多保留 10 分钟、512 条完成记录，
 容量压力可提前淘汰。`operation_unknown` 或过期不证明原操作未执行。
+占用到期后的查询若带 `late_result`，读取其 `success` 和 `data` 获取迟到终态回包，
+`late_reply_age` 为收到回包后的秒数。成功大值的 `data=null` 时，按同层
+`result_file`、`result_bytes`、`result_sha256` 读取完整值。原 `unknown` 收据和
+`retry_safe=false` 仍保留；迟到结果只补充执行证据，不恢复占用、不延长保留期。
 `execute_js(wait=false)` 用于确实需要长时间运行的任务，不用来等待页面状态。
 
 `wait_for` / `wait_for_url` 由服务端调度短同步探测，超时带句柄也要按上述方式补查。

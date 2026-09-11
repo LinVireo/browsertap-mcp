@@ -1033,26 +1033,28 @@ class BrowserBridge:
     def _complete_operation(self, operation_id: str, result: dict[str, Any]) -> bool:
         uncertain = _execution_may_continue(result)
         with _DRIVER_STATE_LOCK:
-            capture_commands = getattr(self, '_capture_commands', {})
-            capture_operation = capture_commands.get(operation_id)
-            data = result.get('data')
-            succeeded = result.get('success') is True and not (
-                isinstance(data, dict) and data.get('ok') is False
-            )
-            if capture_operation is not None:
-                self._capture_state().finish(capture_operation, success=succeeded)
-                # The extension has already sent the terminal reply. Keeping
-                # this bookkeeping entry for an uncertain execution cannot
-                # reconcile a later result (the same id is rejected after the
-                # operation is settled), and otherwise leaks one object for
-                # every timed-out capture command.
-                capture_commands.pop(operation_id, None)
             operations = self._operation_state()
-            if succeeded and isinstance(data, dict) and data.get('pending_execution') is False:
-                operations.observe_manual_execution(operation_id)
-            # Capture state and dialog settlement must commit before the tab is
-            # available to a new start; duplicate reply observers share this lock.
-            return operations.complete(operation_id, result, outcome_unknown=uncertain)
+
+            def settle_active_reply() -> None:
+                capture_commands = getattr(self, '_capture_commands', {})
+                capture_operation = capture_commands.get(operation_id)
+                data = result.get('data')
+                succeeded = result.get('success') is True and not (
+                    isinstance(data, dict) and data.get('ok') is False
+                )
+                if capture_operation is not None:
+                    self._capture_state().finish(capture_operation, success=succeeded)
+                    # Subsequent replies are observations only; command
+                    # bookkeeping need not outlive this first reply.
+                    capture_commands.pop(operation_id, None)
+                if succeeded and isinstance(data, dict) and data.get('pending_execution') is False:
+                    operations.observe_manual_execution(operation_id)
+
+            # The registry runs settlement only while the operation is active,
+            # before releasing its target. A late reply only adds evidence.
+            return operations.complete(
+                operation_id, result, outcome_unknown=uncertain, on_active_reply=settle_active_reply,
+            )
 
     def _sync_pending_operations(self) -> None:
         with _DRIVER_STATE_LOCK:
@@ -1093,7 +1095,7 @@ class BrowserBridge:
         with _DRIVER_STATE_LOCK:
             operations = self._operation_state()
             if (not _valid_protocol_id(operation_id) or not valid
-                    or not operations.accepts_reply(operation_id, transport, owner)):
+                    or not operations.accepts_reply(operation_id, transport, owner, allow_late=kind != 'ack')):
                 self.rejected_operation_replies += 1
                 self.last_rejected_operation_reply = {
                     'operation_id': operation_id[:64] if isinstance(operation_id, str) else '',
@@ -2581,11 +2583,9 @@ class BrowserBridge:
                         snapshot.update({'retry_safe': False, 'js_return_lost': True})
                         return snapshot
                     if snapshot['status'] == 'abandoned':
-                        # No reply ever arrived and the reservation has been
-                        # released. Report the unknown outcome rather than the
-                        # 'no browser result' internal error below: the caller
-                        # needs to know the script may have run before it
-                        # decides whether repeating it is safe.
+                        # Keep the expiry receipt even if a late terminal reply
+                        # is now available in late_result. It is evidence about
+                        # the old execution, not permission to replay it.
                         snapshot.update({
                             'status': 'unknown', 'delivery_state': 'delivered_no_result',
                             'retry_safe': False, 'js_return_lost': True,

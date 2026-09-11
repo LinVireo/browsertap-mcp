@@ -21,8 +21,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   now fails offline until the policy covers it.
 - `get_execute_js_result` tool for retrieving results from
   `execute_js(wait=false)` operations. Acknowledged operations can be polled or
-  claimed without replaying side effects; completed results are consumed once
-  and retained for 10 minutes.
+  claimed without replaying side effects; completed results can be read
+  repeatedly within the retention limits.
 
 ### Removed
 
@@ -79,6 +79,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Retain the first valid late terminal reply after an operation's reservation
+  expires. `get_execute_js_result` exposes it as `late_result` with
+  `late_reply_age`, preserving the original unknown receipt and `retry_safe=false`.
+  Late replies cannot restore reservations, change successor operations or
+  extend retention; successful large values retain lossless file metadata.
 - Reserve every CDP target in a cross-tab batch before dispatch. Child target
   overrides and numeric-string IDs now use the same identities as ordinary
   commands, so another call's busy tab cannot be reached through a batch.

@@ -186,13 +186,15 @@ def test_abandonment_is_not_reported_as_a_released_reservation(clock):
     assert "wire_result" not in snapshot
 
 
-def test_a_late_reply_cannot_land_on_an_abandoned_operation(clock):
+def test_late_result_admission_is_explicit_and_does_not_admit_acks(clock):
     operations = PendingOperations()
-    operations.reserve("a", ["a"], "owner", reply_transport="ws", reply_owner=object())
+    socket = object()
+    operations.reserve("a", ["a"], "owner", reply_transport="ws", reply_owner=socket)
     _advance_past_ttl(clock)
     operations.read("a", "owner")
 
-    assert operations.accepts_reply("a", "ws", operations._operations["a"].reply_owner) is False
+    assert operations.accepts_reply("a", "ws", socket) is False
+    assert operations.accepts_reply("a", "ws", socket, allow_late=True) is True
 
 
 def test_get_execute_js_result_reports_the_unknown_outcome(clock):

@@ -142,6 +142,8 @@ Chrome/Edge/Opera 各自的扩展安装独立，一个浏览器缺失只修对�
 
 JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js_result`。
 它接受 execute_js 和其他桥命令的句柄，查询不重发；完成结果可重复读取。
+占用到期后若带 `late_result`，先读取这份迟到终态回包再判断执行结果；外层仍保留
+原 `unknown` 收据和 `retry_safe=false`。字段及大值文件的读取方式见 [[browsertap-default]]。
 保留期和容量边界见 [[browsertap-default]]；`operation_unknown` 或过期不证明未执行。
 
 `open_new_tab` 的创建句柄走该工具自己的恢复流程：

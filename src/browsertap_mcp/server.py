@@ -5266,7 +5266,7 @@ def execute_js(
                 driver.default_session_id = prev_default
 
 
-@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. A pending operation keeps its tab reserved while other tabs remain usable.")
+@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. After reservation expiry, the first valid late terminal reply appears as late_result (success and data) with late_reply_age in seconds; the original unknown receipt and retry_safe=false remain. A large successful late_result.data uses result_file metadata inside late_result. Late replies do not renew retention or reserve the tab again. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. A pending operation keeps its tab reserved while other tabs remain usable.")
 def get_execute_js_result(
     operation_id: str,
     timeout: float = 0.0,
@@ -5285,6 +5285,17 @@ def get_execute_js_result(
     raw = require_driver().get_execute_js_result(
         operation_id.strip(), timeout=timeout,
     )
+    late = raw.get("late_result")
+    if isinstance(late, dict) and late.get("success") is True:
+        exported = _externalize_execute_js_result({"js_return": late.get("data")})
+        if exported.get("result_externalized"):
+            raw = {
+                **raw,
+                "late_result": {
+                    **late, "data": exported["js_return"],
+                    **{key: value for key, value in exported.items() if key != "js_return"},
+                },
+            }
     if raw.get("status") != "success":
         result = dict(raw)
         if result.get("executed_tab_id") is not None:
