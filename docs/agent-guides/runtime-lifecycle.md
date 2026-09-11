@@ -48,6 +48,28 @@ component is stale, run `browsertap doctor` and read `action`:
 `reload_extension`, `restart_bridge` and `restart_mcp_session` each name the one
 thing that will actually fix it -- the other two will not.
 
+Python diagnostics compare `mcp_source_identity` and `bridge_source_identity`
+with `expected_python_source_identity`. `mcp_build_verdict` and
+`bridge_build_verdict` are `matches_tree`, `stale_process`, or `unverifiable`.
+The loaded identity is sealed at the first package import, before the other
+package modules load; a diagnostic request must never refresh it from disk.
+Same-version edits therefore still require the corresponding process restart.
+The `btap.package-source.v2` identity covers package `.py` bytes and the four
+required import-cached scripts: `chrome_extension/result_serialization.js`,
+`chrome_extension/guarded_eval.js`, `page_scripts/page_outline.js` and
+`page_scripts/list_groups.js`. Missing or unreadable assets and older identity
+schemas cannot prove a match. This does not attest runtime monkeypatches, code
+objects, arbitrary other assets, or a loader's cached bytecode. Freeze source
+while importing or collecting release evidence; an unknown identity is not a
+live pass, even when the top-level connection status is `healthy`.
+
+`Session.connect_at` and `info.connected_at` measure the current transport's
+connection age; HTTP `last_activity_at` measures activity. Polls and tab snapshots
+preserve connection age. A new socket/transport, disconnect recovery, a new tab
+generation, or HTTP recovery after the idle window starts a new age. Settled
+failover uses connection age, while HTTP expiry uses activity. A poll must not
+keep a target permanently too young to select.
+
 An extension that has not supplied runtime status has not been checked for
 compatibility. `extension_status_available=false` keeps
 `reload_extension_required=false`: startup reports `starting` /
@@ -94,6 +116,11 @@ which is the whole point, because the alternative is a stamp that confidently
 describes a build nobody has. `extension_build_enforced` is the usual
 `on_screen` / `input_quiet.enforced` shape: false means no comparison happened,
 so a caller must treat the answer as unknown and not as a pass.
+
+The extension fingerprint reads binary files as bytes. Valid text files normalize
+CR/LF line endings while retaining Unicode line and paragraph separators;
+invalid UTF-8 stays byte-distinct. Stamp writing follows the same normalization
+and must preserve every other Unicode character in `background.js`.
 
 `matches_tree` is enforced in code, not advice. For three releases it was not:
 `reload_extension_required` OR-ed the version comparison in beside the verdict, so

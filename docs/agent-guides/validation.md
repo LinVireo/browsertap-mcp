@@ -18,6 +18,25 @@ python -m pytest tests/ -q
 python -m pytest tests/ -q -m live
 ```
 
+For release evidence, the finalizer and CI use
+`python -m scripts.test_run_evidence --mode offline` (or `--mode live`). This
+collects the whole `tests` directory independently before execution. Both
+receipts record the full collection before marker selection, the actual pytest
+arguments, source fingerprints, and collection outcomes; the execution receipt
+also records each setup/call/teardown result. JUnit carries the matching node IDs.
+The seal binds all three files for each mode. Missing or duplicate tests,
+subset invocations, skipped collection, stale source, and truncated XML fail
+validation even when the remaining JUnit cases pass. Existing outputs must be
+archived first; the finalizer does that recoverably.
+
+`python -m scripts.acceptance_report --check` is a read-only report check. It
+validates the seal, recomputes the report from those inputs, compares the exact
+bytes, and requires all release gates to pass. The report uses the seal's
+timestamp and canonical manifest digest, so unchanged inputs reproduce the
+same bytes and re-sealed inputs cannot hide behind an unchanged score. The
+report is excluded from its own manifest to avoid a circular hash;
+`scripts.evidence_manifest --check` alone verifies only the inputs.
+
 Three things decide whether the live run means anything, and skipping any of them
 wastes the whole run:
 

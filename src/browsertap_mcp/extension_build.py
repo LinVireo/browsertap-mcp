@@ -54,17 +54,17 @@ STAMP_LENGTH = 16
 
 STAMP_FILE = "background.js"
 MANIFEST_FILE = "manifest.json"
+_TEXT_SUFFIXES = frozenset({
+    ".js", ".mjs", ".cjs", ".json", ".html", ".htm", ".css", ".svg",
+    ".xml", ".txt", ".md", ".map", ".webmanifest",
+})
 
 # Anchored and exact: the writer must not be able to match a line that merely
 # mentions the constant, and the reader must not accept a hand-typed value of
 # some other shape -- a stamp nobody generated is worse than none, because it
 # reads as a measurement.
-#
-# Public because there is a second reader: `scripts/check_derived_notices.py`
-# has to exclude this same line from its own fingerprint, and the line's syntax
-# is one fact. Two copies of the pattern would drift the moment either changed,
-# and the failure would be a gate going red on every stamp regeneration -- the
-# exact cry-wolf that exemption exists to prevent.
+# The reader, writer and hash normalizer share this pattern so regenerating the
+# stamp cannot change the source fingerprint it describes.
 STAMP_LINE_RE = re.compile(r"^const BTAP_BUILD = '([0-9a-f]{%d})';$" % STAMP_LENGTH)
 STAMP_PLACEHOLDER = "const BTAP_BUILD = '<stamp>';"
 
@@ -95,8 +95,8 @@ def _normalised(relative: str, lines: list[str]) -> list[str]:
     return lines
 
 
-def _entries(directory: Path) -> list[tuple[str, str]]:
-    """Every file under the directory as (posix relative path, normalised text).
+def _entries(directory: Path) -> list[tuple[str, bytes]]:
+    """Every file as (posix relative path, canonical bytes).
 
     Sorted by path so the digest does not depend on directory order, and the
     whole directory is walked rather than a list of names: a file added to the
@@ -106,13 +106,23 @@ def _entries(directory: Path) -> list[tuple[str, str]]:
     in the Chrome-floor gate, both of which read `chrome_extension/*.js` and so
     could not see the directory a refactor had just created.
     """
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, bytes]] = []
     for path in sorted(directory.rglob("*")):
         if not path.is_file():
             continue
         relative = path.relative_to(directory).as_posix()
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        entries.append((relative, "\n".join(_normalised(relative, lines))))
+        content = path.read_bytes()
+        if path.suffix.lower() in _TEXT_SUFFIXES:
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                # Invalid text still has an exact identity. Replacement decoding
+                # would collapse distinct bytes into the same build stamp.
+                pass
+            else:
+                lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                content = "\n".join(_normalised(relative, lines)).encode("utf-8")
+        entries.append((relative, content))
     return entries
 
 
@@ -124,23 +134,18 @@ def compute_extension_stamp(directory: Path) -> str:
     is not, and a stamp that changed with the checkout's line endings would report
     a fresh worker as stale on someone else's machine.
 
-    Two layers in `_entries` each achieve that on their own, which is worth knowing
-    before simplifying either: reading in text mode turns CRLF and a lone CR into
-    `\\n` on the way in, and `str.splitlines()` treats `\\r\\n` as one separator
-    and drops it. Measured -- `b'a\\r\\nb'` comes back `['a', 'b']` through either
-    path alone. The redundancy is not deliberate; splitting exists because
-    `_normalised` works a line at a time. But it does mean no single-line change
-    here can make `test_the_stamp_survives_a_crlf_checkout` go red, so do not read
-    that test as cover for the text-mode read specifically.
+    Known UTF-8 text formats normalize only CR/LF newlines and the two generated
+    lines. Binary assets and invalid UTF-8 are hashed byte for byte. Unicode
+    separators inside JavaScript strings remain distinct from newline bytes.
 
     Each entry is length-delimited so a path and a line of content cannot be
     confused for one another -- concatenating them would let a file whose content
     happened to equal another file's name shift the boundary silently.
     """
     digest = hashlib.sha256()
-    for relative, text in _entries(Path(directory)):
-        digest.update(f"{relative}\0{len(text)}\0".encode("utf-8"))
-        digest.update(text.encode("utf-8"))
+    for relative, content in _entries(Path(directory)):
+        digest.update(f"{relative}\0{len(content)}\0".encode("utf-8", errors="surrogatepass"))
+        digest.update(content)
     return digest.hexdigest()[:STAMP_LENGTH]
 
 
@@ -154,8 +159,8 @@ def read_extension_stamp(directory: Path) -> str:
     """
     path = Path(directory) / STAMP_FILE
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
+        lines = path.read_text(encoding="utf-8").split("\n")
+    except (OSError, UnicodeError) as exc:
         raise ExtensionStampError(f"cannot read {path}: {exc}") from exc
     found = [match.group(1) for match in map(STAMP_LINE_RE.match, lines) if match]
     if len(found) != 1:
@@ -177,7 +182,7 @@ def write_extension_stamp(directory: Path) -> tuple[str, bool]:
     path = directory / STAMP_FILE
     stamp = compute_extension_stamp(directory)
     original = path.read_text(encoding="utf-8")
-    lines = original.splitlines()
+    lines = original.split("\n")
     replaced = 0
     for index, line in enumerate(lines):
         if STAMP_LINE_RE.match(line):
@@ -187,7 +192,7 @@ def write_extension_stamp(directory: Path) -> tuple[str, bool]:
         raise ExtensionStampError(
             f"{path} must hold exactly one stamp line to rewrite, found {replaced}"
         )
-    updated = "\n".join(lines) + ("\n" if original.endswith("\n") else "")
+    updated = "\n".join(lines)
     if updated == original:
         return stamp, False
     # newline="" so Python's text layer does not translate to CRLF on Windows,

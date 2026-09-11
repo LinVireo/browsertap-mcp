@@ -20,6 +20,8 @@ _LOCAL_PATH_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]\S*")
 SHIPPED_EXTENSION_FILES = frozenset(
     {
         "background.js",
+        "guarded_eval.js",
+        "result_serialization.js",
         "content.js",
         "disable_dialogs.js",
         "manifest.json",
@@ -58,8 +60,8 @@ def test_tool_docs_and_caller_skill_are_synchronized():
 
 def test_documentation_contract_covers_all_registered_tools():
     report = build_report()
-    assert report["registered"] == 49
-    assert report["coverage_manifest"] == 49
+    assert report["registered"] == 51
+    assert report["coverage_manifest"] == 51
     assert not report["readme_missing"]
     assert not report["readme_extra"]
     assert not report["missing_params"]

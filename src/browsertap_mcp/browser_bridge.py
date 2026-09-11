@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, TypeGuard
 from urllib.parse import urlsplit
@@ -28,9 +29,15 @@ from .paths import (
     LEGACY_STATE_DIR_NAME,
     STATE_DIR_ENV,
     state_dir,
+    validate_bridge_port,
 )
 from .pending_operations import PendingOperations
 from .requester_liveness import process_requester_id, requester_liveness
+from .runtime_identity import (
+    compare_source_identities,
+    current_source_identity,
+    loaded_source_identity,
+)
 
 logger = logging.getLogger(__name__)
 _DRIVER_STATE_LOCK = threading.RLock()
@@ -633,6 +640,26 @@ TOKEN_AUTH_ENV = 'BROWSERTAP_BRIDGE_AUTH'  # noqa: S105 - environment variable n
 REMOTE_TRANSPORT_MARGIN = 2.0
 
 
+def tcp_port_open(host: str, port: int, *, timeout: float = 1) -> bool:
+    """Probe TCP addresses without hiding resolver/socket errors from diagnostics."""
+    error: OSError | None = None
+    probed = False
+    for family, kind, protocol, _, address in socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM,
+    ):
+        try:
+            with socket.socket(family, kind, protocol) as probe:
+                probe.settimeout(timeout)
+                if probe.connect_ex(address) == 0:
+                    return True
+                probed = True
+        except OSError as exc:
+            error = exc
+    if not probed and error is not None:
+        raise error
+    return False
+
+
 def _positive_timeout(value: Any, *, name: str = "timeout") -> float:
     """Normalize one timeout without allowing an unbounded/non-running wait."""
     try:
@@ -653,15 +680,51 @@ def _timeout_or_default(value: Any, default: float) -> float:
 def bridge_token_path() -> Path:
     """Return the one persistent token location shared by all BTAP processes."""
     configured = (os.environ.get(TOKEN_FILE_ENV) or '').strip()
-    return Path(configured).expanduser() if configured else state_dir() / 'bridge-token'
+    return Path(configured).expanduser().resolve() if configured else state_dir() / 'bridge-token'
+
+
+@dataclass(frozen=True)
+class _TokenFileState:
+    status: str
+    exists: bool | None
+    value: str = field(default='', repr=False)
+    error: str | None = None
+
+
+def _token_file_state(path: Path) -> _TokenFileState:
+    """Read a token without confusing absent, empty and unreadable files.
+
+    Errors contain fixed reason codes, never exception text or undecodable
+    bytes. The value is excluded from repr so inspecting this state stays safe.
+    """
+    try:
+        value = path.read_text(encoding='utf-8').strip()
+    except FileNotFoundError:
+        return _TokenFileState('missing', False)
+    except UnicodeError:
+        return _TokenFileState('invalid_encoding', True, error='invalid_utf8')
+    except OSError as exc:
+        exists: bool | None
+        try:
+            path.stat()
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        except OSError:
+            exists = None
+        reason = 'permission_denied' if isinstance(exc, PermissionError) else 'io_error'
+        return _TokenFileState('unreadable', exists, error=reason)
+    return _TokenFileState('ready' if value else 'empty', True, value)
 
 
 def _read_token_file(path: Path) -> str:
-    try:
-        value = path.read_text(encoding='utf-8').strip()
-    except (OSError, UnicodeError):
-        return ''
-    return value
+    """Keep the legacy read-or-empty contract for callers that only need a value."""
+    return _token_file_state(path).value
+
+
+def _token_file_error(path: Path, state: _TokenFileState) -> RuntimeError:
+    reason = f' ({state.error})' if state.error else ''
+    return RuntimeError(f'BTAP bridge token file is {state.status}: {path}{reason}')
 
 
 def _persist_token(path: Path, token: str) -> str:
@@ -674,7 +737,10 @@ def _persist_token(path: Path, token: str) -> str:
             while pending:
                 written = os.write(fd, pending)
                 if written <= 0 or written > len(pending):
-                    raise OSError(f'invalid token write count: {written}')
+                    raise RuntimeError(
+                        f'BTAP cannot persist its bridge token at {path}: '
+                        f'invalid token write count: {written}'
+                    )
                 pending = pending[written:]
         finally:
             os.close(fd)
@@ -688,13 +754,16 @@ def _persist_token(path: Path, token: str) -> str:
         # contents. Give that tiny window time to close instead of inventing a
         # different in-memory token that would immediately split the clients.
         for _ in range(20):
-            stored = _read_token_file(path)
-            if stored:
-                return stored
+            state = _token_file_state(path)
+            if state.status == 'ready':
+                return state.value
+            if state.status != 'empty':
+                raise _token_file_error(path, state) from None
             time.sleep(0.01)
         raise RuntimeError(f'BTAP bridge token file is empty: {path}') from None
     except OSError as exc:
-        raise RuntimeError(f'BTAP cannot persist its bridge token at {path}: {exc}') from exc
+        reason = 'permission_denied' if isinstance(exc, PermissionError) else 'io_error'
+        raise RuntimeError(f'BTAP cannot persist its bridge token at {path} ({reason})') from exc
 
 
 def bridge_token() -> str:
@@ -708,9 +777,11 @@ def bridge_token() -> str:
     if auth_mode in {'0', 'false', 'off', 'disabled'}:
         return ''
     path = bridge_token_path()
-    stored = _read_token_file(path)
-    if stored:
-        return stored
+    state = _token_file_state(path)
+    if state.status == 'ready':
+        return state.value
+    if state.status not in {'missing', 'empty'}:
+        raise _token_file_error(path, state) from None
     legacy = (os.environ.get(TOKEN_ENV) or '').strip()
     return _persist_token(path, legacy or secrets.token_urlsafe(32))
 
@@ -755,16 +826,25 @@ def state_paths_report(*, enforced_token: Any = None) -> dict[str, Any]:
     else:
         kind = "default"
     token_path = bridge_token_path()
-    stored = _read_token_file(token_path)
+    token_state = _token_file_state(token_path)
+    stored = token_state.value
     auth_mode = (os.environ.get(TOKEN_AUTH_ENV) or "").strip().lower()
+    try:
+        directory_exists: bool | None = directory.is_dir()
+    except OSError:
+        # Directory metadata may be denied along with the token. Keep the
+        # available token diagnosis and leave existence explicitly unknown.
+        directory_exists = None
     report: dict[str, Any] = {
         "state_dir": str(directory),
-        "state_dir_exists": directory.is_dir(),
+        "state_dir_exists": directory_exists,
         "state_dir_kind": kind,
         "state_dir_env": STATE_DIR_ENV if configured_dir else None,
         "default_state_dir_name": DEFAULT_STATE_DIR_NAME,
         "token_file": str(token_path),
-        "token_file_exists": bool(stored),
+        "token_file_exists": token_state.exists,
+        "token_file_status": token_state.status,
+        "token_file_error": token_state.error,
         "token_file_from_env": bool((os.environ.get(TOKEN_FILE_ENV) or "").strip()),
         "auth_enabled": auth_mode not in {"0", "false", "off", "disabled"},
         "token_fingerprint": token_fingerprint(stored),
@@ -881,12 +961,12 @@ def json_object_body():
 
 # How long an HTTP session may go without long-polling before it counts as gone.
 # That transport has no close event -- a WebSocket does -- so silence is the only
-# signal there is, and every answered poll refreshes `connect_at`.
+# signal there is, and each accepted poll refreshes `last_activity_at`.
 HTTP_SESSION_IDLE_SECONDS = 60
 
 # How long one poll waits for a command before answering "ask again". It has to
 # stay well under the idle timeout above: the clock the timeout measures only
-# advances when a poll returns, so a window as long as the timeout would let a
+# advances when the next poll arrives, so a window as long as the timeout would let a
 # client that polls without pause still be counted as silent.
 HTTP_POLL_SECONDS = 5
 
@@ -914,15 +994,31 @@ class Session:
     declared transport and whose actual routing disagreed.
     """
 
+    client: Any
+    connect_at: float
+    last_activity_at: float
+    disconnect_at: Optional[float]
+
     def __init__(self, session_id, info, client=None):
         self.id = session_id
         self.reconnect(client, info)
 
     def reconnect(self, client, info):
-        """Rebind to a new channel; connecting for the first time is the same act."""
-        self.info = info
+        """Refresh traffic, starting a new age only when the connection changes."""
+        now = time.time()
+        continuing = (
+            hasattr(self, 'connect_at')
+            and self.client is client
+            and self.type == info.get('type', 'ws')
+            and self.disconnect_at is None
+            and (self.type != _QUEUE_TYPE
+                 or now - self.last_activity_at <= HTTP_SESSION_IDLE_SECONDS)
+        )
+        if not continuing:
+            self.connect_at = now
+        self.last_activity_at = now
+        self.info = dict(info, connected_at=self.connect_at)
         self.client = client
-        self.connect_at = time.time()
         self.disconnect_at = None
 
     @property
@@ -952,7 +1048,7 @@ class Session:
         for the life of a daemon that outlives every MCP session.
         """
         if (self.type == _QUEUE_TYPE
-                and time.time() - self.connect_at > HTTP_SESSION_IDLE_SECONDS):
+                and time.time() - self.last_activity_at > HTTP_SESSION_IDLE_SECONDS):
             self.mark_disconnected()
         return self.disconnect_at is None
 
@@ -1087,6 +1183,9 @@ class BrowserBridge:
         kind = data.get('type')
         valid = (
             kind in ('ack', 'result', 'error')
+            # Completed undefined values are sent as explicit null. An absent
+            # result is an incomplete receipt and cannot settle the operation.
+            and (kind != 'result' or 'result' in data)
             and (data.get('tabId') is None or _valid_tab_id(data['tabId']))
             and _valid_tab_snapshot(data.get('newTabs', []))
         )
@@ -1151,6 +1250,7 @@ class BrowserBridge:
             self._operation_state().finish_target(str(session_id), reason)
 
     def __init__(self, host: str = '127.0.0.1', port: int = 18765):
+        port = validate_bridge_port(port)
         self.host, self.port = host, port
         self.started_at = time.time()
         self.sessions: dict[str, Session] = {}
@@ -1183,9 +1283,7 @@ class BrowserBridge:
         # browser, independent of how many tabs exist. Addresses the service
         # worker directly for tab-less commands; see ext_cmd().
         self.ext_clients: dict[str, dict[str, Any]] = {}
-        with socket.socket() as _probe:
-            _probe.settimeout(1)
-            self.is_remote = _probe.connect_ex((host, port+1)) == 0
+        self.is_remote = tcp_port_open(host, port + 1)
         if not self.is_remote:
             # Both bundled servers set SO_REUSEADDR, which on Windows lets a
             # second process bind the very same ports and steal a share of the
@@ -1196,15 +1294,15 @@ class BrowserBridge:
             if self._host_lock is None:
                 for _ in range(20):
                     time.sleep(0.25)
-                    with socket.socket() as s:
-                        s.settimeout(1)
-                        if s.connect_ex((host, port + 1)) == 0: break
+                    if tcp_port_open(host, port + 1):
+                        break
                 self.is_remote = True
         if not self.is_remote:
             self.start_ws_server()
             self.start_http_server()
         else:
-            self.remote = f'http://{self.host}:{self.port+1}/link'
+            url_host = f'[{self.host}]' if ':' in self.host else self.host
+            self.remote = f'http://{url_host}:{self.port+1}/link'
             # trust_env=False: HTTP(S)_PROXY env vars (no NO_PROXY) would route
             # loopback bridge calls through the system proxy — a restart there
             # surfaces as 502/refused, i.e. phantom bridge outages. Session
@@ -1246,12 +1344,26 @@ class BrowserBridge:
                 condition.wait(timeout)
             return self._activity_serial
 
+    def _listener_address(self) -> tuple[int, str]:
+        """Keep the lock, WS and HTTP listeners on the same resolved address."""
+        endpoint = getattr(self, '_listen_endpoint', None)
+        if endpoint is None:
+            family, _, _, _, address = socket.getaddrinfo(
+                self.host, self.port, type=socket.SOCK_STREAM,
+            )[0]
+            host = str(address[0])
+            if family == socket.AF_INET6 and len(address) == 4 and address[3]:
+                host = f'{host}%{address[3]}'
+            endpoint = self._listen_endpoint = (family, host)
+        return endpoint
+
     def _acquire_host_lock(self):
-        s = socket.socket()
+        family, host = self._listener_address()
+        s = socket.socket(family, socket.SOCK_STREAM)
         try:
             if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-            s.bind((self.host, self.port + 2))
+            s.bind((host, self.port + 2))
             s.listen(1)
             return s  # held open for the process lifetime
         except OSError:
@@ -1383,6 +1495,8 @@ class BrowserBridge:
 
         @app.route('/link', method=['GET','POST'])
         def link():
+            # Bottle encodes returned text as strict UTF-8. ASCII JSON escapes
+            # preserve browser UTF-16 surrogates in both values and object keys.
             # 命令通道，先鉴权再解析 body；仅显式关闭鉴权时是 no-op。被拒的请求
             # 由 check_link_token_drained 排空 body，否则 Windows 上 401 会退化成
             # 连接重置。
@@ -1393,44 +1507,44 @@ class BrowserBridge:
                     'error': 'body must be a JSON object containing cmd',
                     'error_code': 'invalid_request',
                 }},
-                                  ensure_ascii=False)
+                                  ensure_ascii=True)
             cmd = data.get('cmd')
             if cmd == 'get_clients':
                 return json.dumps({'r': [
                     {'client_id': cid, 'browser': entry.get('browser')}
                     for cid, entry in list(self.ext_clients.items())
-                ]}, ensure_ascii=False)
+                ]}, ensure_ascii=True)
             if cmd == 'get_all_sessions':
                 try:
-                    return json.dumps({'r': self.get_all_sessions()}, ensure_ascii=False)
+                    return json.dumps({'r': self.get_all_sessions()}, ensure_ascii=True)
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e, prefix='get_all_sessions failed')},
-                                      ensure_ascii=False)
+                                      ensure_ascii=True)
             if cmd == 'diagnose':
                 try:
-                    return json.dumps({'r': self.diagnose()}, ensure_ascii=False)
+                    return json.dumps({'r': self.diagnose()}, ensure_ascii=True)
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e, prefix='diagnose failed')},
-                                      ensure_ascii=False)
+                                      ensure_ascii=True)
             if cmd == 'find_session':
                 url_pattern = data.get('url_pattern', '')
                 try:
-                    return json.dumps({'r': self.find_session(url_pattern)}, ensure_ascii=False)
+                    return json.dumps({'r': self.find_session(url_pattern)}, ensure_ascii=True)
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e, prefix='find_session failed')},
-                                      ensure_ascii=False)
+                                      ensure_ascii=True)
             if cmd == 'resolve_session':
                 try:
                     session_id = data.get('sessionId')
                     if session_id is None:
-                        return json.dumps({'r': None}, ensure_ascii=False)
+                        return json.dumps({'r': None}, ensure_ascii=True)
                     return json.dumps(
                         {'r': self._resolve_local_session_target(str(session_id))},
-                        ensure_ascii=False,
+                        ensure_ascii=True,
                     )
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e, prefix='resolve_session failed')},
-                                      ensure_ascii=False)
+                                      ensure_ascii=True)
             if cmd == 'ext_cmd':
                 try:
                     payload = data.get('payload')
@@ -1446,7 +1560,7 @@ class BrowserBridge:
                             ),
                             'error_code': 'invalid_payload',
                             'hint': 'Do not put the extension command at the /link top level.',
-                        }}, ensure_ascii=False)
+                        }}, ensure_ascii=True)
                     timeout = _positive_timeout(data.get('timeout', 15.0))
                     caller_options = {}
                     if data.get('requesterId') is not None:
@@ -1456,9 +1570,9 @@ class BrowserBridge:
                     result = self.ext_cmd(payload,
                                           client_id=self.select_client_id(data.get('clientId'), use_default=False),
                                           timeout=timeout, **caller_options)
-                    return json.dumps({'r': result}, ensure_ascii=False)
+                    return json.dumps({'r': result}, ensure_ascii=True)
                 except Exception as e:
-                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=False)
+                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=True)
             if cmd == 'execute_js':
                 session_id = data.get('sessionId')
                 code = data.get('code')
@@ -1483,9 +1597,9 @@ class BrowserBridge:
                     result = self.execute_js(code, timeout=timeout, session_id=session_id,
                                               allow_failover=allow_failover, **route_options)
                     logger.debug("Remote execute_js completed (session=%s)", session_id)
-                    return json.dumps({'r': result}, ensure_ascii=False)
+                    return json.dumps({'r': result}, ensure_ascii=True)
                 except Exception as e:
-                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=False)
+                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=True)
             if cmd == 'get_execute_js_result':
                 try:
                     result = self.get_execute_js_result(
@@ -1493,9 +1607,9 @@ class BrowserBridge:
                         timeout=float(data.get('timeout', 0)),
                         requester_id=data.get('requesterId'),
                     )
-                    return json.dumps({'r': result}, ensure_ascii=False)
+                    return json.dumps({'r': result}, ensure_ascii=True)
                 except Exception as e:
-                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=False)
+                    return json.dumps({'r': _error_payload(e)}, ensure_ascii=True)
             # 未知 cmd 必须报错而不是含糊地回 "ok"：调用方会把裸 "ok" 当成功，
             # 而实际上什么都没执行（例如把 ext_cmd 的 payload 直接当顶层 cmd 发）。
             return json.dumps(
@@ -1503,17 +1617,19 @@ class BrowserBridge:
                     'error': f'unknown cmd: {cmd!r}; extension commands require cmd=ext_cmd plus payload',
                     'error_code': 'unknown_command',
                 }},
-                ensure_ascii=False)
+                ensure_ascii=True)
         from socketserver import TCPServer, ThreadingMixIn
         from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
         self.http_server: Optional[WSGIServer] = None
 
         def run():
+            family, host = self._listener_address()
             class _T(ThreadingMixIn, WSGIServer):
                 # A request thread must never outlive shutdown: server_close()
                 # would otherwise join a long-poll that still has seconds to go.
                 daemon_threads = True
+                address_family = family
 
                 def server_bind(self):
                     # HTTPServer reverse-resolves the bind address before
@@ -1532,7 +1648,7 @@ class BrowserBridge:
             # process (a test fixture) can then close the port instead of leaking
             # a listener that later steals requests aimed at its successor.
             server = make_server(
-                self.host, self.port + 1, app, server_class=_T, handler_class=_H)
+                host, self.port + 1, app, server_class=_T, handler_class=_H)
             self.http_server = server
             server.serve_forever()
         http_thread = threading.Thread(target=run, daemon=True)
@@ -1652,7 +1768,7 @@ class BrowserBridge:
                         if not _valid_protocol_id(session_id) or not _valid_page_fields(data):
                             return
                         session_info = {'url': data.get('url'), 'title': data.get('title', ''),
-                            'connected_at': time.time(), 'type': 'ws'}
+                            'type': 'ws'}
                         driver._register_client(session_id, self, session_info)
                     elif data.get('type') in ['ext_ready', 'tabs_update']:
                         tabs = data.get('tabs', [])
@@ -1737,7 +1853,8 @@ class BrowserBridge:
                 driver._unregister_client(self)
 
         # First bind stays in the caller's thread so startup failures are loud.
-        self.server = WebSocketServer(self.host, self.port, JSExecutor)
+        _, host = self._listener_address()
+        self.server = WebSocketServer(host, self.port, JSExecutor)
 
         def run():
             # serve_forever has no internal guard: any exception that escapes
@@ -1756,7 +1873,7 @@ class BrowserBridge:
                     pass
                 time.sleep(1)
                 try:
-                    srv = self.server = WebSocketServer(self.host, self.port, JSExecutor)
+                    srv = self.server = WebSocketServer(host, self.port, JSExecutor)
                     logger.info("WS server rebuilt on ws://%s:%s", self.host, self.port)
                 except Exception:
                     logger.exception("WS server rebuild failed")
@@ -1812,7 +1929,6 @@ class BrowserBridge:
             session_info = {
                 'url': tab.get('url'),
                 'title': tab.get('title', ''),
-                'connected_at': time.time(),
                 'type': 'ext_ws',
                 'client_id': client_id,
                 'browser': browser,
@@ -1860,11 +1976,9 @@ class BrowserBridge:
                 sess = None
                 lifecycle_changed = True
             if sess and sess.is_active():
-                # Both together, and in this order: `type` is read out of `info`,
-                # so refreshing one without the other is what used to leave a
-                # session routing over a transport it no longer claimed.
-                sess.info = session_info
-                sess.client = client
+                # A snapshot is activity on the existing connection unless its
+                # socket changed. Keep both the channel and age in one update.
+                sess.reconnect(client, session_info)
             else:
                 self._register_client(session_id, client, session_info)
         if lifecycle_changed:
@@ -2928,24 +3042,36 @@ class BrowserBridge:
         if self.is_remote:
             # We're a thin client; ask the real host for its self-diagnosis.
             request_timeout = _timeout_or_default(normalized_timeout, 6)
+            unavailable = {
+                "cause": "bridge_unreachable",
+                "ok": False,
+                "advice": (
+                    "The bridge daemon is unreachable or could not provide a diagnosis. "
+                    "BTAP normally starts it automatically; run `browsertap bridge --restart` "
+                    "if recovery does not occur."
+                ),
+            }
             try:
                 envelope = self._remote_cmd(
                     {"cmd": "diagnose"}, timeout=request_timeout
                 )
-                result = envelope.get('r', {})
-                if not isinstance(result, dict):
-                    raise RuntimeError("Bridge returned a malformed diagnosis")
-                return result
-            except Exception as e:
+                result = envelope.get('r') if isinstance(envelope, dict) else None
+                if isinstance(result, dict):
+                    cause = result.get('cause')
+                    if isinstance(cause, str) and cause.strip() and type(result.get('ok')) is bool:
+                        return result
+                    if isinstance(result.get('error'), str) and result['error'].strip():
+                        # /link preserves failures as {error, error_code, ...}.
+                        # Missing version fields on a failed query do not prove
+                        # that the daemon is running an obsolete version.
+                        return {**unavailable, **result, 'cause': 'bridge_unreachable', 'ok': False}
                 return {
-                    "cause": "bridge_unreachable",
-                    "ok": False,
-                    "advice": (
-                        "The bridge daemon is unreachable. BTAP normally starts it automatically; "
-                        "run `browsertap bridge --restart` if recovery does not occur."
-                    ),
-                    "error": str(e),
+                    **unavailable,
+                    "error": "Bridge returned a malformed diagnosis",
+                    "error_code": "malformed_diagnosis",
                 }
+            except Exception as e:
+                return {**unavailable, "error": str(e)}
         self.clean_sessions()
         now = time.time()
         active = [s for s in list(self.sessions.values()) if s.is_active()]
@@ -2995,9 +3121,16 @@ class BrowserBridge:
             extension_status = raw_status.get("data", raw_status)
         except Exception as e:
             extension_status_error = str(e)
+        loaded_python = loaded_source_identity()
+        current_python = current_source_identity()
+        python_verdict = compare_source_identities(loaded_python, current_python)
         result = {
             "cause": cause, "ok": ok, "advice": advice,
             "bridge_version": __version__,
+            "bridge_source_identity": loaded_python,
+            "bridge_expected_source_identity": current_python,
+            "bridge_build_verdict": python_verdict,
+            "bridge_build_enforced": python_verdict != "unverifiable",
             "active_tabs": len(active),
             "ever_registered": ever,
             "last_ext_seen_seconds_ago": round(seconds_since_seen, 1) if seconds_since_seen is not None else None,

@@ -65,8 +65,10 @@ def test_setup_status_reports_all_equal_components_as_healthy(monkeypatch):
     registry = result["capability_registry"]
     assert registry["complete"] is True
     assert set(registry["groups"]) == {"page", "browser", "desktop"}
-    assert registry["tool_count"] == registry["declared_tool_count"] == 49
-    assert registry["groups"]["desktop"] == []
+    assert registry["tool_count"] == registry["declared_tool_count"] == 51
+    assert registry["groups"]["desktop"] == [
+        "cancel_native_file_dialog", "inspect_native_file_dialog",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -403,6 +405,100 @@ def _healthy(**extra):
     }
     diagnosis.update(extra)
     return diagnosis
+
+
+@pytest.mark.parametrize("stale_component", ["mcp", "bridge", "both"])
+def test_python_source_changes_take_precedence_over_an_unavailable_extension(
+    monkeypatch, stale_component
+):
+    expected = S.current_source_identity()
+    old = {**expected, "sha256": "a" * 64}
+    monkeypatch.setattr(
+        S, "loaded_source_identity",
+        lambda: old if stale_component in {"mcp", "both"} else expected,
+    )
+    monkeypatch.setattr(S, "current_source_identity", lambda: expected)
+    bridge = old if stale_component in {"bridge", "both"} else expected
+    result = _status(
+        monkeypatch,
+        {"cause": "starting", "bridge_version": __version__, "bridge_source_identity": bridge},
+        RuntimeError("Extension not connected"),
+    )
+
+    assert result["extension_status_available"] is False
+    assert result["reload_extension_required"] is False
+    assert result["missing_extension_capabilities"] == []
+    assert result["mcp_build_enforced"] is result["bridge_build_enforced"] is True
+    assert result["restart_mcp_session_required"] is (stale_component in {"mcp", "both"})
+    assert result["restart_bridge_required"] is (stale_component in {"bridge", "both"})
+    assert result["action"] == (
+        "restart_bridge" if stale_component == "bridge" else "restart_mcp_session"
+    )
+
+
+@pytest.mark.parametrize("unknown_component", ["mcp", "bridge", "expected"])
+def test_unverifiable_python_identity_does_not_misclassify_an_old_extension(
+    monkeypatch, unknown_component
+):
+    complete = S.current_source_identity()
+    unknown = {**complete, "complete": False, "sha256": None, "error": "unreadable"}
+    monkeypatch.setattr(
+        S, "loaded_source_identity", lambda: unknown if unknown_component == "mcp" else complete
+    )
+    monkeypatch.setattr(
+        S, "current_source_identity",
+        lambda: unknown if unknown_component == "expected" else complete,
+    )
+    result = _status(
+        monkeypatch,
+        _healthy(
+            extension_version="0.0.1", protocol_version=1,
+            bridge_source_identity=unknown if unknown_component == "bridge" else complete,
+        ),
+    )
+
+    assert result["status"] == "stale_extension"
+    assert result["action"] == "reload_extension"
+    assert result["restart_bridge_required"] is False
+    assert result["restart_mcp_session_required"] is False
+    prefixes = ("mcp", "bridge") if unknown_component == "expected" else (unknown_component,)
+    for prefix in prefixes:
+        assert result[f"{prefix}_build_verdict"] == "unverifiable"
+        assert result[f"{prefix}_build_enforced"] is False
+    assert any("package source identity could not be compared" in note for note in result["notes"])
+
+
+def test_bridge_source_snapshot_is_compared_to_the_mcp_installation(monkeypatch):
+    expected = S.current_source_identity()
+    other_installation = {**expected, "sha256": "b" * 64}
+    result = _status(
+        monkeypatch,
+        _healthy(
+            bridge_source_identity=other_installation,
+            bridge_expected_source_identity=other_installation,
+            bridge_build_verdict="matches_tree",
+            bridge_build_enforced=True,
+        ),
+    )
+
+    assert result["mcp_build_verdict"] == "matches_tree"
+    assert result["bridge_build_verdict"] == "stale_process"
+    assert result["diagnosis"]["bridge_build_verdict"] == "matches_tree"
+    assert result["action"] == "restart_bridge"
+    assert any("different installation" in note for note in result["notes"])
+
+
+def test_a_newer_bridge_keeps_the_existing_mcp_upgrade_direction(monkeypatch):
+    expected = S.current_source_identity()
+    result = _status(
+        monkeypatch,
+        _healthy(bridge_version="99.0.0", bridge_source_identity={**expected, "sha256": "b" * 64}),
+    )
+
+    assert result["status"] == "stale_package"
+    assert result["action"] == "restart_mcp_session"
+    assert result["restart_bridge_required"] is False
+    assert result["bridge_build_verdict"] == "stale_process"
 
 
 def _paths_status(monkeypatch, bridge_paths, local=None):

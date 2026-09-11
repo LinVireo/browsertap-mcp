@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .browser_bridge import BrowserBridge
-from .paths import state_dir
+from .paths import configured_bridge_port, state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +326,7 @@ def _remove_record_if_owned(record: dict[str, Any]) -> None:
 
 def _configured_bridge_port_open() -> bool:
     host = os.environ.get("BROWSERTAP_BRIDGE_HOST", "127.0.0.1")
-    port = int(os.environ.get("BROWSERTAP_BRIDGE_PORT", "18765")) + 1
+    port = configured_bridge_port() + 1
     try:
         with socket.create_connection((host, port), timeout=0.25):
             return True
@@ -397,6 +397,7 @@ def _terminate_process(pid: int, timeout: float) -> bool:
 
 def stop_bridge_daemon(*, timeout: float = 5.0) -> dict[str, Any]:
     """Stop only the exact managed bridge process recorded in bridge.pid."""
+    configured_bridge_port()
     record = read_bridge_record()
     if record is None:
         if _configured_bridge_port_open():
@@ -462,7 +463,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
     )
     host = os.environ.get("BROWSERTAP_BRIDGE_HOST", "127.0.0.1")
-    port = int(os.environ.get("BROWSERTAP_BRIDGE_PORT", "18765"))
+    try:
+        port = configured_bridge_port()
+    except ValueError as exc:
+        print(json.dumps({
+            "status": "initialization_failed",
+            "action": "check_config",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }, ensure_ascii=False, indent=2))
+        return 1
     driver = BrowserBridge(host=host, port=port)
     record: Optional[dict[str, Any]] = None
     try:

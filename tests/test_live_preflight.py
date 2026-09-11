@@ -431,11 +431,25 @@ def test_an_unreadable_ownership_registry_does_not_fail_the_live_layer():
 # call because the point of these tests is that the offline layer can check the
 # reasoning with no bridge and no browser.
 _EXTENSION_BUILD_STAMP = "a" * 64
+_PYTHON_IDENTITY = {
+    "schema": "btap.python-source.v1",
+    "scope": "package_python_sources",
+    "sha256": "b" * 64,
+    "file_count": 16,
+    "complete": True,
+}
 _HEALTHY = {
     "status": "healthy",
     "action": "none",
     "package_version": "0.4.3",
     "bridge_version": "0.4.3",
+    "mcp_build_verdict": "matches_tree",
+    "bridge_build_verdict": "matches_tree",
+    "mcp_build_enforced": True,
+    "bridge_build_enforced": True,
+    "mcp_source_identity": _PYTHON_IDENTITY,
+    "bridge_source_identity": _PYTHON_IDENTITY,
+    "expected_python_source_identity": _PYTHON_IDENTITY,
     "extension_version": "0.4.3",
     "extension_status_available": True,
     "protocol_version": 3,
@@ -454,6 +468,41 @@ _HEALTHY = {
 def test_components_that_match_the_checkout_do_not_stop_the_live_layer():
     """The gate has to be silent in the case that happens every time."""
     assert P.stale_component_reason(_HEALTHY) is None
+
+
+def test_same_version_mcp_source_change_names_the_process_restart():
+    reason = P.stale_component_reason(dict(
+        _HEALTHY, status="stale_package", action="restart_mcp_session",
+        mcp_build_verdict="stale_process", restart_mcp_session_required=True,
+    ))
+    assert reason is not None
+    assert "restart the MCP session" in reason
+    assert "current installed Python sources" in reason
+    assert "newer build" not in reason
+    assert "chrome://extensions" not in reason
+
+
+def test_unverified_python_sources_cannot_certify_a_live_run():
+    for prefix in ("mcp", "bridge"):
+        for verdict, enforced in (("unverifiable", False), ("matches_tree", False), (None, None)):
+            reason = P.stale_component_reason({
+                **_HEALTHY, f"{prefix}_build_verdict": verdict,
+                f"{prefix}_build_enforced": enforced,
+            })
+            assert reason is not None
+            assert "cannot verify the Python sources" in reason
+            assert "matching version is insufficient" in reason
+            assert "chrome://extensions" not in reason
+
+
+def test_a_legacy_setup_reply_without_python_identity_is_not_a_verified_build():
+    legacy = {
+        key: value for key, value in _HEALTHY.items()
+        if not key.startswith(("mcp_build_", "bridge_build_"))
+    }
+    reason = P.stale_component_reason(legacy)
+    assert reason is not None
+    assert "this MCP process and the bridge daemon" in reason
 
 
 def test_starting_bridge_is_not_mislabeled_as_a_stale_extension():
@@ -692,6 +741,13 @@ def test_the_recorded_summary_leaves_this_machine_out_of_the_published_evidence(
         "action",
         "package_version",
         "bridge_version",
+        "mcp_build_verdict",
+        "bridge_build_verdict",
+        "mcp_build_enforced",
+        "bridge_build_enforced",
+        "mcp_source_identity",
+        "bridge_source_identity",
+        "expected_python_source_identity",
         "extension_version",
         "extension_status_available",
         "protocol_version",
@@ -710,6 +766,24 @@ def test_the_recorded_summary_leaves_this_machine_out_of_the_published_evidence(
     assert recorded["extension_build_enforced"] is True
     assert recorded["extension_build_stamp"] == _EXTENSION_BUILD_STAMP
     assert recorded["expected_extension_build_stamp"] == _EXTENSION_BUILD_STAMP
+
+
+def test_python_identity_evidence_drops_nested_local_paths_and_errors():
+    private_identity = {
+        **_PYTHON_IDENTITY,
+        "package_path": "C:/Users/someone/private-install",
+        "error": "Cannot read C:/Users/someone/private-install/server.py",
+        "manifest": {"private-path": "not public"},
+    }
+    status = {**_HEALTHY, **{
+        field: private_identity for field in (
+            "mcp_source_identity", "bridge_source_identity", "expected_python_source_identity"
+        )
+    }}
+    recorded = P.component_versions(status)
+    assert recorded is not None
+    for field in ("mcp_source_identity", "bridge_source_identity", "expected_python_source_identity"):
+        assert recorded[field] == _PYTHON_IDENTITY
 
 
 def test_the_live_fixture_refuses_a_stale_build_instead_of_skipping_it():

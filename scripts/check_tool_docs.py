@@ -277,7 +277,7 @@ def build_report(
         version_error = str(exc)
     return {
         "registered": len(registered_set),
-        "expected_registered": 49,
+        "expected_registered": 51,
         "coverage_manifest": len(TOOL_COVERAGE),
         "readme_missing": {
             name: sorted(registered_set - documented[name])
@@ -320,8 +320,8 @@ def report_ok(report: dict[str, Any]) -> bool:
         not report.get("skill_mirrors_unset")
     )
     return (
-        report["registered"] == report["expected_registered"] == 49
-        and report["coverage_manifest"] == 49
+        report["registered"] == report["expected_registered"] == 51
+        and report["coverage_manifest"] == 51
         and all(not values for values in report["readme_missing"].values())
         and all(not values for values in report["readme_extra"].values())
         and not report["missing_params"]

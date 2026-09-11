@@ -153,7 +153,7 @@ Preserve existing sealed artifacts. For ad hoc runs, write reports under a new
 When a tool name, parameter, default, or behavior changes, update all of these
 in the same change:
 
-1. `README.md` and `README.zh-CN.md` (the authoritative 49-tool table);
+1. `README.md` and `README.zh-CN.md` (the authoritative 51-tool table);
 2. the tool's MCP `description=` text;
 3. `src/browsertap_mcp/skills/browsertap-default/SKILL.md` (the caller
    contract: which tool to call first, when `session_id` is mandatory);

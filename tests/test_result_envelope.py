@@ -361,7 +361,7 @@ def test_screenshot_keeps_image_content_and_envelope(monkeypatch):
 
 
 def test_all_registered_tools_declare_the_same_result_contract():
-    assert len(S.TOOL_CAPABILITIES) == 49
+    assert len(S.TOOL_CAPABILITIES) == 51
     assert {
         metadata["result_contract"] for metadata in S.TOOL_CAPABILITIES.values()
     } == {"btap.result.v1"}

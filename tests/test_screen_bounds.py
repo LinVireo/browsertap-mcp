@@ -407,24 +407,29 @@ class TestSourceSelection:
 
         assert P.screen_bounds() is None
 
-    def test_this_machine_answers_and_both_sources_agree(self):
-        """Not a unit test -- the one assertion that the fakes above are honest.
+    def test_this_machine_reports_readable_geometry_or_unknown(self):
+        """Read this machine's geometry or verify its honest unknown report.
 
-        Skipped rather than failed where the geometry cannot be read, because
-        that is a legitimate machine (headless CI is one) and the code's answer
-        for it is already covered above.
+        Headless hosts exercise the real fallback contract. Only hosts with a
+        readable display exercise geometry and agreement between its sources.
         """
         bounds = P.screen_bounds()
         if bounds is None:
-            pytest.skip("this machine exposes no readable display geometry")
+            report = P.check_screen_bounds([(99999, 99999)])
 
-        assert bounds["width"] > 0 and bounds["height"] > 0
-        # Whichever source answered, the process is DPI-aware by now (mss makes
-        # itself aware while constructing), so the other one must agree.
-        other = P._win32_virtual_screen() if bounds["source"] == "mss_virtual_desktop" \
-            else P._mss_virtual_screen()
-        if other is not None:
-            assert (other["width"], other["height"]) == (bounds["width"], bounds["height"])
+            assert report["bounds"] is None
+            assert report["enforced"] is False
+            assert report["checked"] == [[99999, 99999]]
+            assert "without being compared against any screen" in report["note"]
+            assert "clamped" in report["note"]
+        else:
+            assert bounds["width"] > 0 and bounds["height"] > 0
+            # Whichever source answered, the process is DPI-aware by now (mss makes
+            # itself aware while constructing), so the other one must agree.
+            other = P._win32_virtual_screen() if bounds["source"] == "mss_virtual_desktop" \
+                else P._mss_virtual_screen()
+            if other is not None:
+                assert (other["width"], other["height"]) == (bounds["width"], bounds["height"])
 
 
 class _FakeGui:

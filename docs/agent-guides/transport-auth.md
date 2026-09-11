@@ -12,8 +12,11 @@ to that root guide. Commands and release gates remain in
 
 Port 18766 (`/link`, `/api/result`, `/api/longpoll`) requires a bearer token,
 which closes the hole where any local process could execute JS in your browser.
-The port-18765 WebSocket used by the extension is checked by origin instead and
-is unaffected. Full operator detail is in
+The port-18765 WebSocket used by the extension is checked by origin instead.
+`BROWSERTAP_WS_ALLOWED_ORIGINS` applies to both WebSocket and HTTP origin checks;
+HTTP without an Origin header still requires its token. The separate
+`BROWSERTAP_WS_ALLOW_NO_ORIGIN` option applies only to WebSocket clients.
+Full operator detail is in
 [SECURITY.md](../../SECURITY.md) and [docs/TROUBLESHOOTING.md](../TROUBLESHOOTING.md);
 the two facts that catch people writing code here:
 
@@ -26,6 +29,14 @@ the two facts that catch people writing code here:
   body -- guaranteed once the body exceeds the socket buffer -- so the caller
   sees a dropped connection instead of a 401. Copy that helper for any new
   authenticated route.
+
+Resolve explicit state/token overrides against the launching cwd before daemon
+spawn changes it. Preserve default/legacy source labels when no override exists.
+Token diagnostics distinguish missing, empty, ready, unreadable and invalid UTF-8;
+metadata failures leave existence unknown. Never log token bytes, including a
+`UnicodeDecodeError`'s raw representation, or replace an existing unreadable file.
+Configuration validation must precede network/spawn effects without making
+imports or package-path commands depend on valid network settings.
 
 The WebSocket port is the asymmetric half, and the thing that makes it
 survivable is not the origin check. `clientId` arrives in the message body and

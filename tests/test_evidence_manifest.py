@@ -140,6 +140,31 @@ def test_validate_manifest_requires_live_binding(monkeypatch, tmp_path):
     assert any(problem.startswith("artifact records missing:") for problem in problems)
 
 
+@pytest.mark.parametrize("mode", ["offline", "live"])
+@pytest.mark.parametrize("phase", ["collection", "execution"])
+def test_a_seal_requires_complete_suite_receipts(monkeypatch, tmp_path, mode, phase):
+    monkeypatch.setattr(E, "ROOT", tmp_path)
+    monkeypatch.setattr(E, "source_identity", lambda: {})
+    relative_paths = [*E.OFFLINE_ARTIFACTS, *E.LIVE_ARTIFACTS,
+                      "artifacts/dist/package.whl", "artifacts/dist/package.tar.gz"]
+    for relative in relative_paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode())
+    manifest = E.build_manifest(include_live=True)
+    relative = f"artifacts/{mode}-{phase}.json"
+    assert relative in manifest["artifacts"]
+    (tmp_path / relative).unlink()
+    with pytest.raises(FileNotFoundError, match=relative):
+        E.build_manifest(include_live=True)
+    manifest["artifacts"].pop(relative)
+    path = tmp_path / "artifacts/evidence-manifest.json"
+    path.write_bytes(json.dumps(manifest).encode())
+
+    _loaded, problems = E.validate_manifest(path, require_live=True)
+    assert f"artifact records missing: {relative}" in problems
+
+
 def test_a_live_seal_binds_the_preflight_record_as_well_as_the_junit(monkeypatch, tmp_path):
     """A passing junit with an unbound preflight record is the stale-build hole.
 
@@ -157,8 +182,10 @@ def test_a_live_seal_binds_the_preflight_record_as_well_as_the_junit(monkeypatch
     dist.mkdir(parents=True)
     files = {
         **_offline_files(artifacts),
-        artifacts / "live-junit.xml": b"live junit",
-        artifacts / "tool-coverage-live.json": b"live tools",
+        **{
+            artifacts / Path(relative).name: relative.encode()
+            for relative in E.LIVE_ARTIFACTS if relative != "artifacts/live-preflight.json"
+        },
         dist / "package.whl": b"wheel",
         dist / "package.tar.gz": b"sdist",
     }

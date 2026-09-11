@@ -5,7 +5,9 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = 'cf99c8ef9dc76da6';
+const BTAP_BUILD = '2752911b822fab7e';
+importScripts('result_serialization.js');
+importScripts('guarded_eval.js');
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -85,11 +87,13 @@ const DEFAULT_CDP_TIMEOUT_MS = 20000;
 // stored snapshot has actually been read, this worker's map is a local guess and
 // must not be published. A generation minted during that window is *provisional*
 // -- it is the best answer available, and it loses to the durable one as soon as
-// the read succeeds.
+// the read succeeds, unless an observed removal/new lifetime retired that value.
 const TAB_GENERATIONS_KEY = 'btapTabGenerationsV1'; // gitleaks:allow - storage key, not a credential
 const tabGenerations = new Map();
 const tabGenerationAssignments = new Map();
+const tabGenerationRemovals = new Map();
 const provisionalTabGenerations = new Set();
+const retiredTabGenerations = new Set();
 let tabGenerationsLoadPromise = null;
 let tabGenerationWriteQueue = Promise.resolve();
 let nextTabGeneration = 1;
@@ -100,36 +104,133 @@ let tabGenerationLoadFailures = 0;
 // result). Persist the operation before create so a service-worker restart
 // can reconcile an in-flight operation without issuing a second create.
 const CREATE_OPERATIONS_KEY = 'btapCreateOperationsV1'; // gitleaks:allow - storage key, not a credential
+const CREATE_REPLAY_FILTER_KEY = 'btapCreateReplayFilterV1'; // gitleaks:allow - storage key, not a credential
 const CREATE_OPERATION_MAX_RECORDS = 256;
 const CREATE_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
+const CREATE_REPLAY_FILTER_BYTES = 65536;
 const createOperations = new Map();
 const createOperationPromises = new Map();
 let createOperationsLoadPromise = null;
-let createOperationsWriteQueue = Promise.resolve();
+let createOperationsQueue = Promise.resolve();
+let createReplayFilter = { bytes: new Uint8Array(CREATE_REPLAY_FILTER_BYTES), bitsSet: 0 };
 
 // --- Durable tab-create operations ----------------------------------------
-function pruneCreateOperations() {
-  const cutoff = Date.now() - CREATE_OPERATION_TTL_MS;
-  for (const [operationId, record] of createOperations.entries()) {
-    if (record?.status !== 'pending' && Number(record?.created_at || 0) < cutoff) {
-      createOperations.delete(operationId);
-    }
-  }
-  if (createOperations.size <= CREATE_OPERATION_MAX_RECORDS) return;
-  const ordered = [...createOperations.entries()]
-    .filter(([, record]) => record?.status !== 'pending')
-    .sort((a, b) => Number(a[1]?.created_at || 0) - Number(b[1]?.created_at || 0));
-  for (const [operationId] of ordered.slice(0, Math.max(0, createOperations.size - CREATE_OPERATION_MAX_RECORDS))) {
-    createOperations.delete(operationId);
-  }
+function withCreateOperationsLock(work) {
+  const next = createOperationsQueue.then(work, work);
+  createOperationsQueue = next.catch(() => {});
+  return next;
 }
 
-function persistCreateOperations() {
+function createReplayIndices(operationId) {
+  let first = 2166136261;
+  let second = 2246822519;
+  for (let index = 0; index < operationId.length; index += 1) {
+    const code = operationId.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ code, 3266489917);
+  }
+  first ^= first >>> 16;
+  second = (second ^ (second >>> 16)) | 1;
+  return [0, 1, 2, 3].map(index =>
+    ((first + Math.imul(index, second)) >>> 0) % (CREATE_REPLAY_FILTER_BYTES * 8)
+  );
+}
+
+function readCreateReplayFilter(value) {
+  if (value === undefined) return { bytes: new Uint8Array(CREATE_REPLAY_FILTER_BYTES), bitsSet: 0 };
+  if (!value || value.version !== 1 || typeof value.bitmap !== 'string' ||
+      value.bitmap.length !== CREATE_REPLAY_FILTER_BYTES * 2 || !/^[0-9a-f]+$/i.test(value.bitmap)) {
+    throw new Error('tab-create replay protection is unreadable');
+  }
+  const bytes = new Uint8Array(CREATE_REPLAY_FILTER_BYTES);
+  let bitsSet = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = parseInt(value.bitmap.slice(index * 2, index * 2 + 2), 16);
+    for (let bits = bytes[index]; bits; bits &= bits - 1) bitsSet += 1;
+  }
+  return { bytes, bitsSet };
+}
+
+function retiredCreateOperationData(operationId) {
+  const indices = createReplayIndices(operationId);
+  if (!indices.every(bit => createReplayFilter.bytes[bit >>> 3] & (1 << (bit & 7)))) return null;
+  const totalBits = CREATE_REPLAY_FILTER_BYTES * 8;
+  const saturated = createReplayFilter.bitsSet === totalBits;
+  return {
+    status: 'unknown', operation_status: 'unknown', operation_id: operationId,
+    may_have_created: true, retry_safe: false, resume_required: false,
+    error: saturated
+      ? 'tab-create replay protection is full for this browser session; new operation ids are refused'
+      : 'operation_id may match a retired uncertain create; replay protection can conservatively ' +
+        'match a fresh id, but never permits replay of a retired uncertain operation',
+    replay_guard: { match: true, saturated, bits_set: createReplayFilter.bitsSet, total_bits: totalBits },
+  };
+}
+
+function pruneCreateOperations(records = createOperations, replay = createReplayFilter, reserve = 0) {
+  const update = { records: new Map(records), replay, changed: false, replayChanged: false };
+  // A pending record read by a fresh worker has no producer left to complete
+  // it. Preserve the uncertainty as terminal evidence instead of polling it
+  // forever or guessing ownership from a matching URL.
+  for (const [operationId, record] of update.records) {
+    if (record.status === 'pending' && !createOperationPromises.has(operationId)) {
+      update.records.set(operationId, {
+        ...record, status: 'unknown', resume_required: false,
+        error: record.error || 'tab-create worker ended before recording a definitive outcome',
+      });
+      update.changed = true;
+    }
+  }
+  const retire = (operationId, record) => {
+    if (record.status === 'unknown') {
+      // A monotonic, fixed-size Bloom filter retains only uncertain operations
+      // whose full records must be retired. False positives refuse a create;
+      // there are no false negatives, and it never rotates within this browser
+      // session. Completed/not-created receipts keep their existing TTL policy.
+      if (!update.replayChanged) {
+        update.replay = { bytes: replay.bytes.slice(), bitsSet: replay.bitsSet };
+        update.replayChanged = true;
+      }
+      for (const bit of createReplayIndices(operationId)) {
+        const mask = 1 << (bit & 7);
+        if (!(update.replay.bytes[bit >>> 3] & mask)) {
+          update.replay.bytes[bit >>> 3] |= mask;
+          update.replay.bitsSet += 1;
+        }
+      }
+    }
+    update.records.delete(operationId);
+    update.changed = true;
+  };
+  const cutoff = Date.now() - CREATE_OPERATION_TTL_MS;
+  for (const [operationId, record] of update.records) {
+    if (!createOperationPromises.has(operationId) && Number(record.created_at || 0) < cutoff) {
+      retire(operationId, record);
+    }
+  }
+  const limit = CREATE_OPERATION_MAX_RECORDS - reserve;
+  const ordered = [...update.records.entries()]
+    .filter(([operationId]) => !createOperationPromises.has(operationId))
+    .sort((a, b) => Number(a[1]?.created_at || 0) - Number(b[1]?.created_at || 0));
+  for (const [operationId, record] of ordered) {
+    if (update.records.size <= limit) break;
+    retire(operationId, record);
+  }
+  return update;
+}
+
+function publishCreateOperations(update) {
+  createOperations.clear();
+  for (const [operationId, record] of update.records) createOperations.set(operationId, record);
+  createReplayFilter = update.replay;
+}
+
+async function persistCreateOperations(update) {
+  if (!update.changed) return;
   const area = chrome.storage?.session;
-  if (!area) return Promise.reject(new Error('chrome.storage.session is unavailable'));
-  pruneCreateOperations();
+  if (!area) throw new Error('chrome.storage.session is unavailable');
   const snapshot = Object.fromEntries(
-    [...createOperations.entries()].map(([id, record]) => [id, {
+    [...update.records.entries()].map(([id, record]) => [id, {
       operation_id: record.operation_id,
       status: record.status,
       url: record.url,
@@ -141,13 +242,22 @@ function persistCreateOperations() {
       tab_status: record.tab_status || 'unknown',
       load_ready: Boolean(record.load_ready),
       created_at: record.created_at || Date.now(),
+      ...(record.error ? { error: record.error } : {}),
+      ...(record.resume_required === false ? { resume_required: false } : {}),
     }]),
   );
-  const write = createOperationsWriteQueue
-    .catch(() => {})
-    .then(() => area.set({ [CREATE_OPERATIONS_KEY]: snapshot }));
-  createOperationsWriteQueue = write;
-  return write;
+  const values = { [CREATE_OPERATIONS_KEY]: snapshot };
+  if (update.replayChanged) {
+    values[CREATE_REPLAY_FILTER_KEY] = {
+      version: 1,
+      bitmap: Array.from(update.replay.bytes, byte => byte.toString(16).padStart(2, '0')).join(''),
+    };
+  }
+  // Retire the full evidence and persist its replay fence in the same write.
+  // Until that succeeds, neither the local registry nor its durable snapshot
+  // loses a record. Admission is serialized and refuses new work on failure.
+  await area.set(values);
+  publishCreateOperations(update);
 }
 
 async function loadCreateOperations() {
@@ -156,13 +266,30 @@ async function loadCreateOperations() {
     try {
       const area = chrome.storage?.session;
       if (!area) throw new Error('chrome.storage.session is unavailable');
-      const stored = (await area.get(CREATE_OPERATIONS_KEY))[CREATE_OPERATIONS_KEY] || {};
-      for (const [operationId, record] of Object.entries(stored)) {
-        if (record && typeof record === 'object') {
-          createOperations.set(String(operationId), { ...record, operation_id: String(operationId) });
-        }
+      const stored = await area.get([CREATE_OPERATIONS_KEY, CREATE_REPLAY_FILTER_KEY]);
+      const replay = readCreateReplayFilter(stored[CREATE_REPLAY_FILTER_KEY]);
+      const registry = stored[CREATE_OPERATIONS_KEY];
+      if (registry !== undefined &&
+          (!registry || typeof registry !== 'object' || Array.isArray(registry))) {
+        throw new Error('tab-create operation registry is unreadable');
       }
-      pruneCreateOperations();
+      const records = new Map();
+      for (const [operationId, record] of Object.entries(registry || {})) {
+        if (!operationId.trim() || !record || typeof record !== 'object' || Array.isArray(record) ||
+            !['pending', 'completed', 'not_found', 'unknown'].includes(record.status) ||
+            (record.operation_id !== undefined && record.operation_id !== operationId) ||
+            (record.created_at !== undefined &&
+              (typeof record.created_at !== 'number' || !Number.isFinite(record.created_at) ||
+                record.created_at < 0))) {
+          throw new Error('tab-create operation registry is unreadable');
+        }
+        records.set(operationId, {
+          ...record, operation_id: operationId, created_at: record.created_at ?? Date.now(),
+        });
+      }
+      const update = pruneCreateOperations(records, replay);
+      if (update.changed) await persistCreateOperations(update);
+      else publishCreateOperations(update);
     } catch (error) {
       console.log('[BTAP-WS] create operation storage unavailable', error);
       throw error;
@@ -201,16 +328,28 @@ function operationRecordData(record) {
     tab_status: record.tab_status || 'unknown',
     load_ready: Boolean(record.load_ready),
     client_id: record.client_id || null,
-    may_have_created: record.status === 'pending',
+    may_have_created: record.status === 'pending' || record.status === 'unknown',
     retry_safe: record.status === 'not_found',
+    ...(record.error ? { error: record.error } : {}),
+    ...(record.status === 'unknown' ? { resume_required: false } : {}),
   };
 }
 
 async function createTabStatus(msg) {
-  const operationId = String(msg.operation_id || '');
+  const operationId = String(msg.operation_id || '').trim();
   if (!operationId) return { ok: false, error: 'create_status requires operation_id' };
   try {
     await loadCreateOperations();
+    return await withCreateOperationsLock(async () => {
+      await persistCreateOperations(pruneCreateOperations());
+      const record = createOperations.get(operationId);
+      if (record) return { ok: true, data: operationRecordData(record) };
+      const retired = retiredCreateOperationData(operationId);
+      return { ok: true, data: retired || {
+        status: 'not_found', operation_status: 'not_found', operation_id: operationId,
+        may_have_created: false, retry_safe: true,
+      } };
+    });
   } catch (error) {
     return { ok: true, data: {
       status: 'unknown', operation_status: 'unknown', operation_id: operationId,
@@ -218,12 +357,6 @@ async function createTabStatus(msg) {
       error: error.message || String(error),
     } };
   }
-  const record = createOperations.get(operationId);
-  if (!record) return { ok: true, data: {
-    status: 'not_found', operation_status: 'not_found', operation_id: operationId,
-    may_have_created: false, retry_safe: true,
-  } };
-  return { ok: true, data: operationRecordData(record) };
 }
 
 // --- Tab generations: bookkeeping and generation-checked close ------------
@@ -283,7 +416,8 @@ async function loadTabGenerations() {
     }
     const live = new Set(tabs.map(tab => String(tab.id)));
     for (const [rawId, generation] of Object.entries(stored)) {
-      if (live.has(String(rawId)) && typeof generation === 'string') {
+      if (live.has(String(rawId)) && typeof generation === 'string' &&
+          !retiredTabGenerations.has(Number(rawId))) {
         // The durable value wins over anything minted while the store was
         // unreadable: it is the one other callers were handed to keep.
         tabGenerations.set(Number(rawId), generation);
@@ -297,13 +431,19 @@ async function loadTabGenerations() {
       if (!tabGenerations.has(tab.id)) tabGenerations.set(tab.id, newTabGeneration());
     }
     await persistTabGenerations();
+    retiredTabGenerations.clear();
   })();
   tabGenerationsLoadPromise = attempt;
   return await attempt;
 }
 
 function scheduleNewTabGeneration(tabId) {
+  const removal = tabGenerationRemovals.get(tabId);
+  if (removal) return removal.then(() => scheduleNewTabGeneration(tabId));
   if (tabGenerationAssignments.has(tabId)) return tabGenerationAssignments.get(tabId);
+  // This entry point is an explicit new lifetime, unlike a lookup that merely
+  // minted a provisional value while storage was unreadable.
+  if (!tabGenerationsLoaded) retiredTabGenerations.add(tabId);
   const assignment = (async () => {
     await loadTabGenerations();
     const generation = newTabGeneration();
@@ -317,26 +457,40 @@ function scheduleNewTabGeneration(tabId) {
 }
 
 async function tabGenerationFor(tabId) {
+  const removal = tabGenerationRemovals.get(tabId);
+  if (removal) await removal;
   const pending = tabGenerationAssignments.get(tabId);
   if (pending) return await pending;
   await loadTabGenerations();
+  let generation = tabGenerations.get(tabId);
   if (!tabGenerations.has(tabId)) {
-    tabGenerations.set(tabId, newTabGeneration());
+    generation = newTabGeneration();
+    tabGenerations.set(tabId, generation);
     if (!tabGenerationsLoaded) provisionalTabGenerations.add(tabId);
     await persistTabGenerations();
   }
-  return tabGenerations.get(tabId);
+  // onRemoved can clear the map while persistence yields. Return the value
+  // assigned to this lookup, never a missing value or a reused tab's identity.
+  return generation;
 }
 
-async function forgetTabGeneration(tabId) {
+function forgetTabGeneration(tabId) {
+  if (tabGenerationRemovals.has(tabId)) return tabGenerationRemovals.get(tabId);
+  // Record lifecycle evidence before yielding. A recovery read can already be
+  // in flight, and its live-tab snapshot may contain a reused numeric id.
+  if (!tabGenerationsLoaded) retiredTabGenerations.add(tabId);
   const pending = tabGenerationAssignments.get(tabId);
-  if (pending) await pending.catch(() => {});
-  await loadTabGenerations();
-  tabGenerations.delete(tabId);
-  provisionalTabGenerations.delete(tabId);
-  // A load that failed makes this write a no-op, which is harmless: the tab is
-  // gone, so the next successful load drops its stored entry as not-live.
-  await persistTabGenerations();
+  const removal = (async () => {
+    if (pending) await pending.catch(() => {});
+    await loadTabGenerations();
+    tabGenerations.delete(tabId);
+    provisionalTabGenerations.delete(tabId);
+    // An unreadable store still blocks the whole-map write. The retirement
+    // survives until a successful load, so reuse cannot resurrect its old value.
+    await persistTabGenerations();
+  })().finally(() => tabGenerationRemovals.delete(tabId));
+  tabGenerationRemovals.set(tabId, removal);
+  return removal;
 }
 
 // --- Stable tab identities: evidence-backed rebinding across native ids -----
@@ -454,6 +608,12 @@ async function transferTabIdentity(addedTabId, removedTabId) {
   const generation = tabGenerations.get(removedTabId) || await tabGenerationFor(addedTabId);
   tabGenerations.set(addedTabId, generation);
   tabGenerations.delete(removedTabId);
+  if (!tabGenerationsLoaded) {
+    retiredTabGenerations.add(addedTabId);
+    retiredTabGenerations.add(removedTabId);
+    provisionalTabGenerations.add(addedTabId);
+  }
+  provisionalTabGenerations.delete(removedTabId);
   await persistTabGenerations();
 }
 
@@ -514,6 +674,7 @@ const LEGACY_PERMISSION_ALARM_PREFIX = 'tmwd-permission:';
 const PERMISSION_ALARM_PREFIX = 'btap-permission:';
 const PERMISSION_LEASE_STAGED = 'staged';
 const PERMISSION_LEASE_ACTIVE = 'active';
+const PERMISSION_LEASE_MANUAL = 'manual_recovery';
 const SITE_PERMISSION_SETTINGS = new Set(['allow', 'block', 'ask']);
 const SITE_PERMISSION_CONTENT_SETTINGS = {
   notifications: 'notifications',
@@ -607,6 +768,11 @@ function contentSettingForPermission(permission) {
   return SITE_PERMISSION_CONTENT_SETTINGS[permission] || null;
 }
 
+function permissionMethodUnsupported(message) {
+  return /\b(?:unsupported|not supported|method not found|unknown method|unknown command)\b/i.test(message) ||
+    /Browser(?:\.setPermission| domain).*(?:wasn't found|not found|unavailable|not allowed)/i.test(message);
+}
+
 async function setClipboardPermission(tabId, origin, setting) {
   if (!Number.isInteger(tabId)) {
     return { ok: false, unsupported: true, error: 'clipboard permission requires a tabId' };
@@ -623,7 +789,11 @@ async function setClipboardPermission(tabId, origin, setting) {
   } catch (error) {
     // The extension debugger commonly rejects Browser.*. It is never safe to
     // fall back to page or physical input for a browser permission operation.
-    return { ok: false, unsupported: true, error: error.message || String(error) };
+    // Attachment failures and command timeouts are transient, not evidence that
+    // the protocol lacks this method. Only an explicit rejection ends retries.
+    const message = error.message || String(error);
+    const unsupported = !!debuggerLease && permissionMethodUnsupported(message);
+    return { ok: false, ...(unsupported ? { unsupported: true } : {}), error: message };
   } finally {
     if (debuggerLease) {
       try { await detachBtapDebugger(debuggerLease); } catch (_) {}
@@ -636,14 +806,18 @@ async function applyPermissionLease(lease, setting) {
     return await setClipboardPermission(lease.tabId, lease.origin, setting);
   }
   const contentSetting = chrome.contentSettings?.[lease.contentSetting];
-  if (!contentSetting) {
+  if (typeof contentSetting?.set !== 'function') {
     return { ok: false, unsupported: true, error: `content setting unavailable: ${lease.contentSetting}` };
   }
   try {
     await contentSetting.set({ primaryPattern: `${lease.origin}/*`, setting });
     return { ok: true };
   } catch (error) {
-    return { ok: false, error: error.message || String(error) };
+    const message = error.message || String(error);
+    return {
+      ok: false, error: message,
+      ...(permissionMethodUnsupported(message) ? { unsupported: true } : {}),
+    };
   }
 }
 
@@ -651,7 +825,25 @@ async function restorePermissionLease(lease) {
   return await applyPermissionLease(lease, lease.previousSetting);
 }
 
-async function restorePermissionLeaseMatches(matches) {
+function permissionRestoreFailure(lease, result) {
+  const manual = !!result.unsupported;
+  return {
+    id: lease.id,
+    origin: lease.origin,
+    permission: lease.permission,
+    previous_setting: lease.previousSetting,
+    error: result.error || 'restore failed',
+    unsupported: manual,
+    ...(manual ? {
+      manual_recovery_required: true,
+      recovery_instruction: `Restore ${lease.permission} for ${lease.origin} to ` +
+        `${lease.previousSetting} in browser site settings. The saved lease is retained; ` +
+        'an explicit reset may retry restoration after the browser API becomes available.',
+    } : {}),
+  };
+}
+
+async function restorePermissionLeaseMatches(matches, { retryManual = false } = {}) {
   const leases = await loadPermissionLeases();
   const kept = [];
   const succeeded = [];
@@ -663,22 +855,32 @@ async function restorePermissionLeaseMatches(matches) {
       kept.push(lease);
       continue;
     }
+    if (lease.state === PERMISSION_LEASE_MANUAL && !retryManual) {
+      kept.push(lease);
+      failures.push(permissionRestoreFailure(lease, {
+        unsupported: true, error: lease.restoreError || 'permission restore is unsupported',
+      }));
+      continue;
+    }
     attempted.push(lease);
     const result = await restorePermissionLease(lease);
     if (result.ok) {
       restored += 1;
       succeeded.push(lease);
     } else {
-      // A failed restore must survive worker eviction and retries.
-      kept.push(lease);
-      failures.push({ id: lease.id, error: result.error || 'restore failed', unsupported: !!result.unsupported });
+      // Retain the exact prior setting even when this browser cannot restore
+      // it. A persisted manual state stops wake/alarm retry loops without
+      // pretending that the permission was restored or deleting its evidence.
+      kept.push(result.unsupported ? {
+        ...lease,
+        state: PERMISSION_LEASE_MANUAL,
+        restoreError: result.error || 'permission restore is unsupported',
+      } : { ...lease, state: PERMISSION_LEASE_STAGED });
+      failures.push(permissionRestoreFailure(lease, result));
     }
   }
-  if (!attempted.length) {
-    return { ok: true, restored: 0, failures: [], remaining: kept.length };
-  }
   try {
-    await savePermissionLeases(kept);
+    if (attempted.length) await savePermissionLeases(kept);
   } catch (error) {
     for (const lease of attempted) {
       try { await schedulePermissionRetry(lease); } catch (_) {}
@@ -690,6 +892,7 @@ async function restorePermissionLeaseMatches(matches) {
       remaining: leases.length,
       recovery_pending: true,
       recovery_error: error.message || String(error),
+      ...(failures.some(failure => failure.unsupported) ? { manual_recovery_required: true } : {}),
     };
   }
   for (const lease of succeeded) {
@@ -699,6 +902,11 @@ async function restorePermissionLeaseMatches(matches) {
   for (const failure of failures) {
     const lease = kept.find(item => item.id === failure.id);
     if (!lease) continue;
+    if (failure.unsupported) {
+      await clearPermissionAlarm(permissionAlarmName(lease));
+      await clearPermissionAlarm(permissionRetryAlarmName(lease));
+      continue;
+    }
     try {
       await schedulePermissionRetry(lease);
     } catch (error) {
@@ -710,7 +918,10 @@ async function restorePermissionLeaseMatches(matches) {
     restored,
     failures,
     remaining: kept.length,
-    ...(failures.length ? { recovery_pending: true } : {}),
+    ...(failures.length ? {
+      recovery_pending: failures.some(failure => !failure.unsupported),
+      ...(failures.some(failure => failure.unsupported) ? { manual_recovery_required: true } : {}),
+    } : {}),
   };
 }
 
@@ -718,7 +929,8 @@ async function restoreExpiredPermissionLeases() {
   return await withPermissionLeaseLock(async () => {
     const now = Date.now();
     return await restorePermissionLeaseMatches(lease =>
-      lease.state === PERMISSION_LEASE_STAGED || Number(lease.expiresAt) <= now
+      lease.state === PERMISSION_LEASE_STAGED || lease.state === PERMISSION_LEASE_MANUAL ||
+      Number(lease.expiresAt) <= now
     );
   });
 }
@@ -749,9 +961,10 @@ async function resetSitePermissionLeases({ origin = '', permission = '' } = {}) 
     return { ok: false, error: 'unsupported permission' };
   }
   const canonicalPermission = contentSetting || permission;
-  return await withPermissionLeaseLock(async () => await restorePermissionLeaseMatches(lease =>
-    (!normalizedOrigin || lease.origin === normalizedOrigin) &&
-    (!canonicalPermission || lease.permission === canonicalPermission)
+  return await withPermissionLeaseLock(async () => await restorePermissionLeaseMatches(
+    lease => (!normalizedOrigin || lease.origin === normalizedOrigin) &&
+      (!canonicalPermission || lease.permission === canonicalPermission),
+    { retryManual: true },
   ));
 }
 
@@ -779,14 +992,20 @@ async function setSitePermission(msg) {
   return await withPermissionLeaseLock(async () => {
     const now = Date.now();
     const recovery = await restorePermissionLeaseMatches(lease =>
-      lease.state === PERMISSION_LEASE_STAGED || Number(lease.expiresAt) <= now
+      lease.state === PERMISSION_LEASE_STAGED || lease.state === PERMISSION_LEASE_MANUAL ||
+      Number(lease.expiresAt) <= now
     );
     if (!recovery.ok) {
       return {
         ok: false,
-        error: 'an earlier site-permission lease is still awaiting recovery',
-        recovery_pending: true,
+        error: recovery.manual_recovery_required
+          ? 'an earlier site-permission lease requires manual recovery'
+          : 'an earlier site-permission lease is still awaiting recovery',
+        recovery_pending: !!recovery.recovery_pending,
         recovery_error: recovery.recovery_error || recovery.failures?.[0]?.error || 'restore failed',
+        ...(recovery.manual_recovery_required ? {
+          manual_recovery_required: true, failures: recovery.failures,
+        } : {}),
         origin,
         permission: contentSetting,
       };
@@ -2194,14 +2413,20 @@ async function forceInvalidateDebuggerAttachment(
 // session that is already set up there -- a fresh attach cannot (its renderer
 // side is created on the main thread the zombie is holding). Whatever it
 // returns is copied onto the timeout error.
+// `onChromeSettled` observes the original Chrome promise even after this
+// logical command is cancelled, so late remote objects can still be released.
 async function sendDebuggerCommandWithTimeout(
   lease, method, params = {}, timeoutMs = 20000, minimumTimeoutMs = 100,
-  dispatchState = null, beforeInvalidate = null,
+  dispatchState = null, beforeInvalidate = null, onChromeSettled = null,
 ) {
+  if (dispatchState && typeof dispatchState === 'object') {
+    dispatchState.dispatched = false;
+  }
   if (!lease?.attachment || lease.released || lease.attachment.invalidated ||
       lease.generation !== lease.attachment.generation) {
     const error = new Error('debugger_detached: attachment lease is no longer valid');
     error.code = 'debugger_detached';
+    error.dispatched = false;
     throw error;
   }
   const attachment = lease.attachment;
@@ -2213,13 +2438,19 @@ async function sendDebuggerCommandWithTimeout(
     settled: false,
     dispatched: false,
   };
-  if (dispatchState && typeof dispatchState === 'object') {
-    dispatchState.dispatched = false;
-  }
   attachment.pendingCommands ||= new Set();
   attachment.pendingCommands.add(commandState);
   const command = Promise.resolve().then(
     () => {
+      // Releasing a lease rejects its watchdog synchronously, while this send
+      // is queued in a microtask. That rejection must also stop the queued work.
+      if (commandState.settled || lease.released || attachment.invalidated ||
+          lease.generation !== attachment.generation) {
+        const error = new Error('debugger_detached: command ownership ended before dispatch');
+        error.code = 'debugger_detached';
+        error.dispatched = false;
+        throw error;
+      }
       commandState.dispatched = true;
       if (dispatchState && typeof dispatchState === 'object') {
         dispatchState.dispatched = true;
@@ -2227,6 +2458,14 @@ async function sendDebuggerCommandWithTimeout(
       return chrome.debugger.sendCommand(attachment.target, method, params || {});
     },
   );
+  if (typeof onChromeSettled === 'function') {
+    const observeSettlement = () => {
+      if (commandState.dispatched) return onChromeSettled();
+    };
+    // Cleanup observes the raw response without changing the command's result
+    // or extending a caller's deadline. A rejected response can own objects too.
+    void command.then(observeSettlement, observeSettlement).catch(() => {});
+  }
   let timeoutError = null;
   // Resolves once the deadline handler has finished everything it does after
   // deciding the command timed out -- the probe and the invalidation. The
@@ -2733,6 +2972,19 @@ async function navigateWithDialogPolicy(msg) {
   // a microtask, and a deadline throw in that gap must still count the
   // navigation as issued.
   const navigationState = { dispatched: false };
+  const waitForOutcome = async (promises, waitMs, fallback = { kind: 'timeout' }) => {
+    let timer = null;
+    try {
+      return await Promise.race([
+        ...promises,
+        new Promise(resolve => {
+          timer = setTimeout(() => resolve(fallback), waitMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  };
   try {
     const beforeTab = await chrome.tabs.get(tabId);
     debuggerLease = await enablePageForNavigation(tabId, deadlineEpochMs);
@@ -2770,16 +3022,12 @@ async function navigateWithDialogPolicy(msg) {
       kind: 'error', error: error.message || String(error), cause: error,
     }));
     pending.navigationPromise = navigationPromise;
-    const waitMs = Math.min(
-      navigationDeadlineRemaining(deadlineEpochMs, 'before navigation wait'),
-      30000,
-    );
-    let first = await Promise.race([
+    const waitMs = navigationDeadlineRemaining(deadlineEpochMs, 'before navigation wait');
+    let first = await waitForOutcome([
       navigationPromise,
       dialogPromise.then(dialog => ({ kind: 'dialog', dialog })),
       pending.cancelSignal,
-      new Promise(resolve => setTimeout(() => resolve({ kind: 'timeout' }), waitMs)),
-    ]);
+    ], waitMs);
     // Detaching cancels the waiter, not the dispatched navigation. Preserve
     // unknown outcomes through the structured catch so the bridge keeps the
     // original receipt and its bounded reservation instead of reporting ok.
@@ -2790,10 +3038,9 @@ async function navigateWithDialogPolicy(msg) {
         navigationDeadlineRemaining(deadlineEpochMs, 'before dialog grace'),
         250,
       );
-      first = await Promise.race([
+      first = await waitForOutcome([
         dialogPromise.then(dialog => ({ kind: 'dialog', dialog })),
-        new Promise(resolve => setTimeout(() => resolve(first), dialogGraceMs)),
-      ]);
+      ], dialogGraceMs, first);
     }
     const dialog = pending.dialog || (first.kind === 'dialog' ? first.dialog : null);
     if (dialog && action === 'manual') {
@@ -2811,12 +3058,7 @@ async function navigateWithDialogPolicy(msg) {
       const acceptWaitMs = navigationDeadlineRemaining(
         deadlineEpochMs, 'before accepted navigation wait',
       );
-      const completed = await Promise.race([
-        navigationPromise,
-        new Promise(resolve => setTimeout(
-          () => resolve({ kind: 'timeout' }), acceptWaitMs,
-        )),
-      ]);
+      const completed = await waitForOutcome([navigationPromise], acceptWaitMs);
       throwIfNavigationUncertain(completed);
       navigationKind = completed.kind;
       navigationError = completed.kind === 'error' ? completed.error : null;
@@ -3055,13 +3297,6 @@ async function createTabAck(msg) {
   }
   const inFlight = createOperationPromises.get(operationId);
   if (inFlight) return await inFlight;
-  const existing = createOperations.get(operationId);
-  if (existing && existing.status === 'completed') {
-    return { ok: true, data: operationRecordData(existing) };
-  }
-  if (existing && existing.status === 'pending') {
-    return { ok: true, data: operationRecordData(existing) };
-  }
   const run = (async () => {
     const clientId = msg.client_id || msg.clientId
       || (typeof getClientId === 'function' ? await getClientId() : null);
@@ -3074,14 +3309,34 @@ async function createTabAck(msg) {
       tab_status: 'pending',
       load_ready: false,
     };
-    createOperations.set(operationId, pending);
     // This write intentionally precedes chrome.tabs.create. If the worker is
     // evicted after create but before completion is saved, reconciliation sees
-    // pending and returns unknown rather than opening a second tab.
+    // an orphan and returns terminal uncertainty instead of opening a second tab.
     try {
-      await persistCreateOperations();
+      const admission = await withCreateOperationsLock(async () => {
+        await persistCreateOperations(pruneCreateOperations());
+        const existing = createOperations.get(operationId);
+        if (existing && existing.status !== 'not_found') {
+          return { ok: true, data: operationRecordData(existing) };
+        }
+        const retired = !existing && retiredCreateOperationData(operationId);
+        if (retired) return { ok: true, data: retired };
+        const update = pruneCreateOperations(createOperations, createReplayFilter, existing ? 0 : 1);
+        if (!existing && update.records.size >= CREATE_OPERATION_MAX_RECORDS) {
+          return { ok: true, data: {
+            status: 'unknown', operation_status: 'unknown', operation_id: operationId,
+            may_have_created: false, retry_safe: true, resume_required: false,
+            capacity_exhausted: true,
+            error: 'tab-create registry is full of active operations; wait for them to finish before a fresh create',
+          } };
+        }
+        update.records.set(operationId, pending);
+        update.changed = true;
+        await persistCreateOperations(update);
+        return null;
+      });
+      if (admission) return admission;
     } catch (error) {
-      createOperations.delete(operationId);
       return { ok: true, data: {
         status: 'unknown', operation_status: 'unknown', operation_id: operationId,
         may_have_created: false, retry_safe: false,
@@ -3112,17 +3367,24 @@ async function createTabAck(msg) {
         tab_status: tab.status || 'unknown',
         load_ready: Boolean(tab.status === 'complete' && currentUrl),
       };
-      createOperations.set(operationId, completed);
-      await persistCreateOperations();
+      await withCreateOperationsLock(async () => {
+        const update = pruneCreateOperations();
+        update.records.set(operationId, completed);
+        update.changed = true;
+        await persistCreateOperations(update);
+      });
       void sendTabsUpdate();
       return { ok: true, data: operationRecordData(completed) };
     } catch (error) {
       if (tab && tab.id !== undefined && tab.id !== null) {
         // The native side effect already happened. Any failure while
         // assigning generation or persisting the completion is ambiguous;
-        // preserve pending so reconciliation can never issue a second create.
+        // preserve terminal uncertainty so reconciliation never issues another
+        // create or waits for a producer that has already ended.
         const uncertain = {
           ...pending,
+          status: 'unknown',
+          resume_required: false,
           id: tab.id,
           generation: generation || pending.generation || null,
           url: tab.pendingUrl || tab.url || pending.url,
@@ -3131,8 +3393,16 @@ async function createTabAck(msg) {
           tab_status: tab.status || 'unknown',
           error: error.message || String(error),
         };
-        createOperations.set(operationId, uncertain);
-        try { await persistCreateOperations(); } catch (_) {}
+        await withCreateOperationsLock(async () => {
+          const update = pruneCreateOperations();
+          update.records.set(operationId, uncertain);
+          update.changed = true;
+          try { await persistCreateOperations(update); } catch (_) {
+            // The durable pending record still fences the side effect. Keep
+            // the richer local evidence too, without admitting another record.
+            createOperations.set(operationId, uncertain);
+          }
+        });
         return { ok: true, data: operationRecordData(uncertain) };
       }
       const failed = {
@@ -3141,8 +3411,14 @@ async function createTabAck(msg) {
         tab_status: 'unknown',
         error: error.message || String(error),
       };
-      createOperations.set(operationId, failed);
-      try { await persistCreateOperations(); } catch (_) {
+      try {
+        await withCreateOperationsLock(async () => {
+          const update = pruneCreateOperations();
+          update.records.set(operationId, failed);
+          update.changed = true;
+          await persistCreateOperations(update);
+        });
+      } catch (_) {
         return { ok: true, data: {
           status: 'unknown', operation_status: 'unknown', operation_id: operationId,
           may_have_created: false, retry_safe: false,
@@ -3934,91 +4210,8 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
   const execSourceUrl = typeof sourceUrl === 'string' && sourceUrl
     ? sourceUrl.replace(/[\r\n]/g, '') : null;
   return `(async () => {
-    // Turning a page value into something the extension boundary can carry.
-    //
-    // This asks the engine two questions rather than naming the types that
-    // answer them: \`Object.prototype.toString\` for what a value IS -- the
-    // internal class it already tracks, and the only classification that
-    // survives a value arriving from an iframe's realm, where \`instanceof\`
-    // does not -- and the iteration protocol for whether it is a collection.
-    //
-    // Naming jQuery, NodeList and HTMLCollection one branch each, as this did,
-    // decided the answer for exactly three types and silently mangled every
-    // other: a \`Set\` or \`Map\` of elements, a generator's output, a \`$\` bound
-    // in noConflict mode and any non-jQuery wrapper all reached JSON.stringify
-    // and arrived as \`{}\`, with nothing anywhere reporting the loss. Four
-    // branches collapse into one gate because the engine already has a single
-    // answer to "is this a collection".
-    //
-    // Four more defects the shape carried, each of them silent:
-    //  - The cap sat on the wrong branch. Only the array-like path stopped at
-    //    100 while the NodeList and jQuery paths were unbounded, so
-    //    \`querySelectorAll('div')\` on a large page serialised every element's
-    //    outerHTML -- the cap was on the branch least likely to be large.
-    //  - Array-like conversion required \`result[0]\` to be an element, so a
-    //    collection whose first slot was empty fell through to JSON.
-    //  - A node without \`outerHTML\` (a text node, a comment, a document)
-    //    became \`{}\`, and \`window\`/\`document\` nested inside a result became
-    //    the string '[Object]', which a real object can also produce.
-    //  - A cycle threw inside JSON.stringify and discarded the *entire* result
-    //    for one bad edge. Cycles are marked now and the rest survives.
-    const BTAP_MAX_ITEMS = 200;
-    const BTAP_MAX_DEPTH = 6;
-    function smartProcessResult(result, depth, seen) {
-      if (typeof result === 'bigint') return String(result);
-      if (typeof result === 'function') return '[Function: ' + (result.name || 'anonymous') + ']';
-      if (result === null || typeof result !== 'object') return result;
-      depth = depth || 0;
-      seen = seen || new WeakSet();
-      const kind = Object.prototype.toString.call(result).slice(8, -1);
-      if (kind === 'Window') {
-        // Reading any further can throw on a cross-origin frame, so the class
-        // name is the part that is always available.
-        let href = 'cross-origin';
-        try { href = result.location.href; } catch (_) {}
-        return '[Window: ' + href + ']';
-      }
-      if (kind === 'Error') return '[' + (result.name || 'Error') + ': ' + result.message + ']';
-      if (typeof result.outerHTML === 'string') return result.outerHTML;
-      if (typeof result.nodeType === 'number') {
-        return '[' + kind + (result.nodeValue ? ': ' + result.nodeValue : '') + ']';
-      }
-      // \`toJSON\` is the engine's own opt-in serialisation hook, which is how a
-      // Date keeps arriving as an ISO string without Date being named here.
-      if (typeof result.toJSON === 'function') {
-        try { return result.toJSON(); } catch (_) {}
-      }
-      if (seen.has(result)) return '[Circular]';
-      if (depth >= BTAP_MAX_DEPTH) return '[' + kind + ': depth limit]';
-      seen.add(result);
-      try {
-        // Iterable covers NodeList, Set, Map, arguments, typed arrays, jQuery 3
-        // and anything a page defines. The array-like fallback is gated on the
-        // class not being a plain object, so \`{length: 2}\` keeps its keys
-        // instead of becoming a two-element array of undefined.
-        const iterable = typeof result[Symbol.iterator] === 'function';
-        if (iterable || (kind !== 'Object' && typeof result.length === 'number')) {
-          const all = Array.from(result);
-          const out = all.slice(0, BTAP_MAX_ITEMS).map(v => smartProcessResult(v, depth + 1, seen));
-          if (all.length > BTAP_MAX_ITEMS) {
-            out.push('[' + (all.length - BTAP_MAX_ITEMS) + ' more of ' + all.length + ']');
-          }
-          return out;
-        }
-        const out = {};
-        for (const key of Object.keys(result)) {
-          try {
-            out[key] = smartProcessResult(result[key], depth + 1, seen);
-          } catch (e) {
-            // A throwing getter loses its own value, not the whole object.
-            out[key] = '[unreadable: ' + e.message + ']';
-          }
-        }
-        return out;
-      } finally {
-        seen.delete(result);
-      }
-    }
+    const smartProcessResult = (${globalThis.smartProcessResult.toString()});
+    const prepareGuardedEval = (${globalThis.prepareGuardedEval.toString()});
     // Dialog suppression is scoped to this command: disable_dialogs.js defers
     // to the native alert/confirm/prompt unless this deadline is in the future,
     // so the user's own confirmations keep working during normal browsing.
@@ -4060,25 +4253,28 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
       const _btapExecSourceUrl = ${JSON.stringify(execSourceUrl)};
       const _btapWithSourceUrl = c => _btapExecSourceUrl
         ? c + '\\n//# sourceURL=' + _btapExecSourceUrl : c;
-      const jsCode = _btapWithSourceUrl(rawJsCode);
-      const lines = rawJsCode.split(/\\r?\\n/).filter(l => l.trim());
-      const lastLine = lines.length > 0 ? lines[lines.length - 1].trim() : '';
       const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
       let r;
-      function _air(c) { const ls = c.split(/\\r?\\n/); let i = ls.length - 1; while (i >= 0 && !ls[i].trim()) i--; if (i < 0) return c; const t = ls[i].trim(); if (/^(return |return;|return$|let |const |var |if |if\\(|for |for\\(|while |while\\(|switch|try |throw |class |function |async |import |export |\\/\\/|})/.test(t)) return c; ls[i] = ls[i].match(/^(\\s*)/)[1] + 'return ' + t; return ls.join('\\n'); }
-      if (lastLine.startsWith('return')) {
-        r = await (new AsyncFunction(jsCode))();
-      } else {
-        try { r = eval(jsCode); if (r instanceof Promise) r = await r; } catch (e) {
-          if (e instanceof SyntaxError && /return/i.test(e.message)) {
-            // A single-line script can contain several statements followed by
-            // an explicit return. Auto-returning that whole line would return
-            // after its first expression and silently skip the later work.
-            r = await (new AsyncFunction(jsCode))();
-          } else if (e instanceof SyntaxError && /await/i.test(e.message)) {
-            r = await (new AsyncFunction(_btapWithSourceUrl(_air(rawJsCode))))();
-          } else throw e;
-        }
+      const _air = (${globalThis.prepareGuardedEval.asyncBody.toString()});
+      const _btapEvalGuard = (() => {
+        try { return prepareGuardedEval(rawJsCode, this); }
+        catch (error) { return { error }; }
+      })();
+      try {
+        if (_btapEvalGuard.error) throw _btapEvalGuard.error;
+        r = eval(_btapWithSourceUrl(_btapEvalGuard.source));
+        if (r instanceof Promise) r = await r;
+      } catch (e) {
+        const parseFailed = _btapEvalGuard.error || !_btapEvalGuard.started();
+        // A FunctionBody parse failure can mean top-level await even when the
+        // engine's message omits that keyword. AsyncFunction validates it again
+        // before execution. A started script is never retried.
+        if (parseFailed && e instanceof SyntaxError &&
+            (_btapEvalGuard.error || /return/i.test(e.message))) {
+          r = await (new AsyncFunction(_btapWithSourceUrl(_air(rawJsCode))))();
+        } else throw e;
+      } finally {
+        if (_btapEvalGuard.cleanup) _btapEvalGuard.cleanup();
       }
       const processed = smartProcessResult(r);
       if (_btapHasDialogScope) {
@@ -4220,7 +4416,7 @@ function manualExecutionError(error, prefix = 'manual CDP execution failed: ') {
   } };
 }
 
-function normalizeManualEvaluation(evaluationOutcome) {
+async function normalizeManualEvaluation(evaluationOutcome, pending) {
   if (evaluationOutcome.kind === 'evaluation_error') {
     return manualExecutionError(evaluationOutcome.error, '');
   }
@@ -4240,27 +4436,103 @@ function normalizeManualEvaluation(evaluationOutcome) {
       name: 'Error', message: description, stack: description,
     } };
   }
-  const value = evaluation?.result?.value;
-  return { ok: true, data: value };
+  const remote = evaluation?.result;
+  if (!remote || typeof remote !== 'object') {
+    return manualExecutionError(new Error('manual CDP evaluation returned no result'), '');
+  }
+  if (remote.type === 'symbol' && typeof remote.description === 'string') {
+    return { ok: true, data: remote.description };
+  }
+  if (remote.objectId) {
+    const remaining = pending.deadline - Date.now();
+    if (remaining <= 0 || pending.released || !pending.debuggerLease) {
+      return manualExecutionError(new Error('manual result conversion deadline or ownership expired'), '');
+    }
+    const converted = await sendDebuggerCommandWithTimeout(
+      pending.debuggerLease, 'Runtime.callFunctionOn', {
+        objectId: remote.objectId,
+        functionDeclaration: `function() { return (${globalThis.smartProcessResult.toString()})(this); }`,
+        returnByValue: true,
+      }, remaining,
+    );
+    if (converted?.exceptionDetails ||
+        !Object.prototype.hasOwnProperty.call(converted?.result || {}, 'value')) {
+      return manualExecutionError(new Error('manual CDP result conversion failed'), '');
+    }
+    return { ok: true, data: converted.result.value };
+  }
+  if (Object.prototype.hasOwnProperty.call(remote, 'value')) {
+    return { ok: true, data: globalThis.smartProcessResult(remote.value) };
+  }
+  if (remote.type === 'undefined') return { ok: true, data: null };
+  if (remote.type === 'bigint' && /^-?\d+n$/.test(remote.unserializableValue || '')) {
+    return { ok: true, data: remote.unserializableValue.slice(0, -1) };
+  }
+  if (remote.type === 'number' && ['NaN', 'Infinity', '-Infinity', '-0']
+      .includes(remote.unserializableValue)) {
+    return { ok: true, data: remote.unserializableValue === '-0' ? 0 : null };
+  }
+  return manualExecutionError(new Error('manual CDP evaluation returned an unknown value shape'), '');
+}
+
+async function releaseLateManualObjectGroup(pending, owningLease) {
+  const attachment = owningLease?.attachment;
+  if (!pending?.released || !pending.objectGroup || !attachment?.attached ||
+      attachment.invalidated || attachment.detachingPromise ||
+      owningLease.generation !== attachment.generation ||
+      debuggerAttachments.get(attachment.key) !== attachment) return;
+  // A shared capture can keep this exact Chrome connection alive after manual
+  // cancellation. Borrow only that connection to clear our old group; never
+  // attach again or send cleanup into a replacement connection.
+  attachment.refs += 1;
+  const cleanupLease = { attachment, generation: attachment.generation, released: false };
+  try {
+    await sendDebuggerCommandWithTimeout(cleanupLease, 'Runtime.releaseObjectGroup', {
+      objectGroup: pending.objectGroup,
+    }, 1000);
+  } catch (_) {
+  } finally {
+    try { await detachBtapDebugger(cleanupLease); } catch (_) {}
+  }
 }
 
 async function releaseManualExecution(pending) {
   if (!pending) return;
   if (pending.releasePromise) return await pending.releasePromise;
   pending.released = true;
-  pending.state = 'released';
+  pending.state = 'releasing';
   if (pending.expiryTimer) {
     clearTimeout(pending.expiryTimer);
     pending.expiryTimer = null;
   }
-  if (pendingManualExecutions.get(pending.tabId) === pending) {
-    pendingManualExecutions.delete(pending.tabId);
-  }
   const debuggerLease = pending.debuggerLease;
   pending.debuggerLease = null;
+  if (debuggerLease?.attachment) {
+    // Revoke queued evaluation/conversion work before awaiting group cleanup.
+    // Keep the lease itself until that cleanup completes so shared owners stay live.
+    rejectPendingDebuggerCommandsForLease(
+      debuggerLease.attachment, debuggerLease, 'manual execution released',
+    );
+  }
   pending.releasePromise = (async () => {
-    if (debuggerLease) {
-      try { await detachBtapDebugger(debuggerLease); } catch (_) {}
+    try {
+      if (debuggerLease) {
+        if (pending.objectGroup && pending.evaluationStarted) {
+          try {
+            await sendDebuggerCommandWithTimeout(debuggerLease, 'Runtime.releaseObjectGroup', {
+              objectGroup: pending.objectGroup,
+            }, 1000);
+          } catch (_) {}
+        }
+        try { await detachBtapDebugger(debuggerLease); } catch (_) {}
+      }
+    } finally {
+      // Do not admit a new owner while object release or detach is still in
+      // flight. Only this pending lifetime may remove its registry entry.
+      if (pendingManualExecutions.get(pending.tabId) === pending) {
+        pendingManualExecutions.delete(pending.tabId);
+      }
+      pending.state = 'released';
     }
   })();
   await pending.releasePromise;
@@ -4284,10 +4556,12 @@ async function executeManualScript(tabId, code, dialogScope) {
   if (existing) return manualExecutionResult('busy', existing.dialog || null);
 
   const target = { tabId };
+  const generation = nextManualExecutionGeneration++;
   const pending = {
     tabId,
     token: dialogScope.token,
-    generation: nextManualExecutionGeneration++,
+    generation,
+    objectGroup: 'btap-manual-' + generation + '-' + dialogScope.token,
     debuggerLease: null,
     mainFrameId: null,
     executionContextId: null,
@@ -4310,7 +4584,14 @@ async function executeManualScript(tabId, code, dialogScope) {
   manualExecutionGenerations.set(tabId, pending.generation);
 
   try {
-    pending.debuggerLease = await attachBtapDebugger(target);
+    const debuggerLease = await attachBtapDebugger(target);
+    if (pendingManualExecutions.get(tabId) !== pending || pending.released) {
+      // Cancellation may finish while attach is still pending. The late lease
+      // belongs to this abandoned caller, not to any newer pending execution.
+      try { await detachBtapDebugger(debuggerLease); } catch (_) {}
+      throw new Error(pending.cancelReason || 'manual execution ownership changed before debugger setup');
+    }
+    pending.debuggerLease = debuggerLease;
     await sendDebuggerCommandWithTimeout(pending.debuggerLease, 'Page.enable', {}, 5000);
     await sendDebuggerCommandWithTimeout(pending.debuggerLease, 'Runtime.enable', {}, 5000);
     const frameTree = await sendDebuggerCommandWithTimeout(
@@ -4347,32 +4628,32 @@ async function executeManualScript(tabId, code, dialogScope) {
     let evaluationCommand;
     try {
       evaluationCommand = sendDebuggerCommandWithTimeout(
-        pending.debuggerLease, 'Runtime.evaluate', {
+        debuggerLease, 'Runtime.evaluate', {
         expression: code,
         contextId: pending.executionContextId,
         awaitPromise: true,
-        returnByValue: true,
+        returnByValue: false,
+        objectGroup: pending.objectGroup,
         replMode: true,
-      }, boundedCdpTimeout(dialogScope.timeoutMs, 15000));
+      }, boundedCdpTimeout(dialogScope.timeoutMs, 15000), 100, null, null,
+      () => releaseLateManualObjectGroup(pending, debuggerLease));
     } catch (error) {
       evaluationCommand = Promise.reject(error);
     }
     pending.evaluationPromise = Promise.resolve(evaluationCommand).then(
-      evaluation => {
-        pending.evaluationSettled = true;
-        pending.state = 'settled';
-        return { kind: 'evaluation', evaluation };
-      },
-      error => {
-        pending.evaluationSettled = true;
-        pending.state = 'settled';
-        return { kind: 'evaluation_error', error };
-      },
+      evaluation => ({ kind: 'evaluation', evaluation }),
+      error => ({ kind: 'evaluation_error', error }),
     );
     pending.settlementPromise = (async () => {
-      const outcome = await pending.evaluationPromise;
-      await releaseManualExecution(pending);
-      return normalizeManualEvaluation(outcome);
+      try {
+        const outcome = await pending.evaluationPromise;
+        return await normalizeManualEvaluation(outcome, pending);
+      } catch (error) {
+        return manualExecutionError(error, '');
+      } finally {
+        pending.evaluationSettled = true;
+        await releaseManualExecution(pending);
+      }
     })();
 
     const first = await Promise.race([
@@ -5098,7 +5379,8 @@ async function handleWsExec(data) {
       // Echo back the tab we actually ran on. The Python side reports this
       // instead of guessing from its remembered default, which can be stale
       // (or None) while the script ran on a real tab here.
-      send({ type: 'result', id: data.id, result: res.data, newTabs, tabId });
+      // Keep completed undefined distinct from a receipt missing its result.
+      send({ type: 'result', id: data.id, result: res.data ?? null, newTabs, tabId });
     } else {
       console.log(res);
       send({ type: 'error', id: data.id, error: res?.error || 'Unknown error', newTabs, tabId });
@@ -5214,7 +5496,7 @@ function connectWS() {
         // Command path: route directly to handleExtMessage, never parse user JS
         if (data.cmd.tabId === undefined && data.tabId !== undefined) data.cmd.tabId = data.tabId;
         const res = await handleExtMessage(data.cmd, {});
-        reply({ type: res.ok ? 'result' : 'error', id: data.id, result: resultPayload(res), error: res.error });
+        reply({ type: res.ok ? 'result' : 'error', id: data.id, result: resultPayload(res) ?? null, error: res.error });
       } else if (data.id && data.code && typeof data.code === 'string') {
         // JS execution path: pass string directly to eval, never parse as command
         await handleWsExec(data);

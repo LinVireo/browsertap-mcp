@@ -15,6 +15,10 @@ DISABLE_DIALOGS = ROOT / "src/browsertap_mcp/chrome_extension/disable_dialogs.js
 
 
 def _run_node_harness(source: str) -> dict:
+    serializer = BACKGROUND.with_name("result_serialization.js").read_text(encoding="utf-8")
+    source = "globalThis.smartProcessResult = eval(" + json.dumps(serializer) + ");\n" + source
+    guard = BACKGROUND.with_name("guarded_eval.js").read_text(encoding="utf-8")
+    source = "globalThis.prepareGuardedEval = eval(" + json.dumps(guard) + ");\n" + source
     completed = subprocess.run(
         ["node", "-"],
         input=source,
@@ -1026,6 +1030,7 @@ const chrome = {{
     sendCommand(target, method, params = {{}}) {{
       commands.push({{ tabId: target.tabId, method, params }});
       if (method === 'Runtime.enable' || method === 'Page.enable') return Promise.resolve({{}});
+      if (method === 'Runtime.releaseObjectGroup') return Promise.resolve({{}});
       if (method === 'Page.getFrameTree') return Promise.resolve({{
         frameTree: {{ frame: {{ id: 'main-frame' }} }},
       }});
@@ -1258,7 +1263,8 @@ def test_native_manual_runtime_evaluate_preserves_authored_source(code):
     assert evaluation["expression"] == code
     assert evaluation["replMode"] is True
     assert evaluation["awaitPromise"] is True
-    assert evaluation["returnByValue"] is True
+    assert evaluation["returnByValue"] is False
+    assert evaluation["objectGroup"].startswith("btap-manual-")
 
 
 def test_native_manual_top_level_return_fails_closed_with_rewrite_guidance():

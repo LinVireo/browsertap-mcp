@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import runpy
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -382,7 +383,7 @@ def test_port_probe_closes_its_socket_and_reports_connection_status(monkeypatch,
             calls.append(address)
             return result
 
-    monkeypatch.setattr(S.socket, "socket", Probe)
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: Probe())
     assert S._port_open("127.0.0.8", 19000) is (result == 0)
     assert calls == [1, ("127.0.0.8", 19000), "closed"]
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import runpy
+import socket
 import sys
 from types import SimpleNamespace
 
@@ -81,8 +82,14 @@ def test_port_open_closes_socket(monkeypatch, connect_result, expected):
         def close(self):
             self.closed = True
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
     sock = FakeSocket()
-    monkeypatch.setattr(cli.socket, "socket", lambda: sock)
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: sock)
 
     assert cli._port_open("127.0.0.2", 12345) is expected
     assert (sock.timeout, sock.address, sock.closed) == (
@@ -245,7 +252,8 @@ def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path
     assert payload["diagnosis"]["cause"] == "diagnose_failed"
     assert "browsertap-mcp" in payload["next_steps"][-1]
     assert "hermes" not in payload["next_steps"][-1].lower()
-    assert "stale_bridge" in captured.err
+    assert "bridge_unreachable" in captured.err
+    assert "stale_bridge" not in captured.err
 
 
 def test_doctor_prints_nonhealthy_diagnosis_advice(monkeypatch, capsys):

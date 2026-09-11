@@ -42,6 +42,20 @@ TOOL_COVERAGE: dict[str, ToolCoverage] = {
         "tests/test_phase1_tools.py::test_call_extension_parses_json_and_preserves_structured_failure",
         "tests/test_phase1_tools.py::test_call_extension_rejects_invalid_json_before_bridge",
     ),
+    "cancel_native_file_dialog": ToolCoverage(
+        "offline",
+        "tests/test_native_dialog.py::test_cancel_native_file_dialog_sends_one_cancel_and_observes_closed_window",
+        "tests/test_native_dialog.py::test_cancel_native_file_dialog_rejects_same_process_hwnd_reuse_without_marker",
+        True,
+        "tests/test_native_dialog.py::test_cancel_native_file_dialog_cleanup_releases_marker_and_lease_on_refusal",
+    ),
+    "inspect_native_file_dialog": ToolCoverage(
+        "offline",
+        "tests/test_native_dialog.py::test_inspect_native_file_dialog_returns_lifetime_bound_ticket_without_input",
+        "tests/test_native_dialog.py::test_inspect_native_file_dialog_requires_explicit_opt_in_before_native_probe",
+        True,
+        "tests/test_native_dialog.py::test_inspect_native_file_dialog_cleanup_removes_its_marker_on_shutdown",
+    ),
     "capture_page_screenshot": ToolCoverage(
         "offline",
         "tests/test_screenshot_content.py::test_capture_page_screenshot_attaches_image_even_when_saved",

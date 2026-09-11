@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import socket
 import sys
 from typing import Any
 
 from . import __version__
+from .browser_bridge import tcp_port_open
+from .paths import configured_bridge_port
 from .server import (
     agent_skills_dir,
     chrome_extension_dir,
@@ -49,12 +50,11 @@ def cmd_print_hermes_config() -> int:
 
 
 def _port_open(host: str, port: int) -> bool:
-    sock = socket.socket()
-    sock.settimeout(1)
-    try:
-        return sock.connect_ex((host, port)) == 0
-    finally:
-        sock.close()
+    return tcp_port_open(host, port)
+
+
+def _print_diagnostic(message: str) -> None:
+    print(message.encode("ascii", errors="backslashreplace").decode("ascii"), file=sys.stderr)
 
 
 def cmd_doctor() -> int:
@@ -72,10 +72,9 @@ def cmd_doctor() -> int:
             "error": str(init_error),
             "error_type": type(init_error).__name__,
         }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        print(
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        _print_diagnostic(
             f"\n[!!] initialization_failed: {type(init_error).__name__}: {init_error}",
-            file=sys.stderr,
         )
         return 1
     ws_port = getattr(driver, "port", 18765)
@@ -131,13 +130,26 @@ def cmd_doctor() -> int:
                     "ok": False,
                     "error": str(diagnosis_error),
                 }
+    host = getattr(driver, "host", "127.0.0.1")
+    port_probe_errors: dict[str, Any] = {}
+    for field, port in (("ws_port_open", ws_port), ("http_port_open", http_port)):
+        try:
+            payload[field] = _port_open(host, port)
+        except OSError as exc:
+            # The setup result is still evidence when a later DNS/socket probe
+            # fails. Keep it, and mark only this probe as unknown.
+            payload[field] = None
+            port_probe_errors[field] = {
+                "host": host, "port": port,
+                "error": str(exc), "error_type": type(exc).__name__,
+            }
+    if port_probe_errors:
+        payload["port_probe_errors"] = port_probe_errors
     payload.update({
         "remote_mode": getattr(driver, "is_remote", False),
-        "bridge_host": getattr(driver, "host", "127.0.0.1"),
+        "bridge_host": host,
         "bridge_ws_port": ws_port,
         "bridge_http_port": http_port,
-        "ws_port_open": _port_open(getattr(driver, "host", "127.0.0.1"), ws_port),
-        "http_port_open": _port_open(getattr(driver, "host", "127.0.0.1"), http_port),
         "connected_tabs": len(sessions),
         "tabs": sessions,
         "diagnosis": payload.get("diagnosis", diag),
@@ -148,10 +160,16 @@ def cmd_doctor() -> int:
             "Run your MCP client's connection check for `browsertap-mcp` after adding the config.",
         ],
     })
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(json.dumps(payload, ensure_ascii=True, indent=2))
     # Surface the one-line verdict last so it's the first thing the eye lands on.
     final_diag = payload.get("diagnosis", diag)
-    if payload.get("action") == "restart_mcp_session":
+    if port_probe_errors:
+        print(
+            "\n[!!] port_probe_failed: Check bridge_host and local TCP connectivity; "
+            "the available setup diagnosis is preserved above.",
+            file=sys.stderr,
+        )
+    elif payload.get("action") == "restart_mcp_session":
         print(
             "\n[!!] stale_package: A component is newer than this process. Restart the MCP "
             "session/client; restarting the bridge or reloading the extension cannot fix it.",
@@ -160,8 +178,9 @@ def cmd_doctor() -> int:
     elif payload.get("action") == "reload_extension":
         print("\n[!!] stale_extension: Reload BrowserTap Bridge once in chrome://extensions.", file=sys.stderr)
     elif payload.get("action") == "restart_bridge":
+        bridge_status = "stale_bridge" if payload.get("status") == "stale_bridge" else "bridge_unreachable"
         print(
-            "\n[!!] stale_bridge: Run `browsertap bridge --restart`; "
+            f"\n[!!] {bridge_status}: Run `browsertap bridge --restart`; "
             "Chrome does not need restarting.",
             file=sys.stderr,
         )
@@ -173,25 +192,36 @@ def cmd_doctor() -> int:
         )
     elif isinstance(final_diag, dict) and final_diag.get("advice"):
         mark = "OK" if final_diag.get("ok") else "!!"
-        print(f"\n[{mark}] {final_diag.get('cause')}: {final_diag.get('advice')}", file=sys.stderr)
-    return 0 if payload.get("status") in {"healthy", "starting"} else 1
+        _print_diagnostic(f"\n[{mark}] {final_diag.get('cause')}: {final_diag.get('advice')}")
+    return 0 if payload.get("status") in {"healthy", "starting"} and not port_probe_errors else 1
 
 
 def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
     from .bridge import main as bridge_main
     from .bridge import stop_bridge_daemon
 
+    try:
+        configured_bridge_port()
+    except ValueError as exc:
+        print(json.dumps({
+            "status": "initialization_failed",
+            "action": "check_config",
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }, ensure_ascii=True, indent=2))
+        return 1
+
     if not stop and not restart:
         return bridge_main([])
 
     stopped = stop_bridge_daemon()
     if stop:
-        print(json.dumps(stopped, ensure_ascii=False, indent=2))
+        print(json.dumps(stopped, ensure_ascii=True, indent=2))
         return 0 if stopped["status"] in {"stopped", "not_running"} else 1
 
     if stopped["status"] not in {"stopped", "not_running"}:
         payload = {"status": "restart_failed", "stop": stopped, "started": False}
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
         return 1
     started = spawn_bridge_daemon(reset_spawn_lock=True)
     payload = {
@@ -199,7 +229,7 @@ def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
         "stop": stopped,
         "started": started,
     }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(json.dumps(payload, ensure_ascii=True, indent=2))
     return 0 if started else 1
 
 

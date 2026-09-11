@@ -126,10 +126,13 @@ def optimize_html_for_tokens(html, link_refs=None, base_url=None):
     """
     soup = BeautifulSoup(html, 'html.parser') if isinstance(html, str) else html
     for svg in soup.find_all('svg'):
-        # An inline icon's path data is pure noise to a reader, and there can be
-        # hundreds of them. The tag stays so the layout still reads.
+        # Geometry is noise, but an icon may be a control's only accessible
+        # name. Keep its text labels and let the usual attribute rules retain
+        # title/ARIA/selector evidence while dropping drawing attributes.
+        labels = [node.extract() for node in svg.find_all(['title', 'desc'])]
         svg.clear()
-        svg.attrs = {}
+        for label in labels:
+            svg.append(label)
     for tag in soup.find_all(True):
         for name in [name for name in tag.attrs if not _keeps_attribute(name)]:
             del tag.attrs[name]
@@ -237,7 +240,7 @@ discardStrMonitor();
 # still on screen, which is the one thing it needs to know.
 _MONITOR_READ_JS = """function readStrMonitor() {
     const monitor = window.__btap_tm;
-    if (!monitor) return [];
+    if (!monitor) return null;
     delete window.__btap_tm;
     clearInterval(monitor.id);
     const present = monitor.extract();
@@ -257,16 +260,19 @@ def stop_temp_monitor(driver, timeout=15, session_id=None):
     except Exception as e: logger.debug("Temporary monitor stop failed: %s", e)
 
 def get_temp_texts(driver, timeout=15, session_id=None):
-    """Stop the monitor and return the text that came and went while it ran."""
+    """Stop the monitor and return transients, or raise if observation failed."""
     try:
+        response = _execute_in_session(driver, _MONITOR_READ_JS, timeout, session_id=session_id)
+        texts = response.get('data') if isinstance(response, dict) else None
+        if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+            raise PageUnavailable("Temporary text monitoring is unavailable.", payload=response)
         # `dict.fromkeys` rather than `set`: the page walks its text nodes in
         # document order and that order is worth keeping, where a set would hand
         # the agent the same toasts in an order that changes between runs.
-        return list(dict.fromkeys(_execute_in_session(
-            driver, _MONITOR_READ_JS, timeout, session_id=session_id).get('data', [])))
+        return list(dict.fromkeys(texts))
     except Exception as e:
         logger.debug("Temporary monitor read failed: %s", e)
-        return []
+        raise
 
 # Which fields survive from a no-response wire reply into the exception. These
 # are routing and delivery facts, never page content: a caller needs to know
@@ -666,7 +672,13 @@ SUBDIVIDE_ABOVE = 8000
 
 
 def _is_hint(node):
-    return bool(node.string) and _HINT_MARK in node.string
+    # Tag.string recursively descends through lone children. Walk that same
+    # path explicitly so deeply wrapped pages cannot exhaust Python's stack.
+    while not isinstance(node, NavigableString):
+        if len(node.contents) != 1:
+            return False
+        node = node.contents[0]
+    return _HINT_MARK in node
 
 
 def _clip_markup(element, keep):
@@ -719,46 +731,49 @@ def smart_truncate(soup, budget, _depth=0):
     deeply wrapped page reach its real content instead of spending the whole
     budget on `<div><div><div>`.
     """
-    total = len(str(soup))
-    if total <= budget:
-        return soup
-    children = [node for node in soup.children if node.name and not _is_hint(node)]
-    if not children:
-        _clip_markup(soup, budget)
-        return soup
-
-    sizes = [len(str(node)) for node in children]
-    # What the element costs on its own: its tags, and any text sitting directly
-    # between the children. The children have to fit in what is left of it.
-    inner_budget = max(budget - (total - sum(sizes)), 0)
-    logger.debug(
-        "%ssmart_truncate tag=%s total=%d budget=%d children=%d",
-        '  ' * _depth,
-        getattr(soup, 'name', '?'),
-        total,
-        budget,
-        len(children),
-    )
-    if len(children) == 1:
-        smart_truncate(children[0], inner_budget, _depth)
-        return soup
-
-    for node, size, keep in zip(children, sizes, _allocate(sizes, inner_budget), strict=True):
-        if keep >= size:
+    pending = [(soup, budget, _depth)]
+    while pending:
+        element, element_budget, depth = pending.pop()
+        total = len(str(element))
+        if total <= element_budget:
             continue
+        children = [node for node in element.children if node.name and not _is_hint(node)]
+        if not children:
+            _clip_markup(element, element_budget)
+            continue
+
+        sizes = [len(str(node)) for node in children]
+        # What the element costs on its own: its tags, and any text sitting
+        # directly between children. Children fit in what remains of it.
+        inner_budget = max(element_budget - (total - sum(sizes)), 0)
         logger.debug(
-            "%ssmart_truncate child=%s chars=%d keep=%d",
-            '  ' * _depth,
-            node.name,
-            size,
-            keep,
+            "%ssmart_truncate tag=%s total=%d budget=%d children=%d",
+            '  ' * depth,
+            getattr(element, 'name', '?'),
+            total,
+            element_budget,
+            len(children),
         )
-        if not keep:
-            node.decompose()
-        elif keep > SUBDIVIDE_ABOVE:
-            smart_truncate(node, keep, _depth + 1)
-        else:
-            _clip_markup(node, keep)
+        if len(children) == 1:
+            pending.append((children[0], inner_budget, depth))
+            continue
+
+        for node, size, keep in zip(children, sizes, _allocate(sizes, inner_budget), strict=True):
+            if keep >= size:
+                continue
+            logger.debug(
+                "%ssmart_truncate child=%s chars=%d keep=%d",
+                '  ' * depth,
+                node.name,
+                size,
+                keep,
+            )
+            if not keep:
+                node.decompose()
+            elif keep > SUBDIVIDE_ABOVE:
+                pending.append((node, keep, depth + 1))
+            else:
+                _clip_markup(node, keep)
     return soup
 
 # The monitor snapshots/diff around execute_js are best-effort context, not the
@@ -784,10 +799,12 @@ def no_response_kind(response):
         'navigated': 'navigated',
     }.get(delivery_state) if isinstance(delivery_state, str) else None
     if structured: return structured
+    # Unknown structured evidence cannot authorize a retry through legacy text.
+    if 'delivery_state' in response: return 'after_ack'
     # Compatibility with bridge versions that predate structured delivery
     # metadata. New callers must not derive policy from this human text.
     msg = response.get('result')
-    if not isinstance(msg, str): return None
+    if not isinstance(msg, str): return 'after_ack'
     if 'script not polled' in msg: return 'undelivered'
     if 'no ACK' in msg: return 'after_ack'
     if 'ACK received' in msg or 'delivered but no result' in msg: return 'after_ack'
@@ -797,7 +814,13 @@ def no_response_kind(response):
     # fell through to status:"success" with the diagnostic string masquerading
     # as js_return.
     if 'reloaded' in msg: return 'navigated'
-    return None
+    # An absent data key is not an explicit null return. An empty or unfamiliar
+    # envelope proves neither success nor non-delivery, so keep it non-retryable.
+    return 'after_ack'
+
+def undelivered_retry_safe(response):
+    """Keep explicit retry refusals authoritative even after proven non-delivery."""
+    return no_response_kind(response) == 'undelivered' and response.get('retry_safe') is not False
 
 def _remaining(deadline, cap=None):
     remaining = max(0.0, deadline - time.monotonic())
@@ -1026,7 +1049,7 @@ def execute_js_rich(
                     "(script not sent, total execute_js deadline exhausted)"
                 )
             }
-        if no_response_kind(response) == 'undelivered' and phase_timeout():
+        if undelivered_retry_safe(response) and phase_timeout():
             # Never reached the page (session asleep / SW reconnecting): retry
             # only with the time still left in the original budget.
             logger.warning("Script not delivered; retrying once within the remaining deadline")
@@ -1116,7 +1139,7 @@ def execute_js_rich(
         rr['replacement_session_id'] = response.get('replacement_session_id')
         rr['tab_identity'] = response.get('tab_identity')
         rr['rebind_reason'] = response.get('rebind_reason', 'chrome.tabs.onReplaced')
-    kind = no_response_kind(response)
+    kind = no_response_kind(response) if not error_msg else None
     if kind == 'navigated' and not error_msg:
         rr['status'] = 'navigated'
         rr['js_return_lost'] = "The page unloaded before returning the value, so the script result is unavailable."
@@ -1142,21 +1165,32 @@ def execute_js_rich(
         # non-delivery. Only pre-structured bridges need the text fallback.
         delivery_state = response.get('delivery_state')
         if not delivery_state:
+            message = response.get('result')
             if kind == 'undelivered':
                 delivery_state = 'undelivered'
-            elif 'no ACK' in response.get('result', ''):
-                delivery_state = 'sent_unconfirmed'
-            else:
+            elif isinstance(message, str) and (
+                'ACK received' in message or 'delivered but no result' in message
+            ):
                 delivery_state = 'delivered_no_result'
+            else:
+                delivery_state = 'sent_unconfirmed'
         rr['delivery_state'] = delivery_state
-        rr['retry_safe'] = kind == 'undelivered'
+        rr['retry_safe'] = undelivered_retry_safe(response)
         if rr.get('operation_id'):
             rr['poll_with'] = 'get_execute_js_result'
         # Report whether the in-deadline retry actually ran instead of asking the
         # caller to trust prose about it. False means the budget was too small to
         # reserve a retry window, so a caller-side retry is the only one there is.
         rr['btap_retried'] = retried
-        if kind == 'undelivered':
+        if kind == 'undelivered' and not rr['retry_safe']:
+            suggestion = (
+                "The bridge explicitly refused a retry. Inspect its diagnostic details "
+                "and the target before proceeding."
+            )
+            if rr.get('operation_id'):
+                suggestion += " Use get_execute_js_result with this operation_id to inspect the original operation."
+            rr['suggestion'] = suggestion
+        elif kind == 'undelivered':
             rr['suggestion'] = (
                 ("BTAP already retried once inside the original deadline and it was still "
                  "not delivered. " if retried else
@@ -1166,7 +1200,7 @@ def execute_js_rich(
         else:
             rr['suggestion'] = (
                 ("Delivery was not confirmed; the script may already have executed. "
-                 if delivery_state == 'sent_unconfirmed' else
+                 if delivery_state != 'delivered_no_result' else
                  "The script was delivered but did not return before timeout. ")
                 + "If it only waited "
                 "with setTimeout/sleep, replace that wait with wait_for or wait_for_url; do not "
@@ -1205,6 +1239,8 @@ def execute_js_rich(
         if monitor_started and phase_timeout(MONITOR_TIMEOUT):
             stop_temp_monitor(driver, timeout=phase_timeout(MONITOR_TIMEOUT), session_id=session_id)
         return rr
+    if not reloaded:
+        rr['transients_available'] = False
     if not reloaded and phase_timeout(MONITOR_TIMEOUT):
         try:
             rr['transients'] = get_temp_texts(
@@ -1212,6 +1248,7 @@ def execute_js_rich(
                 timeout=phase_timeout(MONITOR_TIMEOUT),
                 session_id=session_id,
             )
+            rr['transients_available'] = True
         except Exception:
             rr['transients'] = []
     if not reloaded and not error_msg and not newTabs and phase_timeout(MONITOR_TIMEOUT):
@@ -1238,7 +1275,7 @@ def execute_js_rich(
             summary = f"DOM changes: {diff['changed']}"
             if diff.get('top_change'):
                 summary += f"\nMost significant change:\n{diff['top_change']}"
-            if not diff['changed'] and not rr.get('transients'):
+            if not diff['changed'] and rr.get('transients_available') and not rr.get('transients'):
                 summary += " (no page changes)"
                 rr['suggestion'] = "No visible page changes were detected."
             rr['diff'] = summary

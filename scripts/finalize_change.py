@@ -93,14 +93,9 @@ def _run_gates(skip_live: bool) -> None:
     _run(
         sys.executable,
         "-m",
-        "pytest",
-        "tests",
-        "-q",
-        "--cov=browsertap_mcp",
-        "--cov-fail-under=95",
-        "--cov-report=term-missing",
-        "--cov-report=json:artifacts/coverage.json",
-        "--junitxml=artifacts/offline-junit.xml",
+        "scripts.test_run_evidence",
+        "--mode",
+        "offline",
     )
     _run(
         sys.executable,
@@ -124,12 +119,9 @@ def _run_gates(skip_live: bool) -> None:
         _run(
             sys.executable,
             "-m",
-            "pytest",
-            "tests",
-            "-q",
-            "-m",
+            "scripts.test_run_evidence",
+            "--mode",
             "live",
-            "--junitxml=artifacts/live-junit.xml",
         )
         _run(
             sys.executable,
@@ -185,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     write_manifest(include_live=not args.skip_live)
     if not args.skip_live:
         _run(sys.executable, "-m", "scripts.acceptance_report")
+        _run(sys.executable, "-m", "scripts.acceptance_report", "--check")
     if archived is not None:
         print(f"Archived previous evidence under {archived.relative_to(ROOT)}.")
     print(f"BTAP change set finalized at {target}; synchronized {len(changed)} file(s).")

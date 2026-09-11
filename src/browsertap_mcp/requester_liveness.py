@@ -63,10 +63,13 @@ def process_requester_id() -> str:
             return existing[0]
         requester_id = _LOCAL_PREFIX + secrets.token_urlsafe(24)
         fd = None
+        created_identity: tuple[int, int] | None = None
+        path = _identity_path(directory, requester_id)
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            path = _identity_path(directory, requester_id)
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            created = os.fstat(fd)
+            created_identity = (created.st_dev, created.st_ino)
             os.ftruncate(fd, 1)
             if not _try_lock(fd):
                 raise OSError("new requester identity lock could not be acquired")
@@ -85,7 +88,21 @@ def process_requester_id() -> str:
             os.fsync(fd)
         except OSError:
             if fd is not None:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            # This identity was never published. Successful records must stay
+            # available as death evidence, but a failed create can remove its
+            # own inode after closing the Windows handle. Preserve replacements
+            # and files whose identity cannot be verified.
+            if created_identity is not None:
+                try:
+                    current = path.stat(follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == created_identity:
+                        path.unlink()
+                except OSError:
+                    pass
             fd = None
             requester_id = "mcp-untracked-v1:" + secrets.token_urlsafe(24)
         _IDENTITIES[key] = (requester_id, fd)

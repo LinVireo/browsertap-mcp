@@ -9,7 +9,7 @@ authoritative contracts. These files route Trellis tasks to those contracts.
 | --- | --- |
 | [Directory structure](directory-structure.md) | Module ownership or entry points |
 | [Persistence](database-guidelines.md) | State files, tokens, locks, or paths |
-| [Error handling](error-handling.md) | Batch target reservations, bounded unknown outcomes, capture bookkeeping, tab-create recovery, or transport failures |
+| [Error handling](error-handling.md) | Batch target reservations, bounded unknown outcomes, capture bookkeeping, tab-create recovery, Unicode output, or transport failures |
 | [Logging](logging-guidelines.md) | Diagnostics or sensitive data handling |
 | [Setup diagnostics](setup-diagnostics.md) | Missing extension handshake, compatibility verdicts or recovery actions |
 | [Quality](quality-guidelines.md) | Tests, tool contracts, or validation |

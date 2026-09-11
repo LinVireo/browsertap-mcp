@@ -52,7 +52,12 @@ class FakeDriver:
 
     def ext_cmd(self, payload, client_id=None, timeout=15.0):
         self.calls.append((payload, client_id, timeout))
+        if payload.get("cmd") == "bookmarks" and payload.get("method") == "tree":
+            return {"data": [{"id": "coverage-id", "title": "Synthetic bookmark", "url": "https://example.test/"}]}
         return self.response
+
+    def select_client_id(self, **kwargs):
+        return "chrome"
 
     def get_execute_js_result(self, operation_id, timeout=0.0):
         self.calls.append(("get_execute_js_result", operation_id, timeout))
@@ -67,6 +72,7 @@ def _install_driver(monkeypatch, response=None):
 
 
 def _success(tool, monkeypatch, tmp_path):
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     driver = _install_driver(monkeypatch)
     if tool == "cdp_batch":
         # A batch is an extension command: it must reach `ext_cmd` on the `cmd`
@@ -225,7 +231,8 @@ def test_harness_boundary(tool, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("tool", MUTATING_HARNESS_TOOLS, ids=MUTATING_HARNESS_TOOLS)
-def test_harness_cleanup(tool, monkeypatch):
+def test_harness_cleanup(tool, monkeypatch, tmp_path):
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     driver = _install_driver(monkeypatch)
     if tool in {
         "network_capture_start",

@@ -100,7 +100,7 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          & $env:BTAP_PYTHON -m pytest tests -q -m live --junitxml=artifacts/live-junit.xml
+          & $env:BTAP_PYTHON -m scripts.test_run_evidence --mode live
       - name: Recheck diagnostics after cleanup
         if: always()
         shell: powershell

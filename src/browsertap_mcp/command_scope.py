@@ -49,7 +49,7 @@ class _Scope:
             key = f"{namespace}/{target}"
             if key in self.locks:
                 continue
-            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(key.encode("utf-8", errors="surrogatepass")).hexdigest()
             fd = os.open(directory / f"{digest}.lock", os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 # Keep the inode and lock byte stable across owners; closing the
@@ -86,9 +86,18 @@ class _Scope:
                             current, expected=initial, expected_revision=revision
                         )
         finally:
-            for fd in self.locks.values():
-                os.close(fd)
-            self.locks.clear()
+            # A failed close may already have released its descriptor. Detach
+            # the batch before cleanup so a later call cannot close a reused fd.
+            locks, self.locks = self.locks, {}
+            first_error: BaseException | None = None
+            for fd in locks.values():
+                try:
+                    os.close(fd)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error
 
 
 _CURRENT: ContextVar[_Scope | None] = ContextVar("btap_command_scope", default=None)

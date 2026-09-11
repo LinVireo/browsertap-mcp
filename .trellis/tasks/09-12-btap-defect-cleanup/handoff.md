@@ -1,0 +1,96 @@
+# Reviewed-source handoff and remaining boundaries
+
+Active task: `.trellis/tasks/09-12-btap-defect-cleanup`.
+Coordinator: `codex-resume-01a0881c`, native session
+`01a09113-7fb4-71d1-b6ef-34cc2d6c9712`.
+Original shared checkout: `D:/browsertap-mcp`, branch `local`.
+
+This is the tracked handoff before the final source commit. The generated
+`out/bug-cleanup-20260912/final-verification.json` supplies the later exact
+commit, tag, complete-suite results, coverage, distribution and installation
+receipts. Do not infer final success from this pre-seal record alone.
+
+## Integrated scope
+
+The [defect ledger](research/defect-ledger-20260912.md) maps every confirmed
+candidate to its disposition. C01-C26, M02-M06, the M01 `_Scope.close` handle
+leak, and the FS-R1/ND-R1/ND-R2 review findings have implementations and scoped
+regressions. Source version is 0.5.0 with 51 registered tools; the two explicit
+native-file-dialog tools preserve opt-in, approval and ownership checks. The
+seven removed generic OS-input tools remain removed.
+
+All writers used bounded isolated copies or worktrees; only root applied source
+patches to the original checkout. The external configuration/coverage/Unicode
+peer owns and commits its own Trellis records. Its source and review artifacts,
+earlier rejected revisions and root integration receipts remain preserved.
+
+The final two integration receipts are:
+
+- `out/bug-cleanup-20260912/root-unicode-r3-integration/integration.json`:
+  accepted Unicode r3, exact candidate bodies/signatures, unrelated AST and root
+  decorators preserved. Root result/docs/registration/version union: 291 passed.
+- `out/bug-cleanup-20260912/root-adjacent-r2-integration/integration.json`:
+  CLI/lock-key/resource-filename Unicode r2 and three-file CI applicability fix.
+  Root adjacent-boundary/CLI/backup/geometry/close/stamp union: 184 passed.
+
+Those suites overlap prior checks; counts must not be summed. Root's
+`final-docs-run.json` and `final-version-run.json` both record exit 0.
+The two bundled Skills' six validator checks passed in
+`root-final-skills-r3.json`; BODY_VERBOSE is an advisory, not a failed gate.
+
+Final independent delta review passed for all 351 frozen public files,
+including the final Unicode/CI/documentation delta. Its report is
+`out/bug-cleanup-20260912/final-fullscope-final-review.md`, bound by
+`final-fullscope-final-manifest.json`. Root's separate artifact and source
+verification receipt is `root-final-review-verification.json`.
+The first two review reports and their original failed probes are immutable.
+
+## Candidate verification sequence
+
+Finish the independent delta review and all owned record commits before the
+source commit. Then run, on that exact clean commit:
+
+```text
+python -m scripts.finalize_change --bump none --skip-live
+python -m scripts.check_install artifacts/dist --output out/bug-cleanup-20260912/full-install.json
+python -m scripts.evidence_manifest --check
+```
+
+Use a fresh install environment; do not reinstall the shared editable venv.
+The previous `build/` was preserved at
+`out/bug-cleanup-20260912/build-before-final-seal/`; its independent receipt is
+`build-preservation-reconciled.json`. The finalizer archives old canonical
+artifacts recoverably. Never overwrite a failed run to make it appear passed.
+
+The intended local tag is `v0.5.0-rc.1`, pointing to the sealed commit. Source
+versions remain numeric because the repository versioner has that contract.
+No formal `v0.5.0` tag, remote push, PyPI upload or Registry publication is
+part of this handoff. `--skip-live` does not establish release readiness.
+
+## Open work and runtime facts
+
+- M01 full persistent-file retention remains open. `_Scope.close` now attempts
+  all owned descriptor closes without replaying an uncertain close. Published
+  v1 requester records remain durable death evidence; command files remain
+  stable lock objects for old waiters. Unlink/TTL alone breaks those contracts.
+  See `out/bug-cleanup-20260912/leases/m01-final-disposition.md`, including the
+  unimplemented narrower Windows incomplete-requester cleanup candidate.
+- Extension source stamp is `2752911b822fab7e`. This cleanup did not manually
+  Reload the extension, restart the shared bridge, or certify a live MCP build.
+  Source, installed metadata and loaded process identities are separate. Use
+  actual diagnostics under a shared live claim before planning the required
+  manual extension Reload and bridge/MCP restarts.
+- Real A7 native Windows dialog inspection/cancellation and native macOS/Linux
+  browser runs remain unverified. SPEC rev7 is still `delivered_stub`.
+  Windows-only parameter collection and simulated POSIX/headless evidence do
+  not constitute native Linux/macOS CI results.
+- Historical wait latency still lacks correlated send/receive evidence. No
+  root cause is claimed. Result-file retention and the pending product-policy
+  decisions were not silently changed into cleanup work.
+- Source identity covers package Python source and four imported JavaScript
+  assets. It does not prove arbitrary bytecode, custom loaders, monkeypatches,
+  code-object identity or malicious same-user ABA races.
+
+The active task remains open for these explicit boundaries. The next session
+starts with the final verification receipt and updated knowledge-vault project
+index, rather than historical uncommitted/live claims from older builds.

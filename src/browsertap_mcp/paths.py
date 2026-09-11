@@ -26,8 +26,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-#: Overrides the state directory wholesale. Absolute path; ``~`` is expanded.
+#: Overrides the state directory; relative paths use the launching process's cwd.
 STATE_DIR_ENV = "BROWSERTAP_STATE_DIR"
+
+BRIDGE_PORT_ENV = "BROWSERTAP_BRIDGE_PORT"
 
 #: Directory name used under the home directory when nothing overrides it.
 DEFAULT_STATE_DIR_NAME = ".browsertap"
@@ -66,24 +68,68 @@ def state_dir(*, create: bool = False) -> Path:
     """
     configured = (os.environ.get(STATE_DIR_ENV) or "").strip()
     if configured:
-        path = Path(configured).expanduser()
+        path = Path(configured).expanduser().resolve()
     else:
         home = Path.home()
         path = home / DEFAULT_STATE_DIR_NAME
         legacy = home / LEGACY_STATE_DIR_NAME
-        if not path.exists() and legacy.is_dir():
+        try:
+            default_missing = not path.exists()
+        except OSError:
+            # Unreadable metadata is not evidence that the default is absent.
+            # Keep its path so token diagnostics can describe the real failure.
+            default_missing = False
+        if default_missing and legacy.is_dir():
             path = legacy
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
 
 
+def validate_bridge_port(value: object) -> int:
+    """Validate the base port before any of the three listeners or locks is used."""
+    message = f"{BRIDGE_PORT_ENV} must be an integer between 1 and 65533, got: {value!r}"
+    if isinstance(value, str):
+        try:
+            port = int(value)
+        except ValueError:
+            raise ValueError(message) from None
+    elif type(value) is int:
+        port = value
+    else:
+        raise ValueError(message)
+    if not 1 <= port <= 65533:
+        raise ValueError(message)
+    return port
+
+
+def configured_bridge_port() -> int:
+    """Read lazily so help, imports and package-path commands need no valid port."""
+    return validate_bridge_port(os.environ.get(BRIDGE_PORT_ENV, "18765"))
+
+
+def bridge_child_environment() -> dict[str, str]:
+    """Preserve explicit path overrides when the daemon changes working directory.
+
+    Defaults must remain absent: adding a default state override would change
+    its diagnostic source from default/legacy to env in the child process.
+    """
+    environ = dict(os.environ)
+    adopt_legacy_env(environ)
+    for name in (STATE_DIR_ENV, "BROWSERTAP_BRIDGE_TOKEN_FILE"):
+        configured = (environ.get(name) or "").strip()
+        if configured:
+            environ[name] = str(Path(configured).expanduser().resolve())
+    return environ
+
+
 def adopt_legacy_env(environ: dict[str, str] | None = None) -> list[str]:
     """Fill in ``BROWSERTAP_*`` variables from their pre-0.4.0 spellings.
 
-    Called once from the package ``__init__``, because ``server`` reads its
-    bridge host and port at *import* time: an entry-point-level call would run
-    after the value it is meant to supply had already been read.
+    Called once from the package ``__init__`` so every entry point sees the same
+    aliases before reading configuration. The bridge host and port themselves
+    are read lazily, keeping imports and package-path commands usable even when
+    those values are invalid.
 
     Only unset names are filled in, so a caller that sets both spellings gets the
     new one. Returns the new names that were populated, which is what makes the

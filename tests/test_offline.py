@@ -29,9 +29,9 @@ from browsertap_mcp.browser_bridge import BrowserBridge, Session
     ({"result": "Session a:1 no response in 15s (script not polled)"}, "undelivered"),
     ({"result": "No response data in 15s (ACK received, script may still be running)"}, "after_ack"),
     ({"result": "Session a:1 no response in 15s (delivered but no result)"}, "after_ack"),
-    ({}, None),
+    ({}, "after_ack"),
     ("not a dict", None),
-    ({"result": 42}, None),                       # non-string result
+    ({"result": 42}, "after_ack"),                # missing a real return
 ])
 def test_no_response_kind(response, expected):
     assert simphtml.no_response_kind(response) == expected

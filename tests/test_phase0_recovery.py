@@ -2119,7 +2119,7 @@ async function sendTabsUpdate() {{}}
     assert result["first"]["data"]["operation_status"] == "completed"
 
 
-def test_extension_post_create_failure_remains_pending_and_is_not_retry_safe():
+def test_extension_post_create_failure_is_terminal_unknown_and_is_not_retry_safe():
     function_source = _create_operation_source()
     script = f"""
 let createCalls = 0;
@@ -2147,7 +2147,8 @@ async function scheduleNewTabGeneration() {{ throw new Error('generation unavail
 """
     result = _run_node_script(script)
     assert result["createCalls"] == 1
-    assert result["first"]["data"]["operation_status"] == "pending"
+    assert result["first"]["data"]["operation_status"] == "unknown"
+    assert result["first"]["data"]["resume_required"] is False
     assert result["first"]["data"]["may_have_created"] is True
     assert result["first"]["data"]["retry_safe"] is False
     assert result["second"]["data"] == result["first"]["data"]
@@ -2188,7 +2189,8 @@ async function scheduleNewTabGeneration() {{ throw new Error('generation should 
     operation = result["result"]["data"]
     assert result["createCalls"] == 1
     assert result["writeCalls"] == 3
-    assert operation["operation_status"] == "pending"
+    assert operation["operation_status"] == "unknown"
+    assert operation["resume_required"] is False
     assert operation["generation"] == "generation-53"
     assert operation["may_have_created"] is True
     assert operation["retry_safe"] is False
@@ -2564,7 +2566,7 @@ const stored = {{ btapCreateOperationsV1: {{ 'op-pending': {{
 let createCalls = 0;
 const chrome = {{
   storage: {{ session: {{
-    get: async (key) => ({{ [key]: stored[key] }}),
+    get: async keys => Object.fromEntries(keys.map(key => [key, stored[key]])),
     set: async (value) => Object.assign(stored, value),
   }} }},
   tabs: {{ create: async () => {{ createCalls += 1; throw new Error('must not create'); }} }},
@@ -2576,6 +2578,8 @@ createTabStatus({{ operation_id: 'op-pending' }}).then(result =>
 """
     result = _run_node_script(script)
     assert result["result"]["data"]["status"] == "pending"
+    assert result["result"]["data"]["operation_status"] == "unknown"
+    assert result["result"]["data"]["resume_required"] is False
     assert result["result"]["data"]["may_have_created"] is True
     assert result["result"]["data"]["retry_safe"] is False
     assert result["createCalls"] == 0
@@ -2594,10 +2598,10 @@ const stored = {{ btapCreateOperationsV1: {{ 'op-recovered': {{
 let reads = 0;
 const chrome = {{
   storage: {{ session: {{
-    get: async key => {{
+    get: async keys => {{
       reads += 1;
       if (reads === 1) throw new Error('No SW');
-      return {{ [key]: stored[key] }};
+      return Object.fromEntries(keys.map(key => [key, stored[key]]));
     }},
     set: async value => Object.assign(stored, value),
   }} }},

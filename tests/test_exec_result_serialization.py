@@ -1,10 +1,7 @@
-"""Behaviour tests for the value converter `execute_js` runs inside the page.
+"""Behaviour tests for the shared converter all `execute_js` routes inject.
 
-`smartProcessResult` decides what a script's return value looks like by the time
-a model reads it, and it is the last untested layer of its kind: it lives inside
-the template literal `buildExecScript` returns, so ruff sees one Python string,
-coverage counts one statement, and no JavaScript tool looks inside it at all --
-the same trap `page_scripts/` was carved out of `simphtml.py` to escape.
+`smartProcessResult` lives in a standalone linted JavaScript resource. The
+worker embeds its function source and the Python fallback reads the same file.
 
 The harness runs the real function text under node against fakes rather than a
 real DOM. That is what lets the assertions here be about the *classification*:
@@ -43,18 +40,7 @@ BACKGROUND = (
 
 
 def _converter_source() -> str:
-    """The real function text, lifted out of the template literal it ships in.
-
-    Sliced by position rather than re-typed for the usual reason: a copy in this
-    file would pass while the shipped converter drifted underneath it.
-    """
-    source = BACKGROUND.read_text(encoding="utf-8")
-    start = source.index("    const BTAP_MAX_ITEMS = 200;")
-    end = source.index("\n    // Dialog suppression is scoped to this command", start)
-    body = source[start:end]
-    # The fragment is a template literal in its natural home, so a backtick or a
-    # `${` inside it is escaped there and has to be unescaped to run standalone.
-    return body.replace("\\`", "`").replace("\\${", "${")
+    return BACKGROUND.with_name("result_serialization.js").read_text(encoding="utf-8")
 
 
 def _run(expression: str, setup: str = "") -> object:
@@ -72,7 +58,7 @@ def _run(expression: str, setup: str = "") -> object:
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(script)
-        completed = subprocess.run(["node", path], capture_output=True, text=True)
+        completed = subprocess.run(["node", path], capture_output=True, text=True, timeout=10)
         if completed.returncode:
             raise AssertionError(f"node harness failed: {completed.stderr.strip()}")
         return json.loads(completed.stdout)["value"]
@@ -84,19 +70,13 @@ def _run(expression: str, setup: str = "") -> object:
 
 
 def test_the_fragment_this_file_tests_is_the_one_that_ships():
-    """A slice that stops matching would leave every test below vacuous.
-
-    Both anchors are asserted rather than assumed: `.index()` raises on a miss,
-    so the failure is loud, but a fragment that no longer contains the function
-    would still run and every assertion would fail for the wrong reason.
-    """
     body = _converter_source()
-    assert "function smartProcessResult(result, depth, seen)" in body
+    assert "function smartProcessResult(" in body
     assert "Object.prototype.toString.call(result)" in body
-    # What must be gone is the *escape*, not the backtick: the shipped fragment
-    # writes `\`` because it lives in a template literal, and a leftover
-    # backslash there is a syntax error under node rather than a wrong result.
-    assert "\\`" not in body and "\\${" not in body, "the unescaping did not run"
+    background = BACKGROUND.read_text(encoding="utf-8")
+    assert "importScripts('result_serialization.js')" in background
+    assert "globalThis.smartProcessResult.toString()" in background
+    assert body.rstrip().endswith("smartProcessResult;")
 
 
 def test_primitives_and_null_pass_through_untouched():
@@ -244,4 +224,24 @@ def test_a_function_is_named_rather_than_dropped():
     """`JSON.stringify` omits functions entirely, so a caller saw no key at all."""
     assert _run("{cb: function namedCallback() {}}") == {
         "cb": "[Function: namedCallback]"
+    }
+
+
+def test_a_truncated_generator_is_closed_after_one_bounded_lookahead():
+    setup = """
+    let closed = false;
+    let steps = 0;
+    function* g() {
+      try { while (true) { steps++; yield steps; } }
+      finally { closed = true; }
+    }
+    """
+    assert _run("(() => { smartProcessResult(g()); return {closed, steps}; })()", setup) == {
+        "closed": True, "steps": 201,
+    }
+
+
+def test_an_own_proto_key_stays_data():
+    assert _run('JSON.parse(\'{"__proto__":{"value":1},"x":2}\')') == {
+        "__proto__": {"value": 1}, "x": 2,
     }

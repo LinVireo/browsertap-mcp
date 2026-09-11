@@ -111,6 +111,32 @@ def test_completed_recovery_claims_the_original_tab_without_creating_another(cre
     assert [call[0] for call in dispatched] == ["status"]
 
 
+@pytest.mark.parametrize("phase", ["resume", "create", "reconcile"])
+def test_terminal_unknown_create_does_not_recommend_polling_a_dead_producer(create_driver, phase):
+    _, statuses, creates, dispatched, _ = create_driver
+    terminal = reply("unknown", resume_required=False, may_have_created=True, retry_safe=False)
+    options = {"owner_id": "owner"}
+    if phase == "resume":
+        statuses.append(terminal)
+        options.update(operation_id="open-tab-fixture", client_id="chrome")
+    else:
+        statuses.append(reply("not_found"))
+        creates.append(terminal if phase == "create" else reply("pending"))
+        if phase == "reconcile":
+            statuses.append(terminal)
+    result = S.open_new_tab("https://created.test/", **options)
+    assert result["status"] == "unknown"
+    assert result["resume_required"] is False
+    assert result["reconciliation"]["resume_required"] is False
+    assert result["may_have_created"] is True
+    assert result["retry_safe"] is False
+    assert result["owned"] is False
+    assert result["owner_id"] == "owner"
+    assert "open_new_tab again" not in result["recovery"]["instruction"]
+    assert "list_tabs()" in result["recovery"]["instruction"]
+    assert len(dispatched) == {"resume": 1, "create": 2, "reconcile": 3}[phase]
+
+
 @pytest.mark.parametrize("fields", [
     {"client_id": "edge"}, {"id": None}, {"generation": ""}, {"id": "invalid"},
 ])

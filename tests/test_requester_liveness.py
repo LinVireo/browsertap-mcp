@@ -198,3 +198,91 @@ def test_identity_storage_failure_keeps_an_untracked_requester(requester_environ
     assert identity.startswith("mcp-untracked-v1:")
     assert L.process_requester_id() == identity
     assert L.requester_liveness(identity) == "unknown"
+
+
+@pytest.mark.usefixtures("requester_environment")
+@pytest.mark.parametrize("failure", ["truncate", "lock", "write", "zero_write", "fsync"])
+def test_unpublished_identity_creation_failure_removes_its_record(
+    monkeypatch, failure,
+):
+    def fail(*args):
+        raise OSError(errno.EIO, "synthetic requester storage failure")
+
+    if failure == "lock":
+        monkeypatch.setattr(L, "_try_lock", lambda _fd: False)
+    elif failure == "zero_write":
+        monkeypatch.setattr(L.os, "write", lambda *_args: 0)
+    else:
+        method = {"truncate": "ftruncate", "write": "write", "fsync": "fsync"}[failure]
+        monkeypatch.setattr(L.os, method, fail)
+
+    identity = L.process_requester_id()
+
+    assert identity.startswith("mcp-untracked-v1:")
+    assert L.process_requester_id() == identity
+    assert L.requester_liveness(identity) == "unknown"
+    assert list(L._directory().iterdir()) == []
+
+
+@pytest.mark.usefixtures("requester_environment")
+def test_failed_requester_create_preserves_a_preexisting_record(monkeypatch):
+    monkeypatch.setattr(L.secrets, "token_urlsafe", lambda _length: "a" * 32)
+    path = L._identity_path(L._directory(), "mcp-local-v1:" + "a" * 32)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"preexisting identity record")
+
+    assert L.process_requester_id().startswith("mcp-untracked-v1:")
+    assert path.read_bytes() == b"preexisting identity record"
+
+
+@pytest.mark.usefixtures("requester_environment")
+def test_unverifiable_created_inode_is_preserved(monkeypatch):
+    def fail(_fd):
+        raise OSError(errno.EIO, "synthetic identity stat failure")
+
+    monkeypatch.setattr(L.os, "fstat", fail)
+
+    assert L.process_requester_id().startswith("mcp-untracked-v1:")
+    files = list(L._directory().iterdir())
+    assert len(files) == 1
+    assert files[0].read_bytes() == b""
+
+
+@pytest.mark.usefixtures("requester_environment")
+def test_unpublished_identity_cleanup_preserves_a_replaced_inode(monkeypatch, tmp_path):
+    monkeypatch.setattr(L.secrets, "token_urlsafe", lambda _length: "a" * 32)
+    path = L._identity_path(L._directory(), "mcp-local-v1:" + "a" * 32)
+    replacement = tmp_path / "replacement.lock"
+    replacement.write_bytes(b"replacement identity record")
+    replacement_info = replacement.stat()
+    real_close = L.os.close
+
+    def fail_fsync(_fd):
+        raise OSError(errno.EIO, "synthetic identity sync failure")
+
+    def close_then_replace(fd):
+        real_close(fd)
+        replacement.replace(path)
+
+    monkeypatch.setattr(L.os, "fsync", fail_fsync)
+    monkeypatch.setattr(L.os, "close", close_then_replace)
+
+    assert L.process_requester_id().startswith("mcp-untracked-v1:")
+    assert path.read_bytes() == b"replacement identity record"
+    assert (path.stat().st_dev, path.stat().st_ino) == (
+        replacement_info.st_dev, replacement_info.st_ino,
+    )
+
+
+@pytest.mark.usefixtures("requester_environment")
+def test_unpublished_identity_cleanup_failure_keeps_the_untracked_fallback(monkeypatch):
+    def fail(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "synthetic requester cleanup failure")
+
+    monkeypatch.setattr(L.os, "fsync", fail)
+    monkeypatch.setattr(Path, "unlink", fail)
+
+    identity = L.process_requester_id()
+    assert identity.startswith("mcp-untracked-v1:")
+    assert L.requester_liveness(identity) == "unknown"
+    assert len(list(L._directory().iterdir())) == 1

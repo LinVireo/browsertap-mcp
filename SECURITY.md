@@ -1,13 +1,14 @@
 # Security Policy
 
 `browsertap-mcp` controls a real browser profile and may expose logged-in
-page content, cookies, downloads, screenshots, and the lab-only physical Enter
-fallback to an MCP client. Treat the client, its model, and every enabled tool
+page content, cookies, downloads, screenshots, the lab-only physical Enter
+fallback, and explicit Windows native-file-dialog cancellation to an MCP client.
+Treat the client, its model, and every enabled tool
 as part of the same trust boundary.
 
 ## Supported versions
 
-Security fixes are applied to the current `0.4.x` release line. Reproduce a
+Security fixes are applied to the current `0.5.x` release line. Reproduce a
 report against the latest release before submitting it when practical.
 
 ## Reporting a vulnerability
@@ -74,8 +75,11 @@ physical input.
   in place every 5 minutes when oversized, so exactly one previous generation
   is kept and both files need the same review.
 - WebSocket handshakes accept extension origins by default and reject missing
-  origins. `BROWSERTAP_WS_ALLOWED_ORIGINS` adds exact trusted origins;
-  `BROWSERTAP_WS_ALLOW_NO_ORIGIN=1` permits origin-less local clients. Both
+  origins. Despite its name, `BROWSERTAP_WS_ALLOWED_ORIGINS` adds exact trusted
+  origins to both the WebSocket handshake and the HTTP origin check. HTTP
+  requests without an `Origin` header remain permitted by that check and still
+  require the token on authenticated routes. `BROWSERTAP_WS_ALLOW_NO_ORIGIN=1`
+  permits origin-less WebSocket clients only. Both
   expand the attack surface and should remain unset in normal installations.
   Scope this guarantee correctly: the default check is a prefix match on
   extension URL schemes and the WebSocket port carries no token, so it keeps
@@ -131,6 +135,15 @@ physical input.
   corner cannot abort automation mid-sequence. The tradeoff is explicit: moving
   the mouse to a corner is not an escape hatch. Stop the MCP client, or use
   `safe` mode, to keep a manual veto.
+- Native-file-dialog inspection/cancellation requires explicit `desktop_opt_in`
+  and the desktop extra. It checks registered Chrome/Edge process identity,
+  native owner/controls, foreground and hit targets. Inspection installs a
+  short-lived per-ticket window property; cancellation consumes that ticket and
+  sends one bounded Cancel message after the physical lease and observed Windows
+  quiet-input gate. Safe mode requires approval. These checks reduce accidental
+  targeting but are not atomic with OS message dispatch and do not isolate a
+  hostile process running as the same user. Unsupported layouts are refused;
+  uncertain outcomes are never automatically replayed.
 - `upload_files` attaches files by path and only checks that the path is an
   existing file: there is no directory allowlist. A client that can name a path
   the user can read can therefore attach it to a page's file input. Restrict

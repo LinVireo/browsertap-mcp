@@ -57,6 +57,17 @@ Bridge 与 MCP 进程必须解析到同一个 token 文件，默认路径为
 响应正文是纯文本行 `unauthorized: missing or bad bridge token`，不是 JSON；按
 `{"error": ...}` 解析所有错误的客户端只会报解析失败，看不到真实原因。
 
+先查看 `state_paths.token_file_status`：`missing`、`empty`、`ready`、`unreadable` 与
+`invalid_encoding` 是不同状态。只有 ready 内容有指纹；`token_file_error` 给出不含凭据
+字节的原因。元数据不可读时，`token_file_exists` 和 `state_dir_exists` 可以为 null。
+默认目录状态未知时保留 canonical 路径，不转向 legacy 目录。
+修正权限或编码问题，保留已有 token 文件。显式相对 `BROWSERTAP_STATE_DIR` 和
+`BROWSERTAP_BRIDGE_TOKEN_FILE` 按发起进程的工作目录解析，daemon 收到对应绝对路径。
+
+`error_code: malformed_diagnosis` 表示 bridge 返回了不可用的报告，仍按
+`bridge_unreachable` 给出重启动作，不能据此认定版本陈旧。后续 DNS/socket 端口探测失败时，
+`doctor` 保留已取得的诊断、增加 `port_probe_errors`，并以非零退出码结束。
+
 ### 调用被拒绝并返回 `Session ... is not connected`
 
 这是有意的拒绝。你明确指定了 `session_id`，而该标签页已经不存在，BTAP 不会把这次调用改到
@@ -104,6 +115,10 @@ BTAP 连续使用三个端口：`BROWSERTAP_BRIDGE_PORT` 为 WebSocket，`PORT+1
 第二个 bridge 不会退出，而是转为通过第一个工作。它与状态目录下的 `spawn.lock` 文件是两套机制：
 后者负责避免多个 MCP 会话在同一时刻各拉起一个守护进程——所以"`PORT+2` 上只有一个监听者"本身
 并不能证明只启动过一个守护进程。其他应用占用这些端口时，客户端可能误判为已连接到错误服务。
+基础端口必须为 `1` 到 `65533` 的整数。无效值在网络或 spawn 操作前拒绝，import、
+help/version 和包路径命令仍可使用。Python 探测、监听器和远程 HTTP URL 支持 IPv6
+地址族；浏览器扩展仍连接 IPv4 回环地址。
+
 Windows 可先只读检查端口持有者：
 
 ```powershell

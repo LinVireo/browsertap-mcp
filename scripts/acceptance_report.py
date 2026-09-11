@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import tarfile
-import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +15,7 @@ from scripts.check_distribution import runtime_package_mismatch, validate_archiv
 from scripts.check_tool_docs import build_report as build_docs_report
 from scripts.check_tool_docs import report_ok as docs_ok
 from scripts.evidence_manifest import validate_manifest
+from scripts.test_run_evidence import validate_test_run
 
 # A single global percentage is an average, and an average hides a module that
 # has stopped being tested: `bridge.py` holds most of the platform-specific
@@ -129,34 +129,23 @@ def _junit(relative: str, manifest: dict[str, object] | None) -> dict[str, objec
             "errors": 0,
             "skipped": 0,
         }
-    path = ROOT / relative
-    try:
-        root = ET.parse(path).getroot()  # noqa: S314 - local pytest JUnit artifact
-    except (OSError, ET.ParseError) as exc:
-        return {
-            "status": "not-run",
-            "source": relative,
-            "summary": f"unavailable ({type(exc).__name__})",
-            "tests": 0,
-            "failures": 0,
-            "errors": 0,
-            "skipped": 0,
-        }
-
-    cases = list(root.iter("testcase"))
-    failures = sum(case.find("failure") is not None for case in cases)
-    errors = sum(case.find("error") is not None for case in cases)
-    skipped = sum(case.find("skipped") is not None for case in cases)
-    tests = len(cases)
-    status = "pass" if tests and not (failures or errors or skipped) else "fail"
+    mode = "live" if relative == "artifacts/live-junit.xml" else "offline"
+    result = validate_test_run(ROOT, mode, manifest=manifest)
+    counts = {name: result[name] for name in ("tests", "failures", "errors", "skipped")}
+    summary = ", ".join(f"{name}={count}" for name, count in counts.items())
+    summary += f"; expected full collection={result['expected_tests']}"
+    if result["problems"]:
+        summary += "; " + "; ".join(result["problems"])
+    status = "pass" if result["ok"] else "fail"
+    if not result["junit_available"]:
+        status = "not-run"
     return {
         "status": status,
         "source": relative,
-        "summary": (f"tests={tests}, failures={failures}, errors={errors}, skipped={skipped}"),
-        "tests": tests,
-        "failures": failures,
-        "errors": errors,
-        "skipped": skipped,
+        "summary": summary,
+        "expected_tests": result["expected_tests"],
+        "problems": result["problems"],
+        **counts,
     }
 
 
@@ -513,7 +502,7 @@ def build_report_data() -> dict[str, object]:
         if code_coverage is not None
         else f"no total coverage: {code_coverage_source}; {per_file_summary}"
     )
-    tool_contract_ok = evidence_fresh and registered == 49 and contract_valid == registered
+    tool_contract_ok = evidence_fresh and registered == 51 and contract_valid == registered
     offline_evidence_ok = (
         evidence_fresh
         and offline.get("status") == "pass"
@@ -526,7 +515,7 @@ def build_report_data() -> dict[str, object]:
         and live_passed
         and extension_build_ok
         and tool_coverage.get("all_evidence_executed") is True
-        and tool_coverage.get("fully_verified_tools") == registered == 49
+        and tool_coverage.get("fully_verified_tools") == registered == 51
     )
     code_coverage_ok = (
         evidence_fresh
@@ -581,8 +570,16 @@ def build_report_data() -> dict[str, object]:
     }
     gates, gate_measurements, gate_structure_problems = _finalize_gates(measured)
     score = sum(weight for name, weight in GATE_WEIGHTS.items() if gates[name])
+    manifest_hash = (
+        hashlib.sha256(json.dumps(
+            evidence_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")).hexdigest()
+        if isinstance(evidence_manifest, dict) else None
+    )
     return {
-        "generated": datetime.now(timezone.utc).isoformat(),
+        # The seal supplies the timestamp: re-deriving a report must not change
+        # its bytes merely because the checker ran later than the writer.
+        "generated": (evidence_manifest or {}).get("generated", "unavailable"),
         "version": versions.get("source", "unknown"),
         "gates": gates,
         "gate_measurements": gate_measurements,
@@ -604,6 +601,7 @@ def build_report_data() -> dict[str, object]:
         "lint_summary": lint_summary,
         "evidence_fresh": evidence_fresh,
         "evidence_manifest": evidence_manifest,
+        "manifest_sha256": manifest_hash,
         "evidence_problems": evidence_problems,
         "sealed_source": sealed_source,
     }
@@ -721,9 +719,9 @@ def _render_scored_source(data: dict[str, object]) -> list[str]:
     """Stamp the source state this score was computed over.
 
     The acceptance report is generated after the evidence manifest is sealed, so
-    it cannot be bound by that manifest itself. Recording the sealed fingerprint
-    inside the report lets a reader detect a stale report mechanically: re-run
-    `python -m scripts.evidence_manifest --check` and compare.
+    it is derived from, rather than included in, the seal. The entire manifest
+    digest also changes when an input is re-sealed but earns the same score.
+    The report checker recomputes the body; a copied footer cannot certify it.
     """
     sealed = data.get("sealed_source")
     if not isinstance(sealed, dict) or not sealed:
@@ -740,10 +738,12 @@ def _render_scored_source(data: dict[str, object]) -> list[str]:
         f"- `git_dirty`: `{str(sealed.get('git_dirty', 'unknown')).lower()}`",
         f"- `content_sha256`: `{sealed.get('content_sha256', 'unknown')}`",
         f"- `file_count`: `{sealed.get('file_count', 'unknown')}`",
+        f"- `manifest_sha256`: `{data.get('manifest_sha256', 'unavailable')}` (canonical JSON)",
         "",
-        "Verify this report is current with"
-        " `python -m scripts.evidence_manifest --check`; a differing"
-        " `content_sha256` means the report predates the current worktree.",
+        "Verify this report with `python -m scripts.acceptance_report --check`."
+        " The check validates the sealed inputs, independently recomputes this"
+        " report, compares every byte, and requires every release gate to pass."
+        " `scripts.evidence_manifest --check` verifies only the inputs.",
         "",
     ]
 
@@ -755,11 +755,23 @@ def build_report() -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("artifacts/acceptance-report.md"))
+    parser.add_argument("--check", action="store_true", help="recompute and compare without writing")
     args = parser.parse_args(argv)
     data = build_report_data()
     output = args.output if args.output.is_absolute() else ROOT / args.output
+    expected = render_report(data).encode("utf-8")
+    if args.check:
+        try:
+            matches = output.read_bytes() == expected
+        except OSError:
+            matches = False
+        print(json.dumps({
+            "output": str(output), "report_matches": matches,
+            "release_ready": data["release_ready"],
+        }))
+        return 0 if matches and data["release_ready"] else 1
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_report(data), encoding="utf-8")
+    output.write_bytes(expected)
     print(output)
     return 0 if data["release_ready"] else 1
 

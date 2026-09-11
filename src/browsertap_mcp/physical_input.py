@@ -8,6 +8,7 @@ import json
 import math
 import os
 import secrets
+import stat
 import sys
 import time
 from pathlib import Path
@@ -75,9 +76,13 @@ def _pid_alive(pid: int) -> bool:
 def _read_record(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (FileNotFoundError, UnicodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _record_fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _record_token(record: dict[str, Any] | None) -> str | None:
@@ -130,7 +135,14 @@ class _ArbitrationGuard:
         try:
             # Windows byte-range locking needs a persistent byte to lock.
             if os.fstat(fd).st_size < 1:
-                os.ftruncate(fd, 1)
+                try:
+                    os.ftruncate(fd, 1)
+                except PermissionError:
+                    # A contender may have filled and locked the byte since
+                    # fstat. If initialized, let the OS lock below arbitrate;
+                    # otherwise this is a storage error, not lease contention.
+                    if os.fstat(fd).st_size < 1:
+                        raise
             _lock_guard_fd(fd)
         except BaseException:
             try:
@@ -271,11 +283,39 @@ class PhysicalInputLease:
                 raise
 
     def _recover_stale(self) -> bool:
-        record = _read_record(self.path)
-        token = _record_token(record)
-        if record is None or token is None or not _record_is_stale(record, time.time()):
+        # __enter__ already holds the lifetime guard. A creator that died
+        # between O_EXCL and write can leave unreadable JSON, but cannot keep
+        # that OS lock. Preserve any readable evidence of a live owner.
+        try:
+            before = self.path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode):
+                return False
+            record = _read_record(self.path)
+            if record is not None:
+                if _record_token(record) is not None:
+                    if not _record_is_stale(record, time.time()):
+                        return False
+                else:
+                    pid = record.get("pid")
+                    if (
+                        isinstance(pid, int)
+                        and not isinstance(pid, bool)
+                        and pid > 0
+                        and _pid_alive(pid)
+                    ):
+                        return False
+            # Recheck both contents and identity, including in-place writes.
+            # Storage/permission failures propagate; they do not prove an
+            # orphan. The guard serializes compliant creators through unlink.
+            if _read_record(self.path) != record:
+                return False
+            after = self.path.stat(follow_symlinks=False)
+            if _record_fingerprint(after) != _record_fingerprint(before):
+                return False
+            self.path.unlink()
+        except FileNotFoundError:
             return False
-        return _unlink_if_token(self.path, token)
+        return True
 
     def __enter__(self) -> PhysicalInputLease:
         if self._acquired:

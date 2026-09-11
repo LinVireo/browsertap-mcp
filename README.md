@@ -34,7 +34,8 @@ Three setup steps; the manual browser step may take longer than a minute.
    ```
 
    On Windows PowerShell, use `.\.venv\Scripts\python.exe` and
-   `.\.venv\Scripts\browsertap.exe`. The optional desktop fallback requires
+   `.\.venv\Scripts\browsertap.exe`. The optional desktop fallback and explicit
+   Windows native-file-dialog tools require
    `pip install "browsertap-mcp[desktop]"` in that same environment; ordinary
    page and browser tools do not need it.
 
@@ -93,12 +94,12 @@ interface that matches the task:
   tabs, downloads, cookies, storage, permissions, bookmarks, extensions,
   service-worker messaging, and raw CDP. These operations can work without a
   foreground tab.
-- **Desktop capability** — not a general public surface. The only current opt-in
-  is the lab-only `resolve_leave_dialog` final Enter fallback for a page leave
-  dialog; browser chrome, native file pickers, extension UI, print/save dialogs,
-  and other page-layer gaps remain unsupported. The seven global OS
-  input/screenshot tools removed in 0.5.0 are not coming back as an ordinary
-  web-workflow fallback.
+- **Desktop capability** — explicit inspection and cancellation of a foreground
+  Windows standard file dialog owned by registered Chrome or Edge. Call
+  `inspect_native_file_dialog` first, then use its short-lived ticket with
+  `cancel_native_file_dialog`; both require `desktop_opt_in=true` and `[desktop]`.
+  Other browser UI and unsupported native layouts remain outside this surface.
+  The seven global OS input/screenshot tools removed in 0.5.0 remain removed.
 
 `resolve_leave_dialog` remains a page-scoped, lab-only recovery workflow; its
 final Enter fallback is a restricted exception, not a general desktop surface.
@@ -127,7 +128,7 @@ For isolated browser tests or accessibility-snapshot-based workflows, compare
 debugging and performance analysis, compare
 [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp).
 Reusing a live browser is not unique to BTAP; choose by the task and the APIs
-you need. BTAP exposes all 49 tools, so clients that need a smaller tool set
+you need. BTAP exposes all 51 tools, so clients that need a smaller tool set
 must filter it themselves.
 
 ## Requirements
@@ -135,8 +136,8 @@ must filter it themselves.
 - Python 3.10+
 - Chrome, Edge, or Opera
 - Linux, macOS, or Windows. The ordinary page, browser, and CDP tools do not
-  require OS-level input; only the lab-only `resolve_leave_dialog` fallback
-  needs a usable desktop session.
+  require OS-level input. The lab-only `resolve_leave_dialog` fallback and the
+  Windows native-file-dialog tools need a usable desktop session.
 - A running Chromium user session rather than an isolated headless container.
   There is no Docker image on purpose: the server attaches to the Chrome *you*
   are signed into, through an extension a human loads once.
@@ -147,7 +148,7 @@ must filter it themselves.
 ### 1. Install
 
 Create a virtual environment and install the package. The optional `desktop`
-extra is only needed for the remaining lab-only physical fallback:
+extra is needed for the lab-only physical fallback or explicit native-file-dialog tools:
 
 **Windows PowerShell**
 
@@ -167,8 +168,8 @@ python -m venv .venv
 
 The core install (`pip install browsertap-mcp`) is sufficient for page, browser,
 and CDP tools. It omits `pyautogui`, `mss`, and `pillow`, which are used by the
-lab-only `resolve_leave_dialog` Enter fallback and its screen/input checks. Add
-`[desktop]` only when you need that fallback.
+lab-only `resolve_leave_dialog` Enter fallback and its screen/input checks.
+The explicit Windows native-file-dialog tools also require `[desktop]`.
 
 To work on the project rather than only use it, install the checkout as editable
 instead. Same extras; the extension directory and the skills are then read
@@ -318,16 +319,17 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 | Variable | Default | Purpose |
 |---|---|---|
 | `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | Bridge bind address. |
-| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket port. HTTP uses `PORT+1`, and `PORT+2` is a lock socket that keeps exactly one bridge *hosting* those two (a second bridge stays up and works through the first). Not to be confused with the separate `spawn.lock` file, which is what stops several MCP sessions from starting several daemons at once. For a custom port, also tell the extension once — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md). |
+| `BROWSERTAP_BRIDGE_PORT` | `18765` | Integer from `1` through `65533`. WebSocket uses this base, HTTP uses `PORT+1`, and the host lock uses `PORT+2`. Invalid values fail before network or spawn actions. The separate `spawn.lock` file prevents concurrent daemon starts. For a custom port, also configure the extension — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md). |
+| `BROWSERTAP_STATE_DIR` | `~/.browsertap` | Override the state directory. A nonempty relative path is anchored to the launching process's working directory before daemon spawn. Existing legacy-directory fallback remains available when no override is set. |
 | `BROWSERTAP_NO_SPAWN` | unset | Set to `1` to stop the MCP server from auto-starting the bridge. Use it when you run the bridge yourself. |
 | `BROWSERTAP_BRIDGE_AUTH` | enabled | Set to `off` only for an explicitly trusted local compatibility setup. By default BTAP authenticates `/link` with a persistent per-user token. |
-| `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | Override the shared token file location. Editors do not need individual token configuration. |
+| `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | Override the shared token file location; relative paths use the launching process's working directory. Without this override, the token lives in the selected state directory. Editors do not need individual tokens. |
 | `BROWSERTAP_BRIDGE_TOKEN` | unset | Legacy one-time migration source. If the token file does not exist, BTAP imports this value once; the file wins thereafter. |
 | `BROWSERTAP_PREFERRED_BROWSER` | unset | `chrome`, `edge`, or `opera`. Which browser wins when several are connected and no tab is specified. |
 | `BROWSERTAP_MODE` | `lab` | `lab` prioritizes uninterrupted automation and skips physical-input/site-allow elicitation; `safe` prompts for every such action. `set_automation_profile` changes only the current MCP process. |
 | `BROWSERTAP_LAB_NO_ELICIT` | enabled | Lab skips elicitation by default. Set this to `0`/`false` only when you want session-level lab approval prompts; the cross-process lock, quiet-input gate, foreground confirmation, and ownership checks always apply. |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | In lab, ordinary `open_url` accepts beforeunload on matching current hosts. `intent_leave=false` always preserves the page. |
-| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins allowed to open the bridge WebSocket. Extension origins are allowed automatically; do not add broad or untrusted origins. |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins allowed by both the bridge WebSocket handshake and HTTP origin check. Extension origins are allowed automatically. HTTP token authentication still applies; HTTP requests without `Origin` remain allowed by the origin check. |
 | `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | unset | Set to `1` only for a trusted non-browser local WebSocket client that cannot send `Origin`. The default rejects origin-less clients. |
 
 ### CLI
@@ -360,12 +362,31 @@ BrowserTap Bridge is enabled in the intended browser and retry `doctor`.
 missing runtime data alone does not request an extension Reload. Confirmed old
 bridge or MCP versions retain their own restart action, including during startup.
 
-It always prints JSON on stdout, including when the configuration itself is
-wrong. An unparseable `BROWSERTAP_BRIDGE_PORT` or a `BROWSERTAP_BRIDGE_HOST`
-that does not resolve fails before any bridge call, and is reported as
-`status: "initialization_failed"` with `action: "check_config"` plus the
-offending `error` and `error_type` — not as a traceback. Exit status is `0` only
-when `status` is `healthy` or `starting`.
+`doctor` prints JSON on stdout even for invalid configuration. An invalid base
+port reports `status: "initialization_failed"`, `action: "check_config"`,
+`error` and `error_type` before network or spawn actions. Imports, help/version
+and package-path commands remain usable. DNS/socket failures during later port
+probes preserve the available setup diagnosis and add `port_probe_errors`;
+an affected port's state is null. Exit status is `0` only for `healthy` or
+`starting` without probe errors. A malformed bridge diagnosis reports
+`cause: "bridge_unreachable"`, `ok: false` and `error_code: "malformed_diagnosis"`;
+it does not establish that the bridge is an old build.
+
+`state_paths.token_file_status` distinguishes `missing`, `empty`, `ready`,
+`unreadable` and `invalid_encoding`. `token_file_error` gives a safe reason;
+only ready content has a fingerprint. Existence fields are null when metadata
+cannot be read. Unknown default-directory metadata keeps the canonical path;
+legacy selection requires the default directory to be confirmed absent.
+Existing empty or unreadable files are not overwritten.
+
+`mcp_build_verdict` and `bridge_build_verdict` compare each process's package-import
+source snapshot with disk: `matches_tree`, `stale_process`, or `unverifiable`.
+The snapshot includes package Python files and the four imported JavaScript
+assets used for result conversion, guarded execution and page inspection.
+Same-version edits still require the corresponding MCP or bridge restart.
+Missing assets or older identity schemas cannot prove a match. This source
+identity does not attest runtime monkeypatches, cached bytecode or arbitrary
+other assets; `*_build_enforced=false` is unknown.
 
 BTAP creates `~/.browsertap/bridge-token` on first use and every bridge/MCP
 process reads that same file. Closing browsers or editors does not rotate it. Removing
@@ -410,7 +431,7 @@ The marker below is maintained with this source tree. It is not proof that a
 development checkout has been published; compare the installed package with its
 release tag before using new tool signatures or the 0.5.0 migration notes.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.4.20**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.0**.
 
 The three components load updates separately:
 
@@ -460,7 +481,7 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Dialogs are explicit.** `execute_js(dialog_policy=...)`, `open_url(beforeunload=...)`, and `handle_dialog(action=...)` take `dismiss` (default), `accept`, or `manual`. The global default still preserves the page; only an explicit accept or lab's configured shell/IDE host heuristic leaves automatically. `handle_dialog` answers within three seconds or reports `no_dialog`/an explicit error. `resolve_leave_dialog` tries protocol accept twice and uses physical Enter only as a final, lab-approved fallback.
 
-**Permissions are leases, not grants.** `set_site_permission` covers one origin for 60–600 seconds, records the prior setting, and restores it on expiry/reset/service-worker restart. `safe` prompts for every `allow`; default `lab` applies it without elicitation. Browser capabilities that cannot be restored return `unsupported` or `requires_user_action`.
+**Permissions use temporary leases.** `set_site_permission` covers one origin for 60–600 seconds, records the prior setting, and attempts restoration on expiry/reset/service-worker restart. `safe` prompts for every `allow`; default `lab` applies it without elicitation. Unsupported restoration is retained as `manual_recovery` with the prior setting and recovery guidance, and automatic retries stop. Correct the cause before an explicit `reset_site_permissions` retry. Unsupported initial grants return `unsupported` or `requires_user_action`.
 
 **Challenges stay in your browser.** A Cloudflare Turnstile or similar widget is handled in the same connected tab, by `page_click`, with a bounded number of attempts. When the challenge has not moved, the result is `challenge_stalled` and BTAP stops so you can finish it yourself in that same tab. BTAP never launches Playwright, a headless browser, or a separate automation profile as a fallback — the whole point is your real, logged-in session.
 
@@ -535,10 +556,40 @@ and as small top-level compatibility fields. Failures set MCP `isError=true`:
 | `switched_session` | Supplemental field indicating that only an implicit dead default was replaced with another live tab. Verify the new target before continuing; explicitly directed dead sessions are never substituted. |
 
 For delivery failures, only `delivery_state="undelivered"` proves the operation
-was not sent. `sent_unconfirmed` means its ACK or HTTP response is missing, so it
+was not sent; `retry_safe=false` still prevents replay. `sent_unconfirmed` means its ACK or HTTP response is missing, so it
 must not trigger an automatic replay. Treat `delivered_no_result`, `navigated`,
 and unknown delivery as potentially executed; recover by operation ID when one
 is available and inspect the page before deciding the next action.
+
+### Complete JSON results
+
+Large JS values and strings containing unpaired UTF-16 code units are returned
+through `result_file`. When `result_file_encoding="json"`, first parse the
+path field once as JSON; otherwise use the path directly. Then read that file
+as UTF-8 JSON and verify `result_bytes` and `result_sha256` against its bytes.
+The path encoding is separate from the file contents. `result_file_scope`
+identifies those contents:
+
+| Scope | JSON contents |
+| --- | --- |
+| `js-value` | The complete converted JavaScript value; its inline value is null. |
+| `envelope` | The complete original v1 tool envelope. |
+| `mcp-call-result` | The complete native MCP result after normal envelope adaptation, including original content and metadata. |
+
+JS descriptors are in `data`, or in `legacy.late_result` for a late reply.
+Unrepresentable strings elsewhere in a tool result use the latter two scopes
+and retain a valid structured decision header with the original `ok`, `isError`
+and retry verdicts. `result_content_externalized` / `result_meta_externalized`
+identify native content or metadata moved into the archive.
+
+If the file cannot be written, parse `result_json` once as JSON;
+`result_json_scope` uses the same scope names. This explicit inline fallback
+can exceed the usual size limit and keeps the original operation receipt.
+For envelope/MCP scopes it is at the header root, with a `result_json_ref` in
+`data`/`legacy`. `result_file_error.message_json` is a JSON-encoded I/O message.
+An error field marked `message_encoding="json"` or `code_encoding="json"`
+(also `error_code_encoding`) must likewise be parsed once. These representations
+preserve the original UTF-16 values; export failure never permits replay.
 
 ## Disclaimers
 
@@ -597,6 +648,7 @@ browser/profile selection.
   - `url` (string), `filename` (string, optional): relative download name, `directory` (string, optional): arbitrary absolute destination directory; creates parents, `wait` (boolean, optional): default `true`; `directory` requires `true`, `timeout` (number, optional): default 60 seconds, maximum 1800, `session_id` (string, optional): selects the browser profile, `overwrite` (boolean, optional): default `false`; an existing final destination raises an error unless explicitly `true`. If a directory download times out, `directory_applied=false`: the move is no longer tracked and Chrome may finish into its default download directory.
 - **open_new_tab** — open a background tab in this MCP process's selected browser/profile, unless `session_id` or `client_id` selects another. Creates a unique `operation_id` and waits a bounded time for exact session/generation registration; pass `active=true` for foreground work. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates by operation id. Ownership requires a completed record with exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only reports immediate availability for session tools. Before create dispatch, registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after dispatch, uncertainty returns `may_have_created=true,retry_safe=false`. With `may_have_created=false,retry_safe=true`, resolve the reported failure and retry without `operation_id`. To recover a dispatched create with `retry_safe=false`, pass the same `operation_id`, returned `client_id`, and `owner_id`: recovery reads the durable record without replaying `tabs/create`. A failed recovery probe preserves that uncertainty and owner capability. If the initial recovery probe finds no record, `reconciliation.resume_required=false` directs the caller to `list_tabs()` and inspection of that browser instead of another recovery call. Missing records, matching URLs, or unchanged tab counts cannot prove non-creation or ownership; keep the outcome unknown unless exact identity and task ownership resolve it. Keep `owner_id` for cleanup of registered task-owned tabs with their exact session/generation. Use this native API for reliable new tabs; page `window.open()` or anchor clicks may be blocked without a user gesture.
   - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner), `operation_id` (optional recovery handle), `client_id` (optional browser/profile client selector for creation or recovery)
+  - A pending create left by a worker restart becomes terminal `unknown`. Bounded record retention also keeps a replay guard for retired operation IDs; a refused old ID does not prove non-creation. Follow `reconciliation.resume_required=false` with inspection of that browser, preserving unknown outcomes and exact ownership evidence.
 - **close_tabs** — *(no tab needed)* accept native numeric tab ids or full `client:tabId` session ids, including `chrome-extension://` tabs. The default `only_if_agent_owned=true` requires the `owner_id` returned by `open_new_tab` and verifies the current lifecycle generation before closing, so pre-existing user tabs and another agent's tabs are refused. If the user already closed an owned tab, cleanup returns `status=already_gone, closed_by=user` without reusing its native id. An actual owned close returns `closed_by=agent`; an explicit unowned/operator override returns `closed_by=none` so it is not counted as task-owned cleanup. If `already_gone` is returned but a page with the same work is still visible, call `list_all_tabs` and verify URL/title before deciding whether a new session/generation should be closed; BTAP never auto-transfers ownership by URL. A Chrome `tabs.onReplaced` identity mapping is safe and also migrates the ownership claim. Set `only_if_agent_owned=false` only when the operator explicitly asked to close an unowned/user tab.
   - `tab_id`, `session_id` (optional browser constraint), `owner_id` (required by the safe default), `only_if_agent_owned` (boolean, default `true`)
 </details>
@@ -615,6 +667,9 @@ browser/profile selection.
 - **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the process default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
   - A `Cannot access contents of the page` error must be classified before retrying: if the script attempted `window.open` or navigation, use `open_new_tab` (Chrome may block it without a user gesture); if injection into the current tab is forbidden, choose a normal scriptable `http/https` tab or the supported CDP route. Do not treat the message as proof that reading the current page failed.
   - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`, `wait` (boolean, optional): default `true`
+  - All routes use the same result conversion: `undefined` and non-finite numbers become `null`; BigInt/symbol become strings; DOM, Error and function values become readable representations. Cycles and depth 6 have markers; iterables keep up to 200 items plus a truncation marker. A `result_file` preserves the complete **converted** value, including those markers.
+  - Once user code starts, a script error does not trigger a second execution. Use an explicit `return` in a complex async body, preferably `(async () => { /* work */ return value; })()`. Ambiguous bodies may complete with `null`; `await(expr)` can parse as a call to an ordinary function named `await`, so use the async IIFE when that distinction matters.
+  - Unpaired UTF-16 values or keys use the same file export at any size, with `result_file_scope="js-value"`. If writing fails, `result_json` preserves the complete value with `result_json_scope="js-value"`; see [Complete JSON results](#complete-json-results) for decoding and receipt semantics.
 - **get_execute_js_result** — read or briefly wait for an `operation_id`, from the same MCP session that submitted it. Accepts handles from `execute_js` and other timed-out bridge commands. Querying never replays the operation. A completed result can be read repeatedly, including after a lost query response; pending, unknown/expired, and foreign handles return explicit statuses or errors. After reservation expiry, the first valid late terminal reply is retained as `late_result` (`success` and `data`), with `late_reply_age` in seconds. The original `unknown` receipt and `retry_safe=false` remain; the late reply neither restores the reservation nor renews retention. Results are retained for up to 10 minutes, with at most 512 completed operation records; capacity pressure can evict them earlier. A missing result does not prove the operation was never executed. Large successful values use the same lossless `result_file` metadata as `execute_js`; for a late value, that metadata is inside `late_result` and its `data` becomes null.
   - `operation_id` (string), `timeout` (number, optional): default `0`, range `0`–`120`
 - **handle_dialog** — inspect or answer a dialog left open on a tab. `action="manual"` reports it without choosing (`blocked_by_dialog`, or `no_dialog` if nothing is open); `accept`/`dismiss` answer it and release any paused `execute_js` or `open_url`. `prompt_text` supplies the text for an accepted `prompt`.
@@ -657,11 +712,11 @@ Pass `session_id` explicitly: the call holds that target in its own context with
 <details>
 <summary><b>Site permissions</b></summary>
 
-Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. Every lease records the prior setting and restores it — on expiry, on explicit reset, and after a service-worker restart or browser restart.
+Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. Every lease records the prior setting and attempts restoration on expiry, explicit reset, and a service-worker or browser restart. Unsupported restoration retains `manual_recovery` with the prior setting and stops automatic retries.
 
-- **set_site_permission** — set one permission for one origin, for 60–600 seconds. Supported: `notifications`, `geolocation` (or `location`), `camera`, `microphone`. `setting` is `allow`, `block`, or `ask`. In `safe`, every `allow` requires approval; default `lab` applies it without elicitation (`BROWSERTAP_LAB_NO_ELICIT=1` semantics). Declining returns `requires_user_action` and changes nothing. `clipboard` returns `unsupported`, because its exact prior state cannot be restored. Omit `origin` to use the target tab's current origin; only `http`/`https` origins are accepted.
+- **set_site_permission** — set one permission for one origin, for 60–600 seconds. Supported: `notifications`, `geolocation` (or `location`), `camera`, `microphone`. `setting` is `allow`, `block`, or `ask`. In `safe`, every `allow` requires approval; default `lab` applies it without elicitation (`BROWSERTAP_LAB_NO_ELICIT=1` semantics). Declining returns `requires_user_action` and changes nothing. `clipboard` returns `unsupported`, because its exact prior state cannot be restored. Omit `origin` to use the target tab's current origin; only `http`/`https` origins are accepted. If an established lease loses restoration support, `manual_recovery` retains its prior setting and recovery guidance and stops automatic retries.
   - `permission` (string), `setting` (string): `allow`, `block`, or `ask`, `origin` (string, optional): defaults to the tab's origin, `duration_seconds` (integer, optional): 60–600, default `300`, `session_id` (string, optional)
-- **reset_site_permissions** — restore matching leases now instead of waiting for expiry. Omit both `origin` and `permission` to restore every lease on that browser.
+- **reset_site_permissions** — attempt to restore matching leases now, including `manual_recovery` records. Omit both `origin` and `permission` to reset every lease on that browser. Unsupported restoration preserves the prior setting and recovery guidance and stops automatic retries; resolve the cause before another explicit reset.
   - `origin` (string, optional), `permission` (string, optional), `session_id` (string, optional)
 </details>
 
@@ -694,7 +749,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
   - `session_id` (string, optional)
 - **create_bookmark** — *(no tab needed)* create a bookmark or folder.
   - `title` (string), `url` (string, optional): omit to create a folder, `parent_id` (string, optional), `session_id` (string, optional)
-- **remove_bookmark** — *(no tab needed)* remove a bookmark or folder subtree.
+- **remove_bookmark** — *(no tab needed)* atomically save the target subtree under `bookmark-backups` in the local state directory, then remove the bookmark or folder. Returns `backup_path` and `backup_sha256`; backup failure prevents deletion. The managed backup subdirectory must be an ordinary directory, not a symlink or reparse point. Limits: 16 MiB per file, 100 files and 64 MiB total; backups older than 30 days or over capacity are removed on the next backup. A lost deletion receipt keeps the backup evidence but requires inspecting the bookmark tree before retrying.
   - `bookmark_id` (string), `recursive` (boolean, optional): default `false`, `session_id` (string, optional)
 - **call_extension** — *(no tab needed)* send JSON to another enabled extension; the target must allow BTAP via `externally_connectable`.
   - `extension_id` (string), `message_json` (string): JSON payload as text, `session_id` (string, optional)
@@ -723,6 +778,23 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 </details>
 
 <details>
+<summary><b>Native file dialogs: explicit desktop opt-in</b></summary>
+
+- **inspect_native_file_dialog** — inspect the current foreground Windows standard Shell file dialog owned by a registered Chrome or Edge process. Requires `[desktop]`. Checks owner/process identity, native controls, visibility and Cancel hit targets, then installs a temporary lifetime marker and returns a 15-second ticket. This has a temporary marker side effect and does not activate a window. Unsupported platforms, portable/unregistered browsers, cross-process owners and unrecognized layouts are refused.
+  - `desktop_opt_in` (boolean, optional): default `false`; must be `true` to inspect.
+- **cancel_native_file_dialog** — consume a fresh inspection ticket and send one bounded message to that dialog's Cancel button. Requires `[desktop]` and the current safe/lab physical-approval policy. Rechecks the cross-process lease, observed Windows quiet-input state, held keys/buttons, identity, foreground and hit targets. Returns `status="success", cancelled=true` only after observing the original window gone. Uncertain delivery or closure returns `unknown`, `retry_safe=false`; inspect state before another action. Each opted-in attempt consumes the ticket, including refusals. Both tools report `desktop`, `on_screen` and `input_quiet` diagnostics.
+  - `ticket` (string, required), `desktop_opt_in` (boolean, optional): default `false`; must be `true` to cancel.
+
+For uploads, use `upload_files` with the page's file input. Native cancellation
+is an explicit recovery action for an already-open supported dialog. `safe`
+requires approval; default `lab` skips elicitation but still requires opt-in.
+Tickets expire, are limited to eight per MCP process, and clean up their own
+markers on consumption, expiry, eviction or orderly shutdown. These checks are
+not an atomic desktop transaction. See [native-dialog design](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/agent-guides/native-dialogs.md).
+
+</details>
+
+<details>
 <summary><b>Removed in 0.5.0: OS-level input and desktop capture</b></summary>
 
 `mouse_move`, `mouse_click`, `mouse_drag`, `type_text`, `hotkey`, `pointer_info`
@@ -742,11 +814,11 @@ call instead:
 
 A failing `page_*` call is a targeting problem, not a reason to look for a
 screen-coordinate fallback — re-read the page with `scan_page` and fix the
-locator. Browser chrome, native file pickers, extension popups and OS dialogs
-are outside what a page-level protocol event can reach, and are unsupported
-rather than served by a desktop path.
+locator. Browser chrome, extension popups and OS dialogs are outside page-level
+input. The explicit native-file-dialog tools above cover only the documented
+Windows inspection/cancellation boundary.
 
-One physical path survives: `resolve_leave_dialog` may send Enter after its two
+One global-key fallback survives: `resolve_leave_dialog` may send Enter after its two
 protocol attempts fail, in `lab` only; pure probe timeouts do not trigger it.
 `safe` returns `requires_user_action` without sending Enter. Lab skips elicitation
 by default; when lab approval prompts are enabled, a declined, cancelled or

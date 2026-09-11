@@ -1,10 +1,9 @@
 """What `execute_js` does with each shape of caller code that returns a value.
 
-The wrapper `buildExecScript` builds picks between three strategies -- an
-AsyncFunction when the last line starts with `return`, a plain `eval` otherwise,
-and an AsyncFunction retry when that eval throws a SyntaxError naming `return` or
-`await`. Which branch a script lands in is invisible to the caller, so a branch
-that drops the value fails silently: the tool answers `null` and reports success.
+The wrapper `buildExecScript` uses guarded direct eval and supports function-body
+return/await syntax only after a parse failure before execution. Which branch a
+script lands in is invisible to the caller, so a branch that drops the value
+fails silently: the tool answers `null` and reports success.
 
 That is not hypothetical. A 2026-08-28 session lost hours to multi-statement and
 IIFE scripts returning `null` through this layer, and the shapes were only
@@ -53,6 +52,12 @@ def _run_exec(code: str) -> dict:
         "globalThis.document = { createElement() { return { style: {}, remove() {},"
         " textContent: '' }; }, body: { appendChild() {} },"
         " documentElement: { appendChild() {} } };\n"
+        + "globalThis.smartProcessResult = eval("
+        + json.dumps(BACKGROUND.with_name("result_serialization.js").read_text(encoding="utf-8"))
+        + ");\n"
+        + "globalThis.prepareGuardedEval = eval("
+        + json.dumps(BACKGROUND.with_name("guarded_eval.js").read_text(encoding="utf-8"))
+        + ");\n"
         + builder
         + "\nconst expression = buildExecScript("
         + json.dumps(code)
@@ -84,9 +89,8 @@ def test_the_builder_this_file_tests_is_the_one_that_ships():
     start = source.index("function buildExecScript")
     end = source.index("\nfunction buildPageScript", start)
     builder = source[start:end]
-    # The three dispatch branches the cases below are here to pin.
+    # The runtime entry points the cases below are here to exercise.
     assert "AsyncFunction" in builder
-    assert "lastLine.startsWith('return')" in builder
     assert "smartProcessResult" in builder
 
 

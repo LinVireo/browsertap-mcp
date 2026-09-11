@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import xml.etree.ElementTree as ET
 
 import pytest
 
 from scripts import acceptance_report as A
 from scripts import evidence_manifest as E
+from scripts import test_run_evidence as T
 
 
 def _passing_docs_report() -> dict[str, object]:
@@ -16,9 +20,9 @@ def _passing_docs_report() -> dict[str, object]:
     weaken any test built on it.
     """
     return {
-        "registered": 49,
-        "expected_registered": 49,
-        "coverage_manifest": 49,
+        "registered": 51,
+        "expected_registered": 51,
+        "coverage_manifest": 51,
         "readme_missing": {"README.md": [], "README.zh-CN.md": []},
         "readme_extra": {"README.md": [], "README.zh-CN.md": []},
         "missing_params": {},
@@ -34,9 +38,9 @@ def _passing_docs_report() -> dict[str, object]:
 
 def _passing_tool_evidence() -> dict[str, object]:
     return {
-        "registered": 49,
-        "contract_valid_tools": 49,
-        "fully_verified_tools": 49,
+        "registered": 51,
+        "contract_valid_tools": 51,
+        "fully_verified_tools": 51,
         "all_evidence_executed": True,
         "failed_evidence": [],
         "unclassified_evidence": [],
@@ -147,9 +151,36 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
         ),
         encoding="utf-8",
     )
-    passing_xml = '<testsuite><testcase classname="c" name="t" /></testsuite>'
-    (artifacts / "offline-junit.xml").write_text(passing_xml, encoding="utf-8")
-    (artifacts / "live-junit.xml").write_text(passing_xml, encoding="utf-8")
+    source = {
+        "git_head": "f" * 40, "git_dirty": git_dirty, "content_sha256": "a" * 64,
+        "file_count": 84, "missing_file_count": 0,
+    }
+    roster = [
+        {"nodeid": "tests/test_fixture.py::test_offline", "live": False},
+        {"nodeid": "tests/test_fixture.py::test_live", "live": True},
+    ]
+    for mode in ("offline", "live"):
+        selected = [row["nodeid"] for row in roster if row["live"] == (mode == "live")]
+        for phase in ("collection", "execution"):
+            receipt = {
+                "schema_version": 1, "mode": mode, "phase": phase,
+                "command": T.pytest_command(mode, phase), "targets": ["tests"],
+                "keyword": "", "markexpr": "live" if mode == "live" else "not live",
+                "invoked_from_root": True, "all_tests": roster, "selected_nodeids": selected,
+                "deselected_nodeids": [row["nodeid"] for row in roster if row["nodeid"] not in selected],
+                "collection_reports": [{"nodeid": "tests/test_fixture.py", "outcome": "passed"}],
+                "reports": [
+                    {"nodeid": nodeid, "when": stage, "outcome": "passed"}
+                    for nodeid in selected for stage in ("setup", "call", "teardown")
+                ] if phase == "execution" else [],
+                "exit_code": 0, "source_before": source, "source_after": source,
+            }
+            (tmp_path / T.receipt_relative(mode, phase)).write_text(json.dumps(receipt), encoding="utf-8")
+        suite = ET.Element("testsuite", tests="1", failures="0", errors="0", skipped="0")
+        case = ET.SubElement(suite, "testcase", classname="test_fixture", name=f"test_{mode}")
+        properties = ET.SubElement(case, "properties")
+        ET.SubElement(properties, "property", name="btap_nodeid", value=selected[0])
+        (artifacts / f"{mode}-junit.xml").write_bytes(ET.tostring(suite))
     (artifacts / "live-preflight.json").write_text(
         json.dumps(_passing_live_preflight()), encoding="utf-8"
     )
@@ -164,19 +195,17 @@ def _seal_release_evidence(monkeypatch, tmp_path, *, git_dirty: bool = False):
         "schema_version": E.SCHEMA_VERSION,
         "generated": "2026-08-18T00:00:00+00:00",
         "include_live": True,
-        "source": {
-            "git_head": "f" * 40,
-            "git_dirty": git_dirty,
-            "content_sha256": "a" * 64,
-            "file_count": 84,
-            "missing_file_count": 0,
-        },
+        "source": source,
         "artifacts": {
             path.relative_to(tmp_path).as_posix(): {"sha256": "x", "bytes": 1}
             for path in (
                 artifacts / "coverage.json",
                 artifacts / "offline-junit.xml",
+                artifacts / "offline-collection.json",
+                artifacts / "offline-execution.json",
                 artifacts / "live-junit.xml",
+                artifacts / "live-collection.json",
+                artifacts / "live-execution.json",
                 artifacts / "live-preflight.json",
                 artifacts / "tool-coverage-offline.json",
                 artifacts / "tool-coverage-live.json",
@@ -226,6 +255,123 @@ def test_complete_sealed_evidence_scores_every_gate(monkeypatch, tmp_path):
     assert data["tool_coverage_source"] == "artifacts/tool-coverage-live.json"
     assert data["live"]["status"] == "pass"
     assert data["distribution_summary"] == "2 manifest-bound archive(s) validated"
+
+
+def test_report_timestamp_comes_from_the_sealed_inputs(monkeypatch, tmp_path):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    first = A.build_report_data()
+    second = A.build_report_data()
+
+    assert first["generated"] == manifest["generated"]
+    assert A.render_report(first) == A.render_report(second)
+
+
+def test_a_truncated_success_xml_cannot_pass_the_offline_gate(monkeypatch, tmp_path):
+    _seal_release_evidence(monkeypatch, tmp_path)
+    path = tmp_path / "artifacts/offline-junit.xml"
+    tree = ET.parse(path)  # noqa: S314 - synthetic local XML fixture
+    tree.getroot().set("tests", "2")
+    tree.write(path, encoding="utf-8")
+
+    data = A.build_report_data()
+    assert data["offline"]["status"] == "fail"
+    assert data["gates"]["offline_evidence"] is False
+    assert data["release_ready"] is False
+
+
+def test_duplicate_success_cases_cannot_count_as_a_complete_suite(monkeypatch, tmp_path):
+    _seal_release_evidence(monkeypatch, tmp_path)
+    path = tmp_path / "artifacts/offline-junit.xml"
+    tree = ET.parse(path)  # noqa: S314 - synthetic local XML fixture
+    case = next(tree.getroot().iter("testcase"))
+    tree.getroot().append(copy.deepcopy(case))
+    tree.getroot().set("tests", "2")
+    tree.write(path, encoding="utf-8")
+
+    data = A.build_report_data()
+    assert data["offline"]["status"] == "fail"
+    assert data["gates"]["offline_evidence"] is False
+
+
+def test_report_check_recomputes_the_body_even_when_the_footer_is_untouched(monkeypatch, tmp_path):
+    _seal_release_evidence(monkeypatch, tmp_path)
+    assert A.main([]) == 0
+    output = tmp_path / "artifacts/acceptance-report.md"
+    original = output.read_bytes()
+    changed = original.replace(
+        f"Score: {A.TOTAL_GATE_WEIGHT}/{A.TOTAL_GATE_WEIGHT}".encode(),
+        f"Score: 0/{A.TOTAL_GATE_WEIGHT}".encode(),
+    )
+    assert changed != original
+    assert changed.split(b"## Scored Source")[1] == original.split(b"## Scored Source")[1]
+    output.write_bytes(changed)
+
+    assert A.main(["--check"]) == 1
+    assert output.read_bytes() == changed
+
+
+def test_resealed_input_with_the_same_score_invalidates_the_old_report(monkeypatch, tmp_path):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    before = A.build_report_data()
+    assert A.main([]) == 0
+    path = tmp_path / "artifacts/lint.json"
+    lint = json.loads(path.read_bytes())
+    lint["unscored_metadata"] = "new evidence run"
+    path.write_bytes(json.dumps(lint).encode())
+    manifest["artifacts"]["artifacts/lint.json"] = {
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size,
+    }
+    after = A.build_report_data()
+
+    assert before["objective_score"] == after["objective_score"]
+    assert after["release_ready"] is True
+    assert before["manifest_sha256"] != after["manifest_sha256"]
+    # Only the manifest digest changes; every measured gate still reads the same.
+    assert [line for line in A.render_report(before).splitlines() if "`manifest_sha256`" not in line] == [
+        line for line in A.render_report(after).splitlines() if "`manifest_sha256`" not in line
+    ]
+    assert A.main(["--check"]) == 1
+
+
+def test_report_check_never_creates_or_rewrites_output(monkeypatch, tmp_path):
+    _seal_release_evidence(monkeypatch, tmp_path)
+    missing = tmp_path / "uncreated/acceptance.md"
+    assert A.main(["--check", "--output", str(missing)]) == 1
+    assert not missing.parent.exists()
+
+    assert A.main([]) == 0
+    output = tmp_path / "artifacts/acceptance-report.md"
+    original, modified = output.read_bytes(), output.stat().st_mtime_ns
+    assert b"\r\n" not in original
+    assert A.main(["--check"]) == 0
+    assert output.read_bytes() == original
+    assert output.stat().st_mtime_ns == modified
+
+
+def test_a_matching_report_still_requires_every_release_gate(monkeypatch, tmp_path, capsys):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    manifest["artifacts"].pop("artifacts/live-preflight.json")
+    assert A.main([]) == 1
+    capsys.readouterr()
+
+    assert A.main(["--check"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["report_matches"] is True
+    assert result["release_ready"] is False
+
+
+@pytest.mark.parametrize("mode", ["offline", "live"])
+@pytest.mark.parametrize("phase", ["collection", "execution"])
+def test_a_passing_junit_without_a_bound_receipt_cannot_earn_its_gate(
+    monkeypatch, tmp_path, mode, phase
+):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    manifest["artifacts"].pop(T.receipt_relative(mode, phase))
+
+    data = A.build_report_data()
+    assert data[mode]["status"] == "fail"
+    assert data["gates"][f"{mode}_evidence"] is False
+    assert data["release_ready"] is False
 
 
 def test_distribution_gate_checks_the_manifest_bound_pair(monkeypatch, tmp_path):
@@ -490,22 +636,16 @@ def test_report_without_a_source_record_says_so_instead_of_inventing_one(monkeyp
     assert "content_sha256" not in text.split("## Scored Source")[1]
 
 
-def test_live_junit_is_the_only_live_status_source(monkeypatch, tmp_path):
-    artifacts = tmp_path / "artifacts"
-    artifacts.mkdir()
-    (artifacts / "live-junit.xml").write_text(
-        '<testsuites><testsuite><testcase classname="live" name="ok" />'
-        '<testcase classname="live" name="also_ok" /></testsuite></testsuites>',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(A, "ROOT", tmp_path)
-
-    result = A._live_junit(
-        {"include_live": True, "artifacts": {"artifacts/live-junit.xml": {}}}
-    )
+def test_live_status_requires_the_bound_complete_run(monkeypatch, tmp_path):
+    manifest = _seal_release_evidence(monkeypatch, tmp_path)
+    result = A._live_junit(manifest)
 
     assert result["status"] == "pass"
-    assert result["summary"] == "tests=2, failures=0, errors=0, skipped=0"
+    assert result["summary"] == (
+        "tests=1, failures=0, errors=0, skipped=0; expected full collection=1"
+    )
+    manifest["artifacts"].pop("artifacts/live-execution.json")
+    assert A._live_junit(manifest)["status"] == "fail"
 
 
 def test_live_junit_fails_on_skips(monkeypatch, tmp_path):

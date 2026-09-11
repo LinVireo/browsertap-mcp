@@ -17,6 +17,8 @@ from scripts.tool_coverage_report import build_report as build_tool_coverage_rep
 from tests.tool_coverage_manifest import TOOL_COVERAGE
 
 EXPECTED = {
+    # explicit native file-dialog inspection/cancellation
+    "inspect_native_file_dialog", "cancel_native_file_dialog",
     # discovery / diagnostics
     "get_setup_status", "get_automation_profile", "set_automation_profile",
     "list_tabs", "list_all_tabs", "extension_path",
@@ -50,6 +52,7 @@ EXPECTED = {
 }
 
 NEW_IN_THIS_ROUND = {
+    "inspect_native_file_dialog", "cancel_native_file_dialog",
     "wait_for",
     "scroll_page",
     "activate_tab",
@@ -86,7 +89,7 @@ def test_expected_tool_set(by_name):
 
 
 def test_behavior_manifest_matches_exact_registered_set(by_name):
-    assert len(by_name) == len(TOOL_COVERAGE) == 49
+    assert len(by_name) == len(TOOL_COVERAGE) == 51
     assert set(TOOL_COVERAGE) == set(by_name)
 
 
@@ -104,6 +107,17 @@ def test_capability_registry_covers_exactly_the_registered_tools(by_name):
     assert S.TOOL_CAPABILITIES["resolve_leave_dialog"]["capability"] == "page"
     assert S.TOOL_CAPABILITIES["resolve_leave_dialog"]["desktop_fallback"] is True
     assert S.TOOL_CAPABILITIES["resolve_leave_dialog"]["desktop_opt_in"] is True
+    assert status["groups"]["desktop"] == [
+        "cancel_native_file_dialog", "inspect_native_file_dialog",
+    ]
+    for name, target, effect in (
+        ("inspect_native_file_dialog", "none", "mixed"),
+        ("cancel_native_file_dialog", "required", "write"),
+    ):
+        assert S.TOOL_CAPABILITIES[name] == {
+            "capability": "desktop", "target": target, "side_effect": effect,
+            "result_contract": "btap.result.v1", "desktop_opt_in": True,
+        }
     for metadata in S.TOOL_CAPABILITIES.values():
         assert metadata["target"] in {"none", "optional", "required"}
         assert metadata["side_effect"] in {"read", "write", "mixed"}

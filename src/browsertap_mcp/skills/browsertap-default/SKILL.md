@@ -53,6 +53,9 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
   或本任务所有权；只凭已有的精确 session/generation 和 owner 登记清理，证据不足时
   保留未知结果。
 
+worker 重启后，遗留的 pending 创建会返回终态 unknown；容量回收后的创建句柄也可能
+由 replay guard 保守拒绝。两者都不能改用新句柄重放同一创建，按上述核对流程处理。
+
 `session_id` 是当前 `client_id:tab_id` 句柄，不是永久身份。只有 Chrome
 `tabs.onReplaced` 和稳定 `tab_identity` 的直接证据允许换发：
 结果带 `rebound_from` / `replacement_session_id` 时，从下一步改用新句柄。
@@ -82,10 +85,17 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 | 下载 | `download_file(url=..., session_id=...)`，由浏览器下载管理器使用现有登录态；确认完成状态和最终 `path`。 |
 | 浏览器原生能力 | 标签页、Cookies/storage、书签、扩展、站点权限、原生 CDP 工具，按 schema 选择目标。 |
 
-`capability_registry` 的 page/browser 分类与 `target`、`side_effect`、
+`remove_bookmark` 会先将目标子树原子备份，再删除。保留返回的 `backup_path` 和
+`backup_sha256`；`bookmark_backup_failed` 表示删除未派发。删除回包丢失时先读取
+书签树并核对备份，备份存在本身不证明删除成功。受管 `bookmark-backups` 子目录须为
+普通目录，不能是符号链接/junction。容量与保留期见同版本 README。
+
+`capability_registry` 的 page/browser/desktop 分类与 `target`、`side_effect`、
 `result_contract`、`desktop_opt_in` 描述当前工具面。当前没有通用 desktop 工具；
 浏览器 chrome、扩展 UI、原生文件选择器、打印/保存对话框不是页面输入可达的控件。
 页面失败不会自动升级成桌面操作。
+
+Windows 上已打开的标准 Chrome/Edge 文件框可以显式检查/取消，见下方原生文件框流程。
 
 ## 输入与截图
 
@@ -100,7 +110,8 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
   跨域 frame / closed shadow root 需换可访问的定位范围。
 - selector click 会命中测试。可滚动到目标时返回 `scrolled_into_view`；
   被遮挡返回 `obscured` 和 `occluded_by`，仍在视口外返回 `outside_viewport`。
-  两种拒绝都没点击，处理遮挡或布局后再定位。通过时有 `hit_verified=true`。
+  前者先处理遮挡，后者检查滚动位置、frame 偏移或视口尺寸后再定位；均未点击。
+  通过时有 `hit_verified=true`。
 - 普通坐标使用顶层视口 **CSS 像素**。iframe 内部点位可用
   `page_click(selector={"frame":[...],"x":20,"y":30}, session_id=...)`，
   由 BTAP 换算为顶层坐标。跨域 frame 或带非恒等 CSS transform 的 frame 链
@@ -126,6 +137,8 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 先读 `ok` 和 `error_code`。成功正文在 `data`，旧失败详情可能保留在
 `legacy`；失败设 MCP `isError=true`。结合 `target`、`diagnostics` 与
 `retryable`，不要仅凭兼容的顶层 `status` 推断成功。
+缺失或无法识别的完成回包保留 unknown；明确的 `data:null` 才是合法空返回。
+`retry_safe=false` 始终禁止自动重发，即使同时出现 `undelivered`。
 
 | 情况 | 下一步 |
 | --- | --- |
@@ -147,7 +160,8 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 容量压力可提前淘汰。`operation_unknown` 或过期不证明原操作未执行。
 占用到期后的查询若带 `late_result`，读取其 `success` 和 `data` 获取迟到终态回包，
 `late_reply_age` 为收到回包后的秒数。成功大值的 `data=null` 时，按同层
-`result_file`、`result_bytes`、`result_sha256` 读取完整值。原 `unknown` 收据和
+`result_file`、`result_bytes`、`result_sha256` 读取完整值；文件写入失败则读取同层
+`result_json`。原 `unknown` 收据和
 `retry_safe=false` 仍保留；迟到结果只补充执行证据，不恢复占用、不延长保留期。
 `execute_js(wait=false)` 用于确实需要长时间运行的任务，不用来等待页面状态。
 
@@ -159,7 +173,27 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 `execute_js` 的策略、monitor、执行、重试与清理共用一个总 deadline。
 `btap_retried=true` 表示内部已重试，不是让调用方继续重复的指令。
 
-## 对话框、权限与唯一物理兜底
+JS 结果经统一 JSON 转换：undefined 和非有限数为 null，BigInt/symbol 为字符串，
+DOM/Error/函数为可读值，循环、深度 6 和超过 200 项的迭代结果有明确标记。
+`result_file` 保存完整的转换后值，包含这些标记。manual 模式先原样执行脚本，
+再转换其返回对象。代码开始执行后的脚本错误不触发第二次执行。
+复杂 async body 用显式 `return`，推荐 `(async () => { /* work */ return value; })()`；
+这样也能避免 `await(expr)` 被当成普通函数调用。不要因返回 null 或脚本错误重放副作用。
+`transients_available=false` 表示瞬态观测读取失败，不能据空列表声称页面没有变化。
+
+较大 JS 值或含未配对 UTF-16 码元的值/键会导出完整 JSON，内联值为 null。
+`result_file_encoding=json` 表示路径字段本身要先解析一次 JSON；未标记的路径直接使用。
+核对文件字节数和哈希后按 UTF-8 JSON 读取；`result_file_scope=js-value` 是 JS 值，
+`envelope` 是原始完整 v1 信封，`mcp-call-result` 是完成常规信封适配后的完整 MCP 结果。
+后两类保留可用的结构化决策头；原 `ok`、`isError` 和重试结论仍有效。
+写文件失败时将 `result_json` 解析一次，范围由 `result_json_scope` 指定；它可能超过
+通常内联上限。JS 字段在 `data` 或 `legacy.late_result`，信封/MCP 后备在决策头根部，
+`data`/`legacy` 的 `result_json_ref` 指向它。导出失败不是重放依据。
+错误带 `message_encoding=json` / `code_encoding=json` / `error_code_encoding=json` 时
+对应字段也是 JSON 字符串，仅解析一次；`result_file_error.message_json` 同理。
+`result_content_externalized` / `result_meta_externalized` 标记移入归档的原生内容/元数据。
+
+## 对话框、权限与显式桌面恢复
 
 用 `handle_dialog(action="manual")` 检查而不选择。需要回答时，根据任务意图选择
 `accept` / `dismiss`，并在发起执行的 MCP 会话中处理。回答对话框不证明原脚本已完成，
@@ -174,8 +208,10 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 `safe` 对每次 `allow` 请求批准；默认 `lab` 按
 `BROWSERTAP_LAB_NO_ELICIT=1` 免询问，设为 false 才启用 lab 会话级批准。
 `unsupported` 表示对应能力无法保证恢复，不改走屏幕点击权限弹窗。
+恢复记录若带 `manual_recovery`，按其中的 prior setting 和恢复指引处理；自动重试已经
+停止。处理原因后可显式调用 `reset_site_permissions` 再尝试恢复。
 
-七个 OS 输入/截图工具已从当前工具面移除。唯一物理路径是
+七个 OS 输入/截图工具已从当前工具面移除。保留的全局按键兜底是
 `resolve_leave_dialog`：显式传 `session_id`，先两次协议 accept，
 符合其失败条件时才尝试 lab Enter 兜底。`safe` 直接拒发物理 Enter；
 不存在的对话框或纯探测超时也不能据此发送 Enter。
@@ -185,6 +221,23 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 `on_screen=false` 表示目标不在屏上。锁的元数据 TTL 不允许抢走活 owner 的 OS lock。
 `get_automation_profile` 查看配置；`set_automation_profile` 只影响当前 MCP 进程，
 改变 profile 不是对新任务的授权。
+
+### 原生文件框
+
+普通上传仍用 `upload_files`，不打开原生窗口。只在任务需要取消一个已打开的受支持文件框时：
+
+1. 同一 MCP 进程调用 `inspect_native_file_dialog(desktop_opt_in=true)`。要求 Windows、
+   `[desktop]`、已注册 Chrome/Edge、当前前景标准 Shell 文件框；检查有临时窗口标记副作用。
+2. 保存返回的 `ticket`，在 15 秒内调用
+   `cancel_native_file_dialog(ticket=..., desktop_opt_in=true)`。不传 HWND 或坐标。
+   `safe` 要求批准；默认 `lab` 免 elicitation，但两者都要求显式 opt-in。
+3. 只有 `status="success", cancelled=true` 表示已观察到原窗口关闭。`unknown` 或
+   `retry_safe=false` 时检查当前状态；不要重发旧票据。每次 opt-in 尝试都消费票据，拒绝也一样。
+
+票据最多八张，消费、到期、驱逐和正常退出会清理自身标记。检查不激活窗口；取消保留跨进程
+输入锁、真实 Windows last-input 静默信号、按住输入检查、前景/身份/命中复核，单次发送 Cancel。
+查看 `desktop`、`on_screen` 和 `input_quiet`；inspect 不运行静默检查，不能把它当作静默通过。
+不支持的平台、未注册/portable 浏览器、跨进程 owner、自绘布局仍拒绝，不能改用全局键鼠兜底。
 
 ## 下载、捕获与正文读取
 
@@ -219,6 +272,15 @@ token 仅用于请求，不写进长期文件或公开报告；用完停止捕�
 取得运行状态后再判断兼容性；未握手本身不要求 Reload。
 按 `reload_extension_required` 和 `extension_build_verdict` 判断是否需要人工 Reload，
 不要只比版本号，也不要直接另起独立浏览器代替用户会话。
+`mcp_build_verdict` / `bridge_build_verdict` 为 `stale_process` 时，即使版本相同也要
+重启对应 Python 进程。身份包含包内 `.py` 和 import 缓存的四份 JavaScript；更新这些脚本
+也需要重启。`unverifiable` 表示源码身份尚未证实，即使连接状态为 `healthy` 也不能作验收。
+
+配置错误按 `check_config` 处理：基础端口为 `1..65533`，相对状态/token 路径以启动 cwd 为准。
+`state_paths.token_file_status` 区分 missing/empty/ready/unreadable/invalid_encoding；
+`state_dir_exists=null` 表示目录元数据未知，保留 canonical 路径，不按缺失切换 legacy。
+权限或编码错误先按 `token_file_error` 修正，不能覆盖已有文件。`malformed_diagnosis` 表示
+bridge 报告不可用，不证明旧构建；详细恢复步骤见 [[browsertap-bridge-recovery]]。
 
 完成时报告实际读取/修改的目标、结果证据、已清理的自有资源及未完成操作。
 把“已请求”“已执行”“已验证”分开；保留未结案的 `operation_id`，不把用户关闭的 tab

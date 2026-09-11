@@ -92,7 +92,7 @@ def test_bridge_constructor_failure_propagates(monkeypatch):
         bridge.main([])
 
 
-def test_bridge_rejects_non_numeric_port_before_constructing(monkeypatch):
+def test_bridge_rejects_non_numeric_port_before_constructing(monkeypatch, capsys):
     monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "not-a-port")
     monkeypatch.setattr(
         bridge,
@@ -100,8 +100,11 @@ def test_bridge_rejects_non_numeric_port_before_constructing(monkeypatch):
         lambda **kwargs: pytest.fail("driver must not be constructed"),
     )
 
-    with pytest.raises(ValueError, match="invalid literal"):
-        bridge.main([])
+    assert bridge.main([]) == 1
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["status"] == "initialization_failed"
+    assert failure["error_type"] == "ValueError"
+    assert "BROWSERTAP_BRIDGE_PORT" in failure["error"]
 
 
 def test_remote_driver_without_close_is_supported(monkeypatch):

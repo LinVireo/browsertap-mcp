@@ -60,12 +60,14 @@ def test_uninstall_extension_forwards_confirmation_and_client(monkeypatch):
     ]
 
 
-def test_bookmark_tools_match_existing_extension_protocol(monkeypatch):
+def test_bookmark_tools_match_existing_extension_protocol(monkeypatch, tmp_path):
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
     driver = _install(
         monkeypatch,
         [
             {"data": {"ok": True, "data": [{"id": "0"}]}},
             {"data": {"ok": True, "data": {"id": "9", "title": "BTAP"}}},
+            {"data": {"ok": True, "data": [{"id": "9", "title": "BTAP"}]}},
             {"data": {"ok": True}},
         ],
     )
@@ -88,6 +90,7 @@ def test_bookmark_tools_match_existing_extension_protocol(monkeypatch):
                 "parentId": "1",
             },
         },
+        {"cmd": "bookmarks", "method": "tree"},
         {"cmd": "bookmarks", "method": "removeTree", "id": "9"},
     ]
 

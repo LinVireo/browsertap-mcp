@@ -92,7 +92,8 @@ def test_execute_in_session_and_temp_monitor_helpers(caplog):
     assert S._execute_in_session(driver, "b", 3, session_id="c:7") == {"data": "pinned"}
     S.start_temp_monitor(driver, timeout=4, session_id="c:7")
     assert set(S.get_temp_texts(driver, timeout=5, session_id="c:7")) == {"one", "two"}
-    assert S.get_temp_texts(driver) == []
+    with pytest.raises(RuntimeError, match="monitor gone"):
+        S.get_temp_texts(driver)
     assert driver.calls[0][1] == {"timeout": 2, "custom": True}
     assert driver.calls[1][1] == {"timeout": 3, "session_id": "c:7"}
     assert "monitor gone" in caplog.text
@@ -854,8 +855,8 @@ def test_the_transient_read_returns_what_came_and_went_and_nothing_else():
     # The read is also the stop: nothing left ticking, nothing left on the page.
     assert report["live"] is False
     assert report["timers"] == 0
-    # And a second read cannot resurrect it or throw.
-    assert report["secondRead"] == []
+    # A second read cannot resurrect it, and is unavailable rather than empty.
+    assert report["secondRead"] is None
 
 
 def test_discarding_the_monitor_reports_whether_there_was_one():

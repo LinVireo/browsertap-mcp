@@ -734,30 +734,31 @@ def test_stale_lease_is_recovered_once(monkeypatch, tmp_path, stale_reason):
     assert not path.exists()
 
 
-def test_malformed_existing_record_is_not_assumed_stale(tmp_path):
+def test_malformed_existing_record_is_recovered_under_the_lifetime_guard(tmp_path):
     path = tmp_path / "input.lock"
     path.write_text("not-json", encoding="utf-8")
 
-    with pytest.raises(PhysicalInputBusy):
-        with PhysicalInputLease(path=path, ttl_seconds=10):
+    with PhysicalInputLease(path=path, ttl_seconds=10) as lease:
+        assert json.loads(path.read_text(encoding="utf-8"))["owner_token"] == lease.owner_token
+        with pytest.raises(PhysicalInputBusy), PhysicalInputLease(path=path):
             pass
 
-    assert path.read_text(encoding="utf-8") == "not-json"
+    assert not path.exists()
 
 
-def test_missing_and_partial_lock_metadata_are_conservative(tmp_path):
+def test_missing_record_is_absent_and_dead_partial_record_is_recovered(monkeypatch, tmp_path):
     missing = tmp_path / "missing.lock"
     assert P._read_record(missing) is None
 
     partial = tmp_path / "partial.lock"
     record = {"pid": 999_999, "expires_at": 0}
     partial.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(P, "_pid_alive", lambda _pid: False)
 
-    with pytest.raises(PhysicalInputBusy):
-        with PhysicalInputLease(path=partial, ttl_seconds=10):
-            pass
+    with PhysicalInputLease(path=partial, ttl_seconds=10) as lease:
+        assert json.loads(partial.read_text(encoding="utf-8"))["owner_token"] == lease.owner_token
 
-    assert json.loads(partial.read_text(encoding="utf-8")) == record
+    assert not partial.exists()
 
 
 def test_stale_recovery_retries_acquisition_only_once(monkeypatch, tmp_path):

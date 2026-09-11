@@ -1,0 +1,30 @@
+{
+  "id": "btap-defect-cleanup",
+  "name": "btap-defect-cleanup",
+  "title": "Clear remaining BTAP defects and reconcile recorded bugs",
+  "description": "Inventory current project and knowledge-vault bug records, reproduce unresolved defects, fix and verify bounded slices in the original shared checkout, reconcile stale records, and update version/local tags when justified by completed checks; user is unavailable for manual extension Reload.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "codex-resume-01a0881c",
+  "assignee": "codex-resume-01a0881c",
+  "createdAt": "2026-09-12",
+  "completedAt": null,
+  "branch": "local",
+  "base_branch": "local",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Native session 01a09113-7fb4-71d1-b6ef-34cc2d6c9712; original shared checkout D:/browsertap-mcp. Confirmed C01-C26, M02-M06, the M01 descriptor cleanup and FS/ND review fixes are integrated; final independent delta review and committed-tree candidate verification are recorded in handoff.md and out/bug-cleanup-20260912/final-verification.json. This task remains in_progress because full M01 retention, real A7/native platforms, historical wait latency correlation and new-build live/manual Reload are not closed. Source 0.5.0; local v0.5.0-rc.1 is conditional on the exact committed-tree offline seal. No remote publication.",
+  "meta": {
+    "handoff": ".trellis/tasks/09-12-btap-defect-cleanup/handoff.md",
+    "final_evidence": "out/bug-cleanup-20260912/final-verification.json",
+    "open_boundaries": ["M01 retention", "A7 native dialog", "macOS/Linux native browser", "historical wait latency correlation", "new-build live and manual Reload"]
+  }
+}

@@ -443,10 +443,31 @@ def stale_component_reason(status: Mapping[str, Any] | None) -> str | None:
             "this snapshot does not establish a stale build."
         )
     stale = [
-        (label, fix) for flag, label, fix in _STALE_COMPONENTS if status.get(flag) is True
+        (
+            label,
+            "restart the MCP session or test process to load the current installed Python sources"
+            if flag == "restart_mcp_session_required"
+            and status.get("mcp_build_verdict") == "stale_process"
+            else fix,
+        )
+        for flag, label, fix in _STALE_COMPONENTS if status.get(flag) is True
     ]
     if not stale:
-        return None
+        unknown = [
+            label
+            for prefix, label in (("mcp", "this MCP process"), ("bridge", "the bridge daemon"))
+            if status.get(f"{prefix}_build_verdict") != "matches_tree"
+            or status.get(f"{prefix}_build_enforced") is not True
+        ]
+        if not unknown:
+            return None
+        return (
+            "the live layer cannot verify the Python sources loaded by "
+            + " and ".join(unknown)
+            + ". A matching version is insufficient. Start fresh MCP and bridge processes "
+            "from readable package sources, then run doctor again; an absent or unreadable "
+            "source identity is unknown, not a verified build."
+        )
     missing = list(status.get("missing_extension_capabilities") or ())
     return "\n".join(
         [
@@ -486,13 +507,17 @@ def component_versions(status: Mapping[str, Any] | None) -> dict[str, Any] | Non
     """
     if not isinstance(status, Mapping):
         return None
-    return {
+    result = {
         field: status.get(field)
         for field in (
             "status",
             "action",
             "package_version",
             "bridge_version",
+            "mcp_build_verdict",
+            "bridge_build_verdict",
+            "mcp_build_enforced",
+            "bridge_build_enforced",
             "extension_version",
             "extension_status_available",
             "protocol_version",
@@ -507,3 +532,14 @@ def component_versions(status: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "restart_mcp_session_required",
         )
     }
+    for field in (
+        "mcp_source_identity", "bridge_source_identity", "expected_python_source_identity"
+    ):
+        identity = status.get(field)
+        # Whitelist within these objects as well: a future diagnostic may add
+        # local paths or exception messages which do not belong in public evidence.
+        result[field] = {
+            key: identity.get(key)
+            for key in ("schema", "scope", "sha256", "file_count", "complete")
+        } if isinstance(identity, Mapping) else None
+    return result

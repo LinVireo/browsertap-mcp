@@ -1,0 +1,5 @@
+{"file":"docs/agent-guides/runtime-lifecycle.md","reason":"Preserve process identity, reload guards and bounded timers."}
+{"file":"docs/agent-guides/tabs-and-input.md","reason":"Preserve explicit targeting, lifecycle generations and physical-input ownership."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Preserve delivery evidence, reservation and non-replay contracts."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Resolve paths and persistent locks safely."}
+{"file":"docs/agent-guides/tool-contracts.md","reason":"Keep public behavior and packaged guidance synchronized."}

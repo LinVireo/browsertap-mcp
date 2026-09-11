@@ -30,7 +30,7 @@ BTAP 连接的是真实浏览器 profile，不是临时沙箱。只连接允许�
 
    Windows PowerShell 改用 `.\.venv\Scripts\python.exe` 和
    `.\.venv\Scripts\browsertap.exe`。普通页面和浏览器工具不需要桌面依赖；
-   仅在需要受限物理兜底时，在同一环境运行 `pip install "browsertap-mcp[desktop]"`。
+   受限物理兜底和显式 Windows 原生文件框工具需要在同一环境运行 `pip install "browsertap-mcp[desktop]"`。
 
 2. **手动加载扩展。** 打开 `chrome://extensions`，开启**开发者模式**，选择
    **加载已解压的扩展程序**，选中刚打印的目录。页面工具需要一个正常的 `http://` 或 `https://` 页面。
@@ -77,10 +77,11 @@ BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接�
   `page_*` CDP 输入。普通网页工作默认走这一层，不使用操作系统鼠标或键盘。
 - **Browser 能力**：真实 Chromium profile 及其浏览器原生能力，包括标签页、下载、Cookies、
   storage、站点权限、书签、扩展、service worker 消息和原生 CDP；很多操作不需要前台标签页。
-- **Desktop 能力**：不是通用的公开能力。当前唯一的显式 opt-in 是仅限 lab、用于页面离开
-  对话框的 `resolve_leave_dialog` 末尾 Enter 兜底；浏览器 chrome、原生文件选择器、扩展 UI、
-  打印/保存对话框及其他页面层缺口仍然不支持。0.5.0 移除的七个全局 OS 键鼠/桌面截图工具不会
-  作为普通网页失败后的兜底回来。
+- **Desktop 能力**：显式检查并取消由已注册 Chrome 或 Edge 持有的当前前景 Windows
+  标准文件对话框。先用 `inspect_native_file_dialog` 取得短期票据，再交给
+  `cancel_native_file_dialog`；两者均需 `desktop_opt_in=true` 和 `[desktop]`。
+  其他浏览器 UI 及不受支持的原生布局仍不在此能力内。0.5.0 移除的七个全局 OS 键鼠/
+  桌面截图工具保持移除。
 
 `resolve_leave_dialog` 仍是页面范围内、仅限 `lab` 的恢复流程；末尾的 Enter 兜底是受限例外，
 不是通用桌面能力。实际注册表位于 `get_setup_status` 返回值的 `data.capability_registry`，客户端不必
@@ -102,14 +103,14 @@ payload 保留在 `legacy`，`error`/`error_code`、`retryable`、`target` 和 `
 以 DevTools 调试和性能分析为主的任务，可对照
 [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp)。
 复用真实浏览器并非 BTAP 独有，应按任务和所需 API 选择。
-BTAP 注册全部 49 个工具，需要缩小工具面时由客户端筛选。
+BTAP 注册全部 51 个工具，需要缩小工具面时由客户端筛选。
 
 ## 环境要求
 
 - Python 3.10+
 - Chrome、Edge 或 Opera
 - Linux、macOS 或 Windows。普通页面、浏览器和 CDP 工具不需要操作系统级输入；只有
-  仅限 lab 的 `resolve_leave_dialog` 物理兜底需要可用的桌面会话
+  仅限 lab 的 `resolve_leave_dialog` 物理兜底及 Windows 原生文件框工具需要可用的桌面会话
 - 运行中的 Chromium 用户会话，而不是隔离的 headless 容器。**故意不提供 Docker 镜像**：
   服务接的是**你自己**已登录的 Chrome，扩展要人手动加载一次
 - Claude Code 或其他 MCP 客户端
@@ -118,8 +119,8 @@ BTAP 注册全部 49 个工具，需要缩小工具面时由客户端筛选。
 
 ### 1. 安装
 
-创建虚拟环境并安装软件包。只有需要剩余的、仅限 lab 的物理兜底时，才需要可选的 `desktop`
-extra：
+创建虚拟环境并安装软件包。仅限 lab 的物理兜底和显式原生文件框工具需要可选的
+`desktop` extra：
 
 **Windows PowerShell**
 
@@ -138,8 +139,8 @@ python -m venv .venv
 ```
 
 核心安装 `pip install browsertap-mcp` 已足够支持页面、浏览器和 CDP 工具。它不包含
-`pyautogui`、`mss`、`pillow`，这些依赖仅用于 `resolve_leave_dialog` 的 lab Enter 兜底及其
-屏幕/输入检查；只有需要这条兜底时才加装 `[desktop]`。
+`pyautogui`、`mss`、`pillow`，这些依赖用于 `resolve_leave_dialog` 的 lab Enter 兜底及其
+屏幕/输入检查；显式 Windows 原生文件框工具也要求安装 `[desktop]`。
 
 要改这个项目本身（而不只是用它），改成 editable 安装：extras 一样，扩展目录和 skill
 直接从工作树里读。
@@ -271,16 +272,17 @@ mcp_servers:
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | 桥的绑定地址 |
-| `BROWSERTAP_BRIDGE_PORT` | `18765` | WebSocket 端口。HTTP 使用 `PORT+1`，`PORT+2` 为锁 socket，保证同时只有一个 bridge **持有**前两个端口（第二个 bridge 不会退出，会转为通过第一个工作）。它与状态目录下的 `spawn.lock` 文件是两回事：后者负责避免多个 MCP 会话同时拉起多个守护进程。使用自定义端口时，还需单独告知扩展一次，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
+| `BROWSERTAP_BRIDGE_PORT` | `18765` | `1` 到 `65533` 的整数。WebSocket 使用基础端口，HTTP 使用 `PORT+1`，host 锁使用 `PORT+2`。无效配置在网络或 spawn 操作前拒绝；状态目录中的 `spawn.lock` 另行避免并发启动守护进程。使用自定义端口时还需配置扩展，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
+| `BROWSERTAP_STATE_DIR` | `~/.browsertap` | 覆盖状态目录。非空相对路径在启动 daemon 前按发起进程的工作目录解析。未设置时保留已有的旧目录回退规则。 |
 | `BROWSERTAP_NO_SPAWN` | 未设置 | 设为 `1` 后 MCP 服务不自动启动 bridge，适用于由运维流程单独管理 bridge 的环境 |
 | `BROWSERTAP_BRIDGE_AUTH` | 启用 | 仅在明确可信的本机兼容环境中设为 `off`。默认 BTAP 使用持久用户 token 保护 `/link`。 |
-| `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | 覆盖共享 token 文件位置。各编辑器不需要分别配置 token。 |
+| `BROWSERTAP_BRIDGE_TOKEN_FILE` | `~/.browsertap/bridge-token` | 覆盖共享 token 文件位置，相对路径按发起进程的工作目录解析。未覆盖时使用所选状态目录中的 token；各编辑器无需独立 token。 |
 | `BROWSERTAP_BRIDGE_TOKEN` | 未设置 | 旧安装的一次性迁移来源。token 文件不存在时导入一次,此后始终以文件为准。 |
 | `BROWSERTAP_PREFERRED_BROWSER` | 未设置 | `chrome` / `edge` / `opera`。多个浏览器都连上、又没指定标签页时,默认落在哪个浏览器 |
 | `BROWSERTAP_MODE` | `lab` | `lab` 默认免询问连续自动化;`safe` 对每次物理输入/站点 allow 单独询问。也可用 `set_automation_profile` 只改当前 MCP 进程 |
 | `BROWSERTAP_LAB_NO_ELICIT` | 启用 | `lab` 默认按 `1` 处理。只有明确设为 `0`/`false` 才恢复会话级询问;跨进程锁、安静窗口、前台确认和 ownership 始终生效 |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | `lab` 下匹配当前 host 时,普通 `open_url` 自动接受 beforeunload;显式 `intent_leave=false` 可强制保留页面 |
-| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | 允许连接 bridge WebSocket 的额外 origin，以英文逗号分隔并精确匹配。扩展 origin 自动允许；不要加入宽泛或不可信 origin。 |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | 同时放行 bridge WebSocket 握手和 HTTP origin 检查的额外来源，以英文逗号分隔并精确匹配。扩展 origin 自动允许；HTTP token 鉴权仍生效，无 `Origin` 的 HTTP 请求仍可通过来源检查。 |
 | `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | 未设置 | 仅在可信的非浏览器本机 WebSocket 客户端无法发送 `Origin` 时设为 `1`。默认拒绝无 origin 客户端。 |
 
 ### 命令行
@@ -305,6 +307,24 @@ browsertap print-hermes-config  # 打印 Hermes 配置片段
 是否启用并连接，再运行 `doctor`。`extension_status_available=false` 表示兼容性尚未确定；
 仅缺少运行数据不会要求 Reload。已确认的旧 bridge 或 MCP 版本仍报告各自的重启动作，
 启动期间也一样。
+
+`doctor` 在配置无效时仍向 stdout 输出 JSON。无效基础端口在网络或 spawn 操作前返回
+`status: "initialization_failed"`、`action: "check_config"`、`error` 和 `error_type`；
+import、help/version 和包路径命令仍可使用。后续端口探测发生 DNS/socket 错误时，保留已有
+诊断并增加 `port_probe_errors`，对应端口状态为 null。仅 `healthy` 或 `starting` 且无探测
+错误时退出码为 `0`。格式错误的 bridge 诊断返回 `cause: "bridge_unreachable"`、
+`ok: false` 和 `error_code: "malformed_diagnosis"`，不能据此认定 bridge 是旧构建。
+
+`state_paths.token_file_status` 区分 `missing`、`empty`、`ready`、`unreadable` 和
+`invalid_encoding`；`token_file_error` 给出不含凭据的原因，只有 ready 内容有指纹。
+元数据不可读时存在性字段为 null；默认目录状态未知时保留 canonical 路径，只有明确不存在
+才尝试 legacy 目录。已有空文件或不可读文件不会被覆盖。
+
+`mcp_build_verdict` 与 `bridge_build_verdict` 将各进程首次 import 包时的源码快照与磁盘
+比较，返回 `matches_tree`、`stale_process` 或 `unverifiable`。快照包含包内 Python 文件及
+结果转换、受控执行和页面检查所加载的四份 JavaScript。同版本修改也要求重启对应 MCP 或
+bridge；缺失资源或旧身份 schema 不能证明匹配。该身份不证明运行期 monkeypatch、缓存
+字节码或其他任意资源一致；`*_build_enforced=false` 仍表示未知。
 
 BTAP 首次使用时创建 `~/.browsertap/bridge-token`，bridge 和所有 MCP 进程均读取该文件。
 关闭浏览器或编辑器不会轮换 token。卸载扩展或重装 Python 包时会保留该文件，因此重装后可以
@@ -342,7 +362,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 以下版本标记随源码维护，不代表开发工作树已经发布。使用新工具签名或 0.5.0 迁移说明前，
 先核对安装包和对应 release tag。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.4.20**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.0**。
 
 三个组件分别加载更新：
 
@@ -411,9 +431,12 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 否则返回 `no_dialog` 或结构化错误；`resolve_leave_dialog` 仅在协议方式失败且 lab 允许时使用物理 Enter。
 
 **站点权限是短期租约。** `set_site_permission` 针对单个 origin 生效 60–600 秒，记录原设置，并在
-到期、显式 `reset_site_permissions` 或 service worker 重启后恢复。`safe` profile 的每次 `allow` 都需
+到期、显式 `reset_site_permissions` 或 service worker 重启后尝试恢复。`safe` profile 的每次 `allow` 都需
 批准；浏览器 API 无法恢复的能力（例如 clipboard、企业托管设置和 OS 级权限对话框）返回
 `unsupported` 或 `requires_user_action`。
+
+恢复过程中失去支持时保留 `manual_recovery`、原设置和恢复指引，并停止自动重试。
+修正原因后可显式调用 `reset_site_permissions` 再尝试。
 
 **挑战页继续使用原浏览器会话。** Cloudflare Turnstile 等控件在同一个已连接标签页中由
 `page_click` 处理，并有尝试次数上限。无进展时返回 `challenge_stalled`，后续处理应在同一标签页
@@ -489,9 +512,36 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 | `bridge_error` | Bridge 调用失败。它可能出现在 `error_code` 或诊断字段，而非顶层 `status`；重试前先运行 `list_tabs`/`doctor`。 |
 | `switched_session` | 补充字段，表示仅在隐式默认目标失效时自动换到另一个活动标签页。另有 `rebound_from` / `replacement_session_id` 时，表示 Chrome 明确报告同一 tab 被替换，BTAP 已换发当前句柄；没有该证据时显式失效 session 不会被替换。 |
 
-投递失败时，只有 `delivery_state="undelivered"` 能证明操作未发送。`sent_unconfirmed` 表示
+投递失败时，只有 `delivery_state="undelivered"` 能证明操作未发送；`retry_safe=false` 仍禁止重放。`sent_unconfirmed` 表示
 没有收到 ACK 或 HTTP 响应，不能据此自动重发。`delivered_no_result`、`navigated` 和未知投递状态均按可能已执行
 处理；有 operation ID 时按该 ID 恢复，并检查页面后再决定下一步。
+
+### 完整 JSON 结果
+
+较大的 JS 值或含未配对 UTF-16 码元的字符串通过 `result_file` 返回。
+如果带有 `result_file_encoding="json"`，先将路径字段解析一次 JSON；否则直接使用路径。
+再按 UTF-8 JSON 读取文件，并用实际文件字节核对 `result_bytes`、`result_sha256`。
+路径解码和文件内容解码是两个步骤。
+`result_file_scope` 区分文件内容：
+
+| 范围 | JSON 内容 |
+| --- | --- |
+| `js-value` | 完整转换后的 JavaScript 值，内联值为 null |
+| `envelope` | 原始完整 v1 工具信封 |
+| `mcp-call-result` | 完成常规信封适配后的完整原生 MCP 结果，包含原 content 和 metadata |
+
+JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
+工具结果其他位置含无法直接传输的字符串时使用后两种范围，同时保留有效的结构化决策头，
+原 `ok`、`isError` 和重试结论不变。`result_content_externalized` /
+`result_meta_externalized` 标明原生内容或元数据移入了归档。
+
+文件写入失败时，将 `result_json` 解析一次 JSON；`result_json_scope` 使用相同范围名。
+这个显式内联后备可能超过通常的大小上限，原操作收据仍保留。
+信封/MCP 范围的字段位于决策头根部，`data`/`legacy` 内用 `result_json_ref` 指向它。
+`result_file_error.message_json` 是 JSON 编码的 I/O 错误消息。
+错误字段标记 `message_encoding="json"` 或 `code_encoding="json"`
+（以及 `error_code_encoding`）时，也只解析一次。上述表示保留原 UTF-16 值；
+结果导出失败不允许重放已执行的操作。
 
 ## 风险提示
 
@@ -543,6 +593,7 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
   - `url`(string)、`filename`(string,可选):相对下载名称、`directory`(string,可选):任意绝对目标目录并自动建父目录;要求 `wait=true`、`wait`(boolean,可选):默认 `true`、`timeout`(number,可选):默认 60 秒,最大 1800、`session_id`(string,可选):选择浏览器 profile、`overwrite`(boolean,可选):默认 `false`,最终目标已存在时拒绝,只有显式 `true` 才替换。带 `directory` 的调用若超时会返回 `directory_applied=false`:后续搬移不再受跟踪,Chrome 可能继续下载到浏览器默认目录
 - **open_new_tab** —— 默认在当前 MCP 进程选中的浏览器/profile 后台创建标签页，也可用 `session_id` 或 `client_id` 指定其他实例。生成唯一 `operation_id`，并在限定时间内等待准确的 session/generation 注册；需要前台时传 `active=true`。返回 `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`。扩展按 operation ID 去重；只有带准确 `client_id+tab_id+generation` 的 completed 记录才登记 ownership，即使 `ready=false`；`ready` 仅表示 session 工具能否立即使用。创建投递前 registry 不确定时返回 `status="unknown",may_have_created=false,retry_safe=true`；投递后不确定时为 `may_have_created=true,retry_safe=false`。若 `may_have_created=false,retry_safe=true`，先解决返回的失败原因，再省略 `operation_id` 重新调用。恢复 `retry_safe=false` 的已投递创建时，传回相同 `operation_id`、返回的 `client_id` 和 `owner_id`，只读取持久化记录，不重放 `tabs/create`；恢复探测失败仍保留不确定性和 owner 凭据。首次恢复探测查不到记录时，`reconciliation.resume_required=false` 指引调用 `list_tabs()` 检查对应浏览器，停止反复恢复同一记录。记录缺失、URL 相同或标签页数量不变均不能证明未创建或本任务所有权；缺少精确身份与任务归属证据时保留未知结果。保留 `owner_id`，仅按已登记的本任务 session/generation 清理。需要可靠开页时使用本工具；页面 `window.open()` 或锚点 click 可能因缺少用户手势被拦截
   - `url`(string)、`timeout`(number,可选):默认 `15`、`active`(boolean,可选):默认 `false`、`session_id`(string,可选):选择浏览器/profile、`owner_id`(string,可选):让同一任务的多个新 tab 共用一个 owner、`operation_id`(string,可选):恢复句柄、`client_id`(string,可选):创建或恢复时锁定浏览器/profile client
+  - worker 重启后遗留的 pending 创建变为终态 `unknown`。有界保留会为已回收的 operation ID 留下 replay guard；旧 ID 被拒绝不证明未创建。按 `reconciliation.resume_required=false` 检查该浏览器，保留未知结果和精确 ownership 证据。
 - **close_tabs** —— *(零标签页可用)* 接受原生数字 tab ID 或完整 `client:tabId` session ID，对 `chrome-extension://` 页面同样有效。默认 `only_if_agent_owned=true`，必须传入 `open_new_tab` 返回的 `owner_id`，并在关闭前核对当前 lifecycle generation；用户预存标签页、其他 Agent 的标签页和复用 ID 的新生命周期均会被拒绝。若用户已关闭 owned 标签页，清理返回 `status=already_gone, closed_by=user`，不会使用旧原生 ID 关闭其他标签页；实际关闭 owned 标签页时返回 `closed_by=agent`；显式关闭非 owned/U 标签页时返回 `closed_by=none`，且不计入本任务 owned 清理。若返回 `already_gone` 但浏览器里仍有同一工作页面，先 `list_all_tabs` 核对 URL/title，再决定是否按新的 session/generation 关闭；BTAP 不会按 URL 自动转移 ownership。只有 Chrome 明确报告 `tabs.onReplaced` 且稳定 tab 身份匹配时，才会安全换发当前 session 句柄并迁移 ownership。仅当用户明确要求关闭非 owned/U 标签页时，才可设置 `only_if_agent_owned=false`
   - `tab_id`(integer/string 或数组)、`session_id`(string,可选)、`owner_id`(string,安全默认下必填)、`only_if_agent_owned`(boolean,默认 `true`)
 </details>
@@ -561,6 +612,9 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 - **execute_js** —— 在页面中执行 JavaScript 并返回结果。`timeout` 是覆盖对话框策略设置、monitor 快照、投递/重试、导航检查和清理的单一总 deadline；显式 `session_id` 在这些浏览器往返中保持不变，不依赖进程默认目标。真正的长任务可设 `wait=false`：扩展确认收到后，BTAP 立即返回 `status="in_progress"` 和 `operation_id`，后续用 `get_execute_js_result` 领取结果，不得重放脚本；后台模式有意不支持 `dialog_policy="manual"`。脚本导致页面导航时返回 `status="navigated"` 和 `landed_url`，而不是 `success`，且脚本返回值不可用。`dialog_policy` 控制 `alert`/`confirm`/`prompt`：`dismiss`（默认）和 `accept` 直接应答并记录到 `dialogs`；`manual` 只用于同步调用，保持原生对话框打开、暂停脚本并返回 `blocked_by_dialog`，后续由 `handle_dialog` 处理。标签页已有 manual 执行暂停时立即返回 `busy`。等待页面状态应使用 `wait_for`/`wait_for_url`，不要在 `execute_js` 中嵌入延迟 `setTimeout` 或 sleep Promise。JSON 编码后的 `js_return` 超过 24 KiB UTF-8 内联上限时，BTAP 会把完整值写入私有临时 JSON 文件，并返回 `result_file`、`result_bytes`、`result_sha256` 和 `result_format`，不再返回会被截断的半截内容
   - 遇到 `Cannot access contents of the page` 先分流再重试：如果脚本尝试了 `window.open` 或导航，使用 `open_new_tab`（Chrome 没有用户手势时可能拦截）；如果是当前 tab 本身不允许注入，换可脚本化的普通 `http/https` tab 或使用支持的 CDP 路径。不要把这句错误直接理解成“当前页面读不到”。
   - `script`(string)、`session_id`(string,可选)、`no_monitor`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`dialog_policy`(string,可选):`dismiss`(默认)、`accept` 或 `manual`、`wait`(boolean,可选):默认 `true`
+  - 各通道使用相同结果转换：`undefined` 和非有限数变为 `null`，BigInt/symbol 变为字符串，DOM、Error 和函数变为可读值。循环和深度 6 有标记；迭代结果最多保留 200 项并附截断标记。`result_file` 保存完整的**转换后**值，包括这些标记。
+  - 用户代码开始执行后，脚本错误不会触发第二次执行。复杂 async body 使用显式 `return`，推荐 `(async () => { /* work */ return value; })()`；含糊的 body 可能返回 `null`。`await(expr)` 可能被解析成调用名为 `await` 的普通函数，需要消除歧义时使用上述 async IIFE。
+  - 含未配对 UTF-16 码元的值或键无论大小均使用文件导出，`result_file_scope="js-value"`。文件写入失败则由 `result_json` 保留完整值，`result_json_scope="js-value"`；解码及原收据语义见[完整 JSON 结果](#完整-json-结果)。
 - **get_execute_js_result** —— 由发起操作的同一 MCP 会话按 `operation_id` 读取或短暂等待结果，接受 `execute_js` 以及其他超时桥命令返回的句柄。查询绝不重放操作；完成结果可重复读取，补查响应丢失后仍可再查。进行中、未知/过期和其他会话的句柄会返回明确状态或错误。占用到期后，首个通过校验的迟到终态回包保存在 `late_result`（`success` 和 `data`），`late_reply_age` 表示收到它后的秒数；原 `unknown` 收据和 `retry_safe=false` 保留，不恢复占用、不延长保留期。结果最多保留 10 分钟，最多保存 512 条已完成操作记录，容量压力可能使其提前淘汰；查不到结果不证明操作未执行。成功返回的大值沿用 `execute_js` 的无损 `result_file` 元数据；迟到大值的文件元数据位于 `late_result` 内，其 `data` 为 null
   - `operation_id`(string)、`timeout`(number,可选):默认 `0`,范围 `0`–`120`
 - **handle_dialog** —— 检查或应答某个标签页上留着的对话框。`action="manual"` 只上报不选择(`blocked_by_dialog`,没有对话框则是 `no_dialog`);`accept`/`dismiss` 应答并释放被暂停的 `execute_js` 或 `open_url`。`prompt_text` 给被 accept 的 `prompt` 提供文本
@@ -608,11 +662,11 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 <details>
 <summary><b>站点权限</b></summary>
 
-由 `chrome.contentSettings` 支撑的临时、origin 作用域权限租约。每条租约都记录原设置并在到期、显式 reset、service worker 重启或浏览器重启后恢复。
+由 `chrome.contentSettings` 支撑的临时、origin 作用域权限租约。每条租约都记录原设置，并在到期、显式 reset、service worker 重启或浏览器重启后尝试恢复；恢复能力失效时保留 `manual_recovery` 和原设置，停止自动重试。
 
-- **set_site_permission** —— 给一个 origin 设置一种权限,60–600 秒。`safe` 下每次 `allow` 都要批准;默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 直接执行。拒绝返回 `requires_user_action` 且不改变任何东西;不可恢复能力返回 `unsupported`
+- **set_site_permission** —— 给一个 origin 设置一种权限，60–600 秒。`safe` 下每次 `allow` 都要批准；默认 `lab` 按 `BROWSERTAP_LAB_NO_ELICIT=1` 直接执行。拒绝返回 `requires_user_action` 且不改变设置；不可恢复能力返回 `unsupported`。已建立租约若恢复能力失效，记录 `manual_recovery`、原设置和恢复指引，停止自动重试。
   - `permission`(string)、`setting`(string):`allow`、`block` 或 `ask`、`origin`(string,可选):默认取标签页 origin、`duration_seconds`(integer,可选):60–600,默认 `300`、`session_id`(string,可选)
-- **reset_site_permissions** —— 不等到期,现在就把匹配的租约恢复。`origin` 和 `permission` 都不给就恢复那个浏览器上的全部租约
+- **reset_site_permissions** —— 立即尝试恢复匹配租约，包括 `manual_recovery` 记录。`origin` 和 `permission` 都不给就重置那个浏览器上的全部租约。恢复不受支持时保留原设置和指引，并停止自动重试；处理原因后可再次显式 reset。
   - `origin`(string,可选)、`permission`(string,可选)、`session_id`(string,可选)
 </details>
 
@@ -647,7 +701,7 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
   - `session_id`(string,可选)
 - **create_bookmark** —— *(零标签页可用)* 创建书签或文件夹
   - `title`(string)、`url`(string,可选):省略则创建文件夹、`parent_id`(string,可选)、`session_id`(string,可选)
-- **remove_bookmark** —— *(零标签页可用)* 删除书签或递归删除文件夹
+- **remove_bookmark** —— *(零标签页可用)* 先把目标子树原子保存到本地状态目录的 `bookmark-backups`，再删除书签或文件夹；返回 `backup_path`、`backup_sha256`。备份失败则不删除；受管备份子目录必须为普通目录，拒绝符号链接、junction 或其他 reparse point。单份上限 16 MiB，总量上限 100 份、64 MiB；下次备份时清理超过 30 天或超容量的旧文件。删除回包丢失时保留备份证据，先检查书签树再决定后续操作。
   - `bookmark_id`(string)、`recursive`(boolean,可选):默认 `false`、`session_id`(string,可选)
 - **call_extension** —— *(零标签页可用)* 向另一个扩展发送 JSON;目标必须启用并通过 `externally_connectable` 允许 BTAP
   - `extension_id`(string)、`message_json`(string):JSON 文本、`session_id`(string,可选)
@@ -676,6 +730,21 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 </details>
 
 <details>
+<summary><b>原生文件框：显式 desktop opt-in</b></summary>
+
+- **inspect_native_file_dialog** —— 检查当前前景、由已注册 Chrome 或 Edge 持有的 Windows 标准 Shell 文件对话框，需要 `[desktop]`。核验进程/owner 身份、原生控件、可见性和 Cancel 命中点后，写入临时生命周期标记并返回 15 秒票据；该检查有临时标记副作用，不激活窗口。不支持的平台、portable/未注册浏览器、跨进程 owner 和未匹配布局均拒绝。
+  - `desktop_opt_in`（boolean，可选）：默认 `false`；检查时须显式为 `true`。
+- **cancel_native_file_dialog** —— 消费新鲜检查票据，对该文件框的 Cancel 控件发送一次有界消息。需要 `[desktop]` 并遵循当前 safe/lab 物理批准策略；派发前重新核验跨进程锁、Windows 输入静默信号、按住的键/按钮、身份、前景和命中点。只有观测到原窗口消失才返回 `status="success", cancelled=true`；投递或关闭无法确认时返回 `unknown`、`retry_safe=false`，后续先检查状态。每次显式 opt-in 尝试均消费票据，包括拒绝。两个工具都返回 `desktop`、`on_screen` 和 `input_quiet` 诊断。
+  - `ticket`（string，必填）、`desktop_opt_in`（boolean，可选）：默认 `false`；取消时须显式为 `true`。
+
+上传使用 `upload_files` 和页面文件输入控件。原生取消用于已打开且受支持的文件框恢复；
+`safe` 要求批准，默认 `lab` 免 elicitation，但仍要求显式 opt-in。每个 MCP 进程最多八张
+票据，消费、到期、驱逐或正常退出时清理各自标记。这些检查不构成原子桌面事务；
+维护约束见[原生文件框设计](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/agent-guides/native-dialogs.md)。
+
+</details>
+
+<details>
 <summary><b>0.5.0 已移除：操作系统级输入与桌面截图</b></summary>
 
 `mouse_move`、`mouse_click`、`mouse_drag`、`type_text`、`hotkey`、`pointer_info` 和
@@ -693,12 +762,12 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 | `capture_desktop_screenshot` | `capture_page_screenshot` |
 
 `page_*` 调用失败是定位问题，不是去找屏幕坐标兜底的理由——用 `scan_page` 重读页面、修 locator。
-浏览器界面、原生文件选择器、扩展弹窗和操作系统对话框本来就不在页面级协议事件能到的范围内，
-按「不支持」处理，而不是由一条桌面路径顶上。
+浏览器界面、扩展弹窗和操作系统对话框不属于页面级输入范围；上面的显式原生文件框工具
+仅覆盖已说明的 Windows 检查/取消边界。
 
-只剩一条物理路径：`resolve_leave_dialog` 在两次协议 accept 失败后发送 Enter，仅限 `lab`。`safe`
-走 MCP elicitation 询问，被拒绝、取消或客户端不支持时返回 `requires_user_action`。两种情况下闸门
-都不变——跨进程锁（已占用时立即返回 `busy`，不排队）、一段短暂安静窗口（检测到鼠标或键盘活动时
+全局按键兜底保留一条：`resolve_leave_dialog` 在两次协议 accept 失败后发送 Enter，仅限 `lab`。
+`safe` 直接拒发 Enter；lab 启用批准询问时，拒绝、取消或客户端不支持也会阻止输入。闸门
+始终保留——跨进程锁（已占用时立即返回 `busy`，不排队）、一段短暂安静窗口（检测到鼠标或键盘活动时
 返回 `input_activity_detected`，不发送输入）、激活目标标签页、然后动作。这个窗口能检测到什么取决于
 操作系统：只有 Windows 提供最后输入时间戳，指针位置在 Wayland、无头容器以及未授予辅助功能权限的
 macOS 上都读不到。一个信号都拿不到时窗口照样等完，但没有任何东西可供比对，所以结果带一个

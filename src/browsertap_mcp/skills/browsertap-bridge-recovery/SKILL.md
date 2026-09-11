@@ -40,6 +40,12 @@ bridge 由多个 MCP 会话共享。重启前说明会影响这些会话，且�
 MCP server、常驻 bridge 和 MV3 扩展分别加载代码。更新包后要检查各自的运行身份，
 不能只比较 `get_setup_status.package_version` 与扩展 manifest 版本。
 
+`mcp_build_verdict` 和 `bridge_build_verdict` 比较首次包 import 时的源码快照与磁盘当前
+身份，包含包内 `.py` 及结果转换、受控执行、页面检查所缓存的四份 JavaScript。
+`stale_process` 需要重启对应进程，即使版本号相同；缺失资源或旧 schema 不能证明一致。
+`unverifiable` / `*_build_enforced=false` 仍表示未知，即使连接状态为 `healthy` 也不能
+作验收。该比较不认证运行时 monkeypatch、缓存字节码或其他任意资源。
+
 | `extension_build_verdict` | 结论 |
 | --- | --- |
 | `matches_tree` | 运行 worker 与当前扩展源码一致；仅版本号差异不要求 Reload。 |
@@ -58,7 +64,9 @@ BTAP 不允许自动禁用自身来强制刷新；被禁用后它无法重新启
 ## 分层检查
 
 默认 bridge 使用 WebSocket 18765、HTTP 18766；自定义地址/端口以 doctor 报告为准。
-扩展 WebSocket 检查 origin，HTTP 使用共享 Bearer token，是两条不同通道。
+扩展 WebSocket 检查 origin，HTTP 同时检查 origin 和共享 Bearer token。
+`BROWSERTAP_WS_ALLOWED_ORIGINS` 的额外来源列表作用于两条通道；
+`BROWSERTAP_WS_ALLOW_NO_ORIGIN` 只控制 WebSocket。HTTP 无 Origin 请求仍需通过 token 鉴权。
 
 | 检查 | 成功能证明什么 | 失败后看哪里 |
 | --- | --- | --- |
@@ -79,7 +87,7 @@ netstat -ano | Select-String '18765|18766'
 ```powershell
 $btapStatus = browsertap doctor | ConvertFrom-Json
 $btapToken = (Get-Content -Raw -LiteralPath $btapStatus.state_paths.token_file).Trim()
-$btapUri = "http://$($btapStatus.bridge_host):$($btapStatus.bridge_http_port)/link"
+$btapUri = [UriBuilder]::new('http', $btapStatus.bridge_host, [int]$btapStatus.bridge_http_port, '/link').Uri
 Invoke-RestMethod -Method Post -Uri $btapUri -TimeoutSec 6 -ContentType 'application/json' -Headers @{ Authorization = "Bearer $btapToken" } -Body '{"cmd":"get_all_sessions"}'
 ```
 
@@ -120,6 +128,8 @@ Chrome/Edge/Opera 各自的扩展安装独立，一个浏览器缺失只修对�
 
 先确认端口所属进程，不能按端口号直接杀进程。
 若选择非默认端口，需要协调 Python 的 `BROWSERTAP_BRIDGE_PORT` 与扩展存储设置；
+基础端口只能是 `1..65533` 的整数，无效配置在网络/spawn 前拒绝。Python IPv6 探测正常
+不证明扩展能用 IPv6；扩展仍连 IPv4 回环。后续探测失败的 `port_probe_errors` 保留已有诊断。
 准确操作见[自定义端口](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md#bridge-port-conflict-or-custom-port)。
 旧 `chrome_extension/config.js` 已移除，不要创建或编辑它来配置当前扩展。
 
@@ -133,6 +143,10 @@ Chrome/Edge/Opera 各自的扩展安装独立，一个浏览器缺失只修对�
    指纹用于比较，不是可用凭据。
 2. 路径不同先统一环境配置。`BROWSERTAP_STATE_DIR` 改状态目录，
    `BROWSERTAP_BRIDGE_TOKEN_FILE` 单独覆盖 token 文件；不要为每个编辑器另造 token。
+   显式相对路径按发起进程的 cwd 解析，daemon 接收绝对路径。先读 `token_file_status`：
+   missing/empty/ready/unreadable/invalid_encoding 分开处理，只有 ready 内容有指纹；
+   `token_file_error` 不含凭据。元数据不可读时存在性为 null，不能当作文件不存在并覆盖。
+   默认目录状态未知时保留 canonical 路径；确认缺失后才尝试 legacy 目录。
 3. 路径一致但 bridge 持有旧内容时，按
    `bridge_token_is_from_before_the_file_changed` 的诊断重启 bridge，再验证认证。
 4. 首次使用会创建持久 token；关闭浏览器、卸载扩展或重装包不会轮换它。
@@ -141,6 +155,21 @@ Chrome/Edge/Opera 各自的扩展安装独立，一个浏览器缺失只修对�
 
 关闭鉴权不是修复 token 不一致的默认方法。
 
+`error_code: malformed_diagnosis` 表示远端诊断格式无效，按 `bridge_unreachable` 的动作
+恢复；它不证明 bridge 陈旧。保留有效结构化失败原本的错误码和细节。
+
+## 原生文件框拒绝
+
+`inspect_native_file_dialog(desktop_opt_in=true)` / `cancel_native_file_dialog(ticket=...,
+desktop_opt_in=true)` 是 Windows 标准文件框的显式 desktop 工具，要求 `[desktop]`、
+已注册 Chrome/Edge 和可验证的前景窗口。检查安装临时标记，票据有效 15 秒且仅供同一
+MCP 进程使用；取消遵循 safe/lab 批准策略，每次 opt-in 尝试消费票据。
+`desktop_extra_unavailable`、`native_dialog_unsupported`、窗口身份/前景/命中拒绝或
+`input_quiet_unavailable` 都按具体原因处理，重启 bridge 不能修复这些条件。
+`unknown`、`retry_safe=false` 或 `marker_cleanup_verified=false` 时保留诊断并检查状态。
+只有 `status="success", cancelled=true` 确认原窗口关闭。完整顺序见 [[browsertap-default]]；
+不能用全局键鼠或重复旧票据代替复核。
+
 ## 结果未知与页面拒绝
 
 JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js_result`。
@@ -148,6 +177,15 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
 占用到期后若带 `late_result`，先读取这份迟到终态回包再判断执行结果；外层仍保留
 原 `unknown` 收据和 `retry_safe=false`。字段及大值文件的读取方式见 [[browsertap-default]]。
 保留期和容量边界见 [[browsertap-default]]；`operation_unknown` 或过期不证明未执行。
+代码开始执行后的 SyntaxError 等脚本错误不会触发第二次执行；修正后先核对已产生的副作用。
+复杂 async body 使用显式 return/async IIFE。各通道共享有界结果转换，文件保存完整的转换后值；
+具体类型和截断标记见 [[browsertap-default]]，返回 null 本身不是桥故障。
+
+`result_file` / `result_json` 是完整结果的后备表示，按对应 scope 读取 JS 值、完整信封
+或适配后的 MCP 结果，具体位置见 [[browsertap-default]]。文件写入失败仍保留原收据，
+不改变 `ok`、`isError` 或重试结论，也不需要重启桥或重放脚本。
+含未配对 UTF-16 码元的值使用 JSON 转义保真；错误字段带 `*_encoding=json` 时解析一次。
+`result_file_encoding=json` 时先解码路径字段，再读取文件并解析内容；普通路径直接使用。
 
 `open_new_tab` 的创建句柄走该工具自己的恢复流程：
 
@@ -155,12 +193,14 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
   重新调用；该次创建没有需要恢复的已投递记录。
 - `retry_safe=false`：按 `recovery` 传回 `operation_id + client_id + owner_id`，
   只读查询原创建，不改用 `get_execute_js_result` 查询创建记录。
-- 首次恢复查不到记录且 `reconciliation.resume_required=false`：停止重复恢复，
+- `reconciliation.resume_required=false`（包括记录缺失或 worker 重启后的终态 unknown）：停止重复恢复，
   用 `list_tabs()` 检查返回 `client_id` 对应的浏览器。记录缺失、URL 相同和标签页
   数量不变都不能证明未创建或所有权；清理仍要求已登记的精确 session/generation
   和本任务 owner，证据不足时保留未知结果。
 
-只有 `delivery_state=undelivered` 才证明未投递。`sent_unconfirmed`、
+只有 `delivery_state=undelivered` 才证明未投递，且必须同时允许 `retry_safe=true`
+才可重试；显式 false 始终禁止自动重发。空或未知结构的回包不算成功。
+`sent_unconfirmed`、
 `delivered_no_result`、`in_progress`、`operation_status=outcome_unknown`
 都不能作为自动重放的理由。debugger detach 不证明页面 JS 停止；
 `reservation_held` 缺失时也不能猜测目标已释放。
@@ -185,6 +225,8 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
 | `requires_user_action` / `input_activity_detected` / `activation_failed` | 按人工批准、用户活动或前台状态处理，不重启桥。 |
 | `challenge_stalled` | 将同一 tab 交给用户，不另起独立浏览器。 |
 | `unsupported` | 当前浏览器 API 无法提供所需能力或可恢复性，不改走物理输入。 |
+| `manual_recovery` | 权限恢复已停止自动重试；保留 prior setting，按恢复指引处理后显式 reset。 |
+| `bookmark_backup_failed` | 备份未完成，删除未派发；检查本地存储，受管备份子目录不能是符号链接/junction。 |
 
 多浏览器时显式传完整 `session_id`。有直接生命周期证据时结果才会换发
 `rebound_from` / `replacement_session_id` / `tab_identity`；

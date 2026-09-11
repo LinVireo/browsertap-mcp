@@ -31,6 +31,7 @@ and `browsertap doctor` expose its diagnostics; live preflight consumes them.
 | No runtime status; bridge diagnosis is `starting` | `starting` | `wait_for_extension` |
 | No runtime status after startup | `extension_unavailable` | `check_extension_connection` |
 | Confirmed old bridge, including during startup | `stale_bridge` | `restart_bridge` |
+| Missing or malformed remote diagnosis | `bridge_unreachable` | `restart_bridge` |
 | Confirmed newer component than the MCP process | `stale_package` | `restart_mcp_session` |
 | Runtime reply proves incompatible extension | `stale_extension` | `reload_extension` |
 | Fallback reply arrives after a starting snapshot and passes compatibility | `healthy` | `none` |
@@ -48,6 +49,16 @@ legacy replies, stale-component priority and build stamps.
 `tests/test_live_preflight.py` checks refusal without a false stale-build label.
 `tests/test_result_envelope.py` preserves diagnostic success for waiting and unavailable states.
 Run these and the checks in [quality guidelines](quality-guidelines.md).
+
+`tests/test_config_diagnostics_regressions.py`, `tests/test_connection_age.py`
+and `tests/test_remote_diagnosis_validation.py` cover the configuration slice:
+base ports are integers in 1..65533 and fail before network/spawn; imports and
+package-path commands remain usable; explicit relative state/token paths are
+anchored before daemon spawn. Token and directory metadata failures remain
+readable diagnostics with unknown existence, and malformed replies carry
+`error_code: malformed_diagnosis` without becoming stale-build evidence.
+Polling preserves connection age, while HTTP expiry uses activity. Python IPv6
+support does not attest the extension's unchanged IPv4 connection path.
 
 ## Wrong and correct inference
 

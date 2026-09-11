@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-12
+
 ### Added
 
 - Task-scoped implementation guides under `docs/agent-guides/`, with a shorter
@@ -23,12 +25,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   `execute_js(wait=false)` operations. Acknowledged operations can be polled or
   claimed without replaying side effects; completed results can be read
   repeatedly within the retention limits.
+- Explicit Windows native-file-dialog inspection and cancellation through
+  `inspect_native_file_dialog` and `cancel_native_file_dialog`. Both require
+  `[desktop]` and `desktop_opt_in=true`; cancellation consumes a short-lived
+  ticket and checks browser ownership, foreground, input quiet and the Cancel
+  control before one bounded dispatch. They do not expose general desktop input.
+- Atomic, bounded bookmark-subtree backups before `remove_bookmark`; a failed
+  backup prevents deletion and an uncertain deletion retains backup metadata.
+- Import-time package source identity in setup diagnostics, including Python
+  and the four imported JavaScript assets, so same-version source changes
+  identify the MCP or bridge process that needs restarting.
+- Complete collection and execution receipts for offline/live evidence, plus
+  deterministic validation of acceptance-report content against sealed inputs.
 
 ### Removed
 
 - **BREAKING: the seven OS-level tools are gone.** A caller that invokes one now
   gets "no such tool" rather than a deprecation warning. `mcp.list_tools()`
-  reports **49** tools, down from 56.
+  reports **51** tools, including the two explicit native-file-dialog tools.
   - `mouse_click` → use `page_click` instead (browser-safe element clicking)
   - `mouse_move` → use `page_click` (no separate move needed)
   - `mouse_drag` → use `page_drag` (drag within the page)
@@ -45,9 +59,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
   **`resolve_leave_dialog` is unaffected** and keeps its lab-only Enter fallback,
   which is why the approval gate, the cross-process lock, the quiet-input window,
-  target activation, and the `on_screen` check all remain. Their internals are
-  unchanged; what went away is every caller that took screen coordinates. The
-  `desktop` extra still carries `pyautogui` for that one path.
+  target activation, and the `on_screen` check all remain. The `desktop` extra
+  also gates the new explicit native-file-dialog tools; none accepts caller
+  supplied screen coordinates or arbitrary key sequences.
 
 ### Changed
 
@@ -62,14 +76,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   counterpart, `AGENTS.md` §4, `SECURITY.md`, both bundled skills, the
   `browsertap` CLI `--help` description, and the PyPI summary in `pyproject.toml`.
   The `page_*` tools are named as *the* input path, and the cases the desktop
-  tools were once kept for (browser chrome, native file pickers, extension popups,
-  OS dialogs) are reported as unsupported rather than as a reason to escalate from
-  a failed `page_click`. Each README keeps one folded section listing the removed
+  tools were once kept for (browser chrome, extension popups and general OS
+  dialogs) remain outside page input. Supported Windows file dialogs now have
+  their own explicit inspection/cancel workflow. A failed `page_click` does not
+  escalate to it. Each README keeps one folded section listing the removed
   names against their replacements, so a caller arriving from an older version
   finds the migration rather than silence.
 - The tool table in the `browsertap-default` skill said "工具全表（55 个）" while
   56 were registered, so the one line a caller reads to decide whether the table
-  is complete was the line that was wrong. It now says 49 and is verified
+  is complete was the line that was wrong. The public surface now has 51 and is verified
   mechanically against `list_tools()` rather than by eye.
 - The physical-input gate no longer has a caller that passes coordinates.
   `check_screen_bounds`, `screen_bounds`, and the `points=` argument to the
@@ -79,6 +94,49 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Unpaired UTF-16 code units survive JSON result export, MCP response adaptation,
+  bookmark backups and bridge HTTP responses without lossy replacement. If a
+  completed result cannot be written to a file, an explicit inline JSON backup
+  preserves its full value, operation receipt and original retry verdict.
+  Result-file paths containing these code units carry an explicit JSON encoding
+  marker, allowing callers to decode the path before reading its JSON content.
+- CLI JSON output also preserves these strings on strict output streams.
+  Command-lock keys and extension resource filenames can contain surrogate code
+  units without crashing their hashes; ordinary identities and stamps retain
+  their existing byte representation.
+- Relative state/token paths remain anchored to the launching directory across
+  detached startup. Port validation happens before network or process effects;
+  Python address-family selection and IPv6 URLs agree. Token diagnostics
+  distinguish missing, empty, unreadable and invalid UTF-8 files without
+  overwriting them; unknown default-directory metadata preserves its path.
+- Connection age no longer resets on ordinary polling. Malformed remote
+  diagnostics remain unreachable evidence instead of being mislabeled stale.
+- A crashed or damaged physical lease can recover while a live OS lock remains
+  authoritative. Command-scope cleanup attempts every held descriptor after a
+  close error and never retries an uncertain descriptor number.
+- Native dialog cancellation samples input under one thread DPI context and
+  claims its ticket before approval; cancelled or concurrent approval cannot
+  leave a reusable ticket. Bookmark backup refuses redirected managed directories
+  before retention cleanup, file writes or browser deletion.
+- SVG accessible names survive simplification, deep DOM truncation is iterative,
+  and failed transient reads are distinguished from an empty successful read.
+  Modifier-only input and outside-viewport refusals give the appropriate cause.
+- JavaScript execution routes share bounded result conversion. Runtime script
+  errors do not trigger re-execution; async-body construction preserves multiple
+  statements and identifiers beginning with `return`. Complex async results use
+  explicit returns. Late debugger attachment/dispatch/cleanup cannot steal a
+  successor's lease or delete its pending operation.
+- Unknown or malformed execution receipts do not become successful null values;
+  an explicit `retry_safe=false` prevents replay even alongside `undelivered`.
+  Initial navigation waits use the caller's deadline and clear race timers.
+- Orphaned tab-create records become terminal unknown after worker restart;
+  bounded retirement keeps replay guards. Lifecycle tombstones prevent older
+  persisted generations from overwriting a newly observed tab lifetime.
+- Permission restoration that becomes unsupported retains `manual_recovery`
+  with the prior setting and stops automatic retries; explicit reset can retry.
+- Extension build stamps hash binary assets without lossy decoding. Public
+  privacy and origin-policy guidance now includes event snapshots, backups,
+  native inspection markers and HTTP origin enforcement.
 - Setup diagnostics no longer request an extension Reload when no runtime
   status has arrived after a bridge restart. Startup asks callers to wait;
   later `extension_unavailable` asks them to check the extension connection.
@@ -1358,7 +1416,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...v0.5.0
 [0.4.20]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...v0.4.20
 [0.4.19]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...v0.4.19
 [0.4.18]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.17...v0.4.18

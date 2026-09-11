@@ -69,6 +69,21 @@ channels (`/api/result`, `/api/longpoll`) use the same token and answer the same
 every error as `{"error": ...}` will report a parse failure instead of the real
 cause.
 
+Read `state_paths.token_file_status` before attempting recovery: `missing`,
+`empty`, `ready`, `unreadable` and `invalid_encoding` are distinct. Only ready
+content has a fingerprint; `token_file_error` describes failures without token
+bytes. `token_file_exists` and `state_dir_exists` can be null when metadata is
+unreadable. Unknown default-directory metadata keeps the canonical path rather
+than selecting the legacy directory. Correct access or encoding problems
+instead of replacing an existing token file. Explicit relative `BROWSERTAP_STATE_DIR` and
+`BROWSERTAP_BRIDGE_TOKEN_FILE` values use the launching process's working
+directory; spawned daemons receive the corresponding absolute paths.
+
+`error_code: malformed_diagnosis` means the bridge returned an unusable report.
+The result remains `bridge_unreachable` with the restart action; it does not
+prove a stale version. If a later DNS/socket probe fails, `doctor` preserves the
+setup report, adds `port_probe_errors`, and exits nonzero.
+
 ### A call is refused with `Session ... is not connected`
 
 This refusal is deliberate. You named an explicit `session_id`, that tab is
@@ -131,7 +146,14 @@ directory, which is what keeps several MCP sessions starting at the same moment
 from each launching a daemon -- so seeing exactly one listener on `PORT+2` is not
 by itself evidence that only one daemon was started. A listener owned by
 another application can make the client appear to be connected to the wrong
-service. On Windows, inspect the owners without stopping anything:
+service.
+
+The base must be an integer from `1` through `65533`. Invalid values are rejected
+before network or spawn actions, while imports, help/version and package-path
+commands remain available. Python probes/listeners and remote HTTP URLs support
+IPv6 address families; the browser extension still connects to IPv4 loopback.
+
+On Windows, inspect the owners without stopping anything:
 
 ```powershell
 Get-NetTCPConnection -State Listen -LocalPort 18765,18766,18767 |

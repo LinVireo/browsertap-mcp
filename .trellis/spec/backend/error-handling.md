@@ -21,6 +21,41 @@ Use [result-envelope tests](../../../tests/test_result_envelope.py) and
 [execution-failure tests](../../../tests/test_execution_failure_contract.py)
 as regression examples, including failure and cleanup paths.
 
+## Unicode at result and byte boundaries
+
+Browser strings and Windows filenames can contain lone UTF-16 surrogate code
+units. Preserve their values with explicit JSON escaping when a downstream
+UTF-8 encoder cannot represent them. A successful dictionary conversion alone
+does not establish that the final response can be sent.
+
+- `_export_json_result` preserves the completed value and original receipt.
+  A file-write `OSError` uses the inline `result_json` fallback; it does not
+  make a completed operation retryable or dispatch it again.
+- `result_file_scope` and `result_json_scope` identify a JS value, complete
+  envelope, or complete adapted MCP call result. Interpret the declared scope
+  before extracting the original data. The public tool descriptions and caller
+  Skills define descriptor placement and decoding.
+- If `result_file_encoding` is `json`, decode the path string once before
+  opening the file, then decode its JSON content. Normal paths carry no marker.
+  Replacing a descriptor clears obsolete path, encoding, size and hash fields.
+- HTTP and CLI JSON use ASCII escapes so Bottle or a strict output stream
+  cannot fail while encoding valid browser strings. Escaping must preserve
+  decoded values and field names. Safe stderr diagnostics preserve exit codes.
+- Command-lock and extension relative-path hashing preserve ordinary UTF-8
+  bytes. Exceptional surrogate code units use `surrogatepass`; lossy replacement
+  could merge distinct identities. This encoding is for hash input, not wire JSON.
+
+Regression checks must exercise the final byte boundary: a complete
+`JSONRPCMessage.model_dump_json()` and strict UTF-8 for MCP, real Bottle WSGI
+output for HTTP, strict streams for CLI, and real temporary Windows directories
+for filename cases. A mocked filename remains supplementary evidence. Verify
+normal Chinese/emoji, literal backslash escapes, lone high and low surrogates,
+file-write failure, descriptor replacement, and unchanged receipt/retry facts.
+
+Examples: `tests/test_result_unicode.py`, `tests/test_http_response_unicode.py`,
+`tests/test_unicode_boundary_regressions.py` and `tests/test_bookmark_backup.py`.
+These checks are offline; they do not establish a browser Reload or live acceptance.
+
 ## Scenario: reserving the complete target set of a batch
 
 ### 1. Scope / Trigger

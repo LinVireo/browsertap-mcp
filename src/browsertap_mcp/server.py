@@ -19,7 +19,6 @@ import os
 import re
 import secrets
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -51,6 +50,8 @@ ROOT = Path(__file__).resolve().parent
 
 from . import (
     __version__,  # noqa: E402
+    bookmark_backup,  # noqa: E402
+    native_dialog,  # noqa: E402
     physical_input,  # noqa: E402
     simphtml,  # noqa: E402
 )
@@ -63,6 +64,7 @@ from .browser_bridge import (  # noqa: E402
     PageExecutionError,
     is_scriptable_url,
     state_paths_report,
+    tcp_port_open,
 )
 from .command_scope import command_scope  # noqa: E402
 from .extension_build import (  # noqa: E402
@@ -83,9 +85,21 @@ from .page_input import (  # noqa: E402
     type_commands,
     type_target_script,
 )
-from .paths import state_dir  # noqa: E402
+from .paths import bridge_child_environment, configured_bridge_port, state_dir  # noqa: E402
+from .runtime_identity import (  # noqa: E402
+    compare_source_identities,
+    current_source_identity,
+    loaded_source_identity,
+)
 
 logger = logging.getLogger(__name__)
+
+_RESULT_SERIALIZER_SOURCE = (ROOT / "chrome_extension" / "result_serialization.js").read_text(
+    encoding="utf-8"
+)
+_GUARDED_EVAL_SOURCE = (ROOT / "chrome_extension" / "guarded_eval.js").read_text(
+    encoding="utf-8"
+)
 
 
 # Keep timeout validation at the public boundary.  A comparison such as
@@ -285,9 +299,19 @@ mcp = FastMCP(
         "session_id (a 'client:tabId' string - pass it verbatim, never split it). "
         "Tabs that existed before the task are user-owned: do not close or navigate them by default. "
         "For mutating work use open_new_tab, keep its owner_id, and close that owned tab in cleanup. "
-        "If a result carries status='no_response', switched_session, or bridge_error: the tab slept, "
-        "reconnected, or the bridge blipped - run list_tabs, switch_tab to the right target, then retry; "
-        "re-run scripts with side effects only after scan_page confirms they did not land."
+        "Read ok, error_code, delivery_state and retry_safe before recovery. Retrieve an operation_id "
+        "from its original MCP session without redispatching. After a delivery failure, retry only with "
+        "delivery_state='undelivered' and retry_safe=true, after fixing the target or connection. "
+        "A page inspection or missing receipt "
+        "does not prove a side effect never happened. Verify any switched_session before continuing. "
+        "For exported results, first JSON-decode result_file only when result_file_encoding=json; "
+        "otherwise use the path directly. Read that file as UTF-8 JSON and verify result_bytes/result_sha256, "
+        "or parse result_json once if file writing failed. The corresponding result_file_scope or "
+        "result_json_scope is js-value, envelope, or mcp-call-result (the complete normally adapted MCP "
+        "result). JS descriptors are in data or legacy.late_result; envelope/MCP descriptors are at "
+        "the decision-header root. Preserve the original ok/isError/retry verdicts. Error fields "
+        "marked message_encoding=json, code_encoding=json or error_code_encoding=json, and "
+        "result_file_error.message_json, must also be parsed once."
     ),
 )
 
@@ -302,13 +326,7 @@ def _get_driver_port() -> int:
     global _DRIVER_PORT
     if _DRIVER_PORT is not None:
         return _DRIVER_PORT
-    raw = os.environ.get("BROWSERTAP_BRIDGE_PORT", "18765")
-    try:
-        _DRIVER_PORT = int(raw)
-    except (ValueError, TypeError):
-        raise ValueError(
-            f"BROWSERTAP_BRIDGE_PORT must be an integer, got: {raw!r}"
-        ) from None
+    _DRIVER_PORT = configured_bridge_port()
     return _DRIVER_PORT
 
 
@@ -421,7 +439,7 @@ def _result_diagnostics(payload: Any, *, tool: str) -> dict[str, Any]:
         # Whether a timed-out page script is still pinning its tab. Decides the
         # caller's next move on that tab, so it belongs next to retry_safe.
         "zombie", "zombie_detail",
-        "input_quiet", "input_reachability", "screen_bounds", "ownership",
+        "input_quiet", "input_reachability", "screen_bounds", "ownership", "desktop",
         "owner_id", "generation", "extension_build_verdict", "status", "code",
         "hint", "directory_applied", "requested_directory", "render_state",
         "content_ready", "render", "recheck_required", "recheck_action",
@@ -693,6 +711,142 @@ def _call_target(
     return _result_target(target_values)
 
 
+_RESULT_PAYLOAD_FIELDS = frozenset({
+    "result_externalized", "result_file", "result_file_encoding", "result_bytes", "result_sha256",
+    "result_format", "result_file_scope", "result_inline_limit_bytes",
+    "result_json", "result_json_scope", "result_file_error", "result_encoding_reason",
+    "result_content_externalized", "result_meta_externalized",
+})
+
+
+def _export_json_result(payload: bytes, *, scope: str) -> dict[str, Any]:
+    """Export JSON without losing an executed result when its file cannot be written."""
+    try:
+        path, size, digest = _write_execute_js_payload(payload)
+        filename = str(path)
+        metadata: dict[str, Any] = {
+            "result_externalized": True,
+            "result_file": filename,
+            "result_bytes": size,
+            "result_sha256": digest,
+            "result_format": "utf-8-json",
+            "result_file_scope": scope,
+        }
+        # Windows filenames can contain lone UTF-16 code units too. Keep the
+        # exact path recoverable without reintroducing them into MCP metadata.
+        if _contains_utf16_surrogate(filename):
+            metadata["result_file"] = json.dumps(filename, ensure_ascii=True)
+            metadata["result_file_encoding"] = "json"
+        return metadata
+    except OSError as write_error:
+        # The operation already completed. A disk failure must not turn its
+        # receipt into a new exception or imply that replay became safe.
+        return {
+            "result_externalized": False,
+            "result_json": json.dumps(json.loads(payload), ensure_ascii=True),
+            "result_json_scope": scope,
+            "result_format": "utf-8-json",
+            "result_encoding_reason": "result-file-write-failed",
+            "result_file_error": {"message_json": json.dumps(str(write_error), ensure_ascii=True)},
+        }
+
+
+def _contains_utf16_surrogate(value: Any) -> bool:
+    """Find non-scalar strings without confusing literal JSON escapes or cycles."""
+    pending = [value]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if re.search(r"[\ud800-\udfff]", current):
+                return True
+        elif isinstance(current, (dict, list, tuple)):
+            identity = id(current)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            if isinstance(current, dict):
+                pending.extend(current.keys())
+                pending.extend(current.values())
+            else:
+                pending.extend(current)
+    return False
+
+
+def _unicode_tool_result(
+    envelope: dict[str, Any], *, native: Optional[CallToolResult] = None,
+) -> Optional[CallToolResult]:
+    """Keep the original JSON recoverable when MCP rejects UTF-16 code units."""
+    original: dict[str, Any] = envelope
+    scope = "envelope"
+    if native is not None:
+        original = {
+            **native.model_dump(mode="python", by_alias=True),
+            "structuredContent": envelope,
+            "isError": bool(native.isError) or not envelope["ok"],
+        }
+        scope = "mcp-call-result"
+    if not _contains_utf16_surrogate(original):
+        return None
+
+    metadata = _export_json_result(_serialize_execute_js_value(original), scope=scope)
+    metadata["result_encoding_reason"] = "utf-16-surrogate"
+
+    def safe_fields(mapping: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item for key, item in mapping.items()
+            if not _contains_utf16_surrogate(key) and not _contains_utf16_surrogate(item)
+        }
+
+    # Keep usable routing and delivery facts in the decision header. Data and
+    # legacy explicitly point to the complete original, rather than presenting
+    # altered strings or colliding escaped dictionary keys as the caller's data.
+    summary = safe_fields({
+        key: item for key, item in envelope.items()
+        if key not in _RESULT_PAYLOAD_FIELDS
+    })
+    summary.update(metadata)
+    summary["target"] = safe_fields(envelope.get("target") or {}) or None
+    summary["diagnostics"] = safe_fields(envelope["diagnostics"])
+    for key in ("data", "legacy"):
+        if key in envelope:
+            summary[key] = (
+                {"result_json_ref": "#/result_json"}
+                if "result_json" in metadata else dict(metadata)
+            )
+    error = envelope.get("error")
+    summary["error"] = None if error is None else dict(error)
+    if error is not None:
+        for key in ("code", "message"):
+            if _contains_utf16_surrogate(error[key]):
+                summary["error"][key] = json.dumps(error[key], ensure_ascii=True)
+                summary["error"][key + "_encoding"] = "json"
+        summary["error_code"] = summary["error"]["code"]
+        if "code_encoding" in summary["error"]:
+            summary["error_code_encoding"] = "json"
+
+    content = []
+    meta = None
+    if native is not None:
+        # Safe images/resources and metadata remain directly usable. Every
+        # original block and metadata entry is also present in the archive.
+        content = [
+            item for item in native.content
+            if not _contains_utf16_surrogate(item.model_dump(mode="python", by_alias=True))
+        ]
+        meta = None if native.meta is None else safe_fields(native.meta)
+        if len(content) != len(native.content):
+            summary["result_content_externalized"] = True
+        if _contains_utf16_surrogate(native.meta):
+            summary["result_meta_externalized"] = True
+    return CallToolResult(
+        _meta=meta,
+        content=[TextContent(type="text", text=json.dumps(summary, ensure_ascii=False)), *content],
+        structuredContent=summary,
+        isError=bool(native and native.isError) or not envelope["ok"],
+    )
+
+
 def _adapt_tool_result(
     tool: str,
     value: Any = None,
@@ -703,6 +857,9 @@ def _adapt_tool_result(
     if isinstance(value, CallToolResult):
         legacy = value.structuredContent
         envelope = _result_envelope(tool, legacy, target=target)
+        unicode_result = _unicode_tool_result(envelope, native=value)
+        if unicode_result is not None:
+            return unicode_result
         return CallToolResult(
             _meta=value.meta,
             content=value.content,
@@ -710,6 +867,9 @@ def _adapt_tool_result(
             isError=bool(value.isError) or not envelope["ok"],
         )
     envelope = _result_envelope(tool, value, exc=exc, target=target)
+    unicode_result = _unicode_tool_result(envelope)
+    if unicode_result is not None:
+        return unicode_result
     if envelope["ok"]:
         return envelope
     # FastMCP treats ordinary dictionaries as transport successes, regardless
@@ -1112,9 +1272,7 @@ def agent_skills_dir() -> Path:
 
 # --- Bridge daemon: liveness, spawn lock, autostart --------------------------
 def _port_open(host: str, port: int) -> bool:
-    with socket.socket() as sock:
-        sock.settimeout(1)
-        return sock.connect_ex((host, port)) == 0
+    return tcp_port_open(host, port)
 
 
 def _bridge_log_path() -> Path:
@@ -1217,6 +1375,7 @@ def spawn_bridge_daemon(*, reset_spawn_lock: bool = False) -> bool:
     instance is avoided because these instances are spawned per session and
     recycled, taking the bridge (and its bound ports) down with them.
     """
+    _get_driver_port()
     if reset_spawn_lock:
         try:
             _spawn_lock_path().unlink(missing_ok=True)
@@ -1277,6 +1436,7 @@ def _spawn_bridge_daemon_locked() -> bool:
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
         "cwd": str(Path.home()),
+        "env": bridge_child_environment(),
     }
     if sys.platform == "win32":
         DETACHED_PROCESS = 0x00000008
@@ -1554,7 +1714,7 @@ def exec_js(
         raise TimeoutError("bridge JS deadline exhausted before dispatch")
     probe_options = {"read_only_probe": True} if read_only_probe else {}
     response = driver.execute_js(script, timeout=first_budget, session_id=sid, **probe_options)
-    if simphtml.no_response_kind(response) == "undelivered":
+    if simphtml.undelivered_retry_safe(response):
         # Never reached the page; retrying is side-effect-free. The reserve
         # above is what makes this branch reachable — a first attempt handed the
         # whole budget can only report "undelivered" after spending it all.
@@ -1572,21 +1732,27 @@ def exec_js(
         # useful to return without data; fail loudly instead of returning junk.
         delivery_state = response.get("delivery_state") or {
             "undelivered": "undelivered",
-            "after_ack": "delivered_no_result",
+            "after_ack": "sent_unconfirmed",
             "navigated": "navigated",
         }[kind]
+        message = response.get("result")
+        if "delivery_state" not in response and kind == "after_ack" and isinstance(message, str):
+            if "ACK received" in message or "delivered but no result" in message:
+                delivery_state = "delivered_no_result"
         hint = (
             _PENDING_OPERATION_HINT
-            if response.get("operation_id") and delivery_state not in {"undelivered", "navigated"}
+            if response.get("operation_id") and kind == "after_ack"
             else "Session may be asleep or disconnected; run list_tabs, switch_tab to a live session, then retry."
         )
+        if kind == "undelivered" and not simphtml.undelivered_retry_safe(response):
+            hint = "The bridge explicitly refused a retry; inspect its diagnostic details and the target before proceeding."
         if read_only_probe and response.get("reservation_held") is False and response.get("operation_id"):
             hint = _RELEASED_WAIT_HINT
         raise BridgeNoResponseError(
             f"Bridge no-response ({kind}): {response.get('result')}. {hint}",
             error_code=str(response.get("error_code") or "no_response"),
             delivery_state=delivery_state,
-            retry_safe=bool(response.get("retry_safe", kind == "undelivered")),
+            retry_safe=simphtml.undelivered_retry_safe(response),
             operation_id=response.get("operation_id"),
             reservation_held=response.get("reservation_held"),
             poll_with=response.get("poll_with") or "get_execute_js_result",
@@ -1645,20 +1811,23 @@ _BROWSER_TOOLS = frozenset({
     "delete_cookies", "storage_get", "storage_set", "set_site_permission",
     "reset_site_permissions", "save_pdf",
 })
-_DESKTOP_TOOLS: frozenset[str] = frozenset()
+_DESKTOP_TOOLS = frozenset({
+    "inspect_native_file_dialog", "cancel_native_file_dialog",
+})
 _CAPABILITY_GROUPS = ("page", "browser", "desktop")
 
 # Targeting is intentionally coarse in S1: it describes whether a caller must
-# provide a page/tab target, not the full session-resolution policy.  The latter
+# provide a page/tab target or a native-dialog ticket, not the full resolution policy. The latter
 # remains in the individual tool contracts and is covered by the target tests.
 _NO_TARGET_TOOLS = frozenset({
     "get_setup_status", "get_automation_profile", "set_automation_profile",
     "list_tabs", "list_all_tabs", "extension_path", "list_extensions",
     "set_extension_enabled", "uninstall_extension", "get_bookmarks",
     "create_bookmark", "remove_bookmark", "call_extension",
+    "inspect_native_file_dialog",
 })
 _REQUIRED_TARGET_TOOLS = frozenset({
-    "close_tabs",
+    "close_tabs", "cancel_native_file_dialog",
 })
 
 _WRITE_TOOLS = frozenset({
@@ -1670,9 +1839,11 @@ _WRITE_TOOLS = frozenset({
     "set_site_permission", "reset_site_permissions", "scroll_page", "page_click",
     "page_type", "page_press", "page_drag", "upload_files", "handle_dialog",
     "resolve_leave_dialog", "save_pdf",
+    "cancel_native_file_dialog",
 })
 _MIXED_EFFECT_TOOLS = frozenset({
     "execute_js", "cdp_command", "cdp_batch", "call_extension",
+    "inspect_native_file_dialog",
 })
 
 def _build_tool_capabilities() -> dict[str, dict[str, Any]]:
@@ -1705,7 +1876,11 @@ def _build_tool_capabilities() -> dict[str, dict[str, Any]]:
     for name in sorted(_DESKTOP_TOOLS):
         result[name] = {
             "capability": "desktop",
-            "target": "optional",
+            "target": (
+                "required" if name in _REQUIRED_TARGET_TOOLS
+                else "none" if name in _NO_TARGET_TOOLS
+                else "optional"
+            ),
             "side_effect": "write",
             "result_contract": "btap.result.v1",
             "desktop_opt_in": True,
@@ -1830,6 +2005,15 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
         "extension_status_available=false means no runtime status was obtained: starting "
         "asks to wait_for_extension, then extension_unavailable asks to "
         "check_extension_connection; missing status alone never requests a reload. "
+        "mcp_build_verdict and bridge_build_verdict compare each process's package-import "
+        "Python and imported JavaScript source snapshot with expected_python_source_identity "
+        "on disk: matches_tree, "
+        "stale_process, or unverifiable. Same-version source changes require "
+        "restart_mcp_session or restart_bridge; *_build_enforced=false is unknown. "
+        "state_paths distinguishes missing/empty/ready/unreadable/invalid_encoding token files "
+        "without exposing token content; unreadable metadata has unknown existence. "
+        "A malformed remote diagnosis reports bridge_unreachable with malformed_diagnosis, "
+        "not evidence of an old build. "
         "Answers while another tool "
         "is still running; default_session_id is isolated from other calls' temporary targets. "
         "capability_registry is the runtime page/browser/desktop inventory; each entry includes "
@@ -1859,6 +2043,11 @@ def get_setup_status() -> dict[str, Any]:
             "error": str(e),
         }
         bridge_error = bridge_error or str(e)
+    expected_python = current_source_identity()
+    mcp_python = loaded_source_identity()
+    bridge_python = diagnosis.get("bridge_source_identity")
+    mcp_build_verdict = compare_source_identities(mcp_python, expected_python)
+    bridge_build_verdict = compare_source_identities(bridge_python, expected_python)
     bridge_version = diagnosis.get("bridge_version")
     extension_version = diagnosis.get("extension_version")
     protocol_version = diagnosis.get("protocol_version")
@@ -1947,9 +2136,15 @@ def get_setup_status() -> dict[str, Any]:
         and not isinstance(protocol_version, bool)
         and protocol_version > _EXTENSION_PROTOCOL_VERSION
     )
-    package_is_stale = bridge_is_newer or extension_is_newer or protocol_is_newer
+    package_is_stale = (
+        bridge_is_newer or extension_is_newer or protocol_is_newer
+        or mcp_build_verdict == "stale_process"
+    )
 
-    restart_bridge_required = bridge_version != __version__ and not bridge_is_newer
+    restart_bridge_required = (
+        (bridge_version != __version__ and not bridge_is_newer)
+        or (bridge_build_verdict == "stale_process" and not bridge_is_newer)
+    )
     missing_extension_capabilities = sorted(
         capability
         for capability in _REQUIRED_EXTENSION_CAPABILITIES
@@ -2033,6 +2228,13 @@ def get_setup_status() -> dict[str, Any]:
         "capability_registry": _capability_registry_status(),
         "package_version": __version__,
         "bridge_version": bridge_version,
+        "mcp_source_identity": mcp_python,
+        "bridge_source_identity": bridge_python,
+        "expected_python_source_identity": expected_python,
+        "mcp_build_verdict": mcp_build_verdict,
+        "bridge_build_verdict": bridge_build_verdict,
+        "mcp_build_enforced": mcp_build_verdict != "unverifiable",
+        "bridge_build_enforced": bridge_build_verdict != "unverifiable",
         "extension_version": extension_version,
         "extension_status_available": extension_status_available,
         "protocol_version": protocol_version,
@@ -2127,9 +2329,30 @@ def get_setup_status() -> dict[str, Any]:
         # above so a genuinely stale package still leads.
         status["notes"].insert(
             0,
-            "A component reports a newer version than this MCP server process. "
+            (
+                "This MCP process's package-import source snapshot (Python and imported JavaScript) differs "
+                "from the installed sources now on disk. "
+                if mcp_build_verdict == "stale_process"
+                else "A component reports a newer version than this MCP server process. "
+            ) +
             "Restart the MCP session or client so it loads the installed build; "
             "restarting the bridge or reloading the extension cannot clear it.",
+        )
+    if bridge_build_verdict == "stale_process" and not bridge_is_newer:
+        status["notes"].insert(
+            1 if package_is_stale else 0,
+            "The bridge daemon's package-import source snapshot (Python and imported JavaScript) differs from "
+            "this installation's current sources. Run `browsertap bridge --restart` "
+            "using this installation. If the daemon uses a different installation, "
+            "align its package path before restarting it.",
+        )
+    if "unverifiable" in (mcp_build_verdict, bridge_build_verdict):
+        status["notes"].append(
+            "A package source identity could not be compared: the process may use an older "
+            "identity schema, or Python sources or required imported JavaScript could not be read. See "
+            "mcp_build_verdict and bridge_build_verdict; *_build_enforced=false means "
+            "unknown, even if versions match. A fresh process with readable installed "
+            "Python sources and imported JavaScript is required to verify the running build.",
         )
     if extension_build_verdict == "stamp_not_regenerated":
         # A stale MCP process is the component verdict and its restart is the
@@ -3133,7 +3356,7 @@ async def resolve_leave_dialog(
 
 
 # --- Tool: open_new_tab (owned tabs) -----------------------------------------
-@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed exactly-once create. Uses the browser selected by this MCP task unless session_id or client_id names another browser. With several browsers connected, first use switch_tab or pass a concrete session_id/client_id. Pass active=true only when foreground work is genuinely required. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true. When retry_safe=true, retry with no operation_id to start a fresh create. If the create ACK is lost with retry_safe=false, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. An uncertain dispatched create returns status=unknown, may_have_created=true, retry_safe=false and the operation_id. An unresolved recovery preserves that uncertainty and its owner_id even when the status probe fails. If recovery starts with not_found, follow its list_tabs() inspection guidance instead of repeating the same recovery read; a fresh create may duplicate the original. Never infer ownership or absence from URLs, tab counts, or missing records.")
+@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed at-most-once create. Uses the browser selected by this MCP task unless session_id or client_id names another browser. With several browsers connected, first use switch_tab or pass a concrete session_id/client_id. Pass active=true only when foreground work is required. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true. When retry_safe=true, retry with no operation_id to start a fresh create. If the create ACK is lost with retry_safe=false, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. An uncertain dispatched create returns status=unknown, may_have_created=true,retry_safe=false and the operation_id. An unresolved recovery preserves that uncertainty and its owner_id even when the status probe fails. After worker restart, orphaned pending creates become terminal unknown; bounded retirement retains replay guards. If reconciliation.resume_required=false, including an initial not_found, follow its list_tabs() inspection guidance instead of repeating the same recovery read; a fresh create may duplicate the original. Never infer ownership or absence from URLs, tab counts, missing records or a refused retired ID.")
 def open_new_tab(
     url: str,
     timeout: float = 15.0,
@@ -3222,6 +3445,7 @@ def open_new_tab(
             may_have_created = True
             retry_safe = False
         detail = dict(info or {})
+        terminal = terminal or detail.get("resume_required") is False
         detail.setdefault("status", "unknown")
         detail.setdefault("operation_status", "unknown")
         detail.update({
@@ -3229,6 +3453,7 @@ def open_new_tab(
             "client_id": client_id,
             "may_have_created": may_have_created,
             "retry_safe": retry_safe,
+            "resume_required": may_have_created and not terminal,
         })
         out = {
             "status": "unknown",
@@ -3242,6 +3467,7 @@ def open_new_tab(
             "may_have_created": may_have_created,
             "retry_safe": retry_safe,
             "reconciliation": detail,
+            "resume_required": detail["resume_required"],
         }
         if may_have_created:
             detail["owner_id"] = capability_owner_id
@@ -3252,7 +3478,11 @@ def open_new_tab(
                 "owner_id": capability_owner_id,
                 "url": url,
                 "instruction": (
-                    "The operation record is missing; stop repeating this recovery read. "
+                    (
+                        "The operation record is missing; "
+                        if operation_state(detail) == "not_found" else
+                        "The operation has a terminal unknown outcome; "
+                    ) + "stop repeating this recovery read. "
                     "Call list_tabs() and inspect tabs for the returned client_id. "
                     "A matching URL, an unchanged tab count, or no matching tab does not prove "
                     "ownership or that no tab was created. For cleanup, use "
@@ -3371,7 +3601,7 @@ def open_new_tab(
             )
         elif probe_state != "pending":
             return unknown_result(
-                {**probe_info, "resume_required": True},
+                probe_info,
                 may_have_created=True,
                 retry_safe=False,
             )
@@ -3649,7 +3879,17 @@ def _extension_client_id(session_id: Optional[str]) -> Optional[str]:
 def _extension_operation_result(
     response: Any, *, operation: str, **context: Any,
 ) -> dict[str, Any]:
-    result = _extension_data(response)
+    raw = response.get("data") if isinstance(response, dict) and "data" in response else response
+    result = dict(raw) if isinstance(raw, dict) else {}
+    explicit_reply = isinstance(response, dict) and (
+        "data" in response or isinstance(response.get("ok"), bool)
+    )
+    if not explicit_reply and _legacy_failure(result) is None:
+        return {
+            "status": "error", "code": "malformed_extension_result",
+            "error": "The extension returned no recognizable completion receipt; inspect state before retrying.",
+            "retry_safe": False, "operation": operation, **context,
+        }
     if result.get("ok") is False:
         failure = dict(result)
         failure.setdefault("status", "error")
@@ -3662,7 +3902,7 @@ def _extension_operation_result(
     # envelope: {data: {ok: true, data: <payload>}}.  The real remote bridge,
     # however, has already removed that inner envelope in BrowserBridge.ext_cmd
     # and returns {data: <payload>} instead.  Preserve both forms.  Treating a
-    # direct dict payload as an envelope used to discard capture snapshots such
+    # direct payload as an envelope used to discard capture snapshots such
     # as {status: "capturing", messages: [...]}, so live Network/Console tools
     # misleadingly returned only the generic operation status.
     if result.get("ok") is True:
@@ -3670,7 +3910,7 @@ def _extension_operation_result(
             key: value for key, value in result.items() if key != "ok"
         }
     else:
-        payload = result
+        payload = raw
     legacy_failure = _legacy_failure(payload)
     if legacy_failure is not None:
         code, message, retryable = legacy_failure
@@ -3980,7 +4220,12 @@ def create_bookmark(
 @mcp.tool(
     description=(
         "Remove a bookmark by id. Set recursive=true only for a folder whose full subtree "
-        "should be removed."
+        "should be removed. First saves the complete subtree to an atomic local JSON backup; "
+        "nothing is removed if the snapshot or backup fails. The managed backup subdirectory "
+        "must not be a symlink or reparse point. Returns backup_path even if the "
+        "deletion outcome is unknown. Backups stay in the state directory for up to 30 days, "
+        "100 files or 64 MiB; each subtree is limited to 16 MiB. The snapshot and browser "
+        "removal are separate operations, so concurrent edits by the user are not transactional."
     )
 )
 def remove_bookmark(
@@ -3991,21 +4236,48 @@ def remove_bookmark(
     bookmark_id = str(bookmark_id).strip()
     if not bookmark_id:
         raise ValueError("bookmark_id must not be empty")
-    response = require_driver().ext_cmd(
-        {
-            "cmd": "bookmarks",
-            "method": "removeTree" if recursive else "remove",
-            "id": bookmark_id,
-        },
-        client_id=_extension_client_id(session_id),
-        timeout=20.0,
-    )
-    return _extension_operation_result(
-        response,
-        operation="remove_bookmark",
-        bookmark_id=bookmark_id,
-        recursive=bool(recursive),
-    )
+    driver = require_driver()
+    client_id = _extension_client_id(session_id)
+    if session_id is not None and client_id is None:
+        raise ValueError("session_id must identify a browser tab as client_id:tab_id")
+    with command_scope():
+        if client_id is None:
+            client_id = driver.select_client_id(timeout=5)
+        context: dict[str, Any] = {
+            "operation": "remove_bookmark", "bookmark_id": bookmark_id,
+            "recursive": bool(recursive), "client_id": client_id,
+        }
+        try:
+            snapshot = driver.ext_cmd(
+                {"cmd": "bookmarks", "method": "tree"}, client_id=client_id, timeout=30.0,
+            )
+            tree_result = _extension_operation_result(snapshot, operation="get_bookmarks")
+            if tree_result.get("status") != "ok":
+                raise RuntimeError(tree_result.get("error") or "bookmark snapshot failed")
+            subtree = bookmark_backup.bookmark_subtree(tree_result.get("data"), bookmark_id)
+            backup = bookmark_backup.save_bookmark_backup(
+                subtree, client_id=client_id, recursive=bool(recursive),
+            )
+        except Exception as exc:
+            return {
+                **context, "status": "error", "code": "bookmark_backup_failed",
+                "error": str(exc), "phase": "backup", "dispatched": False,
+                "retry_safe": True,
+            }
+        try:
+            response = driver.ext_cmd(
+                {"cmd": "bookmarks", "method": "removeTree" if recursive else "remove", "id": bookmark_id},
+                client_id=client_id, timeout=20.0,
+            )
+        except Exception as exc:
+            code, message, retryable, diagnostics = _exception_result_metadata(exc)
+            retry_safe = retryable and diagnostics.get("delivery_state") == "undelivered"
+            return {
+                **context, **backup, **diagnostics, "status": "error", "code": code,
+                "error": message, "phase": "remove", "retry_safe": retry_safe,
+                "hint": "Inspect the bookmark tree and the saved backup before retrying deletion.",
+            }
+        return _extension_operation_result(response, **context, **backup)
 
 
 @mcp.tool(
@@ -4836,7 +5108,10 @@ def _serialize_execute_js_value(value: Any) -> bytes:
         # A hostile/cyclic host object should still be exportable as a useful
         # diagnostic string rather than making the whole execute_js call fail.
         encoded = json.dumps(str(value), ensure_ascii=False)
-    return encoded.encode("utf-8")
+    # UTF-8 rejects lone UTF-16 surrogates admitted by JavaScript strings. At
+    # this point they occur inside JSON strings, so backslashreplace produces
+    # valid \uXXXX escapes while ordinary Unicode remains readable UTF-8.
+    return encoded.encode("utf-8", errors="backslashreplace")
 
 
 def _write_execute_js_payload(payload: bytes) -> tuple[Path, int, str]:
@@ -4869,7 +5144,7 @@ def _write_execute_js_payload(payload: bytes) -> tuple[Path, int, str]:
 
 
 def _externalize_execute_js_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Keep large successful JS values lossless outside the MCP text result."""
+    """Keep large or non-scalar JS strings lossless outside the MCP result."""
     if not isinstance(result, dict):
         return result
     value = result.get("js_return")
@@ -4886,22 +5161,17 @@ def _externalize_execute_js_result(result: dict[str, Any]) -> dict[str, Any]:
         return result
 
     payload = _serialize_execute_js_value(value)
-    if len(payload) <= EXECUTE_JS_INLINE_MAX_BYTES:
+    has_surrogate = _contains_utf16_surrogate(value)
+    if len(payload) <= EXECUTE_JS_INLINE_MAX_BYTES and not has_surrogate:
         return result
 
-    path, size, digest = _write_execute_js_payload(payload)
-    externalized = dict(result)
+    metadata = _export_json_result(payload, scope="js-value")
+    if has_surrogate:
+        metadata.setdefault("result_encoding_reason", "utf-16-surrogate")
+    externalized = {key: item for key, item in result.items() if key not in _RESULT_PAYLOAD_FIELDS}
     externalized["js_return"] = None
-    externalized.update(
-        {
-            "result_externalized": True,
-            "result_file": str(path),
-            "result_bytes": size,
-            "result_sha256": digest,
-            "result_format": "utf-8-json",
-            "result_inline_limit_bytes": EXECUTE_JS_INLINE_MAX_BYTES,
-        }
-    )
+    externalized.update(metadata)
+    externalized["result_inline_limit_bytes"] = EXECUTE_JS_INLINE_MAX_BYTES
     return externalized
 
 
@@ -4946,6 +5216,8 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
     deadline_ms = max(1, min(120000, int(float(timeout) * 1000)))
     return f"""
     (async () => {{
+      {_RESULT_SERIALIZER_SOURCE}
+      {_GUARDED_EVAL_SOURCE}
       const rawJsCode = {json.dumps(script)}.trim();
       const policy = {json.dumps(policy)};
       const token = {json.dumps(token)};
@@ -4961,25 +5233,25 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
       }}
       try {{
         const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
-        const lines = rawJsCode.split(/\\r?\\n/).filter(line => line.trim());
-        const lastLine = lines.length ? lines[lines.length - 1].trim() : '';
         let value;
-        if (lastLine.startsWith('return')) {{
-          value = await (new AsyncFunction(rawJsCode))();
-        }} else {{
-          try {{
-            value = eval(rawJsCode);
-            if (value instanceof Promise) value = await value;
-          }} catch (error) {{
-            if (error instanceof SyntaxError && /return/i.test(error.message))
-              value = await (new AsyncFunction(rawJsCode))();
-            else throw error;
-          }}
+        const _btapEvalGuard = (() => {{
+          try {{ return prepareGuardedEval(rawJsCode, this); }}
+          catch (error) {{ return {{ error }}; }}
+        }})();
+        try {{
+          if (_btapEvalGuard.error) throw _btapEvalGuard.error;
+          value = eval(_btapEvalGuard.source);
+          if (value instanceof Promise) value = await value;
+        }} catch (error) {{
+          const parseFailed = _btapEvalGuard.error || !_btapEvalGuard.started();
+          if (parseFailed && error instanceof SyntaxError &&
+              (_btapEvalGuard.error || /return/i.test(error.message)))
+            value = await (new AsyncFunction(prepareGuardedEval.asyncBody(rawJsCode)))();
+          else throw error;
+        }} finally {{
+          if (_btapEvalGuard.cleanup) _btapEvalGuard.cleanup();
         }}
-        let serializable = value;
-        try {{ serializable = JSON.parse(JSON.stringify(value)); }}
-        catch (_) {{ serializable = String(value); }}
-        return {{ok: true, data: serializable}};
+        return {{ok: true, data: smartProcessResult(value)}};
       }} catch (error) {{
         return {{ok: false, error: {{name: error.name || 'Error',
           message: error.message || String(error), stack: error.stack || ''}}}};
@@ -5059,7 +5331,7 @@ def _execute_js_cdp_fallback(
     }
 
 
-@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. BTAP pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting. Set wait=false for a genuinely long task: BTAP returns an operation_id after delivery acknowledgement, and get_execute_js_result claims the late result without replaying side effects. Use wait_for/wait_for_url instead of setTimeout or sleep Promises when waiting for page state. JSON-encoded js_return values above the 24 KiB UTF-8 inline limit are written to a private temporary JSON file and reported with result_file, result_bytes, result_sha256 and result_format instead of being truncated inline.")
+@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. BTAP pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting. Script errors after execution starts do not trigger another execution. Use an explicit return in complex async bodies, preferably an async IIFE. Results use the same bounded conversion on all routes: undefined/non-finite numbers become null, BigInt/symbol become strings, DOM/Error/functions become readable values, and cycles/depth 6/iterables above 200 items have markers. Set wait=false for a genuinely long task: BTAP returns an operation_id after delivery acknowledgement, and get_execute_js_result claims the late result without replaying side effects. Use wait_for/wait_for_url instead of setTimeout or sleep Promises when waiting for page state. JSON-encoded js_return values above the 24 KiB UTF-8 inline limit, or containing unpaired UTF-16 code units at any size, use a private temporary JSON file with result_file, result_bytes, result_sha256, result_format and result_file_scope=js-value. When result_file_encoding=json, parse the path field once as JSON before opening the file; unmarked paths are used directly. The file preserves the complete converted value, including any conversion markers. If file writing fails, result_json contains the complete ASCII JSON backup with result_json_scope=js-value; parse it once. This explicit fallback can exceed the inline limit and preserves the original result and retry verdicts.")
 def execute_js(
     script: str,
     session_id: Optional[str] = None,
@@ -5250,9 +5522,11 @@ def execute_js(
                 session_id=target_sid,
                 wait=False,
             )
-            execution_pending = bool(raw.get("reservation_held")) or raw.get("status") == "in_progress" or raw.get("delivery_state") in {
-                "sent_unconfirmed", "delivered_no_result",
-            }
+            kind = simphtml.no_response_kind(raw)
+            execution_pending = (
+                bool(raw.get("reservation_held")) or raw.get("status") == "in_progress"
+                or kind == "after_ack"
+            )
             if raw.get("status") == "in_progress":
                 result = dict(raw)
                 result["tab_id"] = result.get("executed_tab_id")
@@ -5271,6 +5545,11 @@ def execute_js(
                     _normalize_execute_js_dialog_result(result)
                 )
             result = dict(raw)
+            result["status"] = "navigated" if kind == "navigated" else "no_response"
+            result["retry_safe"] = kind == "undelivered" and raw.get("retry_safe") is not False
+            result["delivery_state"] = raw.get("delivery_state") or {
+                "undelivered": "undelivered", "navigated": "navigated",
+            }.get(kind, "sent_unconfirmed")
             result["tab_id"] = result.get("executed_tab_id")
             result["poll_with"] = "get_execute_js_result"
             result["monitoring"] = False
@@ -5284,9 +5563,9 @@ def execute_js(
             session_id=target_sid,
             deadline=deadline,
         )
-        execution_pending = bool(result.get("reservation_held")) or result.get("delivery_state") in {
+        execution_pending = bool(result.get("reservation_held")) or result.get("delivery_state") in (
             "sent_unconfirmed", "delivered_no_result",
-        }
+        ) or (result.get("status") == "no_response" and result.get("retry_safe") is not True)
         return _externalize_execute_js_result(
             _normalize_execute_js_dialog_result(result)
         )
@@ -5295,9 +5574,9 @@ def execute_js(
         error_diagnostics = getattr(exc, "diagnostics", None) or {}
         execution_pending = execution_pending or bool(
             getattr(exc, "reservation_held", False) or error_diagnostics.get("reservation_held")
-        ) or (getattr(exc, "delivery_state", None) or error_diagnostics.get("delivery_state")) in {
+        ) or (getattr(exc, "delivery_state", None) or error_diagnostics.get("delivery_state")) in (
             "sent_unconfirmed", "delivered_no_result",
-        }
+        )
         raise
     finally:
         try:
@@ -5327,7 +5606,7 @@ def execute_js(
                 driver.default_session_id = prev_default
 
 
-@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. After reservation expiry, the first valid late terminal reply appears as late_result (success and data) with late_reply_age in seconds; the original unknown receipt and retry_safe=false remain. A large successful late_result.data uses result_file metadata inside late_result. Late replies do not renew retention or reserve the tab again. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. Ordinary pending operations keep their tabs reserved, but a timed-out server-generated read-only wait probe can release its tab before its reply arrives. Use reservation_held to check actual ownership; other tabs remain usable.")
+@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. After reservation expiry, the first valid late terminal reply appears as late_result (success and data) with late_reply_age in seconds; the original unknown receipt and retry_safe=false remain. Large or unpaired-UTF-16 successful values use execute_js result_file metadata, or result_json if file writing fails, with scope=js-value. For late replies the descriptor is inside late_result and data becomes null; JSON-decode the path first only when result_file_encoding=json, then parse the UTF-8 file or result_json once as JSON. Export failure preserves the complete value and original retry verdict. Late replies do not renew retention or reserve the tab again. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. Ordinary pending operations keep their tabs reserved, but a timed-out server-generated read-only wait probe can release its tab before its reply arrives. Use reservation_held to check actual ownership; other tabs remain usable.")
 def get_execute_js_result(
     operation_id: str,
     timeout: float = 0.0,
@@ -5349,7 +5628,7 @@ def get_execute_js_result(
     late = raw.get("late_result")
     if isinstance(late, dict) and late.get("success") is True:
         exported = _externalize_execute_js_result({"js_return": late.get("data")})
-        if exported.get("result_externalized"):
+        if exported.get("result_externalized") or "result_json" in exported:
             raw = {
                 **raw,
                 "late_result": {
@@ -6055,11 +6334,22 @@ def page_click(
                     {
                         "next_action": (
                             "Nothing was dispatched: another element owns that pixel. "
-                            "Dismiss the overlay, or scroll or resize the tab, then call "
+                            "Dismiss the overlay, then call "
                             "page_click again."
                         )
                     }
-                    if before.get("status") in {"obscured", "outside_viewport"}
+                    if before.get("status") == "obscured"
+                    else {}
+                ),
+                **(
+                    {
+                        "next_action": (
+                            "Nothing was dispatched: the target point is outside the viewport. "
+                            "Scroll the target into view, adjust the click offset, or resize "
+                            "the tab, then call page_click again."
+                        )
+                    }
+                    if before.get("status") == "outside_viewport"
                     else {}
                 ),
                 **(
@@ -6768,9 +7058,12 @@ def _site_permission_extension_result(response: Any) -> dict[str, Any]:
 @mcp.tool(
     description=(
         "Temporarily set an origin-scoped browser site permission for 60-600 seconds. "
-        "Only http/https origins and notifications, geolocation/location, camera, microphone, or clipboard are supported. "
+        "Only http/https origins and notifications, geolocation/location, camera or microphone are supported; "
+        "clipboard returns unsupported because its prior state cannot be restored. "
         "safe asks on every allow; lab skips prompts by default and restores session approval only "
-        "when BROWSERTAP_LAB_NO_ELICIT is explicitly disabled. All leases restore their prior setting."
+        "when BROWSERTAP_LAB_NO_ELICIT is explicitly disabled. Leases attempt to restore their prior setting. "
+        "If restoration becomes unsupported, manual_recovery retains that setting and recovery guidance "
+        "without automatic retries; an explicit reset can retry after the cause is resolved."
     )
 )
 async def set_site_permission(
@@ -6844,8 +7137,10 @@ async def set_site_permission(
 
 @mcp.tool(
     description=(
-        "Restore matching temporary site-permission leases now. Omit origin and permission to reset every "
-        "lease for the selected browser; origin accepts only http/https."
+        "Attempt to restore matching temporary site-permission leases now, including manual_recovery records. "
+        "Omit origin and permission to reset every lease for the selected browser; origin accepts only http/https. "
+        "Unsupported restoration preserves the prior setting and recovery guidance as manual_recovery "
+        "and stops automatic retries. Resolve that cause before another explicit reset."
     )
 )
 def reset_site_permissions(
@@ -7664,6 +7959,41 @@ def _requires_user_action() -> dict[str, Any]:
 
 def _physical_error_result(status: str, message: str) -> dict[str, Any]:
     return {"status": status, "message": message}
+
+
+@mcp.tool(description=(
+    "Explicit desktop capability: inspect the current foreground Windows native file dialog "
+    "owned by a registered Chrome or Edge process. Requires desktop_opt_in=true and the desktop "
+    "extra. Verifies the OS owner/process identity, standard Shell file controls and visible "
+    "Cancel button, then installs a temporary per-ticket window identity marker. Returns a "
+    "15-second ticket for cancel_native_file_dialog plus desktop/on_screen/input_quiet diagnostics. "
+    "This inspection has a temporary marker side effect; it does not activate a window. "
+    "Use page/CDP tools for ordinary pages. Unsupported or unverifiable native layouts are refused."
+))
+def inspect_native_file_dialog(desktop_opt_in: StrictBool = False) -> dict[str, Any]:
+    return native_dialog.inspect_native_file_dialog(desktop_opt_in=desktop_opt_in)
+
+
+@mcp.tool(description=(
+    "Explicit desktop capability: cancel the Windows file dialog identified by a fresh "
+    "inspect_native_file_dialog ticket. Requires desktop_opt_in=true and follows the current "
+    "safe/lab physical-approval policy. Each opted-in attempt consumes its ticket. After the "
+    "physical-input lease, enforced quiet gate, identity, foreground and Cancel hit checks, "
+    "sends one bounded message to that Cancel control without activating a window. Reports "
+    "cancelled only after observing the dialog HWND gone; uncertain delivery or closure is "
+    "unknown with retry_safe=false. Inspect state before another action. Returns desktop, "
+    "on_screen and input_quiet diagnostics; unsupported native layouts are refused."
+))
+async def cancel_native_file_dialog(
+    ticket: str, ctx: Context, desktop_opt_in: StrictBool = False,
+) -> dict[str, Any]:
+    with native_dialog._claim_cancellation(ticket, desktop_opt_in=desktop_opt_in) as cancellation:
+        approved = True
+        if cancellation.needs_approval():
+            approved = await _request_physical_approval(ctx, "cancel the inspected native file dialog")
+        return await anyio.to_thread.run_sync(functools.partial(
+            cancellation.cancel, approved=approved,
+        ))
 
 
 async def _run_approved_physical_action(

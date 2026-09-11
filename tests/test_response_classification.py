@@ -98,11 +98,11 @@ class TestMalformed:
         assert no_response_kind([1, 2]) is None
 
     def test_result_not_a_string(self):
-        assert no_response_kind({"result": 42}) is None
-        assert no_response_kind({"result": None}) is None
+        assert no_response_kind({"result": 42}) == "after_ack"
+        assert no_response_kind({"result": None}) == "after_ack"
 
     def test_empty_dict(self):
-        assert no_response_kind({}) is None
+        assert no_response_kind({}) == "after_ack"
 
-    def test_unrecognised_message_is_not_guessed(self):
-        assert no_response_kind({"result": "something nobody planned for"}) is None
+    def test_unrecognised_message_does_not_establish_success_or_safe_retry(self):
+        assert no_response_kind({"result": "something nobody planned for"}) == "after_ack"

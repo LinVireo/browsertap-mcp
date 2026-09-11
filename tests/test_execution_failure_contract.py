@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from browsertap_mcp import server as S
+from browsertap_mcp.simphtml import execute_js_rich as real_execute_js_rich
 
 
 @pytest.fixture
@@ -114,6 +115,48 @@ def test_undelivered_script_cannot_be_retried_after_its_budget_is_spent(executio
 
     assert raised.value.delivery_state == "undelivered"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("response", [
+    {},
+    {"result": "No response (no ACK)"},
+    {"delivery_state": "future_state", "retry_safe": True},
+    *({"delivery_state": state, "result": "script not polled", "retry_safe": True}
+      for state in ({"future": True}, {}, [], False, 0, None, "")),
+])
+def test_unknown_receipt_cannot_authorize_a_second_dispatch(execution, response):
+    driver, _, _ = execution
+    dispatches = []
+    receipt = {**response, "operation_id": "original-operation"}
+
+    def uncertain(*args, **kwargs):
+        dispatches.append((args, kwargs))
+        return receipt
+
+    driver.execute_js = uncertain
+    with pytest.raises(S.BridgeNoResponseError) as raised:
+        S.exec_js("submit_once()", session_id="chrome:7", timeout=10)
+    assert raised.value.retry_safe is False
+    assert raised.value.operation_id == "original-operation"
+    assert len(dispatches) == 1
+    if "delivery_state" not in receipt:
+        assert raised.value.delivery_state == "sent_unconfirmed"
+
+
+@pytest.mark.parametrize("delivery_state", [{"future": True}, {}, "future_state"])
+@pytest.mark.parametrize("wait", [True, False])
+def test_unknown_rich_receipt_keeps_the_original_dialog_scope(execution, monkeypatch, delivery_state, wait):
+    driver, calls, _ = execution
+    monkeypatch.setattr(S.simphtml, "execute_js_rich", real_execute_js_rich)
+    driver.execute_js = lambda *a, **kw: {
+        "delivery_state": delivery_state, "operation_id": "original-operation",
+        "retry_safe": True,
+    }
+    result = S.execute_js("submit_once()", session_id="chrome:7", timeout=10, no_monitor=True, wait=wait)
+    assert result["status"] == "no_response"
+    assert result["retry_safe"] is False
+    assert result["operation_id"] == "original-operation"
+    assert [command["cmd"] for command, _ in calls] == ["set_dialog_policy"]
 
 
 def test_policy_setup_cannot_dispatch_after_target_resolution_consumes_the_deadline(execution, monkeypatch):

@@ -258,6 +258,31 @@ def test_directory_order_does_not_change_the_stamp(tmp_path):
     assert [name for name, _ in _entries(forward)] == ["one.js", "three.js", "two.js"]
 
 
+@pytest.mark.parametrize("relative", ["icons/icon.png", "future/helper.js"])
+def test_distinct_non_utf8_bytes_have_distinct_stamps(tmp_path, relative):
+    first = _tree(tmp_path / "first", {})
+    second = _tree(tmp_path / "second", {})
+    for root, content in ((first, b"header\xffend"), (second, b"header\xfeend")):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    assert compute_extension_stamp(first) != compute_extension_stamp(second)
+
+
+def test_binary_newlines_are_part_of_the_build_identity(tmp_path):
+    first = _tree(tmp_path / "first", {})
+    second = _tree(tmp_path / "second", {})
+    (first / "asset.bin").write_bytes(b"binary\r\npayload")
+    (second / "asset.bin").write_bytes(b"binary\npayload")
+    assert compute_extension_stamp(first) != compute_extension_stamp(second)
+
+
+def test_text_unicode_separators_are_not_normalized_as_newlines(tmp_path):
+    first = _tree(tmp_path / "first", {"script.js": "const value = 'a\u2028b';\n"})
+    second = _tree(tmp_path / "second", {"script.js": "const value = 'a\nb';\n"})
+    assert compute_extension_stamp(first) != compute_extension_stamp(second)
+
+
 @pytest.mark.parametrize(
     ("label", "body"),
     [

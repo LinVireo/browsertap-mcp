@@ -3,7 +3,7 @@
 English | [中文](USAGE.zh-CN.md)
 
 This guide describes the least disruptive way to use `browsertap-mcp` with
-an existing Chrome, Edge, or Opera session. The full 49-tool contract and every
+an existing Chrome, Edge, or Opera session. The full 51-tool contract and every
 parameter remain in the root [README](../README.md); this document defines the
 recommended workflows and operation boundaries.
 
@@ -14,7 +14,7 @@ may still appear at the top level for compatibility.
 
 ## 1. Operation levels
 
-BTAP operations are divided into two levels:
+BTAP page operations are divided into two levels:
 
 | Mode | What it touches | Does it change the visible browser? |
 |---|---|---|
@@ -86,7 +86,7 @@ BTAP has one screenshot tool:
   window happened to be in front, which is a different question from "what does
   this tab show".
 
-Both tools, and `save_pdf`, take a **relative** `save_path` that resolves under
+`capture_page_screenshot` and `save_pdf` take a **relative** `save_path` that resolves under
 `~/Downloads/browsertap`. An absolute path or a `..` escape is rejected with a
 `ValueError`; the sandbox is not configurable by environment variable.
 
@@ -97,7 +97,7 @@ multimodal model when visual interpretation matters. Otherwise use
 WebGL, and terminal pages, look for structured data first; screenshots are a
 last resort for understanding pixels.
 
-## 5. Foreground activation, and the one remaining physical path
+## 5. Foreground activation and explicit desktop recovery
 
 Page-level CDP tools are *the* path for forms, buttons, keyboard shortcuts
 inside a page, scrolling, and drag operations. `page_click`, `page_type`,
@@ -106,14 +106,13 @@ inside a page, scrolling, and drag operations. `page_click`, `page_type`,
 **The seven OS-level tools were removed in 0.5.0**, so there is no
 screen-coordinate surface to escalate to. A failing `page_click` is a targeting
 problem: read `obscured` / `outside_viewport` / `not_found` off the result and
-fix the target. Browser UI, extension popups, native file choosers, and OS
-dialogs are outside what a page-level event can reach at all; report that as
-unsupported.
+fix the target. Browser UI, extension popups and OS dialogs are outside page-level
+input. A supported Windows file dialog has the explicit cancellation flow below.
 
 Foreground activation on its own — `activate_tab`, or `switch_tab(activate=true)`
 — sends no input; use it when the user must see a tab.
 
-One physical path is left: `resolve_leave_dialog` sends Enter after two protocol
+One global-key fallback remains: `resolve_leave_dialog` sends Enter after two protocol
 accepts fail, and only in `lab`. The order it follows is:
 
 1. Two protocol-level attempts first. A `no_dialog` result or a transport
@@ -132,6 +131,18 @@ The default `lab` profile skips elicitation for continuous automation. Set
 `safe` refuses the Enter fallback outright and asks for each site-allow action.
 Neither profile disables the lock, quiet-input gate, ownership checks, or screen
 confirmation.
+
+For an already-open standard Windows file dialog owned by registered Chrome or
+Edge, call `inspect_native_file_dialog(desktop_opt_in=true)` and then
+`cancel_native_file_dialog(ticket=..., desktop_opt_in=true)` in the same MCP
+process within 15 seconds. Install `[desktop]` first. The inspection temporarily
+marks that exact window; cancellation consumes the ticket, checks foreground,
+identity, hit targets and observed quiet input, then sends one Cancel message.
+`safe` requires approval; default `lab` skips elicitation. Refusals consume opted-in
+tickets too. Only `cancelled=true` with `status="success"` confirms closure;
+`unknown` or `retry_safe=false` calls for inspection before another action.
+Unsupported layouts and platforms remain unsupported. For normal uploads,
+`upload_files` targets the page input directly and does not need a native dialog.
 
 ## 6. Dialogs, permissions, and challenges
 

@@ -422,7 +422,7 @@ def test_remote_execute_with_no_live_tab_preserves_the_unselected_target():
 def test_expired_http_session_is_not_resolved_as_a_live_target():
     driver = driver_stub()
     session = _install_exec_session(driver, session_type="http", session_id="http:1")
-    session.connect_at = time.time() - T.HTTP_SESSION_IDLE_SECONDS - 1
+    session.last_activity_at = time.time() - T.HTTP_SESSION_IDLE_SECONDS - 1
     assert driver.resolve_session_target(session.id) is None
     assert session.disconnect_at is not None
 
@@ -477,6 +477,7 @@ def test_persist_token_converges_when_another_process_wins(monkeypatch, tmp_path
 
 def test_persist_token_rejects_an_empty_file_left_by_competitor(monkeypatch, tmp_path):
     path = tmp_path / "token"
+    path.touch()
     monkeypatch.setattr(T.os, "open", lambda *args, **kwargs: (_ for _ in ()).throw(FileExistsError()))
     monkeypatch.setattr(T.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="token file is empty"):
@@ -529,7 +530,7 @@ def test_session_lifecycle_for_ws_http_and_extension_types(monkeypatch, caplog):
     assert session.type == "http"
     assert session.ws_client is None
     assert session.http_queue is not None
-    session.connect_at = time.time() - 61
+    session.last_activity_at = time.time() - 61
     assert session.is_active() is False
     assert "Tab disconnected" in caplog.text
 
@@ -904,7 +905,7 @@ def test_remote_get_sessions_diagnose_and_set_session(monkeypatch):
         if cmd["cmd"] == "find_session":
             return {"r": [["c:1", {"url": "https://x"}]]}
         if cmd["cmd"] == "diagnose":
-            return {"r": {"cause": "healthy"}}
+            return {"r": {"cause": "healthy", "ok": True}}
         return {"r": [{"id": "c:1", "url": "https://x"}]}
 
     driver._remote_cmd = remote
@@ -1059,7 +1060,7 @@ def test_constructor_detects_remote_bridge_without_starting_servers(monkeypatch,
     class HttpSession:
         trust_env = True
 
-    monkeypatch.setattr(T.socket, "socket", Probe)
+    monkeypatch.setattr(T.socket, "socket", lambda *args, **kwargs: Probe())
     monkeypatch.setattr(T.requests, "Session", HttpSession)
     monkeypatch.setattr(T.BrowserBridge, "start_ws_server", lambda self: pytest.fail("must stay remote"))
     monkeypatch.setattr(T.BrowserBridge, "start_http_server", lambda self: pytest.fail("must stay remote"))
@@ -1091,7 +1092,7 @@ def test_constructor_starts_local_servers_when_lock_is_acquired(monkeypatch):
 
     calls = []
     host_lock = object()
-    monkeypatch.setattr(T.socket, "socket", Probe)
+    monkeypatch.setattr(T.socket, "socket", lambda *args, **kwargs: Probe())
     monkeypatch.setattr(T.BrowserBridge, "_acquire_host_lock", lambda self: host_lock)
     monkeypatch.setattr(T.BrowserBridge, "start_ws_server", lambda self: calls.append("ws"))
     monkeypatch.setattr(T.BrowserBridge, "start_http_server", lambda self: calls.append("http"))
@@ -1122,7 +1123,7 @@ def test_constructor_loses_host_lock_then_waits_for_winner(monkeypatch, probes, 
         trust_env = True
 
     sleeps = []
-    monkeypatch.setattr(T.socket, "socket", Probe)
+    monkeypatch.setattr(T.socket, "socket", lambda *args, **kwargs: Probe())
     monkeypatch.setattr(T.BrowserBridge, "_acquire_host_lock", lambda self: None)
     monkeypatch.setattr(T.requests, "Session", HttpSession)
     monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
@@ -1159,11 +1160,11 @@ def test_host_lock_success_and_failure(monkeypatch, exclusive_option):
     else:
         monkeypatch.delattr(T.socket, "SO_EXCLUSIVEADDRUSE", raising=False)
     good = LockSocket()
-    monkeypatch.setattr(T.socket, "socket", lambda: good)
+    monkeypatch.setattr(T.socket, "socket", lambda *args, **kwargs: good)
     assert driver._acquire_host_lock() is good
     assert ("bind", ("127.0.0.1", 18767)) in good.calls
     bad = LockSocket(fail=True)
-    monkeypatch.setattr(T.socket, "socket", lambda: bad)
+    monkeypatch.setattr(T.socket, "socket", lambda *args, **kwargs: bad)
     assert driver._acquire_host_lock() is None
     assert bad.closed is True
 

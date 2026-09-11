@@ -3,7 +3,7 @@
 [English](USAGE.md) | 中文
 
 本文档定义 `browsertap-mcp` 在现有 Chrome、Edge 或 Opera 会话中的推荐操作方式，
-目标是在保持任务可控的同时，尽量避免改变用户正在使用的浏览器和桌面状态。49 个工具及其
+目标是在保持任务可控的同时，尽量避免改变用户正在使用的浏览器和桌面状态。51 个工具及其
 参数以根目录的 [README 中文版](../README.zh-CN.md)为权威参考；本文档仅说明操作流程和
 边界选择。
 
@@ -13,7 +13,7 @@
 
 ## 1. 操作层级
 
-BTAP 的操作分为两个层级：
+BTAP 的页面操作分为两个层级：
 
 | 层级 | 操作对象 | 对可见界面的影响 |
 |---|---|---|
@@ -85,20 +85,20 @@ Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `re
 模型不支持图片输入时，应改用 `scan_page`、`execute_js`、页面数据 API 或环境提供的 OCR。
 对于终端模拟器、canvas 和 WebGL 页面，仍应优先获取结构化数据，仅在确需像素判断时使用截图。
 
-## 5. 前台激活，以及仅剩的那条物理路径
+## 5. 前台激活与显式桌面恢复
 
 普通表单、页面按钮、页内快捷键、滚动和拖拽**就用** `page_*` 等 CDP 工具，`page_click`、
 `page_type`、`page_press`、`page_drag` 全部不需要前台激活。
 
 **那七个操作系统级工具已在 0.5.0 移除**，所以没有屏幕坐标面可以「升级」过去。
 `page_click` 失败是定位问题：按返回的 `obscured` / `outside_viewport` / `not_found` 修正
-目标。浏览器自身界面、扩展弹窗、原生文件选择器和操作系统对话框本来就不在页面级事件能到的
-范围内，按**不支持**上报。
+目标。浏览器自身界面、扩展弹窗和操作系统对话框不属于页面级输入范围；受支持的 Windows
+文件框可使用下述显式取消流程。
 
 单纯的前台激活（`activate_tab`、`switch_tab(activate=true)`）不发送任何输入；用户需要看到
 某个标签页时用它。
 
-只剩一条物理路径：`resolve_leave_dialog` 在两次协议 accept 失败后发送 Enter，且仅限 `lab`。
+全局按键兜底保留一条：`resolve_leave_dialog` 在两次协议 accept 失败后发送 Enter，且仅限 `lab`。
 其执行顺序如下：
 
 1. 先走两次协议级尝试。返回 `no_dialog` 或传输超时就到此为止，什么都不发。
@@ -112,6 +112,15 @@ Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `re
 `BROWSERTAP_LAB_NO_ELICIT=0` 或 `false` 可恢复 lab 会话级询问；`safe` profile 直接拒发这条
 Enter 兜底，并对每次站点 `allow` 操作进行询问。两种 profile 均保留输入锁、安静窗口、
 所有权检查、目标激活和屏幕确认。
+
+已打开的 Windows 标准文件框若由已注册 Chrome 或 Edge 持有，先调用
+`inspect_native_file_dialog(desktop_opt_in=true)`，再在同一 MCP 进程中于 15 秒内调用
+`cancel_native_file_dialog(ticket=..., desktop_opt_in=true)`。这两个工具要求 `[desktop]`。
+检查会临时标记精确窗口；取消会消费票据，核验前景、身份、命中点和真实输入静默信号后，
+只发送一次 Cancel 消息。`safe` 要求批准，默认 `lab` 免 elicitation；显式 opt-in 后的
+拒绝也消费票据。只有 `status="success", cancelled=true` 确认关闭；`unknown` 或
+`retry_safe=false` 时先检查状态。不支持的布局和平台仍会拒绝。普通上传直接用
+`upload_files` 操作页面输入控件，无需打开原生文件框。
 
 ## 6. 对话框、权限与挑战页
 

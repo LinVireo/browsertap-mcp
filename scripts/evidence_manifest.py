@@ -17,10 +17,14 @@ DEFAULT_OUTPUT = ROOT / "artifacts" / "evidence-manifest.json"
 # covers tracked-but-deleted paths. A version-1 manifest is not comparable
 # against a version-2 fingerprint, so it has to be rejected by version rather
 # than silently reported as a content mismatch.
-SCHEMA_VERSION = 2
+# 3: complete-suite collection and execution receipts are mandatory alongside
+# JUnit. A successful XML file alone cannot establish which tests were expected.
+SCHEMA_VERSION = 3
 OFFLINE_ARTIFACTS = (
     "artifacts/coverage.json",
     "artifacts/offline-junit.xml",
+    "artifacts/offline-collection.json",
+    "artifacts/offline-execution.json",
     "artifacts/tool-coverage-offline.json",
     # Lint was the one gate with no evidence behind it: CI ran ruff, the seal
     # recorded nothing about it, so `release_ready: true` said nothing either way
@@ -31,6 +35,8 @@ OFFLINE_ARTIFACTS = (
 )
 LIVE_ARTIFACTS = (
     "artifacts/live-junit.xml",
+    "artifacts/live-collection.json",
+    "artifacts/live-execution.json",
     "artifacts/tool-coverage-live.json",
     # The junit says which tests passed; this says whether the run was worth
     # believing -- which build each of the three processes was running, whether

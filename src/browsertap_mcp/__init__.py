@@ -1,3 +1,11 @@
+from .runtime_identity import capture_source_identity as _capture_source_identity
+
+# Seal Python sources and required JavaScript assets before other modules cache
+# them, including modules imported lazily later. A package reload does not reload
+# all those modules, so it must not replace the original process snapshot either.
+if "_PYTHON_SOURCE_IDENTITY" not in globals():
+    _PYTHON_SOURCE_IDENTITY = _capture_source_identity()
+
 from ._version import __version__
 from .paths import adopt_legacy_env as _adopt_legacy_env
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from scripts import finalize_change as F
 
 
@@ -60,3 +64,61 @@ def test_archive_previous_outputs_sweeps_unenumerated_names_and_stale_dist_dirs(
     ).read_bytes() == b"old sdist"
     # Earlier archived rounds are history, not stale output: they stay put.
     assert (kept / "coverage.json").read_text(encoding="utf-8") == "earlier round"
+
+
+@pytest.fixture
+def finalizer_calls(monkeypatch, tmp_path):
+    """Exercise the real finalizer ordering without launching build or browser work."""
+    calls = []
+    monkeypatch.setattr(F, "ROOT", tmp_path)
+    monkeypatch.setattr(F, "read_source_version", lambda _root: "0.5.0")
+    monkeypatch.setattr(F, "sync_versions", lambda _root, _target: [])
+    monkeypatch.setattr(F, "validate_versions", lambda _root: None)
+    monkeypatch.setattr(F, "_check_version_bump", lambda: calls.append(("version-bump",)))
+    monkeypatch.setattr(F, "_require_module", lambda _module: None)
+    monkeypatch.setattr(F, "_run", lambda *args: calls.append(args))
+    monkeypatch.setattr(F, "write_manifest", lambda **kwargs: calls.append(("seal", kwargs)))
+    return calls
+
+
+@pytest.mark.parametrize("skip_live", [False, True])
+def test_finalizer_uses_the_complete_runner_and_independent_report_check(finalizer_calls, skip_live):
+    calls = finalizer_calls
+    argv = ["--bump", "none", *(["--skip-live"] if skip_live else [])]
+    assert F.main(argv) == 0
+    offline = (sys.executable, "-m", "scripts.test_run_evidence", "--mode", "offline")
+    live = (sys.executable, "-m", "scripts.test_run_evidence", "--mode", "live")
+    version = (sys.executable, "-m", "pytest", "tests/test_versioning.py", "-q")
+    seal = ("seal", {"include_live": not skip_live})
+    report = (sys.executable, "-m", "scripts.acceptance_report")
+    check = (*report, "--check")
+
+    assert calls.count(offline) == 1
+    assert calls.index(("version-bump",)) < calls.index(offline) < calls.index(version)
+    assert calls.index(version) < calls.index(seal)
+    assert (live in calls) is not skip_live
+    assert (report in calls) is not skip_live
+    assert (check in calls) is not skip_live
+    if not skip_live:
+        assert calls.index(offline) < calls.index(live) < calls.index(version)
+        assert calls.index(seal) < calls.index(report) < calls.index(check)
+    for command in (
+        ("compileall", "-q", "src"), ("scripts.lint_report",), ("scripts.check_tool_docs",),
+        ("build", "--wheel", "--sdist", "--outdir", "artifacts/dist"),
+        ("scripts.check_distribution", "artifacts/dist"),
+        ("scripts.check_install", "artifacts/dist", "--no-deps"), ("pip", "check"),
+    ):
+        assert (sys.executable, "-m", *command) in calls
+
+
+def test_a_failed_independent_report_check_stops_finalization(finalizer_calls, monkeypatch, capsys):
+    def run(*args):
+        finalizer_calls.append(args)
+        if args[-2:] == ("scripts.acceptance_report", "--check"):
+            raise SystemExit(1)
+
+    monkeypatch.setattr(F, "_run", run)
+    with pytest.raises(SystemExit, match="1"):
+        F.main(["--bump", "none"])
+    assert finalizer_calls[-1] == (sys.executable, "-m", "scripts.acceptance_report", "--check")
+    assert "finalized" not in capsys.readouterr().out

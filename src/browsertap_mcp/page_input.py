@@ -282,9 +282,9 @@ def press_commands(chord: str) -> list[dict[str, Any]]:
             raise InputValidationError("a modifier may appear only once")
     else:
         modifier_names = []
-    key, code, key_code = _key_details(parts[-1])
     if parts[-1].lower() in _MODIFIER_ALIASES:
         raise InputValidationError("chord must end with a non-modifier key")
+    key, code, key_code = _key_details(parts[-1])
 
     modifiers = 0
     commands: list[dict[str, Any]] = []
