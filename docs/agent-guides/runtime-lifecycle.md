@@ -14,7 +14,7 @@ This is the first thing to check when an edit appears to do nothing.
 
 | Process | What it is | When your edit takes effect |
 |---|---|---|
-| MCP server | one per client session, short-lived | **immediately** on an editable install |
+| MCP server | one per client session | **when a fresh MCP process starts**, including on an editable install |
 | bridge daemon | `pythonw -m browsertap_mcp.bridge`, long-lived, outlives every server | **only after a restart** |
 | Chrome extension | unpacked MV3 extension loaded from `src/browsertap_mcp/chrome_extension` | **only after a manual reload** |
 
@@ -48,6 +48,16 @@ component is stale, run `browsertap doctor` and read `action`:
 `reload_extension`, `restart_bridge` and `restart_mcp_session` each name the one
 thing that will actually fix it -- the other two will not.
 
+An extension that has not supplied runtime status has not been checked for
+compatibility. `extension_status_available=false` keeps
+`reload_extension_required=false`: startup reports `starting` /
+`wait_for_extension`; after startup it reports `extension_unavailable` /
+`check_extension_connection`. Check the extension connection and retry the
+diagnosis. A valid legacy response missing required fields still runs the
+compatibility checks. Confirmed old bridge or MCP versions take precedence over
+waiting, and a successful fallback status probe can complete startup even if the
+earlier bridge snapshot said `starting`.
+
 **Do not answer "is the extension stale?" from a version number.**
 `chrome.runtime.getManifest().version` is parsed by Chrome at load time and
 refreshed on its own schedule; `background.js` does not follow it. Measured here
@@ -68,7 +78,7 @@ and `browsertap doctor` do that and publish `extension_build_verdict`:
 | `matches_tree` | the worker is running this tree | nobody's; stop asking for a Reload |
 | `stale_worker` | it is not | the human's -- press Reload |
 | `stamp_not_regenerated` | an extension file was edited and the stamp was not | yours -- see below |
-| `unverifiable` | the extension predates the stamp, or the directory is unreadable | nobody's; it is unknown, not a pass |
+| `unverifiable` | runtime status is unavailable, the extension predates the stamp, or the directory is unreadable | nobody's; it is unknown, not a pass |
 
 `stamp_not_regenerated` is the one that catches *you*, and it is why the verdict
 cannot simply compare and report: a stale stamp makes a **fresh** worker report

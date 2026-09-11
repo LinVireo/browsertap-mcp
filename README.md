@@ -353,6 +353,13 @@ its `action` is `wait_for_extension`, so wait a few seconds and run `doctor`
 again. `registering` means the extension is connected but no normal `http(s)`
 content tab is ready.
 
+When no extension runtime status is available after startup, the setup status is
+`extension_unavailable` with `action: check_extension_connection`. Check that
+BrowserTap Bridge is enabled in the intended browser and retry `doctor`.
+`extension_status_available=false` means compatibility is still unknown;
+missing runtime data alone does not request an extension Reload. Confirmed old
+bridge or MCP versions retain their own restart action, including during startup.
+
 It always prints JSON on stdout, including when the configuration itself is
 wrong. An unparseable `BROWSERTAP_BRIDGE_PORT` or a `BROWSERTAP_BRIDGE_HOST`
 that does not resolve fails before any bridge call, and is reported as
@@ -573,6 +580,7 @@ browser/profile selection.
 <summary><b>Tabs and navigation</b></summary>
 
 - **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `browsertap bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload; a version number that differs on its own no longer sets it, because Chrome parses `manifest.json` at load time and never re-parses it without a Reload, so a release bump would otherwise demand a click whose only effect is on that number. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. `extension_build_stamp` is the stronger signal and answers the question the four version fields cannot: it is a hash of the extension sources compiled into `background.js`, reported by the worker actually running, so comparing it to `expected_extension_build_stamp` (a fresh hash of the directory) is decisive in both directions where version equality was measured wrong twice. Read the answer from `extension_build_verdict`: `matches_tree` (the worker is running this code), `stale_worker` (it is not -- Reload), `stamp_not_regenerated` (an extension file was edited without running `python -m scripts.extension_stamp --write`, so the comparison proves nothing either way) or `unverifiable` (the extension predates the stamp, or the directory could not be read -- see `extension_build_error`). `extension_build_enforced=false` means no comparison happened, so treat it as unknown rather than as a pass. Answers while another tool is still running; `default_session_id` is this request's snapshot of the MCP process default and `default_session_settled=true` because another call's temporary target is isolated. No parameters.
+  `extension_status_available=false` means the extension has not supplied runtime status: `starting` asks to `wait_for_extension`, and `extension_unavailable` asks to `check_extension_connection`. Missing status alone does not request a Reload. Compatibility checks, including legacy replies missing required fields, apply once runtime status is available.
 - **get_automation_profile** — inspect whether the current MCP process uses `lab` or `safe`.
 - **set_automation_profile** — switch the current MCP process between `lab|safe`; the override is not persisted and does not reload the extension.
   - `mode` (string): `lab` or `safe`

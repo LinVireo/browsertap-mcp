@@ -437,6 +437,7 @@ _HEALTHY = {
     "package_version": "0.4.3",
     "bridge_version": "0.4.3",
     "extension_version": "0.4.3",
+    "extension_status_available": True,
     "protocol_version": 3,
     "expected_protocol_version": 3,
     "missing_extension_capabilities": [],
@@ -472,6 +473,28 @@ def test_starting_bridge_is_not_mislabeled_as_a_stale_extension():
     assert "waiting for the extension handshake" in reason
     assert "do not reload" in reason
     assert "chrome://extensions" not in reason
+
+
+def test_unavailable_extension_is_not_accepted_or_mislabeled_as_stale():
+    status = dict(
+        _HEALTHY,
+        status="extension_unavailable",
+        action="check_extension_connection",
+        extension_version=None,
+        extension_status_available=False,
+        protocol_version=None,
+        extension_build_verdict="unverifiable",
+        extension_build_enforced=False,
+    )
+
+    reason = P.stale_component_reason(status)
+
+    assert reason is not None
+    assert "extension runtime status is unavailable" in reason
+    assert "check the extension connection" in reason
+    assert "Reload" not in reason
+    assert "running a different build" not in reason
+    assert P.component_versions(status)["extension_status_available"] is False
 
 
 def test_a_stale_extension_is_refused_and_named_with_the_click_that_fixes_it():
@@ -670,6 +693,7 @@ def test_the_recorded_summary_leaves_this_machine_out_of_the_published_evidence(
         "package_version",
         "bridge_version",
         "extension_version",
+        "extension_status_available",
         "protocol_version",
         "expected_protocol_version",
         "missing_extension_capabilities",

@@ -11,6 +11,7 @@ authoritative contracts. These files route Trellis tasks to those contracts.
 | [Persistence](database-guidelines.md) | State files, tokens, locks, or paths |
 | [Error handling](error-handling.md) | Batch target reservations, bounded unknown outcomes, capture bookkeeping, tab-create recovery, or transport failures |
 | [Logging](logging-guidelines.md) | Diagnostics or sensitive data handling |
+| [Setup diagnostics](setup-diagnostics.md) | Missing extension handshake, compatibility verdicts or recovery actions |
 | [Quality](quality-guidelines.md) | Tests, tool contracts, or validation |
 
 For work shared with Claude Code, read the

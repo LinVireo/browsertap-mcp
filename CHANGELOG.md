@@ -79,6 +79,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Setup diagnostics no longer request an extension Reload when no runtime
+  status has arrived after a bridge restart. Startup asks callers to wait;
+  later `extension_unavailable` asks them to check the extension connection.
+  Confirmed version, protocol, capability and worker-build mismatches retain
+  their recovery actions. Live preflight refuses unavailable status without
+  labeling it as a stale build.
 - Timed-out server-generated selector/text/URL wait probes can release their
   tab reservation while keeping the original result receipt. The bridge does
   this at its existing probe deadline, without an extra cleanup request.

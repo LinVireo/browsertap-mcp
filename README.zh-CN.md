@@ -300,6 +300,12 @@ browsertap print-hermes-config  # 打印 Hermes 配置片段
 握手；此时 `action` 为 `wait_for_extension`，等待几秒后再次运行 `doctor`。`registering` 表示
 扩展已连接，但尚无正常的 `http(s)` 内容标签页完成注册。
 
+启动期结束后仍未取得扩展运行状态时，setup 状态为 `extension_unavailable`，
+`action` 为 `check_extension_connection`。检查目标浏览器中的 BrowserTap Bridge
+是否启用并连接，再运行 `doctor`。`extension_status_available=false` 表示兼容性尚未确定；
+仅缺少运行数据不会要求 Reload。已确认的旧 bridge 或 MCP 版本仍报告各自的重启动作，
+启动期间也一样。
+
 BTAP 首次使用时创建 `~/.browsertap/bridge-token`，bridge 和所有 MCP 进程均读取该文件。
 关闭浏览器或编辑器不会轮换 token。卸载扩展或重装 Python 包时会保留该文件，因此重装后可以
 继续使用。若需彻底清除用户数据，应先停止所有 BTAP bridge 进程，再删除整个
@@ -520,6 +526,7 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 <summary><b>标签页与导航</b></summary>
 
 - **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `browsertap bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload；**仅版本号不同已不再单独置位它**——Chrome 只在 load 时 parse `manifest.json`、不 Reload 就永远不重新 parse，否则每次涨版本都要人点一次、而那一次唯一改变的就是这个数字。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。`extension_build_stamp` 是更强的信号，回答四个版本字段回答不了的问题：它是编译进 `background.js` 的扩展源码哈希，由**正在运行的** worker 报告，所以把它和 `expected_extension_build_stamp`（当前目录的新鲜哈希）相比，在两个方向上都是决定性的——而版本相等已经两次被实测判错。结论看 `extension_build_verdict`：`matches_tree`（worker 跑的就是这份代码）、`stale_worker`（不是，去 Reload）、`stamp_not_regenerated`（改了扩展文件但没跑 `python -m scripts.extension_stamp --write`，此时比较在两个方向上都不成立）、`unverifiable`（扩展早于该机制，或目录读不出来——见 `extension_build_error`）。`extension_build_enforced=false` 表示这次比较根本没发生，应当按未知处理，不要当成通过。另一个工具正在运行时它照样应答；`default_session_id` 是本次请求取得的 MCP 进程默认目标快照，其他调用的临时目标已隔离，因此 `default_session_settled=true`。无参数
+  `extension_status_available=false` 表示尚未取得扩展运行状态：`starting` 要求 `wait_for_extension`，`extension_unavailable` 要求 `check_extension_connection`。仅缺少状态不会要求 Reload；取得运行状态后才检查兼容性，旧扩展的有效回复缺少必需字段时仍会触发原有检查。
 - **get_automation_profile** —— 查看当前 MCP 进程使用 `lab` 还是 `safe` profile
 - **set_automation_profile** —— 切换当前 MCP 进程的 `lab|safe` profile;覆盖值不会持久化或重载扩展
   - `mode`(string):`lab` 或 `safe`

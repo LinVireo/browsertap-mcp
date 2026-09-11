@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from browsertap_mcp import __version__
 from browsertap_mcp import server as S
 from browsertap_mcp.extension_build import STAMP_LENGTH, stamp_line, write_extension_stamp
@@ -67,28 +69,86 @@ def test_setup_status_reports_all_equal_components_as_healthy(monkeypatch):
     assert registry["groups"]["desktop"] == []
 
 
-def test_setup_status_surfaces_bridge_startup_without_requesting_reload(monkeypatch):
+@pytest.mark.parametrize(
+    ("cause", "expected_status", "expected_action"),
+    [
+        ("starting", "starting", "wait_for_extension"),
+        ("ext_never_registered", "extension_unavailable", "check_extension_connection"),
+        ("sw_slept_or_dropped", "extension_unavailable", "check_extension_connection"),
+        ("healthy", "extension_unavailable", "check_extension_connection"),
+    ],
+)
+def test_missing_runtime_status_does_not_request_reload(
+    monkeypatch, cause, expected_status, expected_action
+):
     result = _status(
         monkeypatch,
         {
-            "cause": "starting",
+            "cause": cause,
             "ok": False,
             "bridge_version": __version__,
+            "ever_registered": False,
+            "bridge_uptime_seconds": 2.0 if cause == "starting" else 30.0,
+            "startup_grace_seconds": 10.0,
+        },
+        RuntimeError("Extension not connected"),
+    )
+
+    assert result["status"] == expected_status
+    assert result["action"] == expected_action
+    assert result["reload_extension_required"] is False
+    assert result["extension_status_available"] is False
+    assert result["missing_extension_capabilities"] == []
+    assert result["extension_build_verdict"] == "unverifiable"
+    assert result["extension_build_enforced"] is False
+    assert not any("Reload the unpacked extension" in note for note in result["notes"])
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_status", "expected_action"),
+    [
+        ("0.0.1", "stale_bridge", "restart_bridge"),
+        ("99.0.0", "stale_package", "restart_mcp_session"),
+    ],
+)
+def test_missing_handshake_does_not_hide_a_known_stale_component(
+    monkeypatch, version, expected_status, expected_action
+):
+    result = _status(
+        monkeypatch,
+        {"cause": "starting", "ok": False, "bridge_version": version},
+        RuntimeError("Extension not connected"),
+    )
+
+    assert result["status"] == expected_status
+    assert result["action"] == expected_action
+    assert result["reload_extension_required"] is False
+
+
+def test_extension_connecting_during_the_fallback_probe_completes_startup(
+    monkeypatch, tmp_path
+):
+    directory, stamp = _extension_tree(tmp_path, "connected-during-probe")
+    result = _build_status(
+        monkeypatch,
+        directory,
+        {"cause": "starting", "ok": False, "bridge_version": __version__},
+        runtime={
             "extension_version": __version__,
             "protocol_version": 3,
-            "extension_capabilities": {
+            "capabilities": {
                 "content_command_channel_removed": True,
                 "batch_result_guard": True,
             },
-            "bridge_uptime_seconds": 2.0,
-            "startup_grace_seconds": 10.0,
+            "build_stamp": stamp,
         },
     )
 
-    assert result["status"] == "starting"
-    assert result["action"] == "wait_for_extension"
+    assert result["status"] == "healthy"
+    assert result["action"] == "none"
+    assert result["extension_status_available"] is True
     assert result["reload_extension_required"] is False
-    assert "handshake" in result["notes"][0]
+    assert result["extension_build_verdict"] == "matches_tree"
 
 
 def test_setup_status_classifies_old_bridge_before_extension(monkeypatch):
@@ -136,6 +196,7 @@ def test_setup_status_treats_missing_extension_capability_as_stale(monkeypatch):
     assert result["status"] == "stale_extension"
     assert result["extension_version"] is None
     assert result["protocol_version"] is None
+    assert result["extension_status_available"] is True
 
 
 def test_setup_status_requires_removed_content_command_channel(monkeypatch):

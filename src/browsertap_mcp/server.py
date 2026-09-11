@@ -358,6 +358,7 @@ _RESULT_FAILURE_STATUSES = frozenset({
 })
 _SETUP_DIAGNOSTIC_STATUSES = frozenset({
     "healthy", "starting", "stale_bridge", "stale_extension", "stale_package",
+    "extension_unavailable",
 })
 _RESULT_RETRYABLE_CODES = frozenset({
     "bridge_unreachable", "extension_not_connected", "session_not_connected",
@@ -1825,7 +1826,11 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
         "the browser worker is running this code (matches_tree / stale_worker), or says why "
         "it cannot tell (stamp_not_regenerated / unverifiable); it is decisive where "
         "version equality is not. extension_build_enforced=false means no comparison "
-        "happened, so treat it as unknown rather than as a pass. Answers while another tool "
+        "happened, so treat it as unknown rather than as a pass. "
+        "extension_status_available=false means no runtime status was obtained: starting "
+        "asks to wait_for_extension, then extension_unavailable asks to "
+        "check_extension_connection; missing status alone never requests a reload. "
+        "Answers while another tool "
         "is still running; default_session_id is isolated from other calls' temporary targets. "
         "capability_registry is the runtime page/browser/desktop inventory; each entry includes "
         "target (none/optional/required), side_effect (read/write/mixed), result_contract, and "
@@ -1860,6 +1865,16 @@ def get_setup_status() -> dict[str, Any]:
     extension_capabilities = diagnosis.get("extension_capabilities") or {}
     extension_status_error = diagnosis.get("extension_status_error")
     reported_build_stamp = diagnosis.get("extension_build_stamp")
+    # A missing handshake is not a compatibility failure. Older bridges forward
+    # these fields only after a runtime reply; even an empty capability object is
+    # meaningful evidence when a legacy extension actually answered.
+    extension_status_available = any(
+        diagnosis.get(field) is not None
+        for field in (
+            "extension_version", "protocol_version", "extension_capabilities",
+            "extension_build_stamp",
+        )
+    )
 
     # An older bridge may not forward extension build data yet, while still
     # supporting the generic ext_cmd route. Probe it directly before deciding
@@ -1869,8 +1884,10 @@ def get_setup_status() -> dict[str, Any]:
     # exactly the installs where the fallback exists to fill gaps in.
     if extension_version is None or protocol_version is None or reported_build_stamp is None:
         try:
-            runtime = _extension_data(
-                driver.ext_cmd({"cmd": "bridge_status"}, timeout=_STATUS_TIMEOUT)
+            runtime_response = driver.ext_cmd({"cmd": "bridge_status"}, timeout=_STATUS_TIMEOUT)
+            runtime = _extension_data(runtime_response)
+            extension_status_available = extension_status_available or isinstance(
+                runtime_response, dict
             )
             # Gap-filling, never overwriting. Every field keeps the bridge's answer
             # when it has one, because this branch now fires with all three version
@@ -1936,7 +1953,7 @@ def get_setup_status() -> dict[str, Any]:
     missing_extension_capabilities = sorted(
         capability
         for capability in _REQUIRED_EXTENSION_CAPABILITIES
-        if extension_capabilities.get(capability) is not True
+        if extension_status_available and extension_capabilities.get(capability) is not True
     )
     # The version number is the *weakest* of the four signals below and the only one
     # a reload cannot be needed for on its own, so it yields to the stamp rather than
@@ -1951,7 +1968,7 @@ def get_setup_status() -> dict[str, Any]:
     # `stamp_not_regenerated`): a weak signal beats none.
     version_skew = extension_version != __version__ and not extension_is_newer
     version_skew_is_only_the_release_number = extension_build_verdict == "matches_tree"
-    reload_extension_required = (
+    reload_extension_required = extension_status_available and (
         (version_skew and not version_skew_is_only_the_release_number)
         or (protocol_version != _EXTENSION_PROTOCOL_VERSION and not protocol_is_newer)
         # A newer extension that no longer advertises a capability this build
@@ -1991,15 +2008,19 @@ def get_setup_status() -> dict[str, Any]:
     if bridge_error or diagnosis.get("cause") == "bridge_unreachable":
         component_status = "bridge_unreachable"
         component_action = "restart_bridge"
-    elif diagnosis.get("cause") == "starting":
-        component_status = "starting"
-        component_action = "wait_for_extension"
     elif package_is_stale:
         component_status = "stale_package"
         component_action = "restart_mcp_session"
     elif restart_bridge_required:
         component_status = "stale_bridge"
         component_action = "restart_bridge"
+    elif not extension_status_available:
+        if diagnosis.get("cause") == "starting":
+            component_status = "starting"
+            component_action = "wait_for_extension"
+        else:
+            component_status = "extension_unavailable"
+            component_action = "check_extension_connection"
     elif reload_extension_required:
         component_status = "stale_extension"
         component_action = "reload_extension"
@@ -2013,6 +2034,7 @@ def get_setup_status() -> dict[str, Any]:
         "package_version": __version__,
         "bridge_version": bridge_version,
         "extension_version": extension_version,
+        "extension_status_available": extension_status_available,
         "protocol_version": protocol_version,
         "expected_protocol_version": _EXTENSION_PROTOCOL_VERSION,
         "extension_capabilities": extension_capabilities,
@@ -2052,8 +2074,16 @@ def get_setup_status() -> dict[str, Any]:
             "Wait a few seconds and retry doctor or the browser tool; do not reload "
             "the extension unless the next diagnosis says stale_extension.",
         )
+    elif component_status == "extension_unavailable":
+        status["notes"].insert(
+            0,
+            "The bridge is reachable but extension runtime status is unavailable. "
+            "Retry doctor; if it persists, check that BrowserTap Bridge is enabled "
+            "and connected in the intended browser. See diagnosis for the connection "
+            "cause. Missing runtime status does not establish an outdated extension.",
+        )
     if (
-        component_status != "starting"
+        extension_status_available
         and extension_build_verdict == "unverifiable"
         and recorded_build_stamp is not None
     ):

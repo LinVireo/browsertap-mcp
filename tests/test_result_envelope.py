@@ -206,7 +206,7 @@ def test_failed_call_tool_result_sets_mcp_is_error():
 
 
 def test_setup_stale_statuses_are_diagnostic_successes():
-    for status in ("stale_bridge", "stale_extension", "stale_package"):
+    for status in ("stale_bridge", "stale_extension", "stale_package", "starting", "extension_unavailable"):
         structured = S._result_envelope(
             "get_setup_status", {"status": status, "action": "inspect"}
         )

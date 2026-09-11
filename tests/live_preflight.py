@@ -436,6 +436,12 @@ def stale_component_reason(status: Mapping[str, Any] | None) -> str | None:
                 "  action: wait a few seconds and run doctor again; do not reload the extension for this snapshot.",
             ]
         )
+    if status.get("status") == "extension_unavailable":
+        return (
+            "the live layer cannot start yet: extension runtime status is unavailable. "
+            "Run doctor again and check the extension connection in the intended browser; "
+            "this snapshot does not establish a stale build."
+        )
     stale = [
         (label, fix) for flag, label, fix in _STALE_COMPONENTS if status.get(flag) is True
     ]
@@ -488,6 +494,7 @@ def component_versions(status: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "package_version",
             "bridge_version",
             "extension_version",
+            "extension_status_available",
             "protocol_version",
             "expected_protocol_version",
             "missing_extension_capabilities",

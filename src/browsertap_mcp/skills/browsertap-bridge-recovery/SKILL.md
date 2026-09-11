@@ -23,12 +23,15 @@ description: "诊断和恢复 browsertap-mcp (BTAP) 的连接、超时、旧 sch
 | --- | --- |
 | `none` / `healthy` | 通道正常；检查原工具或页面层，不重启。 |
 | `wait_for_extension` / `starting` | bridge 刚启动，给扩展重连时间，再做一次有界检查。 |
+| `check_extension_connection` / `extension_unavailable` | 未取得扩展运行状态；检查对应浏览器中 BrowserTap Bridge 是否启用并连接，随后重查。 |
 | `restart_mcp_session` / `stale_package` | 重启该 MCP 会话，使其加载新包与工具 schema；不是重启浏览器。 |
 | `restart_bridge` / `stale_bridge` | 确认影响范围后用 `browsertap bridge --restart`。 |
 | `reload_extension` / `stale_extension` | 请求用户在对应浏览器的扩展页手动 Reload BrowserTap Bridge。 |
 | `check_config` / `initialization_failed` | 先纠正报告中的配置或解释器问题，不把它当运行中的桥宕机。 |
 
 bridge 由多个 MCP 会话共享。重启前说明会影响这些会话，且不会取消已经在浏览器执行的 JS。
+`extension_status_available=false` 表示兼容性尚未检查，缺失字段不是已确认的版本或能力缺口。
+启动宽限期结束也不会把未握手判成旧扩展；取得运行状态后才依据构建和兼容性要求 Reload。
 `browsertap bridge` 不带参数会前台常驻；日常恢复使用管理子参数，
 只有明确需要前台调试时才运行裸命令。
 

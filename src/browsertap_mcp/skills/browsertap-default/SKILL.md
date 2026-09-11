@@ -214,6 +214,9 @@ token 仅用于请求，不写进长期文件或公开报告；用完停止捕�
 连接失败、工具挂住、`401` 或 `Unknown command: downloads` 转
 [[browsertap-bridge-recovery]]，先用 `browsertap doctor` 定位组件。
 缺工具/参数通常检查 MCP schema；下载命令 Unknown 检查目标扩展。
+`extension_status_available=false` 表示尚未取得扩展运行状态；`starting` 时有界等待，
+`extension_unavailable` / `check_extension_connection` 时检查对应浏览器的扩展连接后重查。
+取得运行状态后再判断兼容性；未握手本身不要求 Reload。
 按 `reload_extension_required` 和 `extension_build_verdict` 判断是否需要人工 Reload，
 不要只比版本号，也不要直接另起独立浏览器代替用户会话。
 
