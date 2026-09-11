@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '2878475f7d821497';
+const BTAP_BUILD = 'cf99c8ef9dc76da6';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -2805,9 +2805,11 @@ async function navigateWithDialogPolicy(msg) {
     let navigationKind = first.kind;
     let navigationError = first.kind === 'error' ? first.error : null;
     if (dialog && action === 'accept') {
-      const acceptWaitMs = Math.min(
-        navigationDeadlineRemaining(deadlineEpochMs, 'before accepted navigation wait'),
-        3000,
+      // Accepting the dialog resumes the same navigation and its original
+      // deadline. A separate 3s cap can abandon a navigation that still has
+      // caller budget left and will finish normally.
+      const acceptWaitMs = navigationDeadlineRemaining(
+        deadlineEpochMs, 'before accepted navigation wait',
       );
       const completed = await Promise.race([
         navigationPromise,
