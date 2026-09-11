@@ -81,7 +81,10 @@ def test_setting_is_limited_to_browser_permission_states():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("action,error", [("decline", None), ("cancel", None), ("accept", RuntimeError("unsupported"))])
+@pytest.mark.parametrize("action,error", [
+    ("decline", None), ("cancel", None), ("accept", RuntimeError("unsupported")),
+    ("accept", TimeoutError("approval timed out")),
+])
 async def test_set_site_permission_decline_never_sends_allow(monkeypatch, action, error):
     ctx = _ElicitationContext(action=action, error=error)
     calls = []
@@ -101,6 +104,67 @@ async def test_set_site_permission_decline_never_sends_allow(monkeypatch, action
 
     assert result["status"] == "requires_user_action"
     assert calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("helper, cache, arguments", [
+    ("_request_site_permission_approval", "_LAB_SITE_PERMISSION_APPROVALS", ("camera", "https://example.test", 300)),
+    ("_request_physical_approval", "_LAB_PHYSICAL_APPROVALS", ("confirm the leave dialog",)),
+])
+async def test_lab_approval_is_cached_only_for_the_approved_session(monkeypatch, helper, cache, arguments):
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "lab")
+    monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "0")
+    monkeypatch.setattr(S, cache, set())
+    monkeypatch.setattr(S, "_LAB_APPROVAL_OWNERS", {})
+    first, second = _ElicitationContext(), _ElicitationContext()
+    approve = getattr(S, helper)
+
+    assert await approve(first, *arguments) is True
+    assert await approve(first, *arguments) is True
+    assert await approve(second, *arguments) is True
+    assert len(first.calls) == len(second.calls) == 1
+    assert len(getattr(S, cache)) == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("directed", [False, True])
+async def test_permission_origin_lookup_failure_restores_only_an_explicit_target(monkeypatch, directed):
+    driver = SimpleNamespace(default_session_id="chrome:old")
+
+    def select(session_id=None):
+        driver.default_session_id = "chrome:7"
+        return driver.default_session_id
+
+    def location(*args):
+        raise RuntimeError("page URL unavailable")
+
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "switch_session", select)
+    monkeypatch.setattr(S, "_page_location", location)
+    with pytest.raises(RuntimeError, match="page URL unavailable"):
+        await S.set_site_permission(_ElicitationContext(), "camera", "block",
+                                    session_id="chrome:7" if directed else None)
+    assert driver.default_session_id == ("chrome:old" if directed else "chrome:7")
+
+
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_reset_named_permission_preserves_unsupported_browser_evidence(monkeypatch, unsupported):
+    calls = []
+    response = {"unsupported": True, "error": "browser API unavailable"} if unsupported else {"ok": True}
+    driver = SimpleNamespace(default_session_id="chrome:old")
+    driver.ext_cmd = lambda payload, **kwargs: calls.append((payload, kwargs)) or {"data": response}
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "switch_session", lambda **kwargs: "chrome:7")
+
+    result = S.reset_site_permissions("https://example.test/path", "geolocation", "chrome:7")
+
+    assert result["permission"] == "location"
+    assert result["origin"] == "https://example.test"
+    assert result["status"] == ("unsupported" if unsupported else "ok")
+    assert calls[0][0]["permission"] == "location"
+    assert driver.default_session_id == "chrome:old"
+    if unsupported:
+        assert result["message"] == "browser API unavailable"
 
 
 @pytest.mark.anyio

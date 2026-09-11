@@ -7,7 +7,7 @@ import threading
 import anyio
 import pytest
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult
+from mcp.types import CallToolResult, ElicitRequestURLParams
 
 from browsertap_mcp import server as S
 from browsertap_mcp.browser_bridge import BrowserBridge
@@ -42,10 +42,10 @@ def _transport(driver, monkeypatch, on_dispatch):
     monkeypatch.setattr(driver, "_remote_cmd", remote)
 
 
-def _register(monkeypatch, fn):
+def _register(monkeypatch, fn, *, serialize=False):
     mcp = FastMCP("tab-concurrency")
     monkeypatch.setattr(S, "_mcp_tool", mcp.tool)
-    S._threaded_tool()(fn)
+    S._threaded_tool(serialize=serialize)(fn)
     return mcp._tool_manager.get_tool(fn.__name__).fn
 
 
@@ -280,6 +280,20 @@ def test_default_publish_failure_still_releases_tab_locks(remote_driver, monkeyp
     assert driver.default_session_id == DEFAULT
 
 
+def test_unchanged_scoped_default_is_not_published(remote_driver, monkeypatch):
+    driver = remote_driver
+    monkeypatch.setattr(
+        driver, "publish_default_session_id",
+        lambda *args, **kwargs: pytest.fail("an unchanged default must not be republished"),
+    )
+
+    with command_scope(persist_defaults=True):
+        assert driver.default_session_id == DEFAULT
+        driver.default_session_id = DEFAULT
+
+    assert driver.default_session_id == DEFAULT
+
+
 def test_session_cache_invalidation_cannot_clear_a_snapshot_mid_read(monkeypatch):
     sessions = [{"id": FIRST}]
     monkeypatch.setattr(S, "_sessions_cache", (0.0, sessions))
@@ -292,3 +306,78 @@ def test_session_cache_invalidation_cannot_clear_a_snapshot_mid_read(monkeypatch
     monkeypatch.setattr(S, "require_driver", lambda: pytest.fail("the cache was fresh"))
 
     assert S.active_sessions() is sessions
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("serialize", [False, True])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_url_elicitation_keeps_its_protocol_error_and_releases_the_lock(
+    monkeypatch, serialize, asynchronous,
+):
+    lock = threading.Lock()
+    monkeypatch.setattr(S, "_TOOL_LOCK", lock)
+    request = ElicitRequestURLParams(
+        mode="url", message="Complete authorization", url="https://example.test/authorize",
+        elicitationId="test-authorization",
+    )
+    failure = S.UrlElicitationRequiredError([request])
+
+    if asynchronous:
+        async def probe() -> dict:
+            raise failure
+    else:
+        def probe() -> dict:
+            raise failure
+
+    registered = _register(monkeypatch, probe, serialize=serialize)
+
+    with pytest.raises(S.UrlElicitationRequiredError) as raised:
+        await registered()
+
+    assert raised.value is failure
+    assert raised.value.elicitations == [request]
+    assert not lock.locked()
+
+
+@pytest.mark.anyio
+async def test_serialized_async_success_releases_the_lock_and_restores_the_target(
+    remote_driver, monkeypatch,
+):
+    lock = threading.Lock()
+    monkeypatch.setattr(S, "_TOOL_LOCK", lock)
+
+    async def probe(session_id: str) -> dict:
+        assert lock.locked()
+        remote_driver.default_session_id = session_id
+        await anyio.sleep(0)
+        return {"status": "ok", "session_id": remote_driver.default_session_id}
+
+    registered = _register(monkeypatch, probe, serialize=True)
+    result = await registered(FIRST)
+
+    assert result["ok"] is True
+    assert remote_driver.default_session_id == DEFAULT
+    assert not lock.locked()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("acquired_before_cancellation", [False, True])
+async def test_cancellation_at_the_worker_boundary_cannot_leak_the_tool_lock(
+    monkeypatch, acquired_before_cancellation,
+):
+    lock = threading.Lock()
+    monkeypatch.setattr(S, "_TOOL_LOCK", lock)
+
+    async def cancelled_worker(function):
+        if acquired_before_cancellation:
+            function()
+        scope.cancel()
+        await anyio.lowlevel.checkpoint()
+
+    monkeypatch.setattr(S.anyio.to_thread, "run_sync", cancelled_worker)
+
+    with anyio.CancelScope() as scope:
+        with pytest.raises(anyio.get_cancelled_exc_class()):
+            await S._acquire_tool_lock()
+
+    assert not lock.locked()

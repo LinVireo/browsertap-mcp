@@ -411,6 +411,31 @@ def test_pid_alive_rejects_invalid_pid_values(pid):
     assert P._pid_alive(pid) is False
 
 
+def test_pid_alive_posix_success_does_not_authorize_reclaiming_a_live_process(monkeypatch):
+    calls = []
+    monkeypatch.setattr(P.sys, "platform", "linux")
+    monkeypatch.setattr(P.os, "kill", lambda pid, signal: calls.append((pid, signal)))
+
+    assert P._pid_alive(123) is True
+    assert calls == [(123, 0)]
+
+
+@pytest.mark.parametrize("aware", [True, False])
+def test_dpi_awareness_uses_the_legacy_query_after_a_failed_hresult(monkeypatch, aware):
+    calls = []
+    monkeypatch.setattr(
+        P.ctypes, "windll",
+        SimpleNamespace(
+            shcore=SimpleNamespace(GetProcessDpiAwareness=lambda *args: 0x80004005),
+            user32=SimpleNamespace(IsProcessDPIAware=lambda: calls.append("legacy") or aware),
+        ),
+        raising=False,
+    )
+
+    assert P._process_is_dpi_aware() is aware
+    assert calls == ["legacy"]
+
+
 @pytest.mark.parametrize("outcome", ["missing", "permission", "other"])
 def test_pid_alive_posix_classifies_kill_errors(monkeypatch, outcome):
     monkeypatch.setattr(P.sys, "platform", "linux")
@@ -1286,6 +1311,23 @@ class _FakePyAutoGUI:
 
     def hotkey(self, *keys):
         self.calls.append(("hotkey", keys))
+
+
+@pytest.mark.anyio
+async def test_approved_action_can_explicitly_skip_browser_activation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "lab")
+    monkeypatch.setenv("BROWSERTAP_LAB_NO_ELICIT", "1")
+    monkeypatch.setattr(P, "run_physical_action", lambda summary, action: action())
+    monkeypatch.setattr(S, "_maybe_activate", lambda *args: pytest.fail("activation was explicitly disabled"))
+
+    result = await S._run_approved_physical_action(
+        _ApprovalContext(), "test action", lambda: calls.append("action") or {"status": "ok"},
+        activate_session="none",
+    )
+
+    assert result == {"status": "ok"}
+    assert calls == ["action"]
 
 
 def _reach_the_leave_fallback(monkeypatch, *, mode="lab", no_elicit=None):

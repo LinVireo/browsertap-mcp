@@ -4,11 +4,211 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import runpy
 from types import SimpleNamespace
 
 import pytest
 
 from browsertap_mcp import server as S
+
+
+@pytest.mark.parametrize("value", [None, "not-a-number", {}])
+def test_invalid_timeout_conversion_names_the_parameter(value):
+    with pytest.raises(ValueError, match="body_timeout must be a finite number greater than zero"):
+        S._positive_timeout(value, name="body_timeout")
+
+
+def test_invalid_bridge_port_fails_lazily_without_caching_the_bad_value(monkeypatch):
+    monkeypatch.setattr(S, "_DRIVER_PORT", None)
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "invalid")
+    with pytest.raises(ValueError, match="BROWSERTAP_BRIDGE_PORT must be an integer"):
+        S._get_driver_port()
+    assert S._DRIVER_PORT is None
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "19000")
+    assert S._get_driver_port() == 19000
+
+
+def test_stdio_logging_configuration_is_idempotent(monkeypatch):
+    logger = logging.getLogger("browsertap_mcp")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logging.NOTSET)
+    monkeypatch.setattr(logger, "propagate", True)
+    S.configure_stdio_logging()
+    handler = logger.handlers[0]
+    S.configure_stdio_logging()
+    assert logger.handlers == [handler]
+    assert handler.stream is S.sys.stderr
+    assert logger.propagate is False
+
+
+def test_server_module_initializes_a_driver_before_running_stdio(monkeypatch):
+    from browsertap_mcp import browser_bridge
+
+    calls = []
+    driver = SimpleNamespace()
+    logger = logging.getLogger("browsertap_mcp")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logger.level)
+    monkeypatch.setattr(logger, "propagate", logger.propagate)
+    monkeypatch.setenv("BROWSERTAP_NO_SPAWN", "1")
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_HOST", "127.0.0.8")
+    monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "19000")
+    monkeypatch.setattr(browser_bridge, "BrowserBridge", lambda **kwargs: calls.append(("driver", kwargs)) or driver)
+    monkeypatch.setattr(S.FastMCP, "run", lambda self, **kwargs: calls.append(("run", kwargs)))
+    monkeypatch.delitem(S.sys.modules, S.__name__)
+
+    namespace = runpy.run_module(S.__name__, run_name="__main__", alter_sys=True)
+
+    assert calls == [
+        ("driver", {"host": "127.0.0.8", "port": 19000}),
+        ("run", {"transport": "stdio"}),
+    ]
+    assert namespace["_driver"] is driver
+    assert logger.handlers[0].stream is S.sys.stderr
+
+
+@pytest.mark.parametrize("payload", [None, [1, 2], "plain result"])
+def test_result_envelope_preserves_non_object_values(payload):
+    result = S._result_envelope("probe", payload)
+    assert result["ok"] is True
+    assert result["data"] == payload
+    assert result["target"] is None
+
+
+def test_stale_target_error_survives_failure_to_refresh_tabs(monkeypatch):
+    def unavailable(**kwargs):
+        raise OSError("bridge unavailable")
+
+    monkeypatch.setattr(S, "active_sessions", unavailable)
+    error = S._session_target_not_found("client:old")
+    assert error.diagnostics["stale_session_id"] == "client:old"
+    assert error.diagnostics["replacement_candidates"] == []
+
+
+def test_exception_target_survives_an_unbindable_callable_signature():
+    assert S._call_target(lambda: None, (), {"session_id": "client:7"}) == {
+        "session_id": "client:7", "client_id": "client", "tab_id": 7,
+    }
+
+
+def test_legacy_result_without_a_status_does_not_hide_an_explicit_error():
+    assert S._legacy_failure({"error": "command failed"}) == (
+        "operation_failed", "command failed", False,
+    )
+    assert S._extension_data(None) == {}
+
+
+def test_dialog_normalization_keeps_the_error_and_last_dialog_without_a_history():
+    error = {"code": "dialog_blocked", "message": "waiting for confirmation"}
+    dialog = {"type": "confirm", "message": "Continue?"}
+    wrapped = {
+        "__btap_dialog_result": True, "status": "blocked_by_dialog", "value": None,
+        "error": error, "dialog": dialog, "pending_execution": True,
+    }
+    result = S._normalize_execute_js_dialog_result({
+        "status": "success", "js_return": wrapped, "operation_id": "dialog-operation",
+    })
+
+    assert result["status"] == "blocked_by_dialog"
+    assert result["error"] == error and result["error"] is not error
+    assert result["dialog"] == dialog and result["dialog"] is not dialog
+    assert result["reservation_held"] is True
+    assert result["poll_with"] == "get_execute_js_result"
+    assert result["js_return"] is None
+
+
+def test_extension_failure_derives_retryability_from_undelivered_evidence():
+    result = S._extension_operation_result({"data": {
+        "status": "failed", "error": "route unavailable",
+        "diagnostics": {"retry_safe": True, "delivery_state": "undelivered"},
+    }}, operation="capture")
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is True
+    assert result["error"] == "route unavailable"
+    assert result["operation"] == "capture"
+
+
+@pytest.mark.parametrize("session_id", [":7", "client:invalid"])
+def test_composite_target_requires_a_client_and_numeric_tab_id(session_id):
+    with pytest.raises(ValueError, match="invalid composite session id"):
+        S._split_session_target(session_id)
+
+
+@pytest.mark.parametrize("tool, kwargs, message", [
+    ("create_bookmark", {"title": "folder", "url": "  "}, "url must not be empty"),
+    ("create_bookmark", {"title": "folder", "parent_id": "  "}, "parent_id must not be empty"),
+    ("call_extension", {"extension_id": "  ", "message_json": "{}"}, "extension_id must not be empty"),
+    ("network_capture_start", {"max_body_bytes": 1023}, "max_body_bytes"),
+    ("network_capture_start", {"max_body_bytes": 2097153}, "max_body_bytes"),
+    ("network_capture_start", {"body_timeout": 0.09}, "body_timeout"),
+    ("network_capture_start", {"body_timeout": 10.1}, "body_timeout"),
+    ("network_capture_stop", {"status_max": 600}, "status_max"),
+    ("network_capture_stop", {"status_min": 400, "status_max": 200}, "status_min must not exceed"),
+    ("get_console_messages", {"max_items": 0}, "max_items"),
+    ("get_console_messages", {"max_items": 1001}, "max_items"),
+    ("get_console_messages", {"filter": "errors"}, "filter must be"),
+    ("page_click", {"selector": {"x": 1, "y": 2}, "x": 3, "y": 4}, "top-level coordinates"),
+    ("page_click", {"selector": {"x": 1, "y": 2}, "offset_x": 3}, "cannot use offset"),
+])
+def test_invalid_tool_inputs_are_rejected_before_accessing_the_browser(monkeypatch, tool, kwargs, message):
+    monkeypatch.setattr(S, "require_driver", lambda: pytest.fail("invalid input must not access the bridge"))
+    with pytest.raises(ValueError, match=message):
+        getattr(S, tool)(**kwargs)
+
+
+def test_bookmark_without_a_url_creates_a_folder(monkeypatch):
+    calls = []
+    driver = SimpleNamespace(ext_cmd=lambda payload, **kwargs: calls.append((payload, kwargs)) or {
+        "data": {"ok": True, "data": {"id": "folder-1"}},
+    })
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    result = S.create_bookmark(" Folder ", session_id="client:7")
+    assert result["data"]["id"] == "folder-1"
+    assert calls[0][0] == {"cmd": "bookmarks", "method": "create", "node": {"title": "Folder"}}
+    assert calls[0][1]["client_id"] == "client"
+
+
+def test_console_user_filter_uses_and_retains_the_implicit_selected_tab(monkeypatch):
+    driver = _install_page_driver(monkeypatch)
+    calls = []
+    driver.ext_cmd = lambda payload, **kwargs: calls.append((payload, kwargs)) or {"data": {"messages": []}}
+    result = S.get_console_messages(filter=" USER ")
+    assert result["messages"] == []
+    assert calls[0][0]["filter"] == "user"
+    assert calls[0][0]["tabId"] == 1
+    assert driver.default_session_id == "client:1"
+
+
+@pytest.mark.parametrize("tab_id", [None, 8])
+def test_cookie_read_preserves_an_explicit_tab_override_and_browser_failure(monkeypatch, tab_id):
+    calls = []
+    driver = SimpleNamespace(ext_cmd=lambda payload, **kwargs: calls.append((payload, kwargs)) or {
+        "data": {"ok": False, "error": "cookies permission denied"},
+    })
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    with pytest.raises(RuntimeError, match="cookies permission denied"):
+        S.get_cookies(session_id="client:7", tab_id=tab_id)
+    assert calls[0][0]["tabId"] == (7 if tab_id is None else tab_id)
+    assert calls[0][1]["client_id"] == "client"
+
+
+@pytest.mark.parametrize("marker", [b"\xff\x01", b"\xff\xd0", b"\xff\xd7"])
+def test_jpeg_header_skips_standalone_markers_before_the_frame(marker):
+    frame = b"\xff\xc2\x00\x11\x08\x00\x11\x00\x23\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+    assert S._parse_image_header(b"\xff\xd8" + marker + frame + b"\xff\xd9") == (35, 17)
+
+
+def test_jpeg_header_rejects_a_broken_marker_chain():
+    assert S._parse_image_header(b"\xff\xd8BAD!\x00\x00") is None
+
+
+def test_extended_webp_header_decodes_twenty_four_bit_canvas_dimensions():
+    header = (b"RIFF" + (22).to_bytes(4, "little") + b"WEBPVP8X"
+              + (10).to_bytes(4, "little") + b"\x00" * 4
+              + (65536).to_bytes(3, "little") + (512).to_bytes(3, "little"))
+    assert S._parse_image_header(header) == (65537, 513)
 
 
 def test_switch_session_rejects_ambiguous_url_matches(monkeypatch):
@@ -33,6 +233,21 @@ def test_switch_session_rejects_ambiguous_url_matches(monkeypatch):
     assert "chrome:a:1" in str(exc.value)
     assert "full session_id" in str(exc.value)
     assert driver.default_session_id == "client:old"
+
+
+@pytest.mark.parametrize("directed", [False, True])
+def test_switch_session_selects_a_unique_match_or_the_only_available_browser(monkeypatch, directed):
+    driver = SimpleNamespace(default_session_id=None)
+    sessions = [{"id": "chrome:7", "browser": "chrome", "url": "https://example.test/one"}]
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "active_sessions", lambda **kwargs: sessions)
+    monkeypatch.setattr(S, "ensure_sessions", lambda **kwargs: sessions)
+    monkeypatch.setenv("BROWSERTAP_PREFERRED_BROWSER", "edge")
+
+    target = S.switch_session(**({"browser": "chrome", "url_pattern": "/one"} if directed else {}))
+
+    assert target == "chrome:7"
+    assert driver.default_session_id == "chrome:7"
 
 
 def test_switch_session_accepts_bridge_confirmed_replacement(monkeypatch):
@@ -147,6 +362,172 @@ def _install_page_driver(monkeypatch, *, default_session_id="client:old"):
 def _monotonic(monkeypatch, values):
     timeline = iter(values)
     monkeypatch.setattr(S.time, "monotonic", lambda: next(timeline, values[-1]))
+
+
+@pytest.mark.parametrize("result", [0, 10061])
+def test_port_probe_closes_its_socket_and_reports_connection_status(monkeypatch, result):
+    calls = []
+
+    class Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            calls.append("closed")
+
+        def settimeout(self, timeout):
+            calls.append(timeout)
+
+        def connect_ex(self, address):
+            calls.append(address)
+            return result
+
+    monkeypatch.setattr(S.socket, "socket", Probe)
+    assert S._port_open("127.0.0.8", 19000) is (result == 0)
+    assert calls == [1, ("127.0.0.8", 19000), "closed"]
+
+
+def test_server_skill_path_resolves_both_packaged_calling_guides():
+    for name in ("browsertap-default", "browsertap-bridge-recovery"):
+        assert (S.agent_skills_dir() / name / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("rotation_fails", [False, True])
+def test_spawn_log_rotation_preserves_the_old_log_when_rename_fails(monkeypatch, tmp_path, rotation_fails):
+    log = tmp_path / "bridge.log"
+    log.write_bytes(b"old trace")
+    monkeypatch.setattr(S, "state_dir", lambda **kwargs: tmp_path)
+    monkeypatch.setattr(S.bridge_module, "LOG_MAX_BYTES", 4)
+    if rotation_fails:
+        def fail_replace(*args):
+            raise PermissionError("log still open")
+
+        monkeypatch.setattr(S.Path, "replace", fail_replace)
+    assert S._bridge_log_path() == log
+    assert (log if rotation_fails else log.with_suffix(".log.old")).read_bytes() == b"old trace"
+    assert log.exists() is rotation_fails
+
+
+def test_spawn_lock_stands_down_when_a_stale_lock_cannot_be_removed(monkeypatch, tmp_path):
+    lock = tmp_path / "spawn.lock"
+    lock.write_text("123", encoding="utf-8")
+    monkeypatch.setattr(S, "_spawn_lock_path", lambda: lock)
+    monkeypatch.setattr(S.time, "time", lambda: lock.stat().st_mtime + S._SPAWN_LOCK_STALE + 1)
+
+    def fail_unlink(*args, **kwargs):
+        raise PermissionError("lock is busy")
+
+    monkeypatch.setattr(S.Path, "unlink", fail_unlink)
+    assert S._acquire_spawn_lock() is None
+    assert lock.read_text() == "123"
+
+
+def test_spawn_lock_write_failure_retains_the_exclusive_claim(monkeypatch, tmp_path):
+    lock = tmp_path / "spawn.lock"
+    monkeypatch.setattr(S, "_spawn_lock_path", lambda: lock)
+
+    def fail_write(*args):
+        raise OSError("write failed")
+
+    monkeypatch.setattr(S.os, "write", fail_write)
+    assert S._acquire_spawn_lock() == lock
+    assert lock.read_bytes() == b""
+    assert S._acquire_spawn_lock() is None
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_spawn_lock_cleanup_failure_does_not_mask_the_failed_launch(monkeypatch, reset):
+    cleanups = []
+
+    def unlink(**kwargs):
+        cleanups.append(kwargs)
+        raise PermissionError("lock is busy")
+
+    lock = SimpleNamespace(unlink=unlink)
+    monkeypatch.setattr(S, "_spawn_lock_path", lambda: lock)
+    monkeypatch.setattr(S, "_acquire_spawn_lock", lambda: lock)
+    monkeypatch.setattr(S, "_spawn_bridge_daemon_locked", lambda: False)
+    assert S.spawn_bridge_daemon(reset_spawn_lock=reset) is False
+    assert cleanups == [{"missing_ok": True}] * (2 if reset else 1)
+
+
+def test_spawn_rechecks_the_port_after_winning_the_lock(monkeypatch):
+    monkeypatch.setattr(S, "_port_open", lambda *args: True)
+    monkeypatch.setattr(S.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("already running"))
+    assert S._spawn_bridge_daemon_locked() is True
+
+
+@pytest.mark.parametrize("platform, gui, ready", [
+    ("linux", False, True), ("win32", False, True), ("win32", True, False),
+])
+def test_detached_spawn_uses_platform_flags_and_a_bounded_readiness_wait(
+    monkeypatch, tmp_path, platform, gui, ready,
+):
+    executable = tmp_path / "python.exe"
+    if gui:
+        (tmp_path / "pythonw.exe").touch()
+    calls, sleeps = [], []
+    checks = iter([False, False, ready])
+    monkeypatch.setattr(S.sys, "platform", platform)
+    monkeypatch.setattr(S.sys, "executable", str(executable))
+    monkeypatch.setattr(S, "_port_open", lambda *args: next(checks, ready))
+    monkeypatch.setattr(S, "_bridge_log_path", lambda: tmp_path / "bridge.log")
+    monkeypatch.setattr(S.subprocess, "Popen", lambda cmd, **kwargs: calls.append((cmd, kwargs)))
+    monkeypatch.setattr(S.time, "sleep", sleeps.append)
+    _monotonic(monkeypatch, [0, 0, 1, 9])
+    assert S._spawn_bridge_daemon_locked() is ready
+    command, options = calls[0]
+    assert command[0] == str(tmp_path / ("pythonw.exe" if gui else "python.exe"))
+    assert options["close_fds"] is True
+    if platform == "win32":
+        assert options["creationflags"] & 0x08000000
+    else:
+        assert options["start_new_session"] is True
+        assert "creationflags" not in options
+    assert sleeps == [0.25] * (1 if ready else 2)
+
+
+def test_driver_initialization_reuses_the_instance_published_while_waiting_for_the_lock(monkeypatch):
+    winner = object()
+
+    class InitializationLock:
+        def __enter__(self):
+            S._driver = winner
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(S, "_driver", None)
+    monkeypatch.setattr(S, "_DRIVER_LOCK", InitializationLock())
+    monkeypatch.setattr(S, "BrowserBridge", lambda **kwargs: pytest.fail("must reuse the winner"))
+    assert S.get_driver() is winner
+
+
+def test_ensure_sessions_does_not_prune_the_default_when_no_tabs_are_connected(monkeypatch):
+    monkeypatch.setattr(S, "active_sessions", lambda **kwargs: [])
+    monkeypatch.setattr(S, "prune_stale_default", lambda: pytest.fail("no target to prune"))
+    with pytest.raises(RuntimeError, match="No connected browser tabs"):
+        S.ensure_sessions()
+
+
+def test_exec_js_returns_a_successful_reply_without_replaying_or_changing_the_default(monkeypatch):
+    calls = []
+    driver = SimpleNamespace(default_session_id="client:old", execute_js=lambda *args, **kwargs: (
+        calls.append((args, kwargs)) or {"data": 7}
+    ))
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    assert S.exec_js("return 7", session_id="client:1") == {"data": 7}
+    assert len(calls) == 1
+    assert calls[0][1]["session_id"] == "client:1"
+    assert driver.default_session_id == "client:old"
+
+
+def test_exec_js_exhausted_deadline_prevents_dispatch(monkeypatch):
+    driver = SimpleNamespace(execute_js=lambda *args, **kwargs: pytest.fail("deadline expired"))
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    _monotonic(monkeypatch, [0, 2])
+    with pytest.raises(TimeoutError, match="deadline exhausted before dispatch"):
+        S.exec_js("return 7", timeout=1)
 
 
 @pytest.mark.parametrize("error", [PermissionError("denied"), OSError("read-only")])
@@ -820,7 +1201,11 @@ def test_page_location_and_document_cookie_parse_string_or_object(monkeypatch):
     assert S._cookie_via_document({"name": "sid", "value": "1"}, None, 2) == {}
 
 
-def test_get_cookies_uses_extension_command_channel(monkeypatch):
+@pytest.mark.parametrize("session_id,client_id,tab_id", [
+    ("chrome:profile:9", "chrome:profile", 9),
+    (None, None, None),
+])
+def test_get_cookies_uses_extension_command_channel(monkeypatch, session_id, client_id, tab_id):
     calls = []
     driver = SimpleNamespace(default_session_id="chrome:old:7")
 
@@ -831,14 +1216,14 @@ def test_get_cookies_uses_extension_command_channel(monkeypatch):
     driver.ext_cmd = ext_cmd
     monkeypatch.setattr(S, "require_driver", lambda: driver)
 
-    result = S.get_cookies(session_id="chrome:profile:9")
+    result = S.get_cookies(session_id=session_id)
 
     assert result["ok"] is True
     assert result["data"] == [{"name": "sid", "value": "v1"}]
     assert calls == [
         (
-            {"cmd": "cookies", "tabId": 9},
-            {"client_id": "chrome:profile", "timeout": 15.0},
+            {"cmd": "cookies", **({"tabId": tab_id} if tab_id is not None else {})},
+            {"client_id": client_id, "timeout": 15.0},
         )
     ]
 
@@ -885,7 +1270,8 @@ def test_set_cookies_requires_page_url_for_implicit_scope(monkeypatch):
         (RuntimeError("fallback failed"), "failed", False),
     ],
 )
-def test_set_cookies_cdp_fallbacks_are_explicit(monkeypatch, fallback, expected_status, expect_note):
+@pytest.mark.parametrize("http_only", [False, True])
+def test_set_cookies_cdp_fallbacks_are_explicit(monkeypatch, fallback, expected_status, expect_note, http_only):
     monkeypatch.setattr(S, "_cdp", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("cdp busy")))
 
     def document_cookie(*_args, **_kwargs):
@@ -896,14 +1282,17 @@ def test_set_cookies_cdp_fallbacks_are_explicit(monkeypatch, fallback, expected_
     monkeypatch.setattr(S, "_cookie_via_document", document_cookie)
 
     result = S.set_cookies(
-        {"name": "sid", "httpOnly": True, "url": "https://example.test/"}
+        {"name": "sid", "httpOnly": http_only, "url": "https://example.test/"}
     )
 
     entry = result["results"][0]
     assert entry["status"] == expected_status
     assert entry["method"] == "document.cookie"
-    assert entry["httpOnly_dropped"] is True
-    assert ("note" in entry) is expect_note
+    if http_only:
+        assert entry["httpOnly_dropped"] is True
+    else:
+        assert "httpOnly_dropped" not in entry
+    assert ("note" in entry) is (expect_note and http_only)
 
 
 def test_set_cookies_does_not_fallback_into_wrong_named_tab(monkeypatch):
@@ -930,6 +1319,21 @@ def test_delete_cookies_success_and_page_scope(monkeypatch):
     assert result["status"] == "ok"
     assert result["scope"] == {"path": "/app", "url": "https://example.test/app"}
     assert calls[0][1]["name"] == "sid"
+
+
+def test_delete_cookies_with_domain_keeps_the_requested_scope(monkeypatch):
+    calls = []
+    monkeypatch.setattr(S, "_cdp", lambda *args: calls.append(args) or {})
+    monkeypatch.setattr(S, "_page_location", lambda **kwargs: pytest.fail("scope is already explicit"))
+
+    result = S.delete_cookies("sid", domain=".example.test", path="/app", session_id="chrome:7")
+
+    assert result["status"] == "ok"
+    assert result["scope"] == {"domain": ".example.test", "path": "/app"}
+    assert calls == [(
+        "Network.deleteCookies", {"name": "sid", "domain": ".example.test", "path": "/app"},
+        "chrome:7", None, 20.0,
+    )]
 
 
 def test_delete_cookies_validation_and_missing_page_url(monkeypatch):
@@ -1152,6 +1556,8 @@ def test_storage_set_classifies_transport_errors(
         {"clip": {"x": float("nan"), "y": 0, "width": 1, "height": 1}},
         {"clip": {"x": 0, "y": float("inf"), "width": 1, "height": 1}},
         {"clip": {"x": 0, "y": 0, "width": float("-inf"), "height": 1}},
+        {"clip": {"x": "bad", "y": 0, "width": 1, "height": 1}},
+        {"clip": {"x": None, "y": 0, "width": 1, "height": 1}},
     ],
 )
 def test_capture_page_screenshot_validates_options(kwargs):
@@ -1184,10 +1590,14 @@ def _install_screenshot(monkeypatch, response):
     return driver
 
 
-def test_capture_page_screenshot_jpeg_clip_and_nested_payload(monkeypatch):
+@pytest.mark.parametrize("wrapping_depth", [2, 3])
+def test_capture_page_screenshot_jpeg_clip_and_nested_payload(monkeypatch, wrapping_depth):
     raw = b"small image"
     b64 = base64.b64encode(raw).decode("ascii")
-    driver = _install_screenshot(monkeypatch, {"data": {"data": b64}})
+    response = b64
+    for _ in range(wrapping_depth):
+        response = {"data": response}
+    driver = _install_screenshot(monkeypatch, response)
 
     result = S.capture_page_screenshot(
         session_id="client:7",
@@ -1224,3 +1634,277 @@ def test_capture_page_screenshot_full_page_and_session_mismatch(monkeypatch):
     with pytest.raises(ValueError, match="does not match"):
         S.capture_page_screenshot(session_id="client:7", tab_id=8)
     assert driver.default_session_id == "client:7"
+
+
+@pytest.mark.parametrize("reply,message", [
+    ({"ok": False, "error": "debugger detached"}, "debugger detached"),
+    (None, "incomplete batch result"),
+    ([], "incomplete batch result"),
+    ([{}, None], "incomplete batch result"),
+])
+def test_upload_files_does_not_replay_an_unconfirmed_batch(monkeypatch, tmp_path, reply, message):
+    upload = tmp_path / "input.txt"
+    upload.write_text("fixture", encoding="utf-8")
+    calls = []
+
+    def batch(payload, **kwargs):
+        calls.append((payload, kwargs))
+        return {"data": reply}
+
+    monkeypatch.setattr(S, "_extension_batch", batch)
+
+    with pytest.raises(RuntimeError, match=message):
+        S.upload_files("#file", [str(upload)], session_id="chrome:7")
+
+    assert len(calls) == 1
+    assert calls[0][0]["commands"][-1]["params"]["files"] == [str(upload.resolve())]
+    assert calls[0][1]["session_id"] == "chrome:7"
+    assert upload.read_text(encoding="utf-8") == "fixture"
+
+
+def test_extension_batch_supports_an_embedded_driver_without_a_command_router(monkeypatch):
+    calls = []
+    monkeypatch.setattr(S, "require_driver", lambda: SimpleNamespace())
+    monkeypatch.setattr(S, "exec_js", lambda *args, **kwargs: calls.append((args, kwargs)) or {"data": []})
+    payload = {"cmd": "batch", "commands": [{"cmd": "cdp", "method": "DOM.getDocument"}]}
+
+    assert S._extension_batch(payload, session_id="chrome:7", timeout=2) == {"data": []}
+    assert json.loads(calls[0][0][0]) == payload
+    assert calls[0][1] == {"session_id": "chrome:7", "timeout": 2}
+
+
+def test_extension_batch_does_not_replay_an_arbitrary_transport_error(monkeypatch):
+    failure = OSError("socket closed after send")
+    calls = []
+
+    def ext_cmd(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise failure
+
+    monkeypatch.setattr(S, "require_driver", lambda: SimpleNamespace(ext_cmd=ext_cmd))
+    monkeypatch.setattr(S, "_resolve_cdp_target", lambda *args: ("chrome:7", "chrome", 7))
+    monkeypatch.setattr(S, "exec_js", lambda *args, **kwargs: pytest.fail("must not resend the batch"))
+
+    with pytest.raises(OSError) as raised:
+        S._extension_batch({"cmd": "batch", "commands": []}, session_id="chrome:7", timeout=2)
+
+    assert raised.value is failure
+    assert len(calls) == 1
+
+
+def test_pyautogui_loader_configures_the_imported_backend_without_desktop_io(monkeypatch):
+    backend = SimpleNamespace(FAILSAFE=True)
+    monkeypatch.setitem(S.sys.modules, "pyautogui", backend)
+
+    assert S._pyautogui() is backend
+    assert backend.FAILSAFE is False
+
+
+@pytest.mark.parametrize("collector_state", ["missing", "exception", "failed", "in_progress"])
+def test_waiting_for_a_pending_probe_keeps_its_receipt_without_replaying(monkeypatch, collector_state):
+    now = [0.0]
+    dispatches, polls = [], []
+    driver = SimpleNamespace()
+    receipt = {
+        "operation_id": "wait-operation", "delivery_state": "sent_unconfirmed",
+        "reservation_held": True,
+    }
+    pending_error = TimeoutError("waiting for the page receipt")
+    pending_error.diagnostics = receipt
+
+    def execute(*args, **kwargs):
+        dispatches.append((args, kwargs))
+        assert len(dispatches) == 1
+        raise pending_error
+
+    def collect(operation_id, **kwargs):
+        polls.append((operation_id, kwargs))
+        now[0] = 2
+        if collector_state == "exception":
+            raise OSError("result lookup disconnected")
+        if collector_state == "failed":
+            return {"status": "failed", "error": "page unloaded"}
+        return {"status": "in_progress"}
+
+    if collector_state != "missing":
+        driver.get_execute_js_result = collect
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "exec_js", execute)
+    monkeypatch.setattr(S.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(S.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+
+    info, error, pending, _ = S._poll_wait_condition("return true", "chrome:7", 2)
+
+    assert info == {}
+    assert len(dispatches) == 1
+    assert len(polls) == (collector_state != "missing")
+    if collector_state == "failed":
+        assert error == "page unloaded"
+        assert pending == {
+            **receipt,
+            "operation_status": "failed",
+            "retry_safe": False,
+            "poll_with": "get_execute_js_result",
+        }
+    else:
+        assert error == (
+            "result lookup disconnected" if collector_state == "exception" else str(pending_error)
+        )
+        assert pending["operation_id"] == "wait-operation"
+        assert pending["reservation_held"] is True
+        assert pending["retry_safe"] is False
+
+
+@pytest.mark.parametrize("data", [None, [], json.dumps("not a condition snapshot")])
+def test_wait_probe_does_not_accept_a_non_object_as_a_condition(monkeypatch, data):
+    now = [0.0]
+
+    def execute(*args, **kwargs):
+        now[0] = 2
+        return {"data": data}
+
+    monkeypatch.setattr(S, "exec_js", execute)
+    monkeypatch.setattr(S.time, "monotonic", lambda: now[0])
+
+    info, error, pending, elapsed = S._poll_wait_condition("return true", "chrome:7", 2)
+
+    assert info == {} and pending == {}
+    assert error == "wait probe returned no condition snapshot"
+    assert elapsed == 2000
+
+
+def test_a_refused_tab_close_preserves_its_cleanup_capability(monkeypatch):
+    ownership = S._TabOwnershipRegistry()
+    ownership.register("client:1", "generation-1", owner_id="owner")
+    before = ownership.outstanding()
+    calls = []
+    driver = SimpleNamespace(ext_cmd=lambda *args, **kwargs: calls.append((args, kwargs)) or {
+        "data": {"ok": False, "error": "tab close refused"},
+    })
+    driver.resolve_session_target = lambda session_id: {"session_id": session_id}
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "_TAB_OWNERSHIP", ownership)
+    monkeypatch.setattr(S, "_normalize_tab_targets", lambda *args, **kwargs: ([1], "client"))
+    monkeypatch.setattr(S, "active_sessions", lambda **kwargs: [{
+        "id": "client:1", "generation": "generation-1",
+    }])
+
+    with pytest.raises(RuntimeError, match="tab close refused"):
+        S.close_tabs("client:1", session_id="client:1", owner_id="owner")
+
+    assert len(calls) == 1
+    assert ownership.outstanding() == before
+
+
+def test_activate_tab_preserves_the_explicit_target_and_activation_evidence(monkeypatch):
+    activations, pauses = [], []
+
+    def activate(session_id):
+        activations.append(session_id)
+        return {"session_id": session_id, "on_screen": True}
+
+    monkeypatch.setattr(S, "_activate", activate)
+    monkeypatch.setattr(S.time, "sleep", pauses.append)
+
+    assert S.activate_tab("chrome:7") == {
+        "status": "ok", "session_id": "chrome:7", "on_screen": True,
+    }
+    assert activations == ["chrome:7"]
+    assert pauses == [0.3]
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_optional_activation_preserves_an_explicit_alias_or_a_skipped_reason(monkeypatch, failed):
+    activations, pauses = [], []
+
+    def activate(session_id):
+        activations.append(session_id)
+        if failed:
+            raise RuntimeError("target is no longer connected")
+        return {"session_id": session_id, "on_screen": True}
+
+    monkeypatch.setattr(S, "_activate", activate)
+    monkeypatch.setattr(S.time, "sleep", pauses.append)
+
+    result = S._maybe_activate("chrome:7")
+
+    assert activations == ["chrome:7"]
+    assert result == (
+        {"activation_skipped": "target is no longer connected"} if failed else
+        {"session_id": "chrome:7", "on_screen": True}
+    )
+    assert pauses == ([] if failed else [0.3])
+
+
+@pytest.mark.parametrize("reply", [None, {"data": None}, {"data": {"data": ""}}])
+def test_save_pdf_requires_pdf_data_before_creating_a_file(monkeypatch, tmp_path, reply):
+    destination = tmp_path / "page.pdf"
+    monkeypatch.setattr(S, "_validate_safe_path", lambda *args, **kwargs: destination)
+    monkeypatch.setattr(S, "cdp_command", lambda *args, **kwargs: reply)
+
+    with pytest.raises(RuntimeError, match="returned no PDF data"):
+        S.save_pdf(str(destination), session_id="chrome:7")
+
+    assert not destination.exists()
+
+
+def test_cookie_normalization_keeps_an_unspecified_samesite_policy():
+    result = S._normalize_cookie({"name": "sid", "value": "v", "sameSite": "unspecified"}, 1)
+    assert result["name"] == "sid"
+    assert result["value"] == "v"
+    assert "sameSite" not in result
+
+
+def test_string_storage_values_are_written_without_a_serialization_note(monkeypatch):
+    calls = []
+    value = 'literal "quoted" value'
+    monkeypatch.setattr(S, "exec_js", lambda *args, **kwargs: calls.append((args, kwargs)) or {
+        "data": {"ok": True, "existed": True, "keys": 2},
+    })
+
+    result = S.storage_set("key", value, session_id="chrome:7")
+
+    assert result["status"] == "success"
+    assert result["replaced"] is True
+    assert "note" not in result
+    assert json.dumps(value) in calls[0][0][0]
+    assert calls[0][1]["session_id"] == "chrome:7"
+
+
+def test_scroll_without_an_explicit_target_keeps_the_existing_default(monkeypatch):
+    driver = _install_page_driver(monkeypatch, default_session_id="chrome:7")
+    monkeypatch.setattr(S, "switch_session", lambda **kwargs: pytest.fail("the implicit target is already selected"))
+    monkeypatch.setattr(S, "exec_js", lambda *args, **kwargs: {"data": {"before": 0, "after": 500}})
+
+    result = S.scroll_page("500")
+
+    assert result["scroll_y"] == 500
+    assert driver.default_session_id == "chrome:7"
+
+
+def test_cdp_can_address_a_worker_without_an_extension_id(monkeypatch):
+    calls = []
+    driver = SimpleNamespace(ext_cmd=lambda *args, **kwargs: calls.append((args, kwargs)) or {"data": 7})
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "_implicit_client_id", lambda session_id=None: "chrome")
+
+    assert S.cdp_command("Runtime.evaluate", target_id="worker", session_id="chrome:7") == {"data": 7}
+    assert calls[0][0][0] == {
+        "cmd": "cdp", "method": "Runtime.evaluate", "params": {}, "targetId": "worker",
+    }
+    assert calls[0][1]["client_id"] == "chrome"
+
+
+@pytest.mark.parametrize("diagnosis", [None, [], "invalid diagnosis"])
+def test_setup_status_tolerates_an_unstructured_diagnosis(monkeypatch, diagnosis):
+    driver = SimpleNamespace(
+        default_session_id=None, diagnose=lambda **kwargs: diagnosis,
+        ext_cmd=lambda *args, **kwargs: {"data": {}}, is_remote=False,
+    )
+    monkeypatch.setattr(S, "get_driver", lambda: driver)
+    monkeypatch.setattr(S, "compact_tabs", lambda **kwargs: [])
+
+    result = S.get_setup_status()
+
+    assert result["diagnosis"] == {}
+    assert result["tabs"] == []

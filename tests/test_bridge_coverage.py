@@ -3,6 +3,9 @@ from __future__ import annotations
 import builtins
 import io
 import json
+import runpy
+import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -126,6 +129,99 @@ def test_bridge_record_is_atomic_and_private(monkeypatch, tmp_path):
 
     assert bridge.read_bridge_record() == record
     assert json.loads(bridge.bridge_pid_path().read_text(encoding="utf-8"))["pid"] == 44
+
+
+@pytest.mark.parametrize("failure", ["chmod", "temporary_cleanup"])
+def test_published_bridge_record_survives_best_effort_filesystem_failures(
+    monkeypatch, tmp_path, failure
+):
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        bridge, "process_identity",
+        lambda pid: {"pid": pid, "creation_ticks": 123, "executable": "python"},
+    )
+
+    def denied(*args, **kwargs):
+        raise PermissionError("filesystem policy denied optional cleanup")
+
+    with monkeypatch.context() as patch:
+        if failure == "chmod":
+            patch.setattr(bridge.os, "chmod", denied)
+        else:
+            patch.setattr(bridge.Path, "unlink", denied)
+        record = bridge._write_bridge_record(
+            instance_id="published", host="127.0.0.1", port=18765
+        )
+
+    assert bridge.read_bridge_record() == record
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["bridge.pid"]
+
+
+@pytest.mark.parametrize("current", [None, {"instance_id": "successor"}])
+def test_record_cleanup_does_not_remove_an_unowned_record(monkeypatch, current):
+    monkeypatch.setattr(bridge, "read_bridge_record", lambda: current)
+    monkeypatch.setattr(
+        bridge, "bridge_pid_path", lambda: pytest.fail("no owned record to remove")
+    )
+    bridge._remove_record_if_owned({"instance_id": "old"})
+
+
+def test_record_cleanup_tolerates_a_denied_unlink(monkeypatch, tmp_path):
+    monkeypatch.setenv("BROWSERTAP_STATE_DIR", str(tmp_path))
+    record = {"pid": 44, "creation_ticks": 1, "executable": "python", "instance_id": "old"}
+    path = bridge.bridge_pid_path()
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    def denied(*args, **kwargs):
+        raise PermissionError("record locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(bridge.Path, "unlink", denied)
+        bridge._remove_record_if_owned(record)
+
+    assert bridge.read_bridge_record() == record
+
+
+@pytest.mark.parametrize("reachable", [True, False])
+@pytest.mark.parametrize("custom_address", [True, False])
+def test_configured_listener_probe_closes_its_connection(
+    monkeypatch, reachable, custom_address
+):
+    if custom_address:
+        monkeypatch.setenv("BROWSERTAP_BRIDGE_HOST", "bridge.example")
+        monkeypatch.setenv("BROWSERTAP_BRIDGE_PORT", "19000")
+        address = ("bridge.example", 19001)
+    else:
+        monkeypatch.delenv("BROWSERTAP_BRIDGE_HOST", raising=False)
+        monkeypatch.delenv("BROWSERTAP_BRIDGE_PORT", raising=False)
+        address = ("127.0.0.1", 18766)
+    calls = []
+
+    @contextmanager
+    def connect(target, *, timeout):
+        calls.append((target, timeout))
+        if not reachable:
+            raise ConnectionRefusedError("no listener")
+        try:
+            yield
+        finally:
+            calls.append("closed")
+
+    monkeypatch.setattr(bridge.socket, "create_connection", connect)
+
+    assert bridge._configured_bridge_port_open() is reachable
+    assert calls == [(address, 0.25)] + (["closed"] if reachable else [])
+
+
+def test_bridge_module_help_exits_without_starting_a_daemon(monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, bridge.__name__)
+    monkeypatch.setattr(sys, "argv", ["browsertap-bridge", "--help"])
+
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_module(bridge.__name__, run_name="__main__")
+
+    assert exc.value.code == 0
+    assert "--instance-id" in capsys.readouterr().out
 
 
 def test_stop_bridge_refuses_unmanaged_listener(monkeypatch, tmp_path):

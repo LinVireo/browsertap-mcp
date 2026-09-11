@@ -146,6 +146,34 @@ def test_unknown_outcome_is_still_readable_before_its_reservation_expires(clock)
     assert snapshot["wire_result"]["data"] == "cdp_timeout: x"
 
 
+@pytest.mark.parametrize("observation", ["wire_reply", "manual_recovery"])
+def test_repeated_unknown_observation_does_not_extend_the_reservation(clock, observation):
+    operations = PendingOperations()
+    operations.reserve("execution", ["a"], "owner", caller_budget=20.0)
+    operations.complete("execution", {
+        "success": True,
+        "data": {"__btap_dialog_result": True, "pending_execution": True},
+    })
+    operations.reserve("recovery", ["a"], "owner", kind="handle_dialog", cleanup=True)
+    operations.complete(
+        "execution", {"success": False, "data": "first timeout"}, outcome_unknown=True,
+    )
+    clock[0] += 40
+    if observation == "wire_reply":
+        operations.complete(
+            "execution", {"success": False, "data": "second timeout"}, outcome_unknown=True,
+        )
+    else:
+        operations.observe_manual_execution("recovery")
+    assert operations.read("execution", "owner")["status"] == "outcome_unknown"
+
+    clock[0] += pending_module.SILENT_GRACE_SECONDS + 20 - 40 + 1
+    snapshot = operations.read("execution", "owner")
+    assert snapshot["status"] == "abandoned"
+    assert snapshot["reservation_held"] is False
+    assert snapshot["abandoned_reason"] == "unknown_outcome_reservation_ttl"
+
+
 def test_a_dialog_block_keeps_its_tab(clock):
     # blocked_by_dialog means a human is expected to act; the reservation is
     # what keeps another caller out of that tab meanwhile.

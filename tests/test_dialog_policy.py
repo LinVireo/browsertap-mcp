@@ -145,6 +145,18 @@ def test_manual_dialog_is_never_reported_as_handled():
     assert result["dialog"]["message"] == "Continue?"
 
 
+@pytest.mark.parametrize("details, expected", [
+    ({"handled": False}, "dialog_handle_failed"),
+    ({"handle_error": "debugger detached"}, "dialog_handle_failed"),
+    ({"handled": True}, "ok"),
+])
+def test_navigation_dialog_classification_uses_the_handling_evidence(details, expected):
+    result = S._classify_navigation_result({
+        "status": "ok", "dialog": {"type": "confirm"}, "dialog_action": "accept", **details,
+    }, requested_url="https://example.test")
+    assert result["status"] == expected
+
+
 @pytest.mark.parametrize(
     "bridge_status",
     ["navigation_timeout", "dialog_handle_failed", "navigation_failed"],
@@ -220,6 +232,27 @@ def test_open_url_uses_directed_navigate_route_and_preserves_full_session(monkey
     assert payload["timeoutMs"] <= int(call_timeout * 1000)
 
 
+def test_open_url_uses_the_only_connected_browser_when_the_preference_is_absent(monkeypatch):
+    driver = FakeDriver()
+    driver.default_session_id = None
+    monkeypatch.setenv("BROWSERTAP_PREFERRED_BROWSER", "chrome")
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "ensure_sessions", lambda **kwargs: [{
+        "id": "edge:profile:42", "browser": "edge", "url": "https://old.example/",
+    }])
+    monkeypatch.setattr(S, "invalidate_sessions_cache", lambda: None)
+
+    S.open_url("https://new.example/", beforeunload="dismiss", timeout=9)
+
+    assert len(driver.calls) == 1
+    payload, client_id, timeout = driver.calls[0]
+    assert payload["cmd"] == "navigate"
+    assert payload["tabId"] == 42
+    assert payload["url"] == "https://new.example/"
+    assert client_id == "edge:profile"
+    assert 0 < timeout <= 9
+
+
 def test_open_url_rejects_invalid_policy_without_touching_bridge(monkeypatch):
     monkeypatch.setattr(
         S, "require_driver", lambda: pytest.fail("bridge must not be touched")
@@ -256,6 +289,55 @@ def test_handle_dialog_routes_action_and_prompt_to_requested_browser(monkeypatch
             3.0,
         )
     ]
+
+
+@pytest.mark.parametrize("action, response, expected", [
+    ("accept", {"ok": False, "error": '{"code":-32000}'}, "dialog_handle_failed"),
+    ("manual", {"status": "blocked_by_dialog"}, "blocked_by_dialog"),
+])
+def test_implicit_dialog_handling_preserves_failure_and_manual_action_hints(monkeypatch, action, response, expected):
+    driver = FakeDriver({"data": response})
+    sid = _install_target(monkeypatch, driver)
+    driver.default_session_id = sid
+    result = S.handle_dialog(action)
+    assert result["status"] == expected
+    assert "resolve_leave_dialog" in result["hint"]
+    assert result["active_session_id"] == driver.default_session_id == sid
+
+
+@pytest.mark.anyio
+async def test_resolve_leave_retries_a_protocol_exception_then_stops_after_success(monkeypatch):
+    calls = []
+    monkeypatch.setattr(S, "switch_session", lambda **kwargs: "chrome:7")
+
+    def handle(action, **kwargs):
+        calls.append((action, kwargs))
+        if len(calls) == 1:
+            raise RuntimeError("debugger temporarily unavailable")
+        return {"handled": True}
+
+    monkeypatch.setattr(S, "handle_dialog", handle)
+    monkeypatch.setattr(S, "_run_approved_physical_action", lambda *args, **kwargs: pytest.fail("protocol succeeded"))
+    result = await S.resolve_leave_dialog(None, session_id="chrome:7")
+    assert result["status"] == "ok"
+    assert result["resolution"] == "protocol"
+    assert [item["status"] for item in result["attempts"][:1]] == ["error"]
+    assert len(calls) == 2
+    assert all(kwargs["session_id"] == "chrome:7" for _, kwargs in calls)
+
+
+@pytest.mark.anyio
+async def test_resolve_leave_in_safe_mode_stops_before_physical_input(monkeypatch):
+    monkeypatch.setattr(S, "_AUTOMATION_MODE_OVERRIDE", "safe")
+    monkeypatch.setattr(S, "switch_session", lambda **kwargs: "chrome:7")
+    monkeypatch.setattr(S, "handle_dialog", lambda *args, **kwargs: {
+        "status": "dialog_handle_failed", "error": "debugger unavailable",
+    })
+    monkeypatch.setattr(S, "_run_approved_physical_action", lambda *args, **kwargs: pytest.fail("safe mode"))
+    result = await S.resolve_leave_dialog(None)
+    assert result["status"] == "requires_user_action"
+    assert len(result["attempts"]) == 2
+    assert "Safe mode" in result["hint"]
 
 
 def test_handle_dialog_rejects_invalid_action_without_touching_bridge(monkeypatch):

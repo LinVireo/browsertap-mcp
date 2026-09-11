@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import runpy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -195,6 +197,30 @@ def test_doctor_reload_extension_returns_nonzero(monkeypatch, capsys):
     assert "Reload BrowserTap Bridge" in captured.err
 
 
+@pytest.mark.parametrize(
+    "status, action, exit_code, guidance",
+    [
+        ("stale_package", "restart_mcp_session", 1, "Restart the MCP session/client"),
+        ("starting", "wait_for_extension", 0, "waiting for the extension handshake"),
+    ],
+)
+def test_doctor_explains_the_component_recovery_action(
+    monkeypatch, capsys, status, action, exit_code, guidance
+):
+    driver = FakeDriver()
+    _install_doctor_fakes(
+        monkeypatch,
+        driver,
+        {"status": status, "action": action, "tabs": [], "diagnosis": {}},
+    )
+
+    assert cli.cmd_doctor() == exit_code
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert (payload["status"], payload["action"]) == (status, action)
+    assert guidance in captured.err
+
+
 def test_doctor_reports_bridge_failures_and_restart_action(monkeypatch, tmp_path, capsys):
     driver = FakeDriver(
         sessions=RuntimeError("tabs unavailable"),
@@ -297,6 +323,7 @@ def test_doctor_does_not_touch_the_bridge_when_initialization_fails(monkeypatch,
     "command, target",
     [
         ("extension-path", "cmd_extension_path"),
+        ("skill-path", "cmd_skill_path"),
         ("doctor", "cmd_doctor"),
         ("print-hermes-config", "cmd_print_hermes_config"),
     ],
@@ -340,6 +367,32 @@ def test_cmd_bridge_stop_and_restart(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "restarted"
 
 
+def test_cmd_bridge_runs_in_the_foreground_without_stopping_another_bridge(monkeypatch):
+    from browsertap_mcp import bridge
+
+    calls = []
+    monkeypatch.setattr(bridge, "main", lambda argv: calls.append(argv) or 23)
+    monkeypatch.setattr(
+        bridge, "stop_bridge_daemon", lambda: pytest.fail("foreground start must not stop a daemon")
+    )
+
+    assert cli.cmd_bridge() == 23
+    assert calls == [[]]
+
+
+def test_cmd_bridge_reports_a_failed_spawn_after_a_verified_stop(monkeypatch, capsys):
+    from browsertap_mcp import bridge
+
+    stopped = {"status": "not_running", "stopped": False}
+    monkeypatch.setattr(bridge, "stop_bridge_daemon", lambda: stopped)
+    monkeypatch.setattr(cli, "spawn_bridge_daemon", lambda **kwargs: False)
+
+    assert cli.cmd_bridge(restart=True) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "restart_failed", "stop": stopped, "started": False,
+    }
+
+
 @pytest.mark.parametrize("stop_status", ["identity_mismatch", "unmanaged_running"])
 def test_cmd_bridge_refuses_restart_after_unverified_stop(monkeypatch, capsys, stop_status):
     from browsertap_mcp import bridge
@@ -375,3 +428,14 @@ def test_main_rejects_unknown_subcommand():
     with pytest.raises(SystemExit) as exc:
         cli.main(["not-a-command"])
     assert exc.value.code == 2
+
+
+def test_module_entrypoint_preserves_the_version_exit_status(monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, cli.__name__)
+    monkeypatch.setattr(sys, "argv", ["browsertap", "--version"])
+
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_module(cli.__name__, run_name="__main__")
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"browsertap {cli.__version__}"

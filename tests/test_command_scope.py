@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import queue
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import browsertap_mcp.command_scope as scope_module
 from browsertap_mcp.browser_bridge import BrowserBridge
 from browsertap_mcp.command_scope import (
     TargetBusyError,
@@ -191,6 +193,65 @@ def test_distinct_tabs_clients_and_bridge_namespaces_can_run_concurrently(
 ):
     with _held(lock_environment), command_scope():
         guard_targets(namespace, [target])
+
+
+def test_non_loopback_namespace_is_not_rewritten_into_the_loopback_lock(
+    lock_environment,
+):
+    with _held(lock_environment):
+        with command_scope():
+            guard_targets("browser.example:18765", [TARGET])
+
+
+def test_posix_scope_uses_a_nonblocking_flock(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeFcntl:
+        LOCK_EX = 1
+        LOCK_NB = 2
+
+        @staticmethod
+        def flock(fd, operation):
+            calls.append((fd, operation))
+
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(scope_module, "state_dir", lambda *, create=False: state)
+    monkeypatch.setattr(scope_module.sys, "platform", "linux")
+    monkeypatch.setitem(scope_module.sys.modules, "fcntl", FakeFcntl)
+
+    with command_scope():
+        guard_targets("posix.example:18765", [TARGET])
+
+    assert len(calls) == 1
+    assert calls[0][1] == FakeFcntl.LOCK_EX | FakeFcntl.LOCK_NB
+
+
+def test_lock_storage_error_is_reraised_after_closing_the_descriptor(monkeypatch, tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(scope_module, "state_dir", lambda *, create=False: state)
+    real_open = scope_module.os.open
+    real_fstat = scope_module.os.fstat
+    opened = []
+
+    def tracked_open(path, flags, mode):
+        fd = real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    def fail_fstat(_fd):
+        raise OSError(errno.EIO, "lock storage failed")
+
+    monkeypatch.setattr(scope_module.os, "open", tracked_open)
+    monkeypatch.setattr(scope_module.os, "fstat", fail_fstat)
+
+    with pytest.raises(OSError, match="lock storage failed"), command_scope():
+        guard_targets("storage.example:18765", [TARGET])
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        real_fstat(opened[0])
 
 
 @pytest.mark.parametrize("host", ["localhost", "LOCALHOST", "::1", "[::1]"])

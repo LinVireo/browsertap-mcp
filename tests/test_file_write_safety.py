@@ -92,6 +92,59 @@ def test_payload_open_failure_releases_descriptor_and_partial_file(monkeypatch, 
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("cleanup", ["close", "unlink"])
+def test_payload_cleanup_failure_preserves_the_original_open_error(monkeypatch, tmp_path, cleanup):
+    monkeypatch.setattr(S.tempfile, "tempdir", str(tmp_path))
+    real_close, real_unlink = os.close, S.Path.unlink
+    cleanup_calls = []
+
+    def failed_open(descriptor, mode):
+        raise OSError(errno.ENOSPC, "payload open failed")
+
+    def failed_close(descriptor):
+        real_close(descriptor)
+        cleanup_calls.append("close")
+        raise OSError("close failed")
+
+    def failed_unlink(path, *args, **kwargs):
+        real_unlink(path, *args, **kwargs)
+        cleanup_calls.append("unlink")
+        raise OSError("unlink failed")
+
+    monkeypatch.setattr(S.os, "fdopen", failed_open)
+    if cleanup == "close":
+        monkeypatch.setattr(S.os, "close", failed_close)
+    else:
+        monkeypatch.setattr(S.Path, "unlink", failed_unlink)
+    with pytest.raises(OSError, match="payload open failed"):
+        S._write_execute_js_payload(b"{}")
+    assert cleanup_calls == [cleanup]
+    assert not list(tmp_path.iterdir())
+
+
+def test_atomic_write_close_failure_does_not_mask_the_disk_error(monkeypatch, tmp_path):
+    target = tmp_path / "capture.png"
+    target.write_bytes(b"original")
+    real_close = os.close
+    closed = []
+
+    def failed_write(descriptor, data):
+        raise OSError(errno.ENOSPC, "disk full")
+
+    def failed_close(descriptor):
+        real_close(descriptor)
+        closed.append(descriptor)
+        raise OSError("close failed")
+
+    monkeypatch.setattr(S.os, "write", failed_write)
+    monkeypatch.setattr(S.os, "close", failed_close)
+    with pytest.raises(RuntimeError, match="disk full"):
+        S._atomic_write_bytes(target, b"replacement")
+    assert len(closed) == 1
+    assert target.read_bytes() == b"original"
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_payload_file_is_complete_and_matches_its_digest(monkeypatch, tmp_path):
     monkeypatch.setattr(S.tempfile, "tempdir", str(tmp_path))
     payload = b'{"result":42}'

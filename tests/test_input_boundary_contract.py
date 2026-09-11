@@ -118,10 +118,15 @@ def test_typing_never_replaces_an_explicit_missing_target(typing):
     assert calls == []
 
 
-@pytest.mark.parametrize("stage", ["sessions", "resolver", "capability", "xterm"])
+@pytest.mark.parametrize("stage", [
+    "before_sessions", "sessions", "before_resolver", "resolver", "capability", "xterm",
+])
 def test_typing_deadline_is_checked_before_every_dispatch_stage(typing, monkeypatch, stage):
     driver, now, calls = typing
-    if stage == "sessions":
+    if stage in {"before_sessions", "before_resolver"}:
+        ticks = iter([0, 2] if stage == "before_sessions" else [0, 0, 0, 2])
+        monkeypatch.setattr(S.time, "monotonic", lambda: next(ticks, 2))
+    elif stage == "sessions":
         def slow(**kw):
             now[0] = 2
             return [{"id": "chrome:7"}]
@@ -139,6 +144,34 @@ def test_typing_deadline_is_checked_before_every_dispatch_stage(typing, monkeypa
     with pytest.raises(TimeoutError):
         S.page_type("x", submit_key="enter", timeout=1, session_id="chrome:7")
     assert calls == []
+
+
+@pytest.mark.parametrize("stage", ["target_resolution", "input_dispatch"])
+def test_clicking_stops_when_the_shared_deadline_expires(typing, monkeypatch, stage):
+    driver, now, calls = typing
+    driver.default_session_id = "chrome:1"
+    resolutions = []
+
+    def resolve_session(*args, **kwargs):
+        if stage == "target_resolution":
+            now[0] = 2
+        return "chrome:7"
+
+    def resolve_selector(*args, **kwargs):
+        resolutions.append(args)
+        now[0] = 2
+        return {"found": True, "x": 1, "y": 2, "width": 10, "height": 10}
+
+    monkeypatch.setattr(S, "_resolve_page_input_session", resolve_session)
+    monkeypatch.setattr(S, "_page_selector_info", resolve_selector)
+    monkeypatch.setattr(S, "_clear_page_challenge", lambda *args: None)
+
+    with pytest.raises(TimeoutError, match=stage.replace("_", " ")):
+        S.page_click(selector="button", session_id="chrome:7", timeout=1)
+
+    assert calls == []
+    assert len(resolutions) == (stage == "input_dispatch")
+    assert driver.default_session_id == "chrome:1"
 
 
 def test_non_guard_input_failure_is_preserved(typing, monkeypatch):

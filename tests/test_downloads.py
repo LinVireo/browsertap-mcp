@@ -37,6 +37,74 @@ def test_manifest_requests_downloads_permission():
     assert "downloads" in manifest["permissions"]
 
 
+@pytest.mark.parametrize("failure", [
+    {"ok": False},
+    {"ok": False, "download_id": 7, "code": "download_failed", "error": "NETWORK_FAILED"},
+])
+def test_download_file_preserves_a_router_refusal_without_retry(monkeypatch, failure):
+    driver = _Driver({"data": failure})
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+
+    result = S.download_file("https://example.test/file.bin")
+
+    assert result == {
+        "type": "download", "status": "failed", "error": failure.get("error", "download failed"),
+        **{key: failure[key] for key in ("download_id", "code") if key in failure},
+    }
+    assert len(driver.calls) == 1
+
+
+def test_download_file_keeps_the_completed_file_in_the_default_directory(monkeypatch, tmp_path):
+    source = tmp_path / "download.bin"
+    source.write_bytes(b"completed download")
+    driver = _Driver({"data": {
+        "status": "completed", "download_id": 7, "path": str(source),
+    }})
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "_move_download", lambda *args, **kwargs: pytest.fail("no move was requested"))
+
+    result = S.download_file("https://example.test/file.bin")
+
+    assert result == {
+        "type": "download", "status": "completed", "download_id": 7,
+        "path": str(source.resolve()), "size": len(b"completed download"),
+    }
+    assert source.read_bytes() == b"completed download"
+    assert len(driver.calls) == 1
+
+
+def test_download_file_refuses_a_destination_link_that_escapes_the_requested_directory(monkeypatch, tmp_path):
+    requested = tmp_path / "requested"
+    outside = tmp_path / "outside"
+    requested.mkdir()
+    outside.mkdir()
+    link = requested / "nested"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("Directory symlink creation is unavailable")
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            check=True, capture_output=True,
+        )
+        assert link.resolve() == outside.resolve()
+    source = tmp_path / "download.bin"
+    source.write_bytes(b"completed download")
+    driver = _Driver({"data": {"status": "completed", "path": str(source)}})
+    monkeypatch.setattr(S, "require_driver", lambda: driver)
+    monkeypatch.setattr(S, "_move_download", lambda *args, **kwargs: pytest.fail("destination escapes its directory"))
+
+    with pytest.raises(ValueError, match="filename must stay within directory"):
+        S.download_file(
+            "https://example.test/file.bin", filename="nested/file.bin", directory=str(requested),
+        )
+
+    assert source.read_bytes() == b"completed download"
+    assert list(outside.iterdir()) == []
+    assert len(driver.calls) == 1
+
+
 def test_download_file_default_refuses_to_overwrite_requested_destination(
     monkeypatch, tmp_path
 ):
@@ -365,7 +433,8 @@ def test_registered_download_tool_pins_implicit_browser_without_global_lock(monk
     assert driver.calls[0][1] == "chrome:personal"
 
 
-def test_download_file_preserves_structured_extension_failure(monkeypatch):
+@pytest.mark.parametrize("include_code", [False, True])
+def test_download_file_preserves_structured_extension_failure(monkeypatch, include_code):
     driver = _Driver(
         {
             "data": {
@@ -379,6 +448,8 @@ def test_download_file_preserves_structured_extension_failure(monkeypatch):
             }
         }
     )
+    if not include_code:
+        driver.response["data"]["data"].pop("code")
     monkeypatch.setattr(S, "require_driver", lambda: driver)
 
     result = S.download_file("https://example.test/broken.bin")
@@ -387,7 +458,7 @@ def test_download_file_preserves_structured_extension_failure(monkeypatch):
         "type": "download",
         "status": "failed",
         "download_id": 19,
-        "code": "download_failed",
+        **({"code": "download_failed"} if include_code else {}),
         "error": "NETWORK_FAILED",
     }
 

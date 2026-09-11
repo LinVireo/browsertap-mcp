@@ -67,6 +67,50 @@ def test_discovery_cannot_silently_select_another_or_unknown_browser(create_driv
     assert [call[0] for call in dispatched] == ["status"]
 
 
+@pytest.mark.parametrize("phase", ["discovery", "create"])
+def test_tab_creation_never_dispatches_after_the_deadline_expires(create_driver, monkeypatch, phase):
+    _, statuses, _, dispatched, _ = create_driver
+    statuses.append(reply("not_found"))
+    ticks = iter([0, 2] if phase == "discovery" else [0, 0, 2])
+    monkeypatch.setattr(S.time, "monotonic", lambda: next(ticks, 2))
+
+    result = S.open_new_tab("https://created.test/", timeout=1)
+
+    assert result["status"] == "unknown"
+    assert result["owned"] is False
+    assert [call[0] for call in dispatched] == ([] if phase == "discovery" else ["status"])
+    assert S._TAB_OWNERSHIP.outstanding() == []
+
+
+def test_ambiguous_browser_discovery_stays_a_routing_error(create_driver):
+    driver, statuses, _, dispatched, _ = create_driver
+    driver.default_session_id = None
+    failure = S.AmbiguousBrowserError(["chrome", "edge"])
+    statuses.append(failure)
+
+    with pytest.raises(S.AmbiguousBrowserError) as raised:
+        S.open_new_tab("https://created.test/")
+
+    assert raised.value is failure
+    assert [call[0] for call in dispatched] == ["status"]
+
+
+def test_completed_recovery_claims_the_original_tab_without_creating_another(create_driver):
+    _, statuses, _, dispatched, _ = create_driver
+    statuses.append(reply("completed"))
+
+    result = S.open_new_tab(
+        "https://created.test/", operation_id="open-tab-fixture", client_id="chrome", owner_id="owner",
+    )
+
+    assert result["status"] == "ok"
+    assert result["session_id"] == "chrome:7"
+    assert result["generation"] == "g7"
+    assert result["owner_id"] == "owner"
+    assert result["owned"] is True
+    assert [call[0] for call in dispatched] == ["status"]
+
+
 @pytest.mark.parametrize("fields", [
     {"client_id": "edge"}, {"id": None}, {"generation": ""}, {"id": "invalid"},
 ])
@@ -102,15 +146,19 @@ def test_browser_mismatch_at_each_reply_preserves_uncertainty(create_driver, pha
     assert all(call[-1].get("client_id") == "chrome" for call in dispatched)
 
 
-def test_nested_operation_failure_is_not_lost_during_unwrapping(create_driver):
+@pytest.mark.parametrize("nested_error", [None, "browser rejected the requested URL"])
+def test_nested_operation_failure_is_not_lost_during_unwrapping(create_driver, nested_error):
     _, statuses, creates, _, _ = create_driver
     statuses.append(reply("not_found"))
+    nested = reply("not_found")["data"]
+    if nested_error:
+        nested["error"] = nested_error
     creates.append({"client_id": "chrome", "data": {
-        "error": "browser refused create", "data": reply("not_found")["data"],
+        "error": "browser refused create", "data": nested,
     }})
     result = S.open_new_tab("https://created.test/")
     assert result["status"] == "error"
-    assert result["error"] == "browser refused create"
+    assert result["error"] == (nested_error or "browser refused create")
     assert result["may_have_created"] is False
 
 

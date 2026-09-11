@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import importlib.util
 import json
 import os
 import queue
@@ -15,6 +16,30 @@ import pytest
 
 from browsertap_mcp import requester_liveness as L
 from browsertap_mcp.paths import STATE_DIR_ENV
+
+
+def test_fork_hook_registration_releases_inherited_identity_descriptors(monkeypatch, tmp_path):
+    hooks = []
+    monkeypatch.setattr(os, "register_at_fork", lambda **kwargs: hooks.append(kwargs), raising=False)
+    spec = importlib.util.spec_from_file_location("browsertap_mcp._fork_hook_test", L.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert len(hooks) == 1
+    assert set(hooks[0]) == {"after_in_child"}
+
+    path = tmp_path / "inherited.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    module._IDENTITIES[(123, str(tmp_path))] = ("parent", fd)
+    inherited_lock = module._IDENTITY_LOCK
+    try:
+        hooks[0]["after_in_child"]()
+        assert module._IDENTITIES == {}
+        assert module._IDENTITY_LOCK is not inherited_lock
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    finally:
+        if module._IDENTITIES:
+            os.close(fd)
 
 _HOLDER = """
 import os

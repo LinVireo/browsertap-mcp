@@ -118,11 +118,12 @@ def test_result_wait_wakes_without_replaying_script():
     assert len(bridge.sent) == 1
 
 
-def test_finish_tab_operations_ignores_malformed_native_tab_id():
+@pytest.mark.parametrize("session_id", ["browser:not-number", "legacy-session"])
+def test_finish_tab_operations_ignores_malformed_native_tab_id(session_id):
     bridge = make_bridge()
-    bridge._operation_state().reserve("op", ["browser:not-number"], "a")
+    bridge._operation_state().reserve("op", [session_id], "a")
 
-    bridge._finish_tab_operations("browser:not-number", "tab_removed")
+    bridge._finish_tab_operations(session_id, "tab_removed")
 
     result = bridge._operation_state().read("op", "a")
     assert result["status"] == "lifecycle_ended"
@@ -135,11 +136,105 @@ def test_finish_tab_operations_still_releases_capture_for_numeric_tab_id():
         "browser", {"cmd": "console", "method": "start", "tabId": 1}, "a",
     )
     bridge._capture_commands["capture"] = capture
+    other = bridge._capture_state().prepare(
+        "browser", {"cmd": "console", "method": "start", "tabId": 2}, "b",
+    )
+    bridge._capture_commands["other"] = other
 
     bridge._finish_tab_operations("browser:1", "tab_removed")
 
-    assert bridge._capture_state()._owners == {}
+    assert len(bridge._capture_state()._owners) == 1
     assert "capture" not in bridge._capture_commands
+    assert bridge._capture_commands["other"] is other
+    with pytest.raises(CaptureBusyError):
+        bridge._capture_state().prepare(
+            "browser", {"cmd": "console", "method": "start", "tabId": 2}, "a",
+        )
+    replacement = bridge._capture_state().prepare(
+        "browser", {"cmd": "console", "method": "start", "tabId": 1}, "b",
+    )
+    assert replacement is not None
+
+
+def test_late_close_for_an_old_generation_preserves_the_replacement_operation():
+    bridge = make_bridge()
+    pending = bridge.execute_js("pending", wait=False, requester_id="a")
+
+    bridge._finish_tab_operations("browser:1", "tab_closed", expected_generation="older")
+
+    result = bridge.get_execute_js_result(pending["operation_id"], requester_id="a")
+    assert result["status"] == "in_progress"
+    with pytest.raises(TargetBusyError):
+        bridge.execute_js("second", requester_id="b")
+
+
+@pytest.mark.parametrize("reply_arrives", [False, True])
+def test_sync_execution_observes_tab_removal_before_reporting_a_reply(monkeypatch, reply_arrives):
+    bridge = make_bridge()
+
+    def remove_tab(*args):
+        bridge._finish_tab_operations("browser:1", "tab_removed")
+
+    if reply_arrives:
+        def send(message):
+            payload = json.loads(message)
+            bridge.sent.append(payload)
+            finish(bridge, payload["id"], {
+                "__btap_dialog_result": True, "pending_execution": True,
+                "status": "blocked_by_dialog",
+            })
+            remove_tab()
+
+        bridge.ext_clients["browser"]["ws"].send_message = send
+    else:
+        monkeypatch.setattr(bridge, "_wait_for_activity", remove_tab)
+
+    result = bridge.execute_js("pending", requester_id="a", operation_id="lifecycle-race")
+    assert result["delivery_state"] == "navigated"
+    assert result["js_return_lost"] is True
+    assert result["retry_safe"] is False
+    assert len(bridge.sent) == 1
+    receipt = bridge.get_execute_js_result(result["operation_id"], requester_id="a")
+    assert receipt["status"] == "navigated"
+
+
+@pytest.mark.parametrize("extension", [False, True])
+def test_immediate_manual_dialog_reply_preserves_the_operation_and_tab_reservation(extension):
+    bridge = make_bridge()
+    data = {"__btap_dialog_result": True, "pending_execution": True,
+            "status": "blocked_by_dialog", "dialog": {"type": "confirm"}}
+    reply_on_send(bridge, data=data)
+    if extension:
+        result = bridge.ext_cmd({"cmd": "cdp", "tabId": 1}, requester_id="a")
+    else:
+        result = bridge.execute_js("confirm('Continue?')", requester_id="a")
+    assert result["data"] == data
+    assert result["reservation_held"] is True
+    assert result["operation_status"] == "blocked_by_dialog"
+    receipt = bridge.get_execute_js_result(result["operation_id"], requester_id="a")
+    assert receipt["pending_execution"] is True
+    assert receipt["status"] == "in_progress"
+    with pytest.raises(TargetBusyError):
+        bridge.execute_js("second", requester_id="b")
+
+
+def test_async_execution_that_finishes_immediately_keeps_its_readable_receipt():
+    bridge = make_bridge()
+    result = bridge.execute_js("return 1", wait=False, requester_id="a")
+    receipt = bridge.get_execute_js_result(result["operation_id"], requester_id="a")
+    assert receipt["status"] == "success"
+    assert receipt["data"] == result["data"]
+    assert receipt["reservation_held"] is False
+
+
+def test_close_reply_with_a_malformed_native_id_still_settles_the_valid_target():
+    bridge = make_bridge()
+    pending = bridge.execute_js("pending", wait=False, requester_id="a")
+    reply_on_send(bridge, data={"closed": ["bad", None, 1]})
+    bridge.ext_cmd({"cmd": "tabs", "method": "close", "tabIds": [1]}, requester_id="a")
+    result = bridge.get_execute_js_result(pending["operation_id"], requester_id="a")
+    assert result["status"] == "navigated"
+    assert result["lifecycle_reason"] == "tab_removed"
 
 
 def test_extension_socket_loss_does_not_release_a_running_page_script():
@@ -466,6 +561,20 @@ def test_recovery_commands_do_not_overlap_even_for_the_same_owner():
         operations.reserve('new-js', ['browser:1'], 'b')
     operations.complete('dialog', {'success': True, 'data': None})
     operations.reserve('new-js', ['browser:1'], 'b')
+
+
+@pytest.mark.parametrize("recovery_id", ["missing", "execution", "standalone", "ordinary"])
+def test_manual_observation_ignores_unrelated_or_nonpending_operations(recovery_id):
+    operations = PendingOperations()
+    operations.reserve("execution", ["browser:1"], "a", metadata={"pending_execution": True})
+    operations.reserve("standalone", ["browser:2"], "a", kind="handle_dialog")
+    operations.reserve("normal", ["browser:3"], "a")
+    operations.reserve("ordinary", ["browser:3"], "a", kind="handle_dialog", cleanup=True)
+    before = {key: operations.read(key, "a") for key in operations.pending_ids()}
+
+    operations.observe_manual_execution(recovery_id)
+
+    assert {key: operations.read(key, "a") for key in operations.pending_ids()} == before
 
 
 @pytest.mark.parametrize('liveness', ['alive', 'unknown', 'dead'])

@@ -66,6 +66,124 @@ def test_implicit_execution_honors_the_preferred_browser(execution, monkeypatch)
     assert calls[0][1]["client_id"] == "edge"
 
 
+def test_implicit_execution_keeps_a_live_default(execution):
+    driver, calls, _ = execution
+    driver.default_session_id = "chrome:7"
+
+    assert S.execute_js("return 7")["js_return"] == 7
+    assert calls[0][0]["tabId"] == 7
+    assert driver.default_session_id == "chrome:7"
+
+
+def test_execution_can_keep_a_bridge_confirmed_target_without_rebinding(execution, monkeypatch):
+    driver, calls, _ = execution
+    monkeypatch.setattr(S, "_resolve_session_target", lambda driver, session_id: {"session_id": session_id})
+    monkeypatch.setattr(S._TAB_OWNERSHIP, "rebind", lambda *args: pytest.fail("the identity did not change"))
+
+    assert S.execute_js("return 7", session_id="chrome:7")["js_return"] == 7
+    assert calls[0][0]["tabId"] == 7
+    assert driver.default_session_id == "chrome:1"
+
+
+def test_execution_uses_the_available_browser_when_the_preference_is_not_connected(execution, monkeypatch):
+    driver, calls, _ = execution
+    driver.default_session_id = None
+    monkeypatch.setenv("BROWSERTAP_PREFERRED_BROWSER", "edge")
+
+    assert S.execute_js("return 7")["js_return"] == 7
+    assert calls[0][1]["client_id"] == "chrome"
+    assert driver.default_session_id == "chrome:7"
+
+
+def test_undelivered_script_cannot_be_retried_after_its_budget_is_spent(execution):
+    driver, _, now = execution
+    calls = []
+
+    def undelivered(*args, **kwargs):
+        calls.append((args, kwargs))
+        now[0] = 2
+        return {
+            "status": "no_response", "result": "no response", "delivery_state": "undelivered",
+            "retry_safe": True,
+        }
+
+    driver.execute_js = undelivered
+
+    with pytest.raises(S.BridgeNoResponseError) as raised:
+        S.exec_js("return 7", session_id="chrome:7", timeout=1)
+
+    assert raised.value.delivery_state == "undelivered"
+    assert len(calls) == 1
+
+
+def test_policy_setup_cannot_dispatch_after_target_resolution_consumes_the_deadline(execution, monkeypatch):
+    driver, calls, _ = execution
+    ticks = iter([0, 0, 0, 2])
+    monkeypatch.setattr(S.time, "monotonic", lambda: next(ticks, 2))
+
+    with pytest.raises(TimeoutError, match="policy setup"):
+        S.execute_js("return 7", session_id="chrome:7", timeout=1)
+
+    assert calls == []
+    assert driver.default_session_id == "chrome:1"
+
+
+def test_a_missing_scope_token_cannot_start_a_fallback_after_timeout(execution, monkeypatch):
+    driver, _, now = execution
+
+    def slow_policy(*args, **kwargs):
+        now[0] = 2
+        return {"data": {}}
+
+    driver.ext_cmd = slow_policy
+    monkeypatch.setattr(S, "_execute_js_cdp_fallback", lambda *args, **kwargs: pytest.fail("deadline expired"))
+
+    with pytest.raises(TimeoutError, match="before CDP fallback dispatch"):
+        S.execute_js("return 7", session_id="chrome:7", timeout=1)
+
+    assert driver.default_session_id == "chrome:1"
+
+
+def test_a_missing_scope_token_uses_one_bounded_cdp_fallback(execution, monkeypatch):
+    driver, _, now = execution
+    fallback_calls = []
+
+    def old_router(*args, **kwargs):
+        now[0] = 0.5
+        return {"data": {}}
+
+    def evaluate(*args, **kwargs):
+        fallback_calls.append((args, kwargs))
+        return {"result": {"value": {"ok": True, "data": 7}}}
+
+    driver.ext_cmd = old_router
+    monkeypatch.setattr(S, "_direct_cdp", evaluate)
+    monkeypatch.setattr(S.simphtml, "execute_js_rich", lambda *args, **kwargs: pytest.fail("fallback already ran"))
+
+    result = S.execute_js("return 7", session_id="chrome:7", timeout=1)
+
+    assert result["status"] == "success"
+    assert result["js_return"] == 7
+    assert len(fallback_calls) == 1
+    assert fallback_calls[0][1]["timeout"] == 0.5
+    assert driver.default_session_id == "chrome:1"
+
+
+def test_completed_execution_does_not_extend_the_deadline_for_policy_cleanup(execution, monkeypatch, caplog):
+    driver, calls, now = execution
+
+    def completed(*args, **kwargs):
+        now[0] = 1
+        return {"status": "success", "js_return": 7, "tab_id": 7}
+
+    monkeypatch.setattr(S.simphtml, "execute_js_rich", completed)
+
+    assert S.execute_js("return 7", session_id="chrome:7", timeout=1)["js_return"] == 7
+    assert [payload["cmd"] for payload, _ in calls] == ["set_dialog_policy"]
+    assert "dialog scope will expire naturally" in caplog.text
+    assert driver.default_session_id == "chrome:1"
+
+
 @pytest.mark.parametrize("failure", [TimeoutError("policy timeout"), RuntimeError("permission denied")])
 def test_policy_failure_never_dispatches_user_code(execution, failure):
     driver, _, _ = execution
@@ -203,6 +321,27 @@ def test_input_resolution_rejects_an_explicit_missing_tab(execution, monkeypatch
         S._resolve_page_input_session(driver, "chrome:7", deadline=1, operation="test")
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_input_resolution_preserves_a_cached_or_just_opened_target(execution, monkeypatch, explicit):
+    driver, _, _ = execution
+    driver.default_session_id = "chrome:7"
+    requests = []
+
+    def sessions(**kwargs):
+        requests.append(kwargs)
+        return [{"id": "chrome:7"}] if not explicit or kwargs["fresh"] else []
+
+    monkeypatch.setattr(S, "active_sessions", sessions)
+    result = S._resolve_page_input_session(
+        driver, "chrome:7" if explicit else None, deadline=1, operation="test",
+    )
+
+    assert result == "chrome:7"
+    assert [request["fresh"] for request in requests] == ([False, True] if explicit else [False])
+    assert all(request["timeout"] == 1 for request in requests)
+    assert driver.default_session_id == "chrome:7"
+
+
 def test_input_resolution_avoids_unscriptable_implicit_targets(execution, monkeypatch):
     driver, _, _ = execution
     driver.default_session_id = None
@@ -228,3 +367,14 @@ def test_input_resolution_is_bounded_by_the_original_deadline(execution, monkeyp
 def test_input_batch_requires_commands_and_an_explicit_validated_target(execution, commands, validated):
     with pytest.raises(S.InputValidationError):
         S._run_page_input(commands, None, 1, session_validated=validated)
+
+
+def test_input_batch_cannot_dispatch_after_target_validation_uses_its_budget(execution):
+    driver, calls, _ = execution
+    with pytest.raises(TimeoutError, match="before batch dispatch"):
+        S._run_page_input(
+            [{"method": "Input.insertText", "params": {"text": "x"}}],
+            "chrome:7", 1, session_validated=True, deadline=0,
+        )
+    assert calls == []
+    assert driver.default_session_id == "chrome:1"

@@ -938,3 +938,169 @@ def test_execute_js_rich_does_not_stop_a_monitor_it_never_started(monkeypatch):
     )
     S.execute_js_rich("slow()", driver, no_monitor=True, timeout=2, before_sids=set())
     assert stops == []
+
+
+@pytest.mark.parametrize("reply", [{"data": True}, RuntimeError("page closed")])
+def test_stop_temp_monitor_is_best_effort_and_keeps_the_explicit_target(reply, caplog):
+    caplog.set_level("DEBUG", logger="browsertap_mcp.simphtml")
+    driver = QueueDriver([reply])
+
+    assert S.stop_temp_monitor(driver, timeout=0.5, session_id="c:7") is None
+    script, options = driver.calls[0]
+    assert script == S._MONITOR_DISCARD_JS
+    assert options == {"timeout": 0.5, "session_id": "c:7"}
+    if isinstance(reply, Exception):
+        assert "page closed" in caplog.text
+
+
+@pytest.mark.parametrize("budget", [True, False, -1, 1.5, "100", None])
+def test_get_html_rejects_an_invalid_budget_before_reading_the_page(budget):
+    driver = QueueDriver()
+    with pytest.raises(ValueError, match="non-negative integer"):
+        S.get_html(driver, maxchars=budget)
+    assert driver.calls == []
+
+
+def test_cutlist_null_page_is_unavailable_and_does_not_trigger_another_read():
+    driver = QueueDriver([{
+        "data": {S._CUTLIST_PAYLOAD_MARK: True, "groups": [], "page": None},
+    }])
+    with pytest.raises(S.PageUnavailable, match="page returned null"):
+        S.get_html(driver, cutlist=True)
+    assert len(driver.calls) == 1
+
+
+def test_get_html_accepts_an_already_parsed_page(monkeypatch):
+    soup = BeautifulSoup('<p onclick="bad()">readable</p>', "html.parser")
+    monkeypatch.setattr(S, "get_main_block", lambda *args, **kwargs: soup)
+
+    assert S.get_html(QueueDriver()) == "<p>readable</p>"
+
+
+def test_blank_hidden_items_still_have_a_count_and_selector_hint():
+    soup = BeautifulSoup('<ul id="items"><li></li><li> </li></ul>', "html.parser")
+    hint = S._cutlist_hint(soup, "#items", soup.select("li"))
+
+    assert '2 more items hidden, selector: "#items"' in hint.get_text()
+    assert "Hidden items:" not in hint.get_text()
+
+
+def test_markup_budget_counts_escaped_entities_without_cutting_one_in_half():
+    result = S._limit_chars("<p>" + "&amp;" * 100 + "</p>", 30, markup=True)
+
+    assert len(result) <= 30
+    assert result.endswith("...[TRUNCATED]")
+    assert result.removesuffix("...[TRUNCATED]") == "&amp;" * 3
+
+
+def test_clip_markup_preserves_content_and_hints_when_no_cut_is_needed():
+    soup = BeautifulSoup(f"<main><p>text</p><div>{S._HINT_MARK} hidden</div></main>", "html.parser")
+    original = str(soup.main)
+
+    S._clip_markup(soup.main, len(original) + 1)
+
+    assert str(soup.main) == original
+
+
+@pytest.mark.parametrize("message", ["Cannot access contents of the page", "TypeError: not a function"])
+def test_legacy_navigation_error_does_not_invent_a_popup_policy(message):
+    driver = QueueDriver([RuntimeError({"error": message})])
+    result = S.execute_js_rich(
+        "window.open('https://example.test')", driver,
+        no_monitor=True, before_sids=set(), session_id="c:1",
+    )
+
+    assert result["status"] == "failed"
+    assert result["diagnostics"]["script_intent"] == "new_tab_or_navigation"
+    assert "policy_constraint" not in result["diagnostics"]
+    assert result["retry_safe"] is False
+    assert len(driver.calls) == 1
+
+
+def test_pending_legacy_reply_without_a_handle_does_not_advertise_polling():
+    driver = QueueDriver([{
+        "data": {"__btap_dialog_result": True, "pending_execution": True},
+    }])
+    result = S.execute_js_rich("pending()", driver, no_monitor=True, before_sids=set())
+
+    assert result["reservation_held"] is True
+    assert "operation_id" not in result
+    assert "poll_with" not in result
+
+
+@pytest.mark.parametrize("reason", [None, "explicit-tab-replacement"])
+def test_execution_result_preserves_the_replacement_tab_identity(reason):
+    receipt = {
+        "data": "done", "rebound_from": "c:1", "replacement_session_id": "c:2",
+        "tab_identity": "identity-1",
+    }
+    if reason:
+        receipt["rebind_reason"] = reason
+    result = S.execute_js_rich(
+        "read()", QueueDriver([receipt]), no_monitor=True, before_sids=set(), session_id="c:1",
+    )
+
+    assert result["rebound_from"] == "c:1"
+    assert result["replacement_session_id"] == "c:2"
+    assert result["tab_identity"] == "identity-1"
+    assert result["rebind_reason"] == (reason or "chrome.tabs.onReplaced")
+    assert result["js_return"] == "done"
+
+
+@pytest.mark.parametrize("location_reply", [None, {"result": "location unavailable"}])
+def test_navigation_receipt_survives_a_location_reply_without_data(location_reply):
+    driver = QueueDriver([
+        {"result": "Session c:1 reloaded.", "closed": 1}, location_reply,
+    ])
+    result = S.execute_js_rich(
+        "location.href='x'", driver, no_monitor=True, before_sids=set(), session_id="c:1",
+    )
+
+    assert result["status"] == "navigated"
+    assert "landed_url" not in result
+    assert len(driver.calls) == 2
+
+
+def test_execution_success_survives_a_failed_post_execution_session_snapshot():
+    driver = QueueDriver([{"data": 7}], sessions=RuntimeError("snapshot unavailable"))
+    result = S.execute_js_rich("read()", driver, no_monitor=True, before_sids=set())
+
+    assert result["status"] == "success"
+    assert result["js_return"] == 7
+    assert "newTabs" not in result
+    assert len(driver.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "reply, status",
+    [
+        ({"data": 7}, "success"),
+        ({"result": "Session c:1 reloaded.", "closed": 1}, "navigated"),
+        ({"result": "No response data in 2s (script not polled)"}, "no_response"),
+    ],
+)
+def test_execution_deadline_stops_all_post_execution_roundtrips(monkeypatch, reply, status):
+    now = [100.0]
+    monkeypatch.setattr(S.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(S.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(S, "get_html", lambda *args, **kwargs: "<p>baseline</p>")
+
+    class DeadlineDriver(QueueDriver):
+        def execute_js(self, script, **kwargs):
+            result = super().execute_js(script, **kwargs)
+            now[0] = 102.0
+            return result
+
+    driver = DeadlineDriver([reply])
+    result = S.execute_js_rich(
+        "read()", driver, timeout=2, deadline=102, before_sids=set(), session_id="c:1",
+    )
+
+    assert result["status"] == status
+    assert len(driver.calls) == 1
+    assert driver.session_calls == []
+    assert "transients" not in result
+    assert "landed_url" not in result
+    if status == "no_response":
+        assert result["delivery_state"] == "undelivered"
+        assert result["retry_safe"] is True

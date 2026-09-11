@@ -3,6 +3,9 @@ from __future__ import annotations
 import io
 import json
 import queue
+import runpy
+import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +104,327 @@ class DormantThread:
 
     def start(self):
         self.started = True
+
+
+@pytest.mark.parametrize("message, popup", [("Popup blocked: user gesture required", True),
+                                            ("JavaScript evaluation failed", False)])
+def test_navigation_error_only_suggests_a_new_tab_for_popup_constraints(message, popup):
+    code, retry_safe, diagnostics = T._page_execution_metadata(
+        message, script="window.open('https://example.test')",
+    )
+    assert code == "page_execution_failed"
+    assert retry_safe is False
+    assert diagnostics["script_intent"] == "new_tab_or_navigation"
+    if popup:
+        assert diagnostics["policy_constraint"] == "popup_or_user_gesture"
+        assert diagnostics["next_action"] == "open_new_tab"
+    else:
+        assert "policy_constraint" not in diagnostics
+        assert "next_action" not in diagnostics
+
+
+def test_token_write_without_progress_closes_the_file_and_reports_failure(monkeypatch, tmp_path):
+    closed = []
+    real_close = T.os.close
+
+    def close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(T.os, "write", lambda fd, data: 0)
+    monkeypatch.setattr(T.os, "close", close)
+    with pytest.raises(RuntimeError, match="invalid token write count: 0"):
+        T._persist_token(tmp_path / "bridge-token", "synthetic-token")
+    assert len(closed) == 1
+
+
+def test_auth_rejection_survives_a_request_body_read_failure(monkeypatch):
+    reads = []
+
+    def read(size):
+        reads.append(size)
+        raise OSError("client disconnected")
+
+    monkeypatch.setattr(T, "request", SimpleNamespace(
+        body=SimpleNamespace(read=read), MEMFILE_MAX=16,
+    ))
+    with pytest.raises(bottle.HTTPResponse) as exc:
+        T.check_link_token_drained({}, "synthetic-token")
+    assert exc.value.status_code == 401
+    assert exc.value.body == "unauthorized: missing or bad bridge token"
+    assert reads == [17]
+
+
+@pytest.mark.parametrize("discard_fails", [False, True])
+def test_malformed_json_is_discarded_even_when_the_body_stream_fails(monkeypatch, discard_fails):
+    reads = []
+
+    class MalformedRequest:
+        MEMFILE_MAX = 16
+
+        @property
+        def json(self):
+            raise bottle.HTTPError(400, "Invalid JSON")
+
+        @property
+        def body(self):
+            return self
+
+        def read(self, size):
+            reads.append(size)
+            if discard_fails:
+                raise OSError("client disconnected")
+            return b""
+
+    monkeypatch.setattr(T, "request", MalformedRequest())
+    assert T.json_object_body() is None
+    assert reads == [17]
+
+
+def test_http_repoll_preserves_the_command_queue_and_refreshes_tab_metadata(http_app):
+    messages = queue.Queue()
+    messages.put(json.dumps({"code": "return 1"}))
+    session = T.Session("http:1", {"url": "https://old.test", "type": "http"}, messages)
+    session.mark_disconnected()
+    http_app.sessions[session.id] = session
+
+    response = wsgi_post(http_app.app, "/api/longpoll", {
+        "sessionId": "http:1", "url": "https://new.test", "title": "New page",
+    })
+
+    assert response["status"] == 200
+    assert json.loads(response["body"]) == {"code": "return 1"}
+    assert session.http_queue is messages
+    assert session.url == "https://new.test"
+    assert session.info["title"] == "New page"
+    assert session.is_active()
+    assert http_app.acks == {}
+
+
+def test_http_result_ignores_non_object_json_without_recording_a_reply(http_app):
+    response = wsgi_post(http_app.app, "/api/result", ["invalid"])
+    assert response["status"] == 200
+    assert response["body"] == "ok"
+    assert response["unread_body_bytes"] == 0
+    assert http_app.results == {}
+
+
+def test_http_client_listing_only_exposes_client_identity(http_app):
+    http_app.ext_clients["chrome"] = {"ws": FakeSocket(), "browser": "chrome", "ts": 10}
+    response = wsgi_post(http_app.app, "/link", {"cmd": "get_clients"})
+    assert response["status"] == 200
+    assert json.loads(response["body"]) == {"r": [{"client_id": "chrome", "browser": "chrome"}]}
+
+
+def test_http_execute_without_a_session_checks_client_and_forwards_async_options(http_app):
+    calls = []
+    http_app.select_client_id = lambda **kwargs: calls.append(("select", kwargs)) or "chrome"
+    http_app.execute_js = lambda code, **kwargs: calls.append((code, kwargs)) or {"status": "in_progress"}
+    response = wsgi_post(http_app.app, "/link", {
+        "cmd": "execute_js", "code": "return 1", "allowRebind": "0", "wait": "0",
+        "requesterId": "caller", "operationId": "async-op",
+    })
+    assert json.loads(response["body"])["r"] == {"status": "in_progress"}
+    assert calls == [
+        ("select", {"use_default": False}),
+        ("return 1", {"timeout": 10.0, "session_id": None, "allow_failover": False,
+                      "allow_rebind": False, "wait": False,
+                      "requester_id": "caller", "operation_id": "async-op"}),
+    ]
+
+
+@pytest.mark.parametrize("refusal", ["origin", "takeover"])
+def test_ws_refusal_remains_effective_when_closing_the_peer_fails(monkeypatch, refusal):
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    owner = ws_peer(handler, ext_ready())
+    owner.handle()
+    seen = driver.last_ext_seen
+    peer = ws_peer(handler, ext_ready(tab_id=8),
+                   origin="https://untrusted.test" if refusal == "origin" else "chrome-extension://abc")
+
+    def close():
+        raise OSError("already closed")
+
+    peer.close = close
+    peer.connected()
+    peer.handle()
+    assert driver.ext_clients["chrome"]["ws"] is owner
+    assert "chrome:8" not in driver.sessions
+    assert driver.last_ext_seen == seen
+
+
+def test_ws_handler_reports_dispatch_failure_and_accepts_the_next_frame(monkeypatch, caplog):
+    driver = driver_stub()
+    handler = ws_handler_for(driver, monkeypatch)
+    peer = ws_peer(handler, {"type": "ready", "sessionId": "legacy", "url": "https://example.test"})
+
+    def register(*args):
+        raise RuntimeError("registration failed")
+
+    monkeypatch.setattr(driver, "_register_client", register)
+    peer.handle()
+    assert "Error handling WebSocket message" in caplog.text
+    assert driver.sessions == {}
+    peer.data = json.dumps({"type": "unrecognized"})
+    peer.handle()
+    peer.data = json.dumps({"type": "ping"})
+    peer.handle()
+    assert peer.sent == [{"type": "pong"}]
+
+
+def test_ws_loop_recovers_after_close_and_rebind_failures(monkeypatch, caplog):
+    driver = driver_stub()
+    attempts, closes, sleeps = [], [], []
+
+    class Server:
+        def __init__(self, host, port, handler):
+            attempts.append((host, port))
+            if len(attempts) == 2:
+                raise OSError("address still in use")
+            self.number = len(attempts)
+
+        def serve_forever(self):
+            if self.number == 3:
+                raise KeyboardInterrupt()
+            raise OSError("poll failed")
+
+        def close(self):
+            closes.append(self.number)
+            raise OSError("close failed")
+
+    class RunningThread(DormantThread):
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(T, "WebSocketServer", Server)
+    monkeypatch.setattr(T.threading, "Thread", RunningThread)
+    monkeypatch.setattr(T.time, "sleep", sleeps.append)
+    with pytest.raises(KeyboardInterrupt):
+        driver.start_ws_server()
+    assert len(attempts) == 3
+    assert closes == [1, 1]
+    assert sleeps == [1, 2, 1]
+    assert driver.server.number == 3
+    assert "WS server rebuild failed" in caplog.text
+
+
+def test_invalid_extension_snapshot_cannot_replace_existing_tabs():
+    driver = driver_stub()
+    socket = FakeSocket()
+    driver._apply_extension_tabs("chrome", "chrome", ext_ready()["tabs"], socket)
+    original = driver.sessions["chrome:7"]
+    with pytest.raises(ValueError, match="Invalid extension tab snapshot"):
+        driver._apply_extension_tabs("chrome", "chrome", [{"id": "bad"}], socket)
+    assert driver.sessions == {"chrome:7": original}
+    assert original.is_active()
+
+
+@pytest.mark.parametrize("method, message", [
+    ("get_all_sessions", "malformed session list"),
+    ("set_session", "malformed session match list"),
+    ("select_client_id", "cannot list browser clients"),
+])
+def test_remote_query_rejects_a_response_with_the_wrong_container(method, message):
+    driver = driver_stub(remote=True)
+    driver._remote_cmd = lambda *args, **kwargs: {"r": {"unexpected": True}}
+    with pytest.raises(RuntimeError, match=message):
+        getattr(driver, method)("example.test") if method == "set_session" else getattr(driver, method)()
+
+
+def test_remote_diagnose_reports_a_malformed_response_as_unreachable():
+    driver = driver_stub(remote=True)
+    driver._remote_cmd = lambda *args, **kwargs: {"r": []}
+    result = driver.diagnose()
+    assert result["cause"] == "bridge_unreachable"
+    assert result["ok"] is False
+    assert "malformed diagnosis" in str(result)
+
+
+@pytest.mark.parametrize("command", [{}, {"cmd": None}, {"cmd": 1}, {"cmd": "  "}])
+def test_extension_payload_needs_a_command_before_any_client_is_selected(command):
+    driver = driver_stub()
+    driver.select_client_id = lambda *args, **kwargs: pytest.fail("invalid input must not select a client")
+    with pytest.raises(ValueError, match="non-empty string cmd"):
+        driver.ext_cmd(command)
+
+
+@pytest.mark.parametrize("extension", [False, True])
+def test_proven_undelivered_remote_errors_do_not_claim_an_operation_receipt(extension):
+    driver = driver_stub(remote=True)
+    driver.default_session_id = "chrome:7"
+    error = T.BridgeNoResponseError(
+        "connection refused", delivery_state="undelivered", retry_safe=True,
+    )
+
+    def remote(*args, **kwargs):
+        raise error
+
+    driver._remote_cmd = remote
+    with pytest.raises(T.BridgeNoResponseError) as caught:
+        if extension:
+            driver.ext_cmd({"cmd": "tabs"}, operation_id="not-dispatched")
+        else:
+            driver.execute_js("return 1", operation_id="not-dispatched")
+    assert caught.value is error
+    assert getattr(error, "operation_id", None) is None
+    assert error.retry_safe is True
+
+
+@pytest.mark.parametrize("explicit, candidates, selected", [
+    (False, [
+        {"id": "chrome:1", "url": "chrome://settings", "active": True},
+        {"id": "chrome:2", "url": "https://inactive.test"},
+        {"id": "chrome:3", "url": "https://active.test", "active": True},
+        {"id": "edge:4", "url": "https://other.test", "active": True},
+    ], "chrome:3"),
+    (False, [{"id": "chrome:1", "url": "chrome://settings"}], "chrome:1"),
+    (False, [], "chrome:old"),
+    (True, [], "chrome:old"),
+])
+def test_scoped_remote_reselection_stays_in_the_implicit_browser(
+    monkeypatch, explicit, candidates, selected,
+):
+    driver = driver_stub(remote=True)
+    driver.default_session_id = "chrome:old"
+    driver.resolve_session_target = lambda *args, **kwargs: None
+    driver.get_all_sessions = lambda **kwargs: candidates
+    requests, guarded = [], []
+    driver._remote_cmd = lambda payload, **kwargs: requests.append(payload) or {"r": {"data": 7}}
+    monkeypatch.setattr(T, "has_command_scope", lambda: True)
+    monkeypatch.setattr(T, "guard_targets", lambda namespace, targets: guarded.extend(targets))
+    result = driver.execute_js("return 7", session_id="chrome:old" if explicit else None,
+                               allow_failover=True)
+    assert result == {"data": 7}
+    assert guarded == [selected]
+    assert requests[0]["sessionId"] == selected
+    assert requests[0]["allowRebind"] == "0"
+    assert requests[0]["allowFailover"] == "0"
+
+
+def test_remote_execute_with_no_live_tab_preserves_the_unselected_target():
+    driver = driver_stub(remote=True)
+    requests = []
+
+    def remote(payload, **kwargs):
+        requests.append(payload)
+        return {"r": {
+            "get_clients": [{"client_id": "chrome"}],
+            "get_all_sessions": [],
+            "execute_js": {"data": 7},
+        }[payload["cmd"]]}
+
+    driver._remote_cmd = remote
+    assert driver.execute_js("return 7") == {"data": 7}
+    assert requests[-1]["sessionId"] is None
+
+
+def test_expired_http_session_is_not_resolved_as_a_live_target():
+    driver = driver_stub()
+    session = _install_exec_session(driver, session_type="http", session_id="http:1")
+    session.connect_at = time.time() - T.HTTP_SESSION_IDLE_SECONDS - 1
+    assert driver.resolve_session_target(session.id) is None
+    assert session.disconnect_at is not None
 
 
 def test_token_path_uses_configured_and_default_locations(monkeypatch, tmp_path):
@@ -322,6 +646,57 @@ def test_clean_sessions_removes_old_sessions_results_acks_and_clients(monkeypatc
     assert "bad" not in driver.client_last_seen
 
 
+@pytest.mark.parametrize("sweep", ["cleanup", "tabs_update"])
+def test_session_sweeps_tolerate_another_cleanup_removing_a_snapshotted_key(monkeypatch, sweep):
+    driver = driver_stub()
+    socket = FakeSocket()
+    active = T.Session("c:1", {"type": "ext_ws", "client_id": "c", "tab_id": 1}, socket)
+    stale = T.Session("c:2", {"type": "ext_ws", "client_id": "c", "tab_id": 2}, socket)
+    stale.mark_disconnected()
+    stale.disconnect_at = time.time() - 700
+    driver.sessions = {active.id: active, stale.id: stale}
+    paused, resume = threading.Event(), threading.Event()
+    errors = []
+    original_is_active = active.is_active
+
+    def pause_after_snapshot():
+        if threading.current_thread() is worker and not paused.is_set():
+            paused.set()
+            assert resume.wait(5), "the concurrent cleanup did not finish"
+        return original_is_active()
+
+    def run_sweep():
+        try:
+            if sweep == "cleanup":
+                driver.clean_sessions()
+            else:
+                # Match the WS handler: cleanup can still run while this lock is held.
+                with T._DRIVER_STATE_LOCK:
+                    driver._apply_extension_tabs("c", "chrome", [{"id": 3}], socket)
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(active, "is_active", pause_after_snapshot)
+    worker = threading.Thread(target=run_sweep, daemon=True)
+    worker.start()
+    try:
+        assert paused.wait(5), "the sweep did not reach its first session"
+        driver.clean_sessions()
+        assert stale.id not in driver.sessions
+    finally:
+        resume.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert driver.sessions[active.id] is active
+    if sweep == "tabs_update":
+        assert not active.is_active()
+        assert driver.sessions["c:3"].is_active()
+    else:
+        assert active.is_active()
+
+
 def test_extension_tab_snapshot_isolates_clients_and_replaces_generation():
     driver = driver_stub()
     old_client = FakeSocket()
@@ -362,6 +737,21 @@ def test_extension_tab_replacement_rebinds_only_with_stable_tab_identity():
         "tab_identity": "tab-a",
         "reason": "chrome.tabs.onReplaced",
     }
+    driver.default_session_id = "one:1"
+    assert driver._live_default_session_id() == "one:2"
+    assert driver.default_session_id == "one:2"
+
+    def reply(message):
+        payload = json.loads(message)
+        driver.results[payload["id"]] = {"success": True, "data": 7}
+
+    client.send_message = reply
+    result = driver.execute_js("return 7", session_id="one:1")
+    assert result["data"] == 7
+    assert result["rebound_from"] == "one:1"
+    assert result["replacement_session_id"] == "one:2"
+    assert result["tab_identity"] == "tab-a"
+    assert result["rebind_reason"] == "chrome.tabs.onReplaced"
 
 
 def test_same_url_different_tab_identity_is_not_rebound():
@@ -650,7 +1040,8 @@ def test_newtab_does_not_retry_timeout_or_other_error():
         driver.newtab(url="https://x", operation_id="op")
 
 
-def test_constructor_detects_remote_bridge_without_starting_servers(monkeypatch):
+@pytest.mark.parametrize("entry", ["constructor", "module"])
+def test_constructor_detects_remote_bridge_without_starting_servers(monkeypatch, entry):
     class Probe:
         def __enter__(self):
             return self
@@ -672,9 +1063,15 @@ def test_constructor_detects_remote_bridge_without_starting_servers(monkeypatch)
     monkeypatch.setattr(T.requests, "Session", HttpSession)
     monkeypatch.setattr(T.BrowserBridge, "start_ws_server", lambda self: pytest.fail("must stay remote"))
     monkeypatch.setattr(T.BrowserBridge, "start_http_server", lambda self: pytest.fail("must stay remote"))
-    driver = T.BrowserBridge(host="127.0.0.8", port=19000)
+    if entry == "module":
+        monkeypatch.delitem(sys.modules, T.__name__)
+        driver = runpy.run_module(T.__name__, run_name="__main__")["driver"]
+        expected_remote = "http://127.0.0.1:18766/link"
+    else:
+        driver = T.BrowserBridge(host="127.0.0.8", port=19000)
+        expected_remote = "http://127.0.0.8:19001/link"
     assert driver.is_remote is True
-    assert driver.remote == "http://127.0.0.8:19001/link"
+    assert driver.remote == expected_remote
     assert driver._http.trust_env is False
 
 
@@ -704,8 +1101,9 @@ def test_constructor_starts_local_servers_when_lock_is_acquired(monkeypatch):
     assert calls == ["ws", "http"]
 
 
-def test_constructor_loses_host_lock_then_waits_for_winner(monkeypatch):
-    results = iter([1, 1, 0])
+@pytest.mark.parametrize("probes, waits", [([1, 1, 0], 2), ([1] * 21, 20)])
+def test_constructor_loses_host_lock_then_waits_for_winner(monkeypatch, probes, waits):
+    results = iter(probes)
 
     class Probe:
         def __enter__(self):
@@ -730,10 +1128,11 @@ def test_constructor_loses_host_lock_then_waits_for_winner(monkeypatch):
     monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
     driver = T.BrowserBridge()
     assert driver.is_remote is True
-    assert sleeps == [0.25, 0.25]
+    assert sleeps == [0.25] * waits
 
 
-def test_host_lock_success_and_failure(monkeypatch):
+@pytest.mark.parametrize("exclusive_option", [False, True])
+def test_host_lock_success_and_failure(monkeypatch, exclusive_option):
     class LockSocket:
         def __init__(self, fail=False):
             self.fail = fail
@@ -755,6 +1154,10 @@ def test_host_lock_success_and_failure(monkeypatch):
             self.closed = True
 
     driver = driver_stub()
+    if exclusive_option:
+        monkeypatch.setattr(T.socket, "SO_EXCLUSIVEADDRUSE", -5, raising=False)
+    else:
+        monkeypatch.delattr(T.socket, "SO_EXCLUSIVEADDRUSE", raising=False)
     good = LockSocket()
     monkeypatch.setattr(T.socket, "socket", lambda: good)
     assert driver._acquire_host_lock() is good
@@ -1399,6 +1802,33 @@ def test_ext_cmd_local_timeout_cleans_late_state(monkeypatch):
     assert "cmd-timeout" not in driver.acks
 
 
+def test_ext_cmd_keeps_waiting_for_the_original_reply_without_redispatch(monkeypatch):
+    driver = driver_stub()
+    socket = FakeSocket()
+    driver.ext_clients["c"] = {"ws": socket, "ts": 1}
+    now, waits = [0.0], []
+    monkeypatch.setattr(T.time, "monotonic", lambda: now[0])
+
+    def wait_for_reply(serial, timeout):
+        waits.append(timeout)
+        now[0] += timeout
+        if len(waits) == 2:
+            driver.results["delayed-query"] = {"success": True, "data": {"tabs": []}}
+        return serial
+
+    monkeypatch.setattr(driver, "_wait_for_activity", wait_for_reply)
+
+    result = driver.ext_cmd(
+        {"cmd": "tabs"}, client_id="c", timeout=1,
+        operation_id="delayed-query", requester_id="owner",
+    )
+
+    assert result["data"] == {"tabs": []}
+    assert waits == [0.05, 0.05]
+    assert len(socket.messages) == 1
+    assert driver.get_execute_js_result("delayed-query", requester_id="owner")["status"] == "success"
+
+
 def test_execute_js_with_json_payload_does_not_route_to_ext_cmd():
     """Verify that JSON.parse command hijacking is prevented.
 
@@ -1688,6 +2118,32 @@ def test_execute_js_implicit_default_reselects_live_session(monkeypatch):
     assert driver.default_session_id == live.id
 
 
+def test_execute_js_does_not_move_a_dead_implicit_default_to_another_browser(monkeypatch):
+    driver = driver_stub()
+    socket = FakeSocket()
+    other = _install_exec_session(driver, socket=socket, session_id="other:7")
+    stale = T.Session("c:7", {"type": "ext_ws", "client_id": "c", "tab_id": 7}, FakeSocket())
+    stale.mark_disconnected()
+    driver.sessions[stale.id] = stale
+    driver.default_session_id = stale.id
+    now = [0.0]
+    monkeypatch.setattr(T.time, "monotonic", lambda: now[0])
+
+    def wait_for_reconnect(serial, timeout):
+        now[0] += timeout
+        return serial
+
+    monkeypatch.setattr(driver, "_wait_for_activity", wait_for_reconnect)
+
+    with pytest.raises(T.SessionNotConnectedError, match="different tab") as raised:
+        driver.execute_js("return 1", timeout=1)
+
+    assert raised.value.diagnostics["stale_session_id"] == stale.id
+    assert [item["id"] for item in raised.value.diagnostics["replacement_candidates"]] == [other.id]
+    assert driver.default_session_id == stale.id
+    assert socket.messages == []
+
+
 def test_execute_js_rejects_missing_session_and_invalid_timeout(monkeypatch):
     driver = driver_stub()
     with pytest.raises(ValueError, match="timeout"):
@@ -1774,6 +2230,87 @@ def test_execute_js_detects_reload_during_wait(monkeypatch):
     result = driver.execute_js("navigate()", timeout=0.1, session_id="c:7")
     assert result["closed"] == 1
     assert result["result"] == "Session c:7 reloaded."
+
+
+def test_execute_js_reports_a_disconnected_tab_still_loading_at_the_deadline(monkeypatch):
+    driver = driver_stub()
+    socket = FakeSocket()
+    session = _install_exec_session(driver, socket=socket)
+    now = [0.0]
+    monkeypatch.setattr(T.time, "monotonic", lambda: now[0])
+
+    def disconnect_during_wait(serial, timeout):
+        session.mark_disconnected()
+        now[0] = 1
+        return serial
+
+    monkeypatch.setattr(driver, "_wait_for_activity", disconnect_during_wait)
+
+    result = driver.execute_js("navigate()", timeout=1, session_id="c:7")
+
+    assert result["delivery_state"] == "navigated"
+    assert result["closed"] == 1
+    assert "new page is loading" in result["result"]
+    assert len(socket.messages) == 1
+
+
+@pytest.mark.parametrize("route", ["execute_js", "ext_cmd"])
+@pytest.mark.parametrize("arrival", ["before_wait", "after_wait"])
+def test_a_reply_at_the_deadline_is_consumed_instead_of_reported_as_a_timeout(monkeypatch, route, arrival):
+    driver = driver_stub()
+    socket = FakeSocket()
+    _install_exec_session(driver, socket=socket)
+    driver.ext_clients["c"] = {"ws": socket, "ts": 1}
+    now = [0.0]
+    publish_on_clock_read = [False]
+    scheduled = [False]
+    waits = []
+    operation_id = "deadline-reply"
+
+    def clock():
+        # A browser reply can race with the deadline check between two pops.
+        if publish_on_clock_read[0]:
+            publish_on_clock_read[0] = False
+            driver.results[operation_id] = {"success": True, "data": 17, "tabId": 7}
+        return now[0]
+
+    def expire_and_schedule_reply():
+        if scheduled[0]:
+            return
+        scheduled[0] = True
+        now[0] = 1
+        publish_on_clock_read[0] = True
+
+    snapshot = driver._activity_snapshot
+
+    def activity_snapshot():
+        serial = snapshot()
+        if arrival == "before_wait":
+            expire_and_schedule_reply()
+        return serial
+
+    def wait_for_reply(serial, timeout):
+        waits.append(timeout)
+        expire_and_schedule_reply()
+        return serial
+
+    monkeypatch.setattr(T.time, "monotonic", clock)
+    monkeypatch.setattr(driver, "_activity_snapshot", activity_snapshot)
+    monkeypatch.setattr(driver, "_wait_for_activity", wait_for_reply)
+    kwargs = {"timeout": 1, "requester_id": "owner", "operation_id": operation_id}
+
+    if route == "execute_js":
+        result = driver.execute_js("return 17", session_id="c:7", **kwargs)
+    else:
+        result = driver.ext_cmd({"cmd": "tabs", "all": True}, client_id="c", **kwargs)
+
+    assert result["data"] == 17
+    assert len(socket.messages) == 1
+    assert len(waits) == (arrival == "after_wait")
+    assert operation_id not in driver.results
+    receipt = driver.get_execute_js_result(operation_id, requester_id="owner")
+    assert receipt["status"] == "success"
+    assert receipt["data"] == 17
 
 
 def test_find_session_skips_inactive_and_url_less_entries():
