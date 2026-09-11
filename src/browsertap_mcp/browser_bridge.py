@@ -1033,26 +1033,28 @@ class BrowserBridge:
     def _complete_operation(self, operation_id: str, result: dict[str, Any]) -> bool:
         uncertain = _execution_may_continue(result)
         with _DRIVER_STATE_LOCK:
-            capture_commands = getattr(self, '_capture_commands', {})
-            capture_operation = capture_commands.get(operation_id)
-            data = result.get('data')
-            succeeded = result.get('success') is True and not (
-                isinstance(data, dict) and data.get('ok') is False
-            )
-            if capture_operation is not None:
-                self._capture_state().finish(capture_operation, success=succeeded)
-                # The extension has already sent the terminal reply. Keeping
-                # this bookkeeping entry for an uncertain execution cannot
-                # reconcile a later result (the same id is rejected after the
-                # operation is settled), and otherwise leaks one object for
-                # every timed-out capture command.
-                capture_commands.pop(operation_id, None)
             operations = self._operation_state()
-            if succeeded and isinstance(data, dict) and data.get('pending_execution') is False:
-                operations.observe_manual_execution(operation_id)
-            # Capture state and dialog settlement must commit before the tab is
-            # available to a new start; duplicate reply observers share this lock.
-            return operations.complete(operation_id, result, outcome_unknown=uncertain)
+
+            def settle_active_reply() -> None:
+                capture_commands = getattr(self, '_capture_commands', {})
+                capture_operation = capture_commands.get(operation_id)
+                data = result.get('data')
+                succeeded = result.get('success') is True and not (
+                    isinstance(data, dict) and data.get('ok') is False
+                )
+                if capture_operation is not None:
+                    self._capture_state().finish(capture_operation, success=succeeded)
+                    # Subsequent replies are observations only; command
+                    # bookkeeping need not outlive this first reply.
+                    capture_commands.pop(operation_id, None)
+                if succeeded and isinstance(data, dict) and data.get('pending_execution') is False:
+                    operations.observe_manual_execution(operation_id)
+
+            # The registry runs settlement only while the operation is active,
+            # before releasing its target. A late reply only adds evidence.
+            return operations.complete(
+                operation_id, result, outcome_unknown=uncertain, on_active_reply=settle_active_reply,
+            )
 
     def _sync_pending_operations(self) -> None:
         with _DRIVER_STATE_LOCK:
@@ -1093,7 +1095,7 @@ class BrowserBridge:
         with _DRIVER_STATE_LOCK:
             operations = self._operation_state()
             if (not _valid_protocol_id(operation_id) or not valid
-                    or not operations.accepts_reply(operation_id, transport, owner)):
+                    or not operations.accepts_reply(operation_id, transport, owner, allow_late=kind != 'ack')):
                 self.rejected_operation_replies += 1
                 self.last_rejected_operation_reply = {
                     'operation_id': operation_id[:64] if isinstance(operation_id, str) else '',
@@ -1307,28 +1309,30 @@ class BrowserBridge:
                 return json.dumps({"id": "", "ret": "invalid request"})
             session_info = {'url': data.get('url'), 'title': data.get('title', ''),
                             'type': _QUEUE_TYPE}
-            session = self.sessions.get(session_id)
-            if session is None:
-                session = self.sessions[session_id] = Session(
-                    session_id, session_info, queue.Queue())
-                logger.info("Browser HTTP connected: %s (session=%s)",
-                            redact_url(session.url), session_id)
-            elif session.type == _QUEUE_TYPE:
-                # The same client polling again, so rebind it to the queue it
-                # already has rather than a fresh one: a command handed over
-                # while it was between polls is sitting in there, and swapping
-                # the queue would drop it with nothing anywhere reporting a loss.
-                # Going through `reconnect` is also what refreshes `info` -- the
-                # three field writes this replaces left a resurrected session
-                # describing whichever URL the tab had on its first ever poll.
-                session.reconnect(session.client, session_info)
-            elif session.is_active():
-                # A live socket already reaches this tab. Refusing is what keeps
-                # a command from being handed to the weaker of two channels.
-                return json.dumps({"id": "", "ret": "use ws"})
-            else:
-                # The socket is gone and this client speaks for the tab now.
-                session.reconnect(queue.Queue(), session_info)
+            with _DRIVER_STATE_LOCK:
+                session = self.sessions.get(session_id)
+                if session is None:
+                    session = self.sessions[session_id] = Session(
+                        session_id, session_info, queue.Queue())
+                    logger.info("Browser HTTP connected: %s (session=%s)",
+                                redact_url(session.url), session_id)
+                elif session.type == _QUEUE_TYPE:
+                    # The same client polling again, so rebind it to the queue it
+                    # already has rather than a fresh one: a command handed over
+                    # while it was between polls is sitting in there, and swapping
+                    # the queue would drop it with nothing anywhere reporting a loss.
+                    # Going through `reconnect` is also what refreshes `info` -- the
+                    # three field writes this replaces left a resurrected session
+                    # describing whichever URL the tab had on its first ever poll.
+                    session.reconnect(session.client, session_info)
+                elif session.is_active():
+                    # A live socket already reaches this tab. Refusing is what keeps
+                    # a command from being handed to the weaker of two channels.
+                    return json.dumps({"id": "", "ret": "use ws"})
+                else:
+                    # Serialize the fallback with old-socket cleanup, so a late
+                    # close cannot disconnect the queue that just replaced it.
+                    session.reconnect(queue.Queue(), session_info)
             self._notify_activity()
             try:
                 msg = session.http_queue.get(timeout=HTTP_POLL_SECONDS)
@@ -1474,6 +1478,8 @@ class BrowserBridge:
                         route_options['operation_id'] = str(data['operationId'])
                     if str(data.get('wait', '1')) == '0':
                         route_options['wait'] = False
+                    if data.get('readOnlyProbe') is True:
+                        route_options['read_only_probe'] = True
                     result = self.execute_js(code, timeout=timeout, session_id=session_id,
                                               allow_failover=allow_failover, **route_options)
                     logger.debug("Remote execute_js completed (session=%s)", session_id)
@@ -1498,7 +1504,7 @@ class BrowserBridge:
                     'error_code': 'unknown_command',
                 }},
                 ensure_ascii=False)
-        from socketserver import ThreadingMixIn
+        from socketserver import TCPServer, ThreadingMixIn
         from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
         self.http_server: Optional[WSGIServer] = None
@@ -1508,6 +1514,17 @@ class BrowserBridge:
                 # A request thread must never outlive shutdown: server_close()
                 # would otherwise join a long-poll that still has seconds to go.
                 daemon_threads = True
+
+                def server_bind(self):
+                    # HTTPServer reverse-resolves the bind address before
+                    # listen(), which can stall on the macOS system resolver.
+                    # This local JSON bridge only needs the bound address in
+                    # its WSGI environment, not a DNS-derived server name.
+                    TCPServer.server_bind(self)
+                    self.server_name = str(self.server_address[0])
+                    self.server_port = self.server_address[1]
+                    self.setup_environ()
+
             class _H(WSGIRequestHandler):
                 def log_request(self, *a): pass
             # Keep the listener reachable. The daemon never needs this — it dies
@@ -1668,13 +1685,20 @@ class BrowserBridge:
                         # reconnects and wins the moment the zombie ages out,
                         # where a silently ignored socket would look connected
                         # and receive nothing forever.
-                        if not driver._claim_ext_client(client_id, browser, self):
+                        # Publish the socket and its tab snapshot together. A
+                        # failed send on another thread may retire the old socket
+                        # while this reconnect is arriving; neither transition
+                        # may act on a half-published replacement.
+                        with _DRIVER_STATE_LOCK:
+                            claimed = driver._claim_ext_client(client_id, browser, self)
+                            if claimed:
+                                driver.last_ext_seen = time.time()
+                                driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
+                                driver._apply_extension_tabs(client_id, browser, tabs, self)
+                        if not claimed:
                             try: self.close()
                             except Exception: pass  # noqa: S110 - closing a refused socket is best-effort
                             return
-                        driver.last_ext_seen = time.time()
-                        driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
-                        driver._apply_extension_tabs(client_id, browser, tabs, self)
                     elif data.get('type') == 'ping':
                         # Liveness reply so the extension can tell a live socket
                         # from a half-open zombie (TCP ESTABLISHED but dead). No
@@ -1897,16 +1921,17 @@ class BrowserBridge:
         # genuinely conditional is whether the table gains a row. The log line is
         # read after the bind either way, which is what makes it report the URL the
         # tab has now rather than the one it registered with.
-        session = self.sessions.get(session_id)
-        if session is None:
-            session = self.sessions[session_id] = Session(session_id, session_info, client)
-            logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
-        else:
-            session.reconnect(client, session_info)
-            logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
+        with _DRIVER_STATE_LOCK:
+            session = self.sessions.get(session_id)
+            if session is None:
+                session = self.sessions[session_id] = Session(session_id, session_info, client)
+                logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
+            else:
+                session.reconnect(client, session_info)
+                logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
 
-        self.latest_session_id = session_id
-        if self.default_session_id is None: self.default_session_id = session_id
+            self.latest_session_id = session_id
+            if self.default_session_id is None: self.default_session_id = session_id
         self._notify_activity()
 
     def _unregister_client(self, client: WebSocket) -> None:
@@ -1916,15 +1941,19 @@ class BrowserBridge:
         # raises "dictionary changed size during iteration", which here would
         # abort the disconnect cleanup halfway and leave a dead socket in place
         # for ext_cmd to write into.
+        # Reconnect publication uses this lock too. Comparing the owner and then
+        # mutating without it can disconnect a rebound Session or pop a client ID
+        # that already belongs to a new socket.
         lifecycle_changed = False
-        for session in list(self.sessions.values()):
-            if session.ws_client == client:
-                lifecycle_changed = lifecycle_changed or session.is_active()
-                session.mark_disconnected()
-        # Drop the client-level socket too, else ext_cmd would keep writing into
-        # a closed connection instead of failing over to a live browser.
-        for cid in [c for c, v in list(self.ext_clients.items()) if v.get('ws') is client]:
-            self.ext_clients.pop(cid, None)
+        with _DRIVER_STATE_LOCK:
+            for session in list(self.sessions.values()):
+                if session.ws_client is client:
+                    lifecycle_changed = lifecycle_changed or session.is_active()
+                    session.mark_disconnected()
+            # Losing the transport does not prove its page operations ended:
+            # retain their reservations, capture ownership and reply admission.
+            for cid in [c for c, v in list(self.ext_clients.items()) if v.get('ws') is client]:
+                self.ext_clients.pop(cid, None)
         if lifecycle_changed:
             self._notify_activity()
 
@@ -2086,12 +2115,17 @@ class BrowserBridge:
         return latest if latest in candidates else candidates[-1]
 
     def execute_js(self, code, timeout=15, session_id=None, allow_failover=False, *,
-                   allow_rebind=True, wait=True, requester_id=None, operation_id=None) -> Any:
+                   allow_rebind=True, wait=True, requester_id=None, operation_id=None,
+                   read_only_probe=False) -> Any:
         """Run JS in a tab.
 
         allow_failover=False by default: if the target session is gone we raise
         instead of running the script on some other live tab, because the script
         may have side effects the caller only meant for the tab it named.
+
+        read_only_probe is an internal MCP-server/bridge flag for generated
+        wait probes, never an execute_js tool parameter. Authenticated /link
+        clients are trusted to construct those probes, as with raw JS dispatch.
         """
         if not isinstance(code, str):
             raise ValueError("code must be a string")
@@ -2143,6 +2177,8 @@ class BrowserBridge:
                        "allowFailover": "1" if allow_failover and not scoped_remote else "0",
                        "wait": "1" if wait else "0", "requesterId": requester_id,
                        "operationId": operation_id}
+            if read_only_probe is True:
+                payload['readOnlyProbe'] = True
             if scoped_remote:
                 # The lock names this resolved tab. Rebinding again in the
                 # daemon would dispatch outside the caller's acquired lock.
@@ -2317,6 +2353,7 @@ class BrowserBridge:
         self._sync_pending_operations()
         self._operation_state().reserve(
             exec_id, [str(session.id)], requester_id,
+            kind='wait_probe' if read_only_probe is True else 'execute_js',
             metadata={**extra, 'executed_tab_id': exec_tab_id, 'session_id': str(session.id)},
             reply_transport='http' if tp == 'http' else 'ws',
             reply_owner=str(session.id) if tp == 'http' else session.ws_client,
@@ -2411,6 +2448,8 @@ class BrowserBridge:
                     result = self.results.pop(exec_id, missing_result)
                     if result is not missing_result:
                         break
+                    if read_only_probe is True:
+                        self._operation_state().release_wait_probe(exec_id, requester_id)
                     snapshot = self._operation_state().read(exec_id, requester_id)
                     pending_extra = {
                         **extra, 'operation_id': exec_id,
@@ -2570,11 +2609,9 @@ class BrowserBridge:
                         snapshot.update({'retry_safe': False, 'js_return_lost': True})
                         return snapshot
                     if snapshot['status'] == 'abandoned':
-                        # No reply ever arrived and the reservation has been
-                        # released. Report the unknown outcome rather than the
-                        # 'no browser result' internal error below: the caller
-                        # needs to know the script may have run before it
-                        # decides whether repeating it is safe.
+                        # Keep the expiry receipt even if a late terminal reply
+                        # is now available in late_result. It is evidence about
+                        # the old execution, not permission to replay it.
                         snapshot.update({
                             'status': 'unknown', 'delivery_state': 'delivered_no_result',
                             'retry_safe': False, 'js_return_lost': True,
@@ -2729,7 +2766,7 @@ class BrowserBridge:
                 mark_dispatched()
                 entry['ws'].send_message(json.dumps({'id': exec_id, 'cmd': cmd}))
             except Exception as e:
-                self.ext_clients.pop(client_id, None)
+                self._unregister_client(entry['ws'])
                 disconnected = BridgeNoResponseError(
                     f"Extension client {client_id} disconnected during dispatch ({e}); outcome is unknown.",
                     error_code="extension_not_connected", delivery_state="sent_unconfirmed", retry_safe=False,

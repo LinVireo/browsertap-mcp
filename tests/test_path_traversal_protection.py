@@ -1,6 +1,6 @@
 """Path traversal protection for file-writing tools."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -15,6 +15,30 @@ class TestPathTraversalProtection:
             S._validate_safe_path("/etc/passwd", allowed_base=tmp_path)
         with pytest.raises(ValueError, match="must be a relative path"):
             S._validate_safe_path("C:\\Windows\\System32\\config\\SAM", allowed_base=tmp_path)
+
+    @pytest.mark.parametrize("save_path", [
+        "/etc/passwd",
+        "C:/Windows/System32/config/SAM",
+        r"C:\Windows\System32\config\SAM",
+        r"C:relative.txt",
+        r"\Windows\file.txt",
+        r"\\host\share\file.txt",
+        r"\\?\C:\Windows\file.txt",
+    ])
+    @pytest.mark.parametrize("path_flavor", ["native", "posix"])
+    def test_reject_nonrelative_paths_independent_of_host(self, monkeypatch, tmp_path, save_path, path_flavor):
+        if path_flavor == "posix":
+            # Exercise POSIX parsing on Windows too; native tests cover filesystem resolution.
+            class PosixInput(PurePosixPath):
+                def expanduser(self):
+                    return self
+
+                def resolve(self):
+                    return self
+            monkeypatch.setattr(S, "Path", PosixInput)
+            tmp_path = PosixInput("/btap-output")
+        with pytest.raises(ValueError, match="must be a relative path"):
+            S._validate_safe_path(save_path, allowed_base=tmp_path)
 
     def test_reject_parent_directory_traversal(self, tmp_path):
         with pytest.raises(ValueError, match="path traversal detected"):

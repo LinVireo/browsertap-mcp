@@ -142,6 +142,8 @@ Chrome/Edge/Opera 各自的扩展安装独立，一个浏览器缺失只修对�
 
 JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js_result`。
 它接受 execute_js 和其他桥命令的句柄，查询不重发；完成结果可重复读取。
+占用到期后若带 `late_result`，先读取这份迟到终态回包再判断执行结果；外层仍保留
+原 `unknown` 收据和 `retry_safe=false`。字段及大值文件的读取方式见 [[browsertap-default]]。
 保留期和容量边界见 [[browsertap-default]]；`operation_unknown` 或过期不证明未执行。
 
 `open_new_tab` 的创建句柄走该工具自己的恢复流程：
@@ -160,7 +162,10 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
 都不能作为自动重放的理由。debugger detach 不证明页面 JS 停止；
 `reservation_held` 缺失时也不能猜测目标已释放。
 
-`wait_for` / `wait_for_url` 使用服务端短同步探测；超时返回句柄时同样补查。
+`wait_for` / `wait_for_url` 的 selector/text/URL 只读探针超时后可释放标签页并保留
+原句柄；`reservation_held=false` 时可执行其他命令，同一 MCP 会话仍可补查迟到回包。
+为 true 或未知时，持续查询原操作直到结案或释放。调用方 `wait_for(js=...)`、旧桥、
+已经报告执行不确定或对话框阻塞的探针仍可能持有占用；按返回字段判断，不重放未完成探针。
 `execute_js` 的策略、monitor、执行和清理共用总 deadline，
 不会因为切换传输就获得一份新的调用预算。
 

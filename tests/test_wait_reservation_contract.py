@@ -61,11 +61,76 @@ def _wait(kind, **kwargs):
     return S.wait_for(js="false", **kwargs) if kind == "condition" else S.wait_for_url("missing", **kwargs)
 
 
-@pytest.mark.parametrize("kind", ["condition", "url"])
+@pytest.mark.parametrize("kind", ["selector", "condition", "url"])
 @pytest.mark.parametrize("acknowledged", [True, False])
-def test_wait_timeout_preserves_real_bridge_receipt_until_late_reply(monkeypatch, kind, acknowledged):
+def test_long_wait_keeps_expired_receipt_without_replaying(monkeypatch, kind, acknowledged):
     bridge, now = pending_wait_bridge(monkeypatch, acknowledged=acknowledged)
-    outcome = _wait(kind, timeout=1, session_id="browser:1")
+    kwargs = {"timeout": 140, "session_id": "browser:1"}
+    outcome = S.wait_for(selector="missing", **kwargs) if kind == "selector" else _wait(kind, **kwargs)
+    operation_id = bridge.sent[0]["id"]
+
+    assert len(bridge.sent) == 1
+    assert 1060 < now[0] <= 1140
+    assert outcome["status"] == "timeout"
+    assert outcome["operation_id"] == operation_id
+    assert outcome["operation_status"] == "unknown"
+    assert outcome["reservation_held"] is False
+    assert outcome["retry_safe"] is False
+    assert outcome["poll_with"] == "get_execute_js_result"
+    if kind == "condition":
+        assert "read-only" not in outcome["hint"]
+    receipt = S.get_execute_js_result(operation_id)
+    assert receipt["status"] == "unknown"
+    assert receipt["reservation_held"] is False
+
+    successor = bridge.execute_js("pending", wait=False, timeout=0.1, requester_id="next")
+    assert bridge._record_operation_reply(
+        {"type": "result", "id": operation_id, "result": json.dumps({"met": True})},
+        transport="ws", owner=bridge.ext_clients["browser"]["ws"],
+    ) is True
+    late = S.get_execute_js_result(operation_id)
+    assert late["status"] == "unknown"
+    assert late["late_result"]["success"] is True
+    assert json.loads(late["late_result"]["data"]) == {"met": True}
+    assert late["retry_safe"] is False
+    assert bridge.get_execute_js_result(successor["operation_id"], requester_id="next")["reservation_held"] is True
+    assert len(bridge.sent) == 2
+
+
+@pytest.mark.parametrize("kind", ["condition", "url"])
+@pytest.mark.parametrize("status", ["navigated", "completed_without_result", "failed"])
+def test_wait_returns_unusable_receipt_without_replaying(waiting, monkeypatch, kind, status):
+    driver, now = waiting
+    dispatched, queried = [], []
+
+    def execute(script, **kw):
+        dispatched.append(script)
+        now[0] += 0.4
+        raise S.BridgeNoResponseError(
+            "response pending", delivery_state="delivered_no_result", retry_safe=False,
+            operation_id="wait-operation", reservation_held=True,
+        )
+
+    def result(operation_id, timeout):
+        queried.append(operation_id)
+        return {"status": status, "operation_id": operation_id, "reservation_held": False}
+
+    monkeypatch.setattr(S, "exec_js", execute)
+    driver.get_execute_js_result = result
+    outcome = _wait(kind, timeout=2)
+    assert len(dispatched) == 1
+    assert queried == ["wait-operation"]
+    assert outcome["status"] == "timeout"
+    assert outcome["operation_id"] == "wait-operation"
+    assert outcome["operation_status"] == status
+    assert outcome["reservation_held"] is False
+    assert outcome["retry_safe"] is False
+
+
+@pytest.mark.parametrize("acknowledged", [True, False])
+def test_caller_js_wait_timeout_holds_target_until_late_reply(monkeypatch, acknowledged):
+    bridge, now = pending_wait_bridge(monkeypatch, acknowledged=acknowledged)
+    outcome = _wait("condition", timeout=1, session_id="browser:1")
     operation_id = outcome["operation_id"]
     pending = S.get_execute_js_result(operation_id)
     with pytest.raises(TargetBusyError):

@@ -118,7 +118,10 @@ def _windows_process_identity(pid: int) -> Optional[dict[str, Any]]:
     from ctypes import wintypes
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    kernel32 = ctypes.windll.kernel32
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise ProcessIdentityUnavailable("Windows process APIs are unavailable")
+    kernel32 = windll.kernel32
     # Declare the handle as HANDLE, not the default c_int: a truncated handle is
     # benign on Windows today but there is no reason to rely on that.
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]

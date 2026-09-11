@@ -906,6 +906,14 @@ def test_windows_pointer_position_handles_api_failure(monkeypatch, result):
     assert P._windows_pointer_position() == (None, None)
 
 
+def test_windows_observations_without_native_loader_are_unknown(monkeypatch):
+    monkeypatch.delattr(P.ctypes, "windll", raising=False)
+    assert P._windows_pointer_position() == (None, None)
+    assert P._process_is_dpi_aware() is None
+    monkeypatch.setattr(P, "_process_is_dpi_aware", lambda: True)
+    assert P._win32_virtual_screen() is None
+
+
 def test_macos_pointer_position_without_library_or_event(monkeypatch):
     monkeypatch.setattr(P.ctypes.util, "find_library", lambda _name: None)
     assert P._macos_pointer_position() == (None, None)

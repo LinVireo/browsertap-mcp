@@ -161,8 +161,14 @@ def _spawn_test_bridge(token, monkeypatch):
                 break
         time.sleep(0.05)
     else:
+        import faulthandler
+
+        # An in-process listener that did not start is a failure of this run,
+        # not an unavailable optional platform feature. Capture a blocked
+        # startup thread before cleanup so CI can show where it stopped.
+        faulthandler.dump_traceback()
         d.stop_http_server()
-        pytest.skip(f"test bridge never bound 127.0.0.1:{base + 1}")
+        pytest.fail(f"test bridge never listened on 127.0.0.1:{base + 1}")
     return _TestBridge(d, base)
 
 

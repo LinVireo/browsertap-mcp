@@ -125,11 +125,20 @@ Guard the complete set, reserve it as one operation, then send the batch once.
 - `silent_deadline_seconds(budget)` returns `min(MAX_SILENT_SECONDS,
   budget + SILENT_GRACE_SECONDS)` for a finite positive budget, and the ceiling
   for an absent or unusable budget.
-- Before the deadline, `read()` reports `status: "outcome_unknown"`, keeps the
-  wire receipt, and sets `reservation_held: true`.
+- Before the deadline, `read()` reports `status: "outcome_unknown"` and keeps
+  the wire receipt and existing reservation. `reservation_held` is derived
+  from the actual target/recovery owner maps, not from operation status.
 - After the deadline, the record becomes `abandoned`, the target is released,
   and the receipt/diagnosis remains readable until the normal result TTL.
   Callers receive `retry_safe: false` for an uncertain execution.
+- The first authenticated late terminal reply may add `late_result` and
+  `late_reply_age` to an abandoned receipt. It does not settle capture/dialog
+  state again, restore a reservation, change the original receipt or renew TTL.
+- Generated selector/text/URL probes use the internal `wait_probe` kind. Their
+  existing bridge timeout releases an ordinary `in_progress` lease while the
+  receipt remains collectible. Caller JS, recovery leases and already-unknown
+  or dialog-blocked operations do not qualify. A lost response leaves release
+  unconfirmed until the caller queries; an older bridge remains conservative.
 - A legitimate remote `status: unknown` receipt preserves the original error,
   `operation_status`, abandonment metadata and `reservation_held: false`.
   Its diagnostic `error` does not by itself make the receipt an RPC failure;
@@ -142,12 +151,15 @@ Guard the complete set, reserve it as one operation, then send the batch once.
 
 | Condition | Required behavior |
 | --- | --- |
-| No reply, deadline not reached | Keep `in_progress` and the target reservation |
+| No reply, silence deadline not reached | Keep `in_progress`; ordinary operations retain their target reservation |
+| Generated read-only probe reaches its bridge wait deadline | Release its ordinary lease, retain receipt and original silence/retention bounds |
 | No reply, deadline reached | `abandoned`, `js_return_lost: true`, release target |
+| Wait collection ends without a successful condition snapshot | Return the original receipt and current reservation status; never dispatch again from an unknown, lost or failed result |
 | Unknown outcome, `unknown_since` deadline not reached | Keep receipt and reservation |
 | Unknown outcome, `unknown_since` deadline reached | `abandoned_reason: unknown_outcome_reservation_ttl`, release target |
 | `blocked_by_dialog` | Keep reservation for explicit manual recovery |
-| Late reply after abandonment | Reject it; never attach it to a new operation |
+| First authenticated late terminal reply after abandonment | Retain alongside the original receipt; never attach it to a new operation |
+| Duplicate, uncertain, foreign or ended-lifecycle late reply | Do not replace retained terminal evidence or affect successor state |
 | Remote query of a retained abandoned receipt | Preserve the local receipt and uncertainty fields |
 | Capture operation leaves retained set without reply | Reclaim command bookkeeping; preserve real capture owner |
 
@@ -162,9 +174,12 @@ Guard the complete set, reserve it as one operation, then send the batch once.
 
 ### 6. Tests Required
 
-- `tests/test_silent_operation_expiry.py`: assert the fresh manual grace window,
-  expiry/release, receipt retention, per-budget deadlines, and late-reply
-  rejection.
+- `tests/test_silent_operation_expiry.py` and `tests/test_late_operation_results.py`:
+  assert the fresh manual grace window, expiry/release, receipt retention,
+  per-budget deadlines, authenticated late evidence and rejection boundaries.
+- `tests/test_read_only_wait_release.py` and `tests/test_wait_reservation_contract.py`:
+  assert release/receipt separation, requester and kind guards, successor
+  isolation, conservative caller JS, and local/HTTP/old-bridge/lost-response paths.
 - `tests/test_pending_bridge_operations.py` and `tests/test_pending_execution_results.py`:
   assert bridge/MCP envelopes preserve `operation_status`, `reservation_held`,
   `retry_safe`, and the unknown diagnostic.

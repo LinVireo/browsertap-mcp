@@ -107,6 +107,21 @@ def _post(port, body, headers=None, timeout=5):
                          headers=headers or {}, timeout=timeout)
 
 
+def test_http_listener_starts_without_reverse_dns(monkeypatch, request):
+    """A slow system resolver must not delay the local command channel."""
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("HTTP startup must not reverse-resolve its bind address")
+
+    monkeypatch.setattr(T.socket, "getfqdn", unexpected_lookup)
+    bridge = request.getfixturevalue("link_bridge_open")
+    response = _post(bridge.port, {"cmd": "get_all_sessions"})
+    assert response.status_code == 200
+    assert response.json()["r"] == []
+    environ = bridge.driver.http_server.base_environ
+    assert environ["SERVER_NAME"] == "127.0.0.1"
+    assert environ["SERVER_PORT"] == str(bridge.port)
+
+
 class TestUnauthenticatedBridge:
     """Explicit auth=off keeps the historical unauthenticated behaviour."""
 

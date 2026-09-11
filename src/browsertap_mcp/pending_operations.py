@@ -113,6 +113,11 @@ class _Operation:
     status: str = "in_progress"
     result: dict[str, Any] | None = None
     completed_at: float | None = None
+    # A late reply adds evidence to an abandoned receipt; it does not settle
+    # the operation again or restart its retention deadline.
+    late_result: dict[str, Any] | None = None
+    late_reply_at: float | None = None
+    late_reply_closed: bool = False
     # The lambda is not decoration: a bare ``default_factory=time.monotonic``
     # captures the function object when this class is defined, so a test that
     # substitutes the module clock would be silently ignored here while every
@@ -135,6 +140,10 @@ class _Operation:
     reply_owner: Any = None
     waiters: int = 0
 
+    @property
+    def accepts_late_result(self) -> bool:
+        return self.status == "abandoned" and self.late_result is None and not self.late_reply_closed
+
 
 class PendingOperations:
     def __init__(self, *, requester_liveness: Callable[[str | None], str] | None = None) -> None:
@@ -155,9 +164,10 @@ class PendingOperations:
     def _abandon_silent_operations(self, now: float) -> None:
         """Release a tab whose dispatched command never produced any reply.
 
-        An in-progress operation holds its target so a late result still has
-        somewhere to land, and that is right for as long as a reply is
-        plausible. With no expiry it was permanent: one lost MV3 reply left the
+        A side-effecting in-progress operation holds its target while the
+        execution is unresolved. Read-only wait probes may release that lease
+        earlier while keeping the same receipt and retention bounds. With no
+        expiry a hold was permanent: one lost MV3 reply left the
         tab answering target_busy for the life of the daemon, with no terminal
         status for the caller to read and no id to poll, and enough of them
         exhausted admission capacity for every requester.
@@ -169,8 +179,9 @@ class PendingOperations:
 
         Abandonment is terminal but not a verdict on the page: the script may
         well have run. The status says exactly that, and the reservation goes
-        away because after this long it protects nothing -- the reply it was
-        holding a slot for can no longer be trusted to belong to this caller.
+        away once the bounded observation window ends. A later authenticated
+        terminal reply can still be retained beside the abandonment receipt,
+        without restoring the reservation or extending result retention.
         A blocked dialog is deliberately left alone: a human recovery command
         still has a live path back to the page.  An ``outcome_unknown`` reply is
         different.  For a CDP timeout the extension has already answered the
@@ -330,8 +341,13 @@ class PendingOperations:
             if operation is not None:
                 operation.acknowledged = True
 
-    def accepts_reply(self, operation_id: Any, transport: str, owner: Any = None) -> bool:
-        """Whether an inbound ACK/result belongs to a live operation.
+    def accepts_reply(
+        self, operation_id: Any, transport: str, owner: Any = None, *, allow_late: bool = False,
+    ) -> bool:
+        """Whether an inbound reply belongs to this operation and transport.
+
+        Result handlers may opt into an abandoned record's first late result.
+        ACKs remain limited to active operations.
 
         WebSocket ownership is identity-based because a client id is supplied by
         the peer itself.  HTTP long-poll ownership is a session-id string.  A
@@ -341,8 +357,11 @@ class PendingOperations:
         """
         key = str(operation_id) if operation_id is not None else ""
         with self._lock:
+            self._prune()
             operation = self._operations.get(key)
-            if operation is None or operation.status not in ACTIVE_STATUSES:
+            if operation is None or not (
+                operation.status in ACTIVE_STATUSES or allow_late and operation.accepts_late_result
+            ):
                 return False
             if operation.reply_transport != transport:
                 return False
@@ -384,6 +403,37 @@ class PendingOperations:
                 operation.waiters -= 1
                 self._prune()
 
+    def _holds_targets(self, operation: _Operation) -> bool:
+        return any(
+            self._targets.get(target) == operation.operation_id
+            or self._recoveries.get(target) == operation.operation_id
+            for target in operation.targets
+        )
+
+    def release_wait_probe(self, operation_id: str, requester_id: str | None) -> bool:
+        """End a server-owned read-only probe's lease, keeping its reply receipt.
+
+        Called by the bridge at its existing synchronous wait deadline, so
+        releasing does not require a second request after the tool times out.
+        Caller JS, uncertain outcomes and dialog recovery keep their leases.
+        """
+        with self._lock:
+            self.read(operation_id, requester_id)
+            operation = self._operations[operation_id]
+            if (operation.kind != "wait_probe" or operation.status != "in_progress"
+                    or not self._holds_targets(operation)
+                    or operation.superseded_recoveries
+                    or any(self._recoveries.get(target) == operation_id for target in operation.targets)):
+                return False
+            held = [target for target in operation.targets if self._targets.get(target) == operation_id]
+            self._release(operation)
+            operation.metadata.update({
+                "reservation_released": True,
+                "released_reason": "read_only_wait_probe_timeout",
+                "released_targets": held,
+            })
+            return True
+
     def _release(self, operation: _Operation) -> None:
         for target in operation.targets:
             if self._targets.get(target) == operation.operation_id:
@@ -401,15 +451,31 @@ class PendingOperations:
 
     def complete(
         self, operation_id: str, result: dict[str, Any], *, outcome_unknown: bool = False,
+        on_active_reply: Callable[[], None] | None = None,
     ) -> bool:
         with self._lock:
+            self._prune()
             operation = self._operations.get(operation_id)
             if operation is None:
                 return False
+            data = result.get("data")
+            pending = (
+                result.get("success") is True and isinstance(data, dict)
+                and data.get("pending_execution") is True
+            )
             if operation.status not in ACTIVE_STATUSES:
+                if (operation.accepts_late_result and not outcome_unknown and not pending
+                        and operation.last_wire_result is not result):
+                    operation.late_result = dict(result)
+                    operation.late_reply_at = time.monotonic()
                 return True
             if operation.last_wire_result is result:
                 return False
+            # The bridge must settle capture/dialog state before releasing a
+            # target. Keep that work under this lock and only for an active
+            # reply, so expiry cannot turn it into a late mutation of a successor.
+            if on_active_reply is not None:
+                on_active_reply()
             operation.last_wire_result = result
             operation.result = dict(result)
             if outcome_unknown:
@@ -417,7 +483,6 @@ class PendingOperations:
                     operation.unknown_since = time.monotonic()
                 operation.status = "outcome_unknown"
                 return False
-            data = result.get("data")
             if (result.get("success") is True and isinstance(data, dict)
                     and data.get("pending_execution") is True
                     and (data.get("__btap_dialog_result") is True or operation.kind == "navigate")):
@@ -467,7 +532,8 @@ class PendingOperations:
             operation_ids = {
                 operation.operation_id
                 for operation in self._operations.values()
-                if operation.status in ACTIVE_STATUSES and target in operation.targets
+                if (operation.status in ACTIVE_STATUSES or operation.status == "abandoned")
+                and target in operation.targets
             }
             for operation_id in operation_ids:
                 if operation_id is None:
@@ -477,6 +543,11 @@ class PendingOperations:
                     continue
                 operation.targets = tuple(item for item in operation.targets if item != target)
                 if operation.targets:
+                    continue
+                if operation.status == "abandoned":
+                    # Keep the original receipt and any already observed reply,
+                    # but the ended lifecycle cannot supply new late evidence.
+                    operation.late_reply_closed = True
                     continue
                 operation.result = None
                 operation.status = "lifecycle_ended"
@@ -513,12 +584,18 @@ class PendingOperations:
                 "operation_id": operation_id,
                 "status": status,
                 "acknowledged": operation.acknowledged,
-                "reservation_held": status in ACTIVE_STATUSES,
+                "reservation_held": self._holds_targets(operation),
             }
             if operation.result is not None:
                 result["wire_result"] = dict(operation.result)
+            if operation.late_result is not None:
+                result["late_result"] = dict(operation.late_result)
+                if operation.late_reply_at is not None:
+                    result["late_reply_age"] = round(max(0.0, time.monotonic() - operation.late_reply_at), 3)
             if consume and status not in ACTIVE_STATUSES:
                 operation.result = None
                 operation.last_wire_result = None
+                operation.late_result = None
+                operation.late_reply_at = None
                 operation.status = "consumed"
             return result

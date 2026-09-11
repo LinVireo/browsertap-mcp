@@ -148,10 +148,9 @@ def _validate_safe_path(
 
     path = Path(save_path).expanduser()
 
-    # Reject absolute paths to prevent writing to arbitrary locations.
-    # ``pathlib`` on Windows turns a POSIX path such as ``/etc/passwd`` into
-    # a drive-qualified path during normalization, so test the raw input too.
-    if path.is_absolute() or path.drive or str(save_path).startswith("/"):
+    # Callers can supply either path syntax regardless of the host OS.
+    # Windows anchors also include drive-relative and root-relative paths.
+    if path.is_absolute() or PureWindowsPath(save_path).anchor:
         raise ValueError(
             f"{description} must be a relative path within {allowed_base}"
         )
@@ -1526,9 +1525,17 @@ _PENDING_OPERATION_HINT = (
     "The operation is still unresolved. Call get_execute_js_result with its "
     "operation_id from the same MCP session before another command on this tab."
 )
+_RELEASED_WAIT_HINT = (
+    "The wait operation no longer holds the tab. "
+    "Another command can use this tab. Call get_execute_js_result with its "
+    "operation_id from the same MCP session to inspect its receipt or collect a delayed reply; "
+    "do not replay the operation automatically."
+)
 
 
-def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0) -> dict[str, Any]:
+def exec_js(
+    script: str, session_id: Optional[str] = None, timeout: float = 15.0, *, read_only_probe: bool = False,
+) -> dict[str, Any]:
     timeout = _positive_timeout(timeout)
     deadline = time.monotonic() + timeout
 
@@ -1544,7 +1551,8 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
     first_budget, _reserved = simphtml.undelivered_retry_split(remaining())
     if first_budget <= 0:
         raise TimeoutError("bridge JS deadline exhausted before dispatch")
-    response = driver.execute_js(script, timeout=first_budget, session_id=sid)
+    probe_options = {"read_only_probe": True} if read_only_probe else {}
+    response = driver.execute_js(script, timeout=first_budget, session_id=sid, **probe_options)
     if simphtml.no_response_kind(response) == "undelivered":
         # Never reached the page; retrying is side-effect-free. The reserve
         # above is what makes this branch reachable — a first attempt handed the
@@ -1555,6 +1563,7 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
                 script,
                 timeout=retry_budget,
                 session_id=sid,
+                **probe_options,
             )
     kind = simphtml.no_response_kind(response)
     if kind:
@@ -1570,6 +1579,8 @@ def exec_js(script: str, session_id: Optional[str] = None, timeout: float = 15.0
             if response.get("operation_id") and delivery_state not in {"undelivered", "navigated"}
             else "Session may be asleep or disconnected; run list_tabs, switch_tab to a live session, then retry."
         )
+        if read_only_probe and response.get("reservation_held") is False and response.get("operation_id"):
+            hint = _RELEASED_WAIT_HINT
         raise BridgeNoResponseError(
             f"Bridge no-response ({kind}): {response.get('result')}. {hint}",
             error_code=str(response.get("error_code") or "no_response"),
@@ -4431,7 +4442,7 @@ _WAIT_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _poll_wait_condition(
-    script: str, target_session: Optional[str], timeout: float,
+    script: str, target_session: Optional[str], timeout: float, *, read_only_probe: bool = False,
 ) -> tuple[dict[str, Any], Optional[str], dict[str, Any], int]:
     """Poll synchronously; a delayed reply is collected without replaying JS."""
     started = time.monotonic()
@@ -4453,15 +4464,18 @@ def _poll_wait_condition(
                 snapshot = collect(
                     pending["operation_id"], timeout=min(remaining, _WAIT_CALL_TIMEOUT_SECONDS),
                 )
-                if snapshot.get("status") == "in_progress":
-                    if "reservation_held" in snapshot:
-                        pending["reservation_held"] = snapshot["reservation_held"]
-                else:
+                for key in ("reservation_held", "delivery_state"):
+                    if key in snapshot:
+                        pending[key] = snapshot[key]
+                if snapshot.get("status") == "success":
                     pending = {}
-                    if snapshot.get("status") == "success":
-                        response = snapshot
-                    else:
-                        last_error = str(snapshot.get("error") or snapshot.get("status"))
+                    response = snapshot
+                elif snapshot.get("status") != "in_progress":
+                    # Expiry or a lost/failed result is not a false condition.
+                    # Return the original receipt instead of dispatching again.
+                    pending["operation_status"] = snapshot.get("operation_status") or snapshot.get("status")
+                    last_error = str(snapshot.get("error") or snapshot.get("status"))
+                    break
             else:
                 call_timeout = min(remaining, _WAIT_CALL_TIMEOUT_SECONDS)
                 first_budget, _reserved = simphtml.undelivered_retry_split(call_timeout)
@@ -4470,7 +4484,9 @@ def _poll_wait_condition(
                 if first_budget <= _WAIT_RESULT_MARGIN_SECONDS:
                     time.sleep(remaining)
                     break
-                response = exec_js(script, session_id=target_session, timeout=call_timeout)
+                response = exec_js(
+                    script, session_id=target_session, timeout=call_timeout, read_only_probe=read_only_probe,
+                )
             if response is not None:
                 raw = response.get("data")
                 decoded = json.loads(raw) if isinstance(raw, str) else raw
@@ -4498,6 +4514,8 @@ def _poll_wait_condition(
         remaining = max(0.0, deadline - time.monotonic())
         if remaining > 0:
             time.sleep(min(delay, remaining))
+    if pending.get("reservation_held") is False and last_error:
+        last_error = last_error.replace(_PENDING_OPERATION_HINT, _RELEASED_WAIT_HINT)
     return info, last_error, pending, int((time.monotonic() - started) * 1000)
 
 
@@ -4509,7 +4527,10 @@ def _poll_wait_condition(
         "match, text for a substring in body text, url_pattern for a regex on the URL, "
         "js for a JS expression to become truthy. The server schedules short synchronous "
         "page checks under one deadline. A delayed reply returns its operation_id for "
-        "get_execute_js_result; it is never replayed while pending."
+        "get_execute_js_result; it is never replayed while pending. Timed-out "
+        "selector/text/URL checks can release the tab while keeping that receipt: "
+        "reservation_held=false permits another command. Caller-provided js stays reserved; "
+        "when reservation_held is true or unknown, collect the original operation first."
     )
 )
 def wait_for(
@@ -4579,7 +4600,9 @@ def wait_for(
     }})()
     """
     try:
-        info, last_error, pending, waited_ms = _poll_wait_condition(script, target_session, timeout)
+        info, last_error, pending, waited_ms = _poll_wait_condition(
+            script, target_session, timeout, read_only_probe=kind != "js",
+        )
     finally:
         if session_id is not None:
             driver.default_session_id = prev_default
@@ -4604,7 +4627,8 @@ def wait_for(
         elif last_error:
             out["error"] = f"The page was repeatedly unavailable while waiting: {last_error}"
         out["hint"] = (
-            _PENDING_OPERATION_HINT if pending else
+            (_RELEASED_WAIT_HINT if pending.get("reservation_held") is False else _PENDING_OPERATION_HINT)
+            if pending else
             "The condition was not met before timeout. Verify the selector or text, or inspect the page with scan_page."
         )
     return out
@@ -4617,7 +4641,10 @@ def wait_for(
         "'complete', then returns the final url, title and readyState. Use this after a click "
         "or open_url that navigates; wait_for(url_pattern=...) only checks the URL and can "
         "return while the new document is still blank. The server schedules short synchronous "
-        "page checks. Delayed replies retain their operation_id for get_execute_js_result."
+        "page checks. Delayed replies retain their operation_id for get_execute_js_result. "
+        "A timed-out probe can release the tab without losing its receipt: "
+        "reservation_held=false permits another command while the original reply remains collectible. "
+        "When reservation_held is true or unknown, collect the original operation first."
     )
 )
 def wait_for_url(
@@ -4659,7 +4686,9 @@ def wait_for_url(
     }})()
     """
     try:
-        info, last_error, pending, waited_ms = _poll_wait_condition(script, target_session, timeout)
+        info, last_error, pending, waited_ms = _poll_wait_condition(
+            script, target_session, timeout, read_only_probe=True,
+        )
     finally:
         if session_id is not None:
             driver.default_session_id = prev_default
@@ -4681,7 +4710,8 @@ def wait_for_url(
             out["error"] = f"The page was repeatedly unavailable while waiting: {last_error}"
         landed = info.get("url")
         out["hint"] = (
-            _PENDING_OPERATION_HINT if pending else
+            (_RELEASED_WAIT_HINT if pending.get("reservation_held") is False else _PENDING_OPERATION_HINT)
+            if pending else
             f"Timed out: current URL {landed} (readyState={info.get('ready')}) does not match url_pattern"
             if landed else
             "Timed out and could not read the current URL. The tab may be suspended or disconnected; confirm it with list_tabs first.")
@@ -5267,7 +5297,7 @@ def execute_js(
                 driver.default_session_id = prev_default
 
 
-@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. A pending operation keeps its tab reserved while other tabs remain usable.")
+@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. After reservation expiry, the first valid late terminal reply appears as late_result (success and data) with late_reply_age in seconds; the original unknown receipt and retry_safe=false remain. A large successful late_result.data uses result_file metadata inside late_result. Late replies do not renew retention or reserve the tab again. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. Ordinary pending operations keep their tabs reserved, but a timed-out server-generated read-only wait probe can release its tab before its reply arrives. Use reservation_held to check actual ownership; other tabs remain usable.")
 def get_execute_js_result(
     operation_id: str,
     timeout: float = 0.0,
@@ -5286,6 +5316,17 @@ def get_execute_js_result(
     raw = require_driver().get_execute_js_result(
         operation_id.strip(), timeout=timeout,
     )
+    late = raw.get("late_result")
+    if isinstance(late, dict) and late.get("success") is True:
+        exported = _externalize_execute_js_result({"js_return": late.get("data")})
+        if exported.get("result_externalized"):
+            raw = {
+                **raw,
+                "late_result": {
+                    **late, "data": exported["js_return"],
+                    **{key: value for key, value in exported.items() if key != "js_return"},
+                },
+            }
     if raw.get("status") != "success":
         result = dict(raw)
         if result.get("executed_tab_id") is not None:
