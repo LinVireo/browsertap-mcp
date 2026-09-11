@@ -183,6 +183,8 @@ def test_upload_files_rejects_invalid_selector_or_path_shapes(
 # --- the tool surface ---------------------------------------------------
 
 EXPECTED_TOOLS = {
+    # explicit native file-dialog inspection/cancellation
+    "inspect_native_file_dialog", "cancel_native_file_dialog",
     "get_setup_status", "get_automation_profile", "set_automation_profile",
     "list_tabs", "list_all_tabs", "close_tabs",
     "switch_tab", "activate_tab", "open_url", "open_new_tab",

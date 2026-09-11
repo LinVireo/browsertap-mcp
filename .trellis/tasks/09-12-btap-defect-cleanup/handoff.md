@@ -45,6 +45,20 @@ including the final Unicode/CI/documentation delta. Its report is
 verification receipt is `root-final-review-verification.json`.
 The first two review reports and their original failed probes are immutable.
 
+The first canonical attempt on `147c781` exposed one stale test inventory:
+`tests/test_offline.py::test_every_tool_is_registered` omitted the two newly
+registered native-dialog tools. It had 3965 passes and one failure; this is not
+a passing canonical run. The isolated original assertion reproduced that
+failure before the expected set was updated. The exact-set assertion and
+product source are unchanged. `canonical.log`, `canonical-run.json`, the seven
+files in `canonical-r1-evidence/` and `registry-red.*` preserve the failure.
+`registry-green.*` and `final-registry-delta-review.md/.json` supply the bounded
+follow-up verification; the final receipt identifies the later canonical run.
+Root reproduced 28 registry tests passing. The supplement independently passed
+four checks and confirmed that the other 350 public files were unchanged;
+root verified its source and preserved-artifact hashes separately in
+`root-registry-review-verification.json`.
+
 ## Candidate verification sequence
 
 Finish the independent delta review and all owned record commits before the

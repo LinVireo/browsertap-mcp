@@ -2,6 +2,17 @@
 
 Coordinator: `codex-resume-01a0881c`. Inventory: `/root/btap_bug_inventory`; implementation/review reports are kept separately. Integration baseline: `e631522` (includes the setup and coverage baseline). Current implementation and measured regressions override historical prose.
 
+Canonical follow-up: the first full attempt at `147c781` had 3965 passes and
+one failure because `tests/test_offline.py` retained the old 49-name expected
+set. A standalone invocation reproduced the exact missing-two-tools mismatch.
+The list now includes the two explicit native-dialog tools; its exact-set
+assertion and product code are unchanged. Original failed evidence is retained
+under `out/bug-cleanup-20260912/canonical-r1-evidence/` and `registry-red.*`.
+Root's 28-test registry follow-up and the independent four-test supplement
+passed; `root-registry-review-verification.json` binds the final two-line delta
+to the previous review of the other 350 public files.
+Use the final verification receipt for the later committed-tree gate result.
+
 Sources: knowledge-vault `projects/browsertap-mcp/task-queue.md` (Q), `source-review-2026-09-10.md` (R), `source-audit-2026-09-07.md`, `traps.md`; archived Trellis `browser_bridge-review.md` (BR); repository `BUGREPORT.md`, issue history, `DELIVER.md`, `SPEC.md`, public docs and current tests. Line references below identify the inventory snapshot.
 
 ## Source and documentation repairs
