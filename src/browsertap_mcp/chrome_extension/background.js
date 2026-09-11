@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = 'edd16646791a4c63';
+const BTAP_BUILD = '2878475f7d821497';
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -2700,6 +2700,22 @@ async function settleZombieAfterTimeout(tabId, attachment) {
     + ` not be re-probed (${after.error?.message || after.error})`);
 }
 
+function throwIfNavigationUncertain(outcome) {
+  if (outcome.kind === 'cancelled' || outcome.kind === 'timeout') {
+    const code = outcome.kind === 'timeout' ||
+      debuggerFailureCode(outcome.reason) === 'cdp_timeout'
+      ? 'cdp_timeout' : 'debugger_detached';
+    const reason = outcome.reason || 'navigation outcome did not arrive before its deadline';
+    const error = new Error(`${code}: ${reason}`);
+    error.code = code;
+    throw error;
+  }
+  if (outcome.kind === 'error' &&
+      ['cdp_timeout', 'debugger_detached'].includes(debuggerFailureCode(outcome.cause))) {
+    throw outcome.cause;
+  }
+}
+
 async function navigateWithDialogPolicy(msg) {
   const tabId = Number(msg.tabId);
   const action = msg.beforeunload;
@@ -2751,7 +2767,7 @@ async function navigateWithDialogPolicy(msg) {
       navigationBudget,
       1,
     ).then(value => ({ kind: 'navigation', value })).catch(error => ({
-      kind: 'error', error: error.message || String(error),
+      kind: 'error', error: error.message || String(error), cause: error,
     }));
     pending.navigationPromise = navigationPromise;
     const waitMs = Math.min(
@@ -2764,6 +2780,10 @@ async function navigateWithDialogPolicy(msg) {
       pending.cancelSignal,
       new Promise(resolve => setTimeout(() => resolve({ kind: 'timeout' }), waitMs)),
     ]);
+    // Detaching cancels the waiter, not the dispatched navigation. Preserve
+    // unknown outcomes through the structured catch so the bridge keeps the
+    // original receipt and its bounded reservation instead of reporting ok.
+    throwIfNavigationUncertain(first);
     // Page.navigate can resolve just before the dialog event is delivered.
     if (first.kind === 'navigation' && !pending.dialog) {
       const dialogGraceMs = Math.min(
@@ -2795,6 +2815,7 @@ async function navigateWithDialogPolicy(msg) {
           () => resolve({ kind: 'timeout' }), acceptWaitMs,
         )),
       ]);
+      throwIfNavigationUncertain(completed);
       navigationKind = completed.kind;
       navigationError = completed.kind === 'error' ? completed.error : null;
       if (completed.kind === 'navigation') navigation = completed.value;

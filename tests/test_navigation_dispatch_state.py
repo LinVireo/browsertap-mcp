@@ -18,12 +18,18 @@ import json
 
 import pytest
 
-from browsertap_mcp.browser_bridge import _execution_may_continue
+from browsertap_mcp import pending_operations as pending_module
+from browsertap_mcp.browser_bridge import PageExecutionError, _execution_may_continue
+from browsertap_mcp.command_scope import TargetBusyError
 from tests.test_dialog_policy import BACKGROUND, _run_node_harness
+from tests.test_pending_bridge_operations import make_bridge, reply_on_send
 
 
-def _navigate_harness(*, page_enable: str, page_navigate: str, timeout_ms: int) -> dict:
-    """page_enable / page_navigate: 'ok' | 'hang' | 'reject'."""
+def _navigate_harness(
+    *, page_enable: str, page_navigate: str, timeout_ms: int,
+    beforeunload: str = "dismiss",
+) -> dict:
+    """Drive real navigation, debugger cancellation, and deadline handling."""
     return _run_node_harness(
         f"""
 const fs = require('fs');
@@ -56,7 +62,24 @@ const calls = {{ 'Page.enable': 0, 'Page.navigate': 0 }};
 function act(method) {{
   calls[method] += 1;
   const mode = behaviour[method];
-  if (mode === 'hang') return new Promise(() => {{}});
+  if (method === 'Page.navigate' && {json.dumps(beforeunload)} === 'accept') {{
+    queueMicrotask(() => handleDebuggerEvent({{ tabId: 42 }},
+      'Page.javascriptDialogOpening', {{
+        type: 'beforeunload', message: 'Leave?', url: 'https://old.example/',
+      }}));
+  }}
+  if (mode === 'detach') return new Promise(() => {{
+    setTimeout(() => {{ void handleDebuggerDetach({{ tabId: 42 }}); }}, 25);
+  }});
+  if (mode === 'timeout_error') return Promise.reject(Object.assign(
+    new Error('navigation watchdog expired'), {{ code: 'cdp_timeout' }},
+  ));
+  if (mode === 'detached_error') return Promise.reject(Object.assign(
+    new Error('debugger detached during navigation'), {{ code: 'debugger_detached' }},
+  ));
+  if (['hang', 'wait_timeout', 'watchdog_timeout'].includes(mode)) {{
+    return new Promise(() => {{}});
+  }}
   if (mode === 'reject') return Promise.reject(new Error(method + ' refused by stub'));
   return Promise.resolve(method === 'Page.navigate' ? {{ frameId: 'f' }} : {{}});
 }}
@@ -68,6 +91,7 @@ const chrome = {{
     detach() {{ return Promise.resolve(); }},
     sendCommand(target, method) {{
       if (method in behaviour) return act(method);
+      if (method === 'Page.handleJavaScriptDialog') return Promise.resolve({{}});
       throw new Error('unexpected command: ' + method);
     }},
   }},
@@ -80,9 +104,20 @@ eval(source.slice(
   source.indexOf('function handleDebuggerEvent'),
   source.indexOf('async function handleExtMessage'),
 ));
+// The navigation wait and CDP watchdog have separate deadlines. Control their
+// order while retaining the real dispatcher, cancellation, and cleanup paths.
+const sendWithDeadline = sendDebuggerCommandWithTimeout;
+sendDebuggerCommandWithTimeout = function(lease, method, params, timeout, ...rest) {{
+  if (method === 'Page.navigate') {{
+    if (behaviour[method] === 'wait_timeout') timeout += 2000;
+    if (behaviour[method] === 'watchdog_timeout') timeout = 100;
+  }}
+  return sendWithDeadline(lease, method, params, timeout, ...rest);
+}};
 (async () => {{
   const result = await navigateWithDialogPolicy({{
-    tabId: 42, url: 'https://new.example/', beforeunload: 'dismiss', timeoutMs: {timeout_ms},
+    tabId: 42, url: 'https://new.example/',
+    beforeunload: {json.dumps(beforeunload)}, timeoutMs: {timeout_ms},
   }});
   process.stdout.write(JSON.stringify({{ result, calls, pendingAtEnd: pendingNavigations.has(42) }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
@@ -110,20 +145,77 @@ def test_page_enable_timeout_before_navigate_is_reported_as_not_dispatched():
     assert outcome["pendingAtEnd"] is False
 
 
-def test_failure_after_navigate_was_sent_is_still_held():
-    # Page.navigate is dispatched and hangs; the deadline then expires inside
-    # the wait. The handler must not claim the navigation never happened.
-    outcome = _navigate_harness(page_enable="ok", page_navigate="hang", timeout_ms=1200)
+@pytest.mark.parametrize(("mode", "policy", "code"), [
+    ("hang", "dismiss", "cdp_timeout"),
+    ("wait_timeout", "dismiss", "cdp_timeout"),
+    ("watchdog_timeout", "dismiss", "cdp_timeout"),
+    ("detach", "dismiss", "debugger_detached"),
+    ("timeout_error", "dismiss", "cdp_timeout"),
+    ("detached_error", "dismiss", "debugger_detached"),
+    ("hang", "accept", "cdp_timeout"),
+    ("wait_timeout", "accept", "cdp_timeout"),
+    ("detach", "accept", "debugger_detached"),
+])
+def test_failure_after_navigate_was_sent_is_still_held(monkeypatch, mode, policy, code):
+    outcome = _navigate_harness(
+        page_enable="ok", page_navigate=mode, timeout_ms=1200, beforeunload=policy,
+    )
     result = outcome["result"]
     assert outcome["calls"]["Page.navigate"] == 1
-    if result["ok"] is False:
-        # Reached the outer catch after the send: dispatched must be true.
-        assert result["error"]["dispatched"] is True
-        assert _bridge_verdict(result) is True
-    else:
-        # Or the handler settled it inside as a timed-out navigation; either
-        # way nothing says "not dispatched".
-        assert result["data"]["status"] != "not_dispatched"
+    assert result["ok"] is False, result
+    assert result["error"]["code"] == code
+    assert result["error"]["dispatched"] is True
+    assert _bridge_verdict(result) is True
+    assert outcome["pendingAtEnd"] is False
+
+    # Feed the real extension outcome through the bridge and registry. Merely
+    # checking error.dispatched would miss a success-shaped reply that releases
+    # the target, as the previous test's permissive else branch did.
+    now = [1000.0]
+    monkeypatch.setattr(pending_module.time, "monotonic", lambda: now[0])
+    bridge = make_bridge()
+    reply_on_send(bridge, success=False, data=result["error"])
+    with pytest.raises(PageExecutionError) as caught:
+        bridge.ext_cmd(
+            {"cmd": "navigate", "tabId": 1, "url": "https://new.example/"},
+            requester_id="navigator", operation_id="navigation-receipt", timeout=5,
+        )
+    operation_id = caught.value.operation_id
+    assert operation_id == "navigation-receipt"
+    assert caught.value.retry_safe is False
+    assert caught.value.diagnostics["reservation_held"] is True
+    for _ in range(2):
+        receipt = bridge.get_execute_js_result(operation_id, requester_id="navigator")
+        assert receipt["operation_id"] == operation_id
+        assert receipt["operation_status"] == "outcome_unknown"
+        assert receipt["reservation_held"] is True
+        assert receipt["retry_safe"] is False
+        for requester in ("navigator", "other"):
+            with pytest.raises(TargetBusyError):
+                bridge.execute_js("second", requester_id=requester)
+    assert len(bridge.sent) == 1
+
+    now[0] += pending_module.silent_deadline_seconds(5) + 1
+    expired = bridge.get_execute_js_result(operation_id, requester_id="navigator")
+    assert expired["status"] == "unknown"
+    assert expired["reservation_held"] is False
+    assert expired["retry_safe"] is False
+    assert expired["abandoned_reason"] == "unknown_outcome_reservation_ttl"
+    reply_on_send(bridge, data="after")
+    assert bridge.execute_js("after", requester_id="other")["data"] == "after"
+    assert sum(message.get("cmd", {}).get("cmd") == "navigate" for message in bridge.sent) == 1
+
+
+@pytest.mark.parametrize(("mode", "status"), [
+    ("ok", "ok"), ("reject", "navigation_failed"),
+])
+def test_known_navigation_outcomes_keep_their_terminal_shape(mode, status):
+    outcome = _navigate_harness(page_enable="ok", page_navigate=mode, timeout_ms=1200)
+    assert outcome["result"]["ok"] is True
+    assert outcome["result"]["data"]["status"] == status
+    assert outcome["result"]["data"]["pending_execution"] is False
+    assert outcome["calls"]["Page.navigate"] == 1
+    assert outcome["pendingAtEnd"] is False
 
 
 @pytest.mark.parametrize("stage", ["tabs.get", "Page.enable"])
