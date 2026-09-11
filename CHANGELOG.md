@@ -83,6 +83,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   cannot be sent. Reconnect publication and disconnect cleanup are serialized,
   so an old send failure or delayed close cannot remove a replacement channel.
   Uncertain operation receipts, reservations and capture ownership remain intact.
+- Honor the caller's remaining navigation deadline after accepting a leave-page
+  dialog. A separate three-second cap previously reported an unknown outcome
+  while a navigation could still finish within the original budget; actual
+  timeouts continue to retain their receipt and reservation without replaying.
 - Retain the first valid late terminal reply after an operation's reservation
   expires. `get_execute_js_result` exposes it as `late_result` with
   `late_reply_age`, preserving the original unknown receipt and `retry_safe=false`.

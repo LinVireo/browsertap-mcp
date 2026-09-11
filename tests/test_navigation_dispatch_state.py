@@ -77,6 +77,9 @@ function act(method) {{
   if (mode === 'detached_error') return Promise.reject(Object.assign(
     new Error('debugger detached during navigation'), {{ code: 'debugger_detached' }},
   ));
+  if (mode === 'slow_success') return new Promise(resolve => {{
+    setTimeout(() => resolve({{ frameId: 'f' }}), 3500);
+  }});
   if (['hang', 'wait_timeout', 'watchdog_timeout'].includes(mode)) {{
     return new Promise(() => {{}});
   }}
@@ -155,6 +158,7 @@ def test_page_enable_timeout_before_navigate_is_reported_as_not_dispatched():
     ("hang", "accept", "cdp_timeout"),
     ("wait_timeout", "accept", "cdp_timeout"),
     ("detach", "accept", "debugger_detached"),
+    ("slow_success", "accept", "cdp_timeout"),
 ])
 def test_failure_after_navigate_was_sent_is_still_held(monkeypatch, mode, policy, code):
     outcome = _navigate_harness(
@@ -204,6 +208,22 @@ def test_failure_after_navigate_was_sent_is_still_held(monkeypatch, mode, policy
     reply_on_send(bridge, data="after")
     assert bridge.execute_js("after", requester_id="other")["data"] == "after"
     assert sum(message.get("cmd", {}).get("cmd") == "navigate" for message in bridge.sent) == 1
+
+
+def test_accepted_navigation_can_finish_after_three_seconds_within_caller_budget():
+    """An accepted dialog must not replace the caller's deadline with a 3s cap."""
+    outcome = _navigate_harness(
+        page_enable="ok", page_navigate="slow_success", timeout_ms=5500,
+        beforeunload="accept",
+    )
+    result = outcome["result"]
+    assert result["ok"] is True, result
+    assert result["data"]["status"] == "ok"
+    assert result["data"]["navigation"] == {"frameId": "f"}
+    assert result["data"]["handled"] is True
+    assert result["data"]["pending_execution"] is False
+    assert outcome["calls"]["Page.navigate"] == 1
+    assert outcome["pendingAtEnd"] is False
 
 
 @pytest.mark.parametrize(("mode", "status"), [
