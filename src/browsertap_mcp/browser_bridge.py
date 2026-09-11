@@ -1309,28 +1309,30 @@ class BrowserBridge:
                 return json.dumps({"id": "", "ret": "invalid request"})
             session_info = {'url': data.get('url'), 'title': data.get('title', ''),
                             'type': _QUEUE_TYPE}
-            session = self.sessions.get(session_id)
-            if session is None:
-                session = self.sessions[session_id] = Session(
-                    session_id, session_info, queue.Queue())
-                logger.info("Browser HTTP connected: %s (session=%s)",
-                            redact_url(session.url), session_id)
-            elif session.type == _QUEUE_TYPE:
-                # The same client polling again, so rebind it to the queue it
-                # already has rather than a fresh one: a command handed over
-                # while it was between polls is sitting in there, and swapping
-                # the queue would drop it with nothing anywhere reporting a loss.
-                # Going through `reconnect` is also what refreshes `info` -- the
-                # three field writes this replaces left a resurrected session
-                # describing whichever URL the tab had on its first ever poll.
-                session.reconnect(session.client, session_info)
-            elif session.is_active():
-                # A live socket already reaches this tab. Refusing is what keeps
-                # a command from being handed to the weaker of two channels.
-                return json.dumps({"id": "", "ret": "use ws"})
-            else:
-                # The socket is gone and this client speaks for the tab now.
-                session.reconnect(queue.Queue(), session_info)
+            with _DRIVER_STATE_LOCK:
+                session = self.sessions.get(session_id)
+                if session is None:
+                    session = self.sessions[session_id] = Session(
+                        session_id, session_info, queue.Queue())
+                    logger.info("Browser HTTP connected: %s (session=%s)",
+                                redact_url(session.url), session_id)
+                elif session.type == _QUEUE_TYPE:
+                    # The same client polling again, so rebind it to the queue it
+                    # already has rather than a fresh one: a command handed over
+                    # while it was between polls is sitting in there, and swapping
+                    # the queue would drop it with nothing anywhere reporting a loss.
+                    # Going through `reconnect` is also what refreshes `info` -- the
+                    # three field writes this replaces left a resurrected session
+                    # describing whichever URL the tab had on its first ever poll.
+                    session.reconnect(session.client, session_info)
+                elif session.is_active():
+                    # A live socket already reaches this tab. Refusing is what keeps
+                    # a command from being handed to the weaker of two channels.
+                    return json.dumps({"id": "", "ret": "use ws"})
+                else:
+                    # Serialize the fallback with old-socket cleanup, so a late
+                    # close cannot disconnect the queue that just replaced it.
+                    session.reconnect(queue.Queue(), session_info)
             self._notify_activity()
             try:
                 msg = session.http_queue.get(timeout=HTTP_POLL_SECONDS)
@@ -1681,13 +1683,20 @@ class BrowserBridge:
                         # reconnects and wins the moment the zombie ages out,
                         # where a silently ignored socket would look connected
                         # and receive nothing forever.
-                        if not driver._claim_ext_client(client_id, browser, self):
+                        # Publish the socket and its tab snapshot together. A
+                        # failed send on another thread may retire the old socket
+                        # while this reconnect is arriving; neither transition
+                        # may act on a half-published replacement.
+                        with _DRIVER_STATE_LOCK:
+                            claimed = driver._claim_ext_client(client_id, browser, self)
+                            if claimed:
+                                driver.last_ext_seen = time.time()
+                                driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
+                                driver._apply_extension_tabs(client_id, browser, tabs, self)
+                        if not claimed:
                             try: self.close()
                             except Exception: pass  # noqa: S110 - closing a refused socket is best-effort
                             return
-                        driver.last_ext_seen = time.time()
-                        driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
-                        driver._apply_extension_tabs(client_id, browser, tabs, self)
                     elif data.get('type') == 'ping':
                         # Liveness reply so the extension can tell a live socket
                         # from a half-open zombie (TCP ESTABLISHED but dead). No
@@ -1910,16 +1919,17 @@ class BrowserBridge:
         # genuinely conditional is whether the table gains a row. The log line is
         # read after the bind either way, which is what makes it report the URL the
         # tab has now rather than the one it registered with.
-        session = self.sessions.get(session_id)
-        if session is None:
-            session = self.sessions[session_id] = Session(session_id, session_info, client)
-            logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
-        else:
-            session.reconnect(client, session_info)
-            logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
+        with _DRIVER_STATE_LOCK:
+            session = self.sessions.get(session_id)
+            if session is None:
+                session = self.sessions[session_id] = Session(session_id, session_info, client)
+                logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
+            else:
+                session.reconnect(client, session_info)
+                logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
 
-        self.latest_session_id = session_id
-        if self.default_session_id is None: self.default_session_id = session_id
+            self.latest_session_id = session_id
+            if self.default_session_id is None: self.default_session_id = session_id
         self._notify_activity()
 
     def _unregister_client(self, client: WebSocket) -> None:
@@ -1929,15 +1939,19 @@ class BrowserBridge:
         # raises "dictionary changed size during iteration", which here would
         # abort the disconnect cleanup halfway and leave a dead socket in place
         # for ext_cmd to write into.
+        # Reconnect publication uses this lock too. Comparing the owner and then
+        # mutating without it can disconnect a rebound Session or pop a client ID
+        # that already belongs to a new socket.
         lifecycle_changed = False
-        for session in list(self.sessions.values()):
-            if session.ws_client == client:
-                lifecycle_changed = lifecycle_changed or session.is_active()
-                session.mark_disconnected()
-        # Drop the client-level socket too, else ext_cmd would keep writing into
-        # a closed connection instead of failing over to a live browser.
-        for cid in [c for c, v in list(self.ext_clients.items()) if v.get('ws') is client]:
-            self.ext_clients.pop(cid, None)
+        with _DRIVER_STATE_LOCK:
+            for session in list(self.sessions.values()):
+                if session.ws_client is client:
+                    lifecycle_changed = lifecycle_changed or session.is_active()
+                    session.mark_disconnected()
+            # Losing the transport does not prove its page operations ended:
+            # retain their reservations, capture ownership and reply admission.
+            for cid in [c for c, v in list(self.ext_clients.items()) if v.get('ws') is client]:
+                self.ext_clients.pop(cid, None)
         if lifecycle_changed:
             self._notify_activity()
 
@@ -2740,7 +2754,7 @@ class BrowserBridge:
                 mark_dispatched()
                 entry['ws'].send_message(json.dumps({'id': exec_id, 'cmd': cmd}))
             except Exception as e:
-                self.ext_clients.pop(client_id, None)
+                self._unregister_client(entry['ws'])
                 disconnected = BridgeNoResponseError(
                     f"Extension client {client_id} disconnected during dispatch ({e}); outcome is unknown.",
                     error_code="extension_not_connected", delivery_state="sent_unconfirmed", retry_safe=False,

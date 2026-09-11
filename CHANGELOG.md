@@ -79,6 +79,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Retire the failed extension socket and all tabs it still owns when a command
+  cannot be sent. Reconnect publication and disconnect cleanup are serialized,
+  so an old send failure or delayed close cannot remove a replacement channel.
+  Uncertain operation receipts, reservations and capture ownership remain intact.
 - Retain the first valid late terminal reply after an operation's reservation
   expires. `get_execute_js_result` exposes it as `late_result` with
   `late_reply_age`, preserving the original unknown receipt and `retry_safe=false`.
