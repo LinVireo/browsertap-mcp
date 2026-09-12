@@ -6,6 +6,39 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-12
+
+### Added
+
+- Explicit MCP tool effect annotations for all 51 tools, including read-only,
+  destructive and idempotent hints derived from the public capability inventory.
+- Source identity now covers `chrome_extension/disable_dialogs.js` in addition
+  to the four JavaScript assets already frozen by 0.5.0.
+
+### Fixed
+
+- JavaScript dialog interception is installed only for explicit accept/dismiss
+  scopes, is shared by the extension and Python CDP fallback, records bounded
+  alert/confirm/prompt results, and restores native page descriptors after the
+  last lease or deadline.
+- Physical approval failures expose stable reasons without dispatching input;
+  cancellation still propagates while native-dialog tickets are cleaned up.
+- Bridge and MCP logging boundaries retain useful categories while preventing
+  browser payloads, protocol identifiers, Origin values, and configuration
+  secrets from reaching logs or WSGI tracebacks.
+- Bridge token creation and reads now preserve exclusive per-user ownership,
+  reject unsafe existing files, and keep secret bytes out of exception chains.
+
+### Security
+
+- WebSocket and HTTP Origin checks trust only the exact packaged extension
+  identity, derived from Chromium-compatible manifest keys or unpacked paths;
+  explicit allowlist entries are exact matches and HTTP bodies are drained on
+  rejection.
+- Raw CDP browser-wide writes and common ownership/recovery bypasses are blocked
+  before dispatch. They require both lab mode and the explicit
+  `BROWSERTAP_ALLOW_UNSAFE_CDP=1` operator opt-in; safe mode always refuses them.
+
 ## [0.5.0] - 2026-09-12
 
 ### Added
@@ -1416,7 +1449,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...v0.5.0
 [0.4.20]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...v0.4.20
 [0.4.19]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...v0.4.19

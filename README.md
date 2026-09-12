@@ -436,7 +436,7 @@ The marker below is maintained with this source tree. It is not proof that a
 development checkout has been published; compare the installed package with its
 release tag before using new tool signatures or the 0.5.0 migration notes.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.0**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.1**.
 
 The three components load updates separately:
 

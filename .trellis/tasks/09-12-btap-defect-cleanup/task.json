@@ -21,7 +21,7 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "Native session 01a09113-7fb4-71d1-b6ef-34cc2d6c9712; original shared checkout D:/browsertap-mcp. Confirmed C01-C26, M02-M06, the M01 descriptor cleanup and FS/ND review fixes are integrated; final independent delta review and committed-tree candidate verification are recorded in handoff.md and out/bug-cleanup-20260912/final-verification.json. This task remains in_progress because full M01 retention, real A7/native platforms, historical wait latency correlation and new-build live/manual Reload are not closed. Source 0.5.0; local v0.5.0-rc.1 is conditional on the exact committed-tree offline seal. No remote publication.",
+  "notes": "Native session 01a09113-7fb4-71d1-b6ef-34cc2d6c9712; original shared checkout D:/browsertap-mcp. Confirmed C01-C26, M02-M06, the M01 descriptor cleanup and FS/ND review fixes are integrated; final independent delta review and committed-tree candidate verification are recorded in handoff.md and out/bug-cleanup-20260912/final-verification.json. This task remains in_progress because full M01 retention, real A7/native platforms, historical wait latency correlation and new-build live/manual Reload are not closed. Source 0.5.1; local v0.5.1-rc.1 is conditional on the exact committed-tree offline seal. Existing v0.5.0-rc.1 remains historical. No remote publication.",
   "meta": {
     "handoff": ".trellis/tasks/09-12-btap-defect-cleanup/handoff.md",
     "final_evidence": "out/bug-cleanup-20260912/final-verification.json",
