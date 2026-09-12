@@ -471,17 +471,16 @@ def test_persist_token_retries_partial_writes(monkeypatch, tmp_path):
     assert path.read_text(encoding="utf-8") == "partial-write-token\n"
 
 
-def test_persist_token_converges_when_another_process_wins(monkeypatch, tmp_path):
+def test_persist_token_converges_when_another_process_wins(tmp_path):
     path = tmp_path / "token"
     path.write_text("winner\n", encoding="utf-8")
-    monkeypatch.setattr(T.os, "open", lambda *args, **kwargs: (_ for _ in ()).throw(FileExistsError()))
+    # The existing target rejects publication without interfering with temporary files.
     assert T._persist_token(path, "loser") == "winner"
 
 
 def test_persist_token_rejects_an_empty_file_left_by_competitor(monkeypatch, tmp_path):
     path = tmp_path / "token"
     path.touch()
-    monkeypatch.setattr(T.os, "open", lambda *args, **kwargs: (_ for _ in ()).throw(FileExistsError()))
     monkeypatch.setattr(T.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="token file is empty"):
         T._persist_token(path, "token")
