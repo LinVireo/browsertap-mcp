@@ -133,3 +133,16 @@ platforms, historical wait reply correlation, and new-build Reload/live. The
 prior 0.5.0 live Attempt 2 had 58 passed / 3 failed; it does not certify these
 changes or user-tab preservation. SPEC rev7 is still delivered_stub. Bridge
 read-probe release does not establish the cause of the initial missing replies.
+
+## Canonical r1 follow-up
+
+The complete offline gate at `5b39e29` reported 4393 passed and two failures in
+the parameterized `test_predispatch_unknown_directs_a_fresh_create`. Both stopped
+at the description's old retry wording, after confirming that the first call
+had not dispatched a create and was safe to retry. The compact F8 description
+still conveyed the same condition; restore its explicit `When retry_safe=true`
+and `retry with no operation_id` wording without changing runtime behavior or
+weakening the regression. Preserve `canonical-r1.log` and its runner receipt.
+The successor must rerun the affected contract and full finalizer on its own
+clean commit; this failed run is not acceptance evidence. Final results remain
+in `out/fable-review-20260912/final-verification.json`.
