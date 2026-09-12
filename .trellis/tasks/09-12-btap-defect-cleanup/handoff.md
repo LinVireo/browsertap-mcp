@@ -101,7 +101,7 @@ part of this handoff. `--skip-live` does not establish release readiness.
 - Historical wait latency still lacks correlated send/receive evidence. No
   root cause is claimed. Result-file retention and the pending product-policy
   decisions were not silently changed into cleanup work.
-- Source identity covers package Python source and four imported JavaScript
+- Source identity covers package Python source and five imported JavaScript
   assets. It does not prove arbitrary bytecode, custom loaders, monkeypatches,
   code-object identity or malicious same-user ABA races.
 

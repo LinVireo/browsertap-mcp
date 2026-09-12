@@ -400,14 +400,14 @@ def test_unreadable_token_fails_without_retry_or_overwrite(monkeypatch, status):
     original = b"\xffprivate-fixture" if status == "invalid_encoding" else b"private-fixture"
     token_path.write_bytes(original)
     if status == "unreadable":
-        original_read = Path.read_text
+        original_read = bridge._token_file.read_text
 
         def denied(path, *args, **kwargs):
             if path == token_path:
                 raise PermissionError("private-fixture")
             return original_read(path, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "read_text", denied)
+        monkeypatch.setattr(bridge._token_file, "read_text", denied)
     monkeypatch.setattr(bridge.time, "sleep", lambda seconds: pytest.fail("not an empty-file race"))
     monkeypatch.setattr(
         bridge.secrets, "token_urlsafe", lambda *a: pytest.fail("must not generate a replacement")
@@ -441,7 +441,7 @@ def test_empty_token_waits_for_atomic_creator(monkeypatch):
 
 def test_token_diagnostics_leave_existence_unknown_when_metadata_is_unreadable(monkeypatch):
     token_path = bridge.bridge_token_path()
-    original_read, original_stat = Path.read_text, Path.stat
+    original_read, original_stat = bridge._token_file.read_text, Path.stat
 
     def denied_read(path, *args, **kwargs):
         if path == token_path:
@@ -453,7 +453,7 @@ def test_token_diagnostics_leave_existence_unknown_when_metadata_is_unreadable(m
             raise PermissionError("private-fixture")
         return original_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", denied_read)
+    monkeypatch.setattr(bridge._token_file, "read_text", denied_read)
     monkeypatch.setattr(Path, "stat", denied_stat)
     report = bridge.state_paths_report()
     assert report["token_file_status"] == "unreadable"
@@ -473,7 +473,7 @@ def test_token_report_survives_unreadable_state_directory(monkeypatch, error_typ
         (Path.home() / paths.LEGACY_STATE_DIR_NAME).mkdir()
     directory = paths.state_dir()
     token_path = bridge.bridge_token_path()
-    original_read, original_stat = Path.read_text, Path.stat
+    original_read, original_stat = bridge._token_file.read_text, Path.stat
 
     def denied_read(path, *args, **kwargs):
         if path == token_path:
@@ -485,7 +485,7 @@ def test_token_report_survives_unreadable_state_directory(monkeypatch, error_typ
             raise error_type("private-fixture")
         return original_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", denied_read)
+    monkeypatch.setattr(bridge._token_file, "read_text", denied_read)
     monkeypatch.setattr(Path, "stat", denied_stat)
 
     report = bridge.state_paths_report()

@@ -54,9 +54,14 @@ physical input.
   whether a route is actually guarded. Leave it unset.
 - The state directory reported as `state_paths.state_dir` (`~/.browsertap`, or
   `~/.agent-browser-mcp` on an install that predates 0.4.0) holds the token,
-  the pid record, and `bridge.log`. Its contents are readable by the local
-  user; BTAP does not rely on file permissions for the token's secrecy, only on
-  the local-user trust boundary stated above.
+  the pid record, and `bridge.log`. On Windows, a new token receives an explicit
+  current-user owner and protected owner-only DACL before its first byte is
+  written. Existing token files must belong to that user; BTAP hardens and
+  verifies their DACL before reading through the same file handle. A failed
+  security check refuses the read without replacing the file or token. Even a
+  diagnostic read can harden an existing DACL. POSIX creation uses mode `0600`.
+  These controls exclude other ordinary OS users; they do not isolate same-user
+  processes or privileged administrators, or retract previously disclosed tokens.
 - `bridge.log` is the file operators are asked to attach to a bug report, so
   what may be written into it is a policy, not an accident. Page URLs are
   redacted at the log call: the scheme, host, and a truncated path survive;
@@ -66,27 +71,37 @@ physical input.
   content. A caller's `wait_for_url` pattern gets the same treatment. The token
   value is never logged in any form; the log records only the path of the file
   it was read from, and the diagnostics in `get_setup_status` compare tokens as
-  a truncated `sha256:` fingerprint rather than by value. What the log does
-  still contain is tab ids, timings, client
-  names, error text from the browser, and enough of each URL to identify a
-  site — review it before attaching it, and note that `execute_js` script text
-  or page data reaching the log through an exception message is not redacted.
+  a truncated `sha256:` fingerprint rather than by value. Bridge request and
+  WebSocket exception handlers log fixed operation names and exception types,
+  without exception text, source lines, request/result bodies or tracebacks.
+  Arbitrary protocol identifiers and rejected Origins use short SHA-256
+  references for correlation. Unexpected HTTP callback errors are caught before
+  the web framework can print their traceback. Logs still contain timings,
+  local paths, socket addresses and enough of each URL to identify a site;
+  review them before attaching them to a report.
   It caps at 5 MB: the daemon copies the file to `bridge.log.old` and truncates
   in place every 5 minutes when oversized, so exactly one previous generation
   is kept and both files need the same review.
-- WebSocket handshakes accept extension origins by default and reject missing
-  origins. Despite its name, `BROWSERTAP_WS_ALLOWED_ORIGINS` adds exact trusted
+- WebSocket handshakes accept only the packaged extension's exact Origin by
+  default and reject missing origins. Its ID comes from `manifest.key` when
+  present, otherwise Chromium's hash of the absolute unpacked installation path.
+  This preserves the identity of existing unpacked installs without choosing a
+  new Web Store key. The daemon's `ws_origin_policy` reports the default Origin
+  and identity source; an unreadable/invalid manifest leaves no default trusted
+  Origin. Despite its name, `BROWSERTAP_WS_ALLOWED_ORIGINS` adds exact trusted
   origins to both the WebSocket handshake and the HTTP origin check. HTTP
   requests without an `Origin` header remain permitted by that check and still
   require the token on authenticated routes. `BROWSERTAP_WS_ALLOW_NO_ORIGIN=1`
   permits origin-less WebSocket clients only. Both
   expand the attack surface and should remain unset in normal installations.
-  Scope this guarantee correctly: the default check is a prefix match on
-  extension URL schemes and the WebSocket port carries no token, so it keeps
-  ordinary web pages out but does not distinguish the real extension from a
-  local process that sends an extension-shaped `Origin` header.
-- What that local process cannot do is take the connected extension's place.
-  The client id in an `ext_ready` message is self-reported, and it used to be
+  The browser controls an extension's Origin: another installed extension with
+  a different ID cannot register under a new `clientId` or inject its tabs.
+  The WebSocket port still carries no token, so a non-browser local process can
+  forge the pinned Origin. Pinning does not authenticate local processes.
+  For an intentionally separate unpacked copy, trust only its complete Origin
+  via the explicit list. Changing a key or package path requires a bridge
+  restart and checking the browser's installed extension identity.
+- The client id in an `ext_ready` message is self-reported, and it used to be
   written straight into the routing table, so one forged message re-pointed
   every subsequent command at the sender. A client id now stays bound to the
   socket holding it: a second socket claiming the same id is refused and closed
@@ -97,7 +112,8 @@ physical input.
   Takeover is allowed only after the incumbent has been silent for a minute,
   because a socket can be dead while the operating system still reports it as
   connected, and refusing forever would leave the bridge unusable until someone
-  restarted it by hand.
+  restarted it by hand. This guard protects an occupied client id; it does not
+  prevent a process that forged an allowed Origin from claiming a new id.
 - The extension has broad browser permissions because BTAP can inspect and
   modify the real session, including cookies, downloads, tabs, bookmarks,
   extension management, CDP debugger access, and site content on `<all_urls>`.
@@ -123,6 +139,28 @@ physical input.
   only run commands against pages appropriate for the MCP client's trust level.
 - Page content is untrusted and may contain prompt injection. A successful
   browser connection does not make instructions found in a page trustworthy.
+- Dialog helpers no longer run as default MAIN-world content scripts. Commands
+  using `accept`/`dismiss` install temporary scopes and restore their owned page
+  properties after the last scope or its expiry. MAIN world remains page-owned:
+  a page can observe the active helper or prevent restoration by locking a
+  property. Old documents retain wrappers from an earlier extension until normal
+  navigation/refresh; reloading the extension alone does not remove them.
+- Every MCP tool advertises explicit read-only, destructive, idempotent and
+  open-world hints. Optional script/clear/file-write paths are included in the
+  classification. Hints are metadata for the host, not authorization or a
+  concurrency lock; they do not constrain arbitrary JavaScript or CDP.
+- Public `cdp_command` and `cdp_batch` reject browser-wide writes and common
+  bypasses of scoped cleanup before dispatch: `Browser.*` except read-only
+  diagnostics, `Storage.clear*`, `Network.clearBrowserCookies`,
+  `Network.clearBrowserCache`, `Network.setUserAgentOverride`,
+  `Emulation.setUserAgentOverride`, `Page.close`, `Target.closeTarget`,
+  `Target.disposeBrowserContext`, and the opaque `Target.sendMessageToTarget`.
+  Batches are checked in full before any member runs. Use dedicated BTAP tools
+  for their ownership or restore behavior. An intentional raw override requires
+  both `BROWSERTAP_ALLOW_UNSAFE_CDP=1` and `lab`; `safe` always keeps the guard.
+  `raw_cdp_blocked` is undelivered and is not a transient retry condition.
+  This prevents common mistakes, not all state changes: allowed methods such
+  as `Runtime.evaluate` can still modify page state. It is not a CDP sandbox.
 - The shipped default mode is `lab`, which skips elicitation so continuous
   automation is not interrupted: on a default install no physical-input or
   site-allow action asks for approval. Set `BROWSERTAP_MODE=safe` to be
@@ -130,6 +168,9 @@ physical input.
   `BROWSERTAP_LAB_NO_ELICIT=0` to keep `lab` but restore prompts. Both modes
   retain ownership checks, the physical-input lock, the quiet-input gate,
   activation checks, and temporary permission cleanup.
+  An approval refusal reports `requires_user_action` with a stable `reason`:
+  `elicitation_unsupported`, `declined`, `timeout`, `cancelled`, or `error`.
+  None of these dispatches the requested action.
 - The remaining physical Enter fallback disables pyautogui's corner failsafe
   (`pyautogui.FAILSAFE = False`) so a pointer that happens to pass a screen
   corner cannot abort automation mid-sequence. The tradeoff is explicit: moving

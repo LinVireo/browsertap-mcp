@@ -24,6 +24,7 @@ _PACKAGE_DIRECTORY = Path(__file__).parent
 _IMPORTED_JAVASCRIPT = (
     "chrome_extension/result_serialization.js",
     "chrome_extension/guarded_eval.js",
+    "chrome_extension/disable_dialogs.js",
     "page_scripts/page_outline.js",
     "page_scripts/list_groups.js",
 )

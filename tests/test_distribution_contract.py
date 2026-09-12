@@ -960,11 +960,11 @@ _CHROME_API_FLOORS = (
 def test_manifest_declares_the_chrome_floor_its_own_api_use_forces():
     """Without this key Chrome installs the extension and then misbehaves.
 
-    An unsupported `world: "MAIN"` content script is not rejected -- it is
-    registered in the isolated world instead, so `disable_dialogs.js` patches a
-    copy of `window` that the page never sees and every dialog it was meant to
-    suppress comes back, with nothing anywhere reporting a problem. Declaring
-    the floor turns that into an install-time refusal naming the browser.
+    Browser APIs can silently ignore unsupported options. The retired default
+    MAIN-world dialog content script was one example: old Chrome registered it
+    in the isolated world instead, so it patched a copy of `window` the page
+    never saw. Dialog hooks now use targeted execution; the floor still covers
+    every API this checkout actually uses.
 
     An option name has the same shape one layer in, which is why the floor is
     121 rather than 111: unknown members of a WebIDL dictionary are dropped

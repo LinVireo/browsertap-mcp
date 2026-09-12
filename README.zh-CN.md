@@ -84,9 +84,12 @@ BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接�
   桌面截图工具保持移除。
 
 `resolve_leave_dialog` 仍是页面范围内、仅限 `lab` 的恢复流程；末尾的 Enter 兜底是受限例外，
-不是通用桌面能力。实际注册表位于 `get_setup_status` 返回值的 `data.capability_registry`，客户端不必
-根据包 extras 或文档猜测当前工具面。每个条目还会说明 target 是 none、optional 还是
-required，操作是 read、write 还是 mixed，以及是否涉及 desktop opt-in。所有公开工具现在都在
+不是通用桌面能力。`get_setup_status` 返回值的 `data.capability_registry` 提供工具计数和能力分组。
+MCP `tools/list` 提供实际工具 schema，并为每个工具显式提供 `readOnlyHint`、`destructiveHint`、
+`idempotentHint` 和 `openWorldHint`；分类覆盖全部参数路径，可执行脚本、清空 buffer 或写文件的
+工具不整体标为只读。这些提示帮助宿主安排调用，不授予操作权限，也不替代 BTAP 的所有权和并发检查。
+
+所有公开工具现在都在
 不改工具名的前提下返回 `btap.result.v1` envelope：成功的操作数据放在 `data`，明确的旧版失败
 payload 保留在 `legacy`，`error`/`error_code`、`retryable`、`target` 和 `diagnostics` 提供稳定的
 机器可读状态。失败同时设置 MCP `isError=true`。数组、对象、HTML 和其他大段正文从 `data` 或
@@ -280,9 +283,10 @@ mcp_servers:
 | `BROWSERTAP_BRIDGE_TOKEN` | 未设置 | 旧安装的一次性迁移来源。token 文件不存在时导入一次,此后始终以文件为准。 |
 | `BROWSERTAP_PREFERRED_BROWSER` | 未设置 | `chrome` / `edge` / `opera`。多个浏览器都连上、又没指定标签页时,默认落在哪个浏览器 |
 | `BROWSERTAP_MODE` | `lab` | `lab` 默认免询问连续自动化;`safe` 对每次物理输入/站点 allow 单独询问。也可用 `set_automation_profile` 只改当前 MCP 进程 |
+| `BROWSERTAP_ALLOW_UNSAFE_CDP` | 未设置 | raw CDP 默认拦截浏览器级写操作及常见 ownership/恢复绕过。设为 `1` 且处于 `lab` 才放行；`safe` 始终保留拦截。完整范围见 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)。 |
 | `BROWSERTAP_LAB_NO_ELICIT` | 启用 | `lab` 默认按 `1` 处理。只有明确设为 `0`/`false` 才恢复会话级询问;跨进程锁、安静窗口、前台确认和 ownership 始终生效 |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | `lab` 下匹配当前 host 时,普通 `open_url` 自动接受 beforeunload;显式 `intent_leave=false` 可强制保留页面 |
-| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | 同时放行 bridge WebSocket 握手和 HTTP origin 检查的额外来源，以英文逗号分隔并精确匹配。扩展 origin 自动允许；HTTP token 鉴权仍生效，无 `Origin` 的 HTTP 请求仍可通过来源检查。 |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | WebSocket 与 HTTP 的额外精确来源，以英文逗号分隔。默认只允许随包扩展的 ID，由 manifest key 或未打包安装路径推导；另放目录的副本需显式配置其完整 Origin。HTTP token 鉴权仍生效，包括无 `Origin` 的请求。 |
 | `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | 未设置 | 仅在可信的非浏览器本机 WebSocket 客户端无法发送 `Origin` 时设为 `1`。默认拒绝无 origin 客户端。 |
 
 ### 命令行
@@ -425,6 +429,11 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 操作逐次确认。所有权和目标检查始终存在；物理路径还保留 OS lock、安静窗口和 `on_screen`
 检查。`input_quiet.enforced` 说明是否获得了可比较的输入标记。
 
+**Raw CDP。** `get_automation_profile.raw_cdp_policy` 为 `guarded` 或 `allow_unsafe`。
+单条命令和整个批次都在投递前检查；关闭标签页、Cookie、权限和 UA 修改优先使用专用工具。
+该检查覆盖常见破坏性方法；允许的 JavaScript/CDP 仍能修改页面。
+完整范围及显式 lab 开关见 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)。
+
 **对话框策略必须显式理解。** `execute_js(dialog_policy=...)`、`open_url(beforeunload=...)` 和
 `handle_dialog(action=...)` 均支持 `dismiss`（默认）、`accept` 和 `manual`。全局默认优先保留页面；
 仅在显式选择 `accept` 或 lab 的 host 规则匹配时自动离开。`handle_dialog` 会在三秒内应答，
@@ -498,7 +507,8 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 | `dialog_handle_failed` | 已检测到对话框，但应答失败；标签页可能仍处于阻塞状态 |
 | `navigation_failed` / `navigation_timeout` | `open_url` 超时未完成,或浏览器报错 |
 | `triggered` 且 `type="download"` | `open_url` 被浏览器下载取代。只有 CDP 同时报告 `isDownload=true` 时 `ERR_ABORTED` 才可能是正常下载语义;要完成状态和本地路径请用 `download_file` |
-| `requires_user_action` | 批准被拒绝、取消或不可用；未执行操作 |
+| `requires_user_action` | 需要人工处理；批准失败附 `reason`（`elicitation_unsupported`、`declined`、`timeout`、`cancelled` 或 `error`），不执行操作 |
+| `raw_cdp_blocked` | 原始方法绕过受保护的状态/所有权路径；未投递命令。改用专用工具或处理操作员配置，无需原样重试 |
 | `busy` | 另一个 BTAP 进程持有物理输入锁，或标签页已有挂起的 manual 执行；调用立即返回且不排队 |
 | `target_busy` | 标签页被另一调用或仍在执行的浏览器命令占用。检查 `delivery_state` 和 `retry_safe`；涉及多个 tab 的调用可能已经完成前面的步骤 |
 | `capture_busy` | 另一 MCP 会话拥有该 console/network 捕获；原会话停止后，其他会话才能重新启动、停止或清空 |
@@ -673,9 +683,9 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 <details>
 <summary><b>CDP</b></summary>
 
-- **cdp_command** —— 发送单条 CDP 命令
+- **cdp_command** —— 向所选标签页或显式 debuggee 发送单条 CDP 命令。浏览器级写操作及常见 ownership/恢复绕过在投递前返回 `raw_cdp_blocked`；params 必须为 JSON 对象。范围见上方 raw CDP 说明
   - `method`(string):如 `Page.navigate`、`params_json`(string,可选):JSON 对象的文本形式、`session_id`(string,可选)、`tab_id`(integer/string,可选)、`extension_id`(string,可选)、`target_id`(string,可选)、`timeout`(number,可选):默认 `20`
-- **cdp_batch** —— 批量发送,`batch_json` 必须是带 `cmd: "batch"` 的 JSON 对象
+- **cdp_batch** —— 批量发送；`batch_json` 必须为带 `cmd: "batch"` 和 `commands` 数组的 JSON 对象，成员为 `cdp`、`tabs` 或 `cookies` 对象。整批通过 raw CDP 检查后才执行第一项；拒绝嵌套和未知命令
   - `batch_json`(string)、`session_id`(string,可选)
 - **debugger_targets** —— *(零标签页可用)* 列出所有可 attach 的 CDP 目标,包括 service worker 和扩展背景页 —— 这些在 `list_tabs` 里永远看不到
   - `session_id`(string,可选)

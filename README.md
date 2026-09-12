@@ -103,11 +103,15 @@ interface that matches the task:
 
 `resolve_leave_dialog` remains a page-scoped, lab-only recovery workflow; its
 final Enter fallback is a restricted exception, not a general desktop surface.
-The live registry is returned in `get_setup_status`'s `data.capability_registry`, so a
-client can inspect the actual tool inventory instead of guessing from package
-extras or documentation. Each entry also reports whether a target is none,
-optional, or required, whether the operation reads, writes, or may do either,
-and whether desktop opt-in is involved. Every public tool now returns the
+`get_setup_status` returns tool counts and capability groups in
+`data.capability_registry`. MCP `tools/list` supplies the actual tool schemas and
+explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`
+for every tool. These describe all supported parameter paths: tools with optional
+script execution, buffer clearing, or file writes are not classified as read-only.
+Annotations help hosts plan calls; they do not grant permission or replace
+BTAP's ownership and concurrency checks.
+
+Every public tool now returns the
 `btap.result.v1` envelope without renaming tools: successful operation data is
 in `data`, explicit legacy failure payloads remain in `legacy`, and
 `error`/`error_code`, `retryable`, `target`, and `diagnostics` provide stable
@@ -327,9 +331,10 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 | `BROWSERTAP_BRIDGE_TOKEN` | unset | Legacy one-time migration source. If the token file does not exist, BTAP imports this value once; the file wins thereafter. |
 | `BROWSERTAP_PREFERRED_BROWSER` | unset | `chrome`, `edge`, or `opera`. Which browser wins when several are connected and no tab is specified. |
 | `BROWSERTAP_MODE` | `lab` | `lab` prioritizes uninterrupted automation and skips physical-input/site-allow elicitation; `safe` prompts for every such action. `set_automation_profile` changes only the current MCP process. |
+| `BROWSERTAP_ALLOW_UNSAFE_CDP` | unset | Raw CDP blocks browser-wide writes and common ownership/restore bypasses by default. `1` permits them only in `lab`; `safe` retains the guard. See [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md). |
 | `BROWSERTAP_LAB_NO_ELICIT` | enabled | Lab skips elicitation by default. Set this to `0`/`false` only when you want session-level lab approval prompts; the cross-process lock, quiet-input gate, foreground confirmation, and ownership checks always apply. |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | In lab, ordinary `open_url` accepts beforeunload on matching current hosts. `intent_leave=false` always preserves the page. |
-| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins allowed by both the bridge WebSocket handshake and HTTP origin check. Extension origins are allowed automatically. HTTP token authentication still applies; HTTP requests without `Origin` remain allowed by the origin check. |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins for WebSocket and HTTP. The packaged extension ID is pinned by default, from its manifest key or unpacked path; separate copies need their own explicit Origin. HTTP token authentication still applies, including without `Origin`. |
 | `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | unset | Set to `1` only for a trusted non-browser local WebSocket client that cannot send `Origin`. The default rejects origin-less clients. |
 
 ### CLI
@@ -479,6 +484,13 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Automation profiles.** With `BROWSERTAP_MODE` unset, BTAP defaults to `lab` with `BROWSERTAP_LAB_NO_ELICIT=1` semantics. Lab permits site `allow` and the restricted leave-dialog fallback without elicitation; `safe` prompts for each site `allow` and refuses the physical Enter fallback. Neither profile is a confirmation prompt for every browser action. Ownership and target checks still apply, and the physical path keeps its OS lock, quiet-input gate and `on_screen` check. `input_quiet.enforced` says whether comparable input markers were available.
 
+**Raw CDP.** `get_automation_profile.raw_cdp_policy` reports `guarded` or
+`allow_unsafe`. Single commands and entire batches are checked before dispatch;
+use dedicated tools for tab closure, cookies, permissions and user-agent changes.
+The guard covers common destructive methods, while allowed JavaScript/CDP can
+still change a page. The complete policy and explicit lab override are in
+[SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md).
+
 **Dialogs are explicit.** `execute_js(dialog_policy=...)`, `open_url(beforeunload=...)`, and `handle_dialog(action=...)` take `dismiss` (default), `accept`, or `manual`. The global default still preserves the page; only an explicit accept or lab's configured shell/IDE host heuristic leaves automatically. `handle_dialog` answers within three seconds or reports `no_dialog`/an explicit error. `resolve_leave_dialog` tries protocol accept twice and uses physical Enter only as a final, lab-approved fallback.
 
 **Permissions use temporary leases.** `set_site_permission` covers one origin for 60–600 seconds, records the prior setting, and attempts restoration on expiry/reset/service-worker restart. `safe` prompts for every `allow`; default `lab` applies it without elicitation. Unsupported restoration is retained as `manual_recovery` with the prior setting and recovery guidance, and automatic retries stop. Correct the cause before an explicit `reset_site_permissions` retry. Unsupported initial grants return `unsupported` or `requires_user_action`.
@@ -541,7 +553,8 @@ and as small top-level compatibility fields. Failures set MCP `isError=true`:
 | `dialog_handle_failed` | A dialog was seen but answering it failed; the tab may still be blocked. |
 | `navigation_failed` / `navigation_timeout` | `open_url` did not complete within its timeout, or the browser reported an error. |
 | `triggered` with `type="download"` | `open_url` was replaced by a browser download. `ERR_ABORTED` can be normal only when CDP also reports `isDownload=true`; use `download_file` for completion and the local path. |
-| `requires_user_action` | Approval was declined, cancelled, or unavailable — nothing was done. |
+| `requires_user_action` | The action needs user intervention; approval failures include `reason` (`elicitation_unsupported`, `declined`, `timeout`, `cancelled`, or `error`) and do not execute the action. |
+| `raw_cdp_blocked` | A raw method bypasses a protected state/ownership path. No command was dispatched; use a dedicated tool or resolve the operator configuration instead of retrying unchanged. |
 | `busy` | Another BTAP process holds the physical-input lock, or the tab already has a pending manual execution. Returned immediately, never queued. |
 | `target_busy` | This tab is reserved by another call or a still-pending browser command. Check `delivery_state` and `retry_safe`; a call involving multiple tabs may have completed earlier steps. |
 | `capture_busy` | Another MCP session owns this console/network capture. Its owner must stop it before another session can restart, stop, or clear it. |
@@ -723,9 +736,9 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 <details>
 <summary><b>CDP</b></summary>
 
-- **cdp_command** — send one CDP command.
+- **cdp_command** — send one CDP command to the selected tab or explicit debuggee. Browser-wide writes and common ownership/restore bypasses return `raw_cdp_blocked` before dispatch; params must be a JSON object. See the raw CDP policy above.
   - `method` (string): e.g. `Page.navigate`, `params_json` (string, optional): JSON object as text, `session_id` (string, optional), `tab_id` (integer/string, optional), `extension_id` (string, optional), `target_id` (string, optional), `timeout` (number, optional): default `20`
-- **cdp_batch** — send a batch; `batch_json` must be a JSON object with `cmd: "batch"`.
+- **cdp_batch** — send a batch; `batch_json` must be a JSON object with `cmd: "batch"` and a `commands` array of `cdp`, `tabs`, or `cookies` objects. The whole batch passes the raw CDP policy before its first member runs; nested/unknown commands are rejected.
   - `batch_json` (string), `session_id` (string, optional)
 - **debugger_targets** — *(no tab needed)* list every CDP-attachable target, including service workers and extension background pages that `list_tabs` never shows.
   - `session_id` (string, optional)

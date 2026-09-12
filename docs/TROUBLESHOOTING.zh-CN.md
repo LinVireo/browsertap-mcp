@@ -17,8 +17,9 @@
 
 Bridge 日志位于 `~/.browsertap/bridge.log`，上限 5 MB，轮转时保留一份
 `bridge.log.old`。URL 在写入日志时已做脱敏 —— 保留 scheme、host 与截断后的 path，
-去掉 query 与 fragment —— 但日志仍能看出浏览器访问过哪些站点，也仍包含来自页面的错误文本，
-两个文件对外提供前都要先检查内容。哪些内容允许出现、哪些不允许，见
+去掉 query 与 fragment。桥的异常处理不再写入 payload 文本或 traceback；任意协议标识符使用
+哈希引用。日志仍能识别访问过的站点，并含本地路径、socket 地址和时间信息，两个文件对外提供前
+都要先检查内容。哪些内容允许出现、哪些不允许，见
 [SECURITY.md](../SECURITY.md)。
 
 ## 连接问题
@@ -27,6 +28,13 @@ Bridge 日志位于 `~/.browsertap/bridge.log`，上限 5 MB，轮转时保留�
 
 确认未打包扩展已启用，并至少打开一个正常的 `http` 或 `https` 页面。空白页和浏览器内部页面
 不会建立普通页面会话。重新加载扩展后，应刷新页面或打开新 URL，再次运行 `doctor`。
+
+桥默认只允许 `browsertap extension-path` 对应扩展的精确 Origin。诊断中的
+`ws_origin_policy.default_origin` 和 `identity_source`（`manifest_key`、`unpacked_path`
+或 `unavailable`）说明来源。与 `chrome://extensions` 的已安装 ID 对照；没有 manifest key
+时，复制到另一个目录会产生不同 ID。加载报告的包路径，或在桥环境的
+`BROWSERTAP_WS_ALLOWED_ORIGINS` 中显式添加该副本完整的 `chrome-extension://<id>`，
+修正配置后重启桥。`unavailable` 需先修复包内 manifest；另报 `clientId` 不能让陌生 ID 获得信任。
 
 ### MCP 客户端无法启动服务
 
@@ -205,9 +213,27 @@ browsertap bridge --restart
 
 ### 物理输入返回 `requires_user_action`
 
-MCP 客户端可能未实现 elicitation，或用户拒绝了该操作。应优先使用 `page_click`、
-`page_type`、`page_press` 和 `page_drag`，这些工具不需要桌面级输入。`safe` 模式下，
-`setting="allow"` 的站点权限同样需要 elicitation。
+批准未通过时读取结果的 `reason`，同一字段也保留在 `legacy` 和 `diagnostics`。这些结果均不会
+派发需要批准的操作：
+
+| `reason` | 含义 |
+| --- | --- |
+| `elicitation_unsupported` | MCP 宿主不支持批准请求。 |
+| `declined` | 用户拒绝。 |
+| `timeout` | 等待批准超时。 |
+| `cancelled` | 批准提示被取消。 |
+| `error` | 批准交互失败。 |
+
+任务可使用页面输入时优先选择 `page_click`、`page_type`、`page_press` 和 `page_drag`。
+`safe` 模式下，`setting="allow"` 的站点权限同样需要 elicitation。拒绝不能作为切换 profile
+或重新派发操作的依据；整个 MCP 任务被取消时仍正常传播取消。
+
+### 扩展升级后仍看到旧的弹窗 helper 全局变量
+
+扩展不再向每个 document 常驻注入 MAIN world 弹窗 helper。需要 `accept`/`dismiss` 的操作会在
+本次范围内安装 helper；最后一个范围结束时恢复页面属性描述符并移除临时 controller，超时回收
+处理被遗弃的范围。旧扩展已注入的 document 在扩展 Reload 后仍保留旧 wrapper；正常导航或刷新
+页面后才会产生干净的新 document。BTAP 不会为此刷新无关标签页。
 
 ### 物理输入返回 `busy`
 

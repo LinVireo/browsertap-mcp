@@ -74,6 +74,9 @@ worker 重启后，遗留的 pending 创建会返回终态 unknown；容量回�
 
 ## 工具选择
 
+`tools/list` 的四项 MCP annotations 覆盖工具全部参数路径。可选 JS、clear 或写文件路径会使
+工具不能整体标为只读；这些只是宿主提示，不构成任务授权或并发锁。
+
 | 任务 | 工具与完成信号 |
 | --- | --- |
 | 读页面 | `scan_page` 返回简化 HTML/文本；链接短引用 `#r1` 对应结果中的完整 URL。 |
@@ -84,6 +87,12 @@ worker 重启后，遗留的 pending 创建会返回终态 unknown；容量回�
 | 上传 | `upload_files(selector=..., paths=[...])`，操作文件输入控件，不打开原生文件选择器。 |
 | 下载 | `download_file(url=..., session_id=...)`，由浏览器下载管理器使用现有登录态；确认完成状态和最终 `path`。 |
 | 浏览器原生能力 | 标签页、Cookies/storage、书签、扩展、站点权限、原生 CDP 工具，按 schema 选择目标。 |
+
+`cdp_command` / `cdp_batch` 默认拦截浏览器级破坏及常见 ownership/恢复绕过；
+`raw_cdp_blocked` 表示整次调用未投递，改用对应专用工具。批次含未知/嵌套命令也会整体拒绝。
+`get_automation_profile.raw_cdp_policy` 为 `guarded` 或 `allow_unsafe`；例外由操作员设置
+`BROWSERTAP_ALLOW_UNSAFE_CDP=1` 且使用 `lab`，`safe` 始终拦截。允许的 `Runtime.evaluate`
+仍能改页面；此规则不是 sandbox，也不为任务新增授权。
 
 `remove_bookmark` 会先将目标子树原子备份，再删除。保留返回的 `backup_path` 和
 `backup_sha256`；`bookmark_backup_failed` 表示删除未派发。删除回包丢失时先读取
@@ -152,7 +161,8 @@ Windows 上已打开的标准 Chrome/Edge 文件框可以显式检查/取消，�
 | `cdp_timeout` / `debugger_detached` | 先补查操作句柄并核对页面；通道错误不证明操作没执行。 |
 | `debugger_conflict` | 确认 DevTools/其他 debugger 的占用，由其所有者释放后再执行。 |
 | `challenge_stalled` | 停止自动尝试，把同一标签页交给用户。 |
-| `requires_user_action` | 报告所需人工动作；不通过切 profile 绕过被拒绝的批准。 |
+| `requires_user_action` | 批准失败时读 `reason`：`elicitation_unsupported` / `declined` / `timeout` / `cancelled` / `error`；按原因处理，不切 profile 绕过拒绝。 |
+| `raw_cdp_blocked` | 原始方法在投递前被拒绝；使用专用工具或交操作员处理配置，不原样重试。 |
 | `input_activity_detected` / `activation_failed` | 物理输入未发出，按用户活动或屏幕状态处理，不诊断为桥坏。 |
 
 `get_execute_js_result` 接受异步 JS、同步超时和其他桥命令的句柄。
@@ -164,6 +174,10 @@ Windows 上已打开的标准 Chrome/Edge 文件框可以显式检查/取消，�
 `result_json`。原 `unknown` 收据和
 `retry_safe=false` 仍保留；迟到结果只补充执行证据，不恢复占用、不延长保留期。
 `execute_js(wait=false)` 用于确实需要长时间运行的任务，不用来等待页面状态。
+
+弹窗 helper 仅在需要 `accept`/`dismiss` 的操作范围内安装，并在最后一个范围结束或到期时恢复。
+升级前已注入的旧 document 需正常导航/刷新才会消除历史 wrapper；扩展 Reload 本身不卸载它。
+不为清理历史注入刷新无关标签页。
 
 `wait_for` / `wait_for_url` 由服务端调度短同步探测。selector/text/URL 只读探针超时
 带句柄时，`reservation_held=false` 表示该探针已释放标签页，可以执行其他命令；

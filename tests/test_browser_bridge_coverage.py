@@ -15,6 +15,7 @@ import pytest
 
 from browsertap_mcp import browser_bridge as T
 from browsertap_mcp import simphtml
+from browsertap_mcp.extension_origin import default_extension_origin
 
 
 class FakeSocket:
@@ -241,7 +242,7 @@ def test_ws_refusal_remains_effective_when_closing_the_peer_fails(monkeypatch, r
     owner.handle()
     seen = driver.last_ext_seen
     peer = ws_peer(handler, ext_ready(tab_id=8),
-                   origin="https://untrusted.test" if refusal == "origin" else "chrome-extension://abc")
+                   origin="https://untrusted.test" if refusal == "origin" else default_extension_origin())
 
     def close():
         raise OSError("already closed")
@@ -441,12 +442,13 @@ def test_token_path_uses_configured_and_default_locations(monkeypatch, tmp_path)
 @pytest.mark.parametrize("error", [OSError("unreadable"), UnicodeError("bad encoding")])
 def test_read_token_file_returns_empty_for_unreadable_file(monkeypatch, tmp_path, error):
     path = tmp_path / "token"
-    monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(T._token_file, "read_text", lambda *args, **kwargs: (_ for _ in ()).throw(error))
     assert T._read_token_file(path) == ""
 
 
 def test_persist_token_creates_secure_file_and_ignores_chmod_failure(monkeypatch, tmp_path):
     path = tmp_path / "nested" / "token"
+    monkeypatch.setattr(T._token_file, "_WINDOWS", False)
     monkeypatch.setattr(T.os, "chmod", lambda *args: (_ for _ in ()).throw(OSError("readonly")))
     assert T._persist_token(path, "abc") == "abc"
     assert path.read_text(encoding="utf-8") == "abc\n"
@@ -486,10 +488,11 @@ def test_persist_token_rejects_an_empty_file_left_by_competitor(monkeypatch, tmp
 
 def test_persist_token_wraps_os_error(monkeypatch, tmp_path):
     path = tmp_path / "token"
-    monkeypatch.setattr(T.os, "open", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("denied")))
+    monkeypatch.setattr(T._token_file, "create", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("denied")))
     with pytest.raises(RuntimeError, match="cannot persist") as exc:
         T._persist_token(path, "token")
-    assert exc.value.__cause__ is not None
+    assert exc.value.__cause__ is None
+    assert exc.value.__suppress_context__ is True
 
 
 @pytest.mark.parametrize("mode", ["0", "false", "off", "disabled"])
@@ -601,14 +604,17 @@ def test_live_default_reselects_latest_and_handles_no_sessions(caplog):
     [
         ("", "", False),
         ("", "1", True),
-        ("chrome-extension://abc", "", True),
-        ("moz-extension://abc", "", True),
+        ("chrome-extension://abc", "", False),
+        ("moz-extension://abc", "", False),
+        ("packaged", "", True),
         ("https://site", "", False),
         ("https://site", "https://site,https://other", True),
     ],
 )
 def test_origin_allowlist(monkeypatch, origin, env, expected):
     driver = driver_stub()
+    if origin == "packaged":
+        origin = default_extension_origin()
     sock = SimpleNamespace(request=SimpleNamespace(headers={"Origin": origin}))
     monkeypatch.setenv("BROWSERTAP_WS_ALLOW_NO_ORIGIN", env)
     monkeypatch.delenv("BROWSERTAP_WS_ALLOWED_ORIGINS", raising=False)
@@ -1218,7 +1224,7 @@ def test_http_hook_rejects_web_origin_and_allows_extension_or_configured_origin(
         http_app.app,
         "/link",
         {"cmd": "get_all_sessions"},
-        origin="chrome-extension://abc",
+        origin=default_extension_origin(),
     )
     assert allowed["status"] == 200
     monkeypatch.setenv("BROWSERTAP_WS_ALLOWED_ORIGINS", "https://trusted")
@@ -1468,10 +1474,10 @@ def test_start_ws_server_exposes_handler_and_handles_protocol_messages(monkeypat
     driver.start_ws_server()
     handler = captured["handler"]
 
-    def peer(data, origin="chrome-extension://abc"):
+    def peer(data, origin=None):
         item = object.__new__(handler)
         item.data = json.dumps(data) if not isinstance(data, str) else data
-        item.request = SimpleNamespace(headers={"Origin": origin})
+        item.request = SimpleNamespace(headers={"Origin": default_extension_origin() if origin is None else origin})
         item.address = ("local", 1)
         item.sent = []
         item.closed = False
@@ -1576,7 +1582,7 @@ def test_ws_handler_assigns_stable_fallback_client_and_tolerates_ping_send_error
     driver.start_ws_server()
     handler = captured["handler"]
     item = object.__new__(handler)
-    item.request = SimpleNamespace(headers={"Origin": "chrome-extension://abc"})
+    item.request = SimpleNamespace(headers={"Origin": default_extension_origin()})
     item.address = ("local", 1)
     item.data = json.dumps({"type": "tabs_update", "tabs": []})
     item.handle()
@@ -2364,11 +2370,11 @@ def ws_handler_for(driver, monkeypatch):
     return captured["handler"]
 
 
-def ws_peer(handler, data, *, origin="chrome-extension://abc", address=("local", 1)):
+def ws_peer(handler, data, *, origin=None, address=("local", 1)):
     """One connected peer. Sends are captured and close() is recorded, not real."""
     peer = object.__new__(handler)
     peer.data = data if isinstance(data, str) else json.dumps(data)
-    peer.request = SimpleNamespace(headers={"Origin": origin})
+    peer.request = SimpleNamespace(headers={"Origin": default_extension_origin() if origin is None else origin})
     peer.address = address
     peer.sent = []
     peer.closed = False
@@ -2389,7 +2395,7 @@ def ext_ready(client_id="chrome", *, tab_id=7, url="https://x"):
 def test_a_live_socket_keeps_its_client_id_against_a_forged_ext_ready(monkeypatch):
     """The WS port takes no token, so this guard is the only thing in the way.
 
-    The handshake Origin is a prefix any local process can write into a header,
+    A local process can forge even the correctly pinned Origin header,
     and the clientId is whatever the sender claims, so one forged ext_ready used
     to re-point ext_clients at the forger -- after which every ext_cmd,
     execute_js included, was written to it instead of to the extension.

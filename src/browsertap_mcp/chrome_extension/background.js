@@ -5,9 +5,10 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '2752911b822fab7e';
+const BTAP_BUILD = '6c9dcdd1ad0b09cc';
 importScripts('result_serialization.js');
 importScripts('guarded_eval.js');
+importScripts('disable_dialogs.js');
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -4209,46 +4210,23 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
   const dialogPolicy = hasDialogScope ? dialogScope.policy : null;
   const execSourceUrl = typeof sourceUrl === 'string' && sourceUrl
     ? sourceUrl.replace(/[\r\n]/g, '') : null;
+  const dialogManager = hasDialogScope ? `(${globalThis.manageDialogScope.toString()})` : 'null';
   return `(async () => {
     const smartProcessResult = (${globalThis.smartProcessResult.toString()});
     const prepareGuardedEval = (${globalThis.prepareGuardedEval.toString()});
-    // Dialog suppression is scoped to this command: disable_dialogs.js defers
-    // to the native alert/confirm/prompt unless this deadline is in the future,
-    // so the user's own confirmations keep working during normal browsing.
-    //
-    // A DEADLINE rather than a boolean, because a boolean stays stuck on if the
-    // script throws past the finally, the tab navigates mid-command, or the
-    // worker is evicted — and a stuck flag silently eats the user's own
-    // confirm() dialogs, which is the very bug this was meant to fix.
-    //
-    // Each command captures its OWN deadline. Two concurrent commands used to
-    // share one window.__btap_suppress_until slot: whichever finished first
-    // zeroed it, un-suppressing the dialog while the other command's script
-    // was still mid-flight. Only the command that set the CURRENT value may
-    // clear it.
+    // Ordinary and manual execution never install a MAIN-world dialog hook.
+    // Answering commands own a lease; the last release restores the originals.
     const _btapHasDialogScope = ${JSON.stringify(hasDialogScope)};
-    const _btapDeadline = _btapHasDialogScope
-      ? Date.now() + ${dialogScopeWindowMs(dialogScope)} : 0;
-    const _btapDialogToken = ${JSON.stringify(dialogToken)};
-    if (_btapHasDialogScope) {
-      const _btapDialogScope = {
-        token: _btapDialogToken,
-        policy: ${JSON.stringify(dialogPolicy)},
-        deadline: _btapDeadline,
-      };
-      const _btapScopes = Array.isArray(window.__btap_dialog_scopes)
-        ? window.__btap_dialog_scopes : [];
-      _btapScopes.push(_btapDialogScope);
-      window.__btap_dialog_scopes = _btapScopes;
-      window.__btap_suppress_until = Math.max(
-        _btapDeadline,
-        ..._btapScopes.map(scope => Number(scope.deadline) || 0),
-      );
-    }
-    const _btapRecords = () => (Array.isArray(window.__btap_dialog_records)
-      ? window.__btap_dialog_records : [])
-      .filter(record => record.token === _btapDialogToken);
+    const _btapManageDialogScope = ${dialogManager};
+    let _btapDialogLease = null;
     try {
+      if (_btapHasDialogScope) {
+        _btapDialogLease = _btapManageDialogScope('enter', {
+          token: ${JSON.stringify(dialogToken)},
+          policy: ${JSON.stringify(dialogPolicy)},
+          deadline: Date.now() + ${dialogScopeWindowMs(dialogScope)},
+        });
+      }
       const rawJsCode = ${JSON.stringify(code)}.trim();
       const _btapExecSourceUrl = ${JSON.stringify(execSourceUrl)};
       const _btapWithSourceUrl = c => _btapExecSourceUrl
@@ -4281,22 +4259,14 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
         return { ok: true, data: {
           __btap_dialog_result: true,
           value: processed,
-          dialogs: _btapRecords(),
+          dialogs: _btapDialogLease.records(),
         } };
       }
       return { ok: true, data: processed };
     } catch (e) {
       ${errorHandler}
     } finally {
-      if (_btapHasDialogScope && Array.isArray(window.__btap_dialog_scopes)) {
-        window.__btap_dialog_scopes = window.__btap_dialog_scopes
-          .filter(scope => scope.token !== _btapDialogToken && Date.now() < scope.deadline);
-        window.__btap_suppress_until = window.__btap_dialog_scopes.reduce(
-          (latest, scope) => Math.max(latest, Number(scope.deadline) || 0), 0
-        );
-      } else if (_btapHasDialogScope && window.__btap_suppress_until === _btapDeadline) {
-        window.__btap_suppress_until = 0;
-      }
+      if (_btapDialogLease) _btapDialogLease.release();
     }
   })()`;
 }
@@ -4323,16 +4293,9 @@ function dialogScopeWindowMs(scope) {
   return Math.max(1000, budget) + DIALOG_SCOPE_GRACE_MS;
 }
 
-// The scope registration for frames that the exec preamble never reaches.
-// disable_dialogs.js runs in EVERY frame (manifest all_frames: true) and
-// activeScope() reads window.__btap_dialog_scopes out of its own frame's window,
-// but the preamble above only lands in the top frame. Without this an iframe's
-// confirm() falls through to the native dialog and blocks the very injection
-// that was supposed to be dialog-proof, with nothing reporting why.
-//
-// Sub-frame scopes are not explicitly cleared: activeScope() drops expired
-// entries as it reads, so the deadline is what bounds them. That is the whole
-// reason the deadline is derived from the command budget.
+// The caller's code only runs in the top frame. Install the same temporary
+// dialog scope in its subframes; handleWsExec releases the token in all frames
+// after execution. Deadline cleanup also works if the worker disappears.
 function buildSubframeScopeScript(dialogScope) {
   const active = Boolean(
     dialogScope?.token &&
@@ -4346,10 +4309,7 @@ function buildSubframeScopeScript(dialogScope) {
   return `(() => {
     const _btapScope = ${JSON.stringify(scope)};
     _btapScope.deadline = Date.now() + ${dialogScopeWindowMs(dialogScope)};
-    const _btapScopes = Array.isArray(window.__btap_dialog_scopes)
-      ? window.__btap_dialog_scopes : [];
-    _btapScopes.push(_btapScope);
-    window.__btap_dialog_scopes = _btapScopes;
+    (${globalThis.manageDialogScope.toString()})('enter', _btapScope);
   })()`;
 }
 
@@ -5202,6 +5162,29 @@ async function handleWsExec(data) {
   const newTabIds = new Set();
   const onCreated = (tab) => { if (tab.openerTabId === tabId) newTabIds.add(tab.id); };
   chrome.tabs.onCreated.addListener(onCreated);
+  let dialogScopesCleared = false;
+  const clearFrameDialogScopes = async () => {
+    if (dialogScopesCleared || !dialogScope ||
+        (dialogScope.policy !== 'accept' && dialogScope.policy !== 'dismiss')) return;
+    // Mark before awaiting: an uncertain cleanup response must not trigger a
+    // second injection. Each frame also has its own deadline and cleanup timer.
+    dialogScopesCleared = true;
+    let cleanupTimer = null;
+    try {
+      await Promise.race([
+        chrome.scripting.executeScript({
+          target: { tabId, allFrames: true },
+          world: 'MAIN',
+          func: globalThis.manageDialogScope,
+          args: ['release', { token: dialogScope.token }],
+        }),
+        // A frame that stopped answering must not hide an already-known exec
+        // outcome. Its page timer still expires the scope independently.
+        new Promise(resolve => { cleanupTimer = setTimeout(resolve, 1000); }),
+      ]);
+    } catch (_) { /* navigation/restricted frames: deadline remains the fallback */ }
+    finally { if (cleanupTimer !== null) clearTimeout(cleanupTimer); }
+  };
   try {
     let res;
     if (dialogScope?.policy === 'manual') {
@@ -5211,11 +5194,8 @@ async function handleWsExec(data) {
       res = await executeManualScript(tabId, data.code, dialogScope);
     } else {
       const inject = async () => {
-        // allFrames so the dialog scope reaches the sub-frames whose own
-        // disable_dialogs.js would otherwise fall through to a native dialog and
-        // block this injection (see buildSubframeScopeScript). The caller's code
-        // still runs in the top frame only — sub-frames evaluate the scope
-        // registration and nothing else.
+        // allFrames confines temporary dialog scopes to this tab and reaches
+        // its subframes. The caller's code still runs in the top frame only.
         const result = await chrome.scripting.executeScript({
           target: { tabId, allFrames: true },
           world: 'MAIN',
@@ -5356,6 +5336,7 @@ async function handleWsExec(data) {
         );
       }
     }
+    await clearFrameDialogScopes();
     // Grace period for async tab creation (e.g. link click with target=_blank)
     if (newTabIds.size === 0) await new Promise(r => setTimeout(r, 200));
     chrome.tabs.onCreated.removeListener(onCreated);
@@ -5386,8 +5367,10 @@ async function handleWsExec(data) {
       send({ type: 'error', id: data.id, error: res?.error || 'Unknown error', newTabs, tabId });
     }
   } catch (e) {
+    await clearFrameDialogScopes();
     send({ type: 'error', id: data.id, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' }, tabId });
   } finally {
+    await clearFrameDialogScopes();
     chrome.tabs.onCreated.removeListener(onCreated);
   }
 }

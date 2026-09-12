@@ -65,6 +65,9 @@ BTAP 不允许自动禁用自身来强制刷新；被禁用后它无法重新启
 
 默认 bridge 使用 WebSocket 18765、HTTP 18766；自定义地址/端口以 doctor 报告为准。
 扩展 WebSocket 检查 origin，HTTP 同时检查 origin 和共享 Bearer token。
+默认只允许随包扩展的精确 ID：有 manifest key 时按 key 推导，否则按未打包目录推导。
+桥诊断的 `ws_origin_policy.default_origin` / `identity_source` 可与已安装 ID 对照。
+另放目录的副本使用显式完整 Origin；`unavailable` 时先修复包内 manifest，保持拒绝陌生扩展。
 `BROWSERTAP_WS_ALLOWED_ORIGINS` 的额外来源列表作用于两条通道；
 `BROWSERTAP_WS_ALLOW_NO_ORIGIN` 只控制 WebSocket。HTTP 无 Origin 请求仍需通过 token 鉴权。
 
@@ -222,11 +225,21 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
 | `cross_origin_frame` / `unsupported_frame_transform` | 当前定位路径不受支持，不能用重连修复。 |
 | `cdp_timeout` / `debugger_detached` | 核对原操作是否可能继续；先补查，不换通道重复输入。 |
 | `debugger_conflict` | 由 DevTools/竞争 debugger 的使用者释放占用。 |
-| `requires_user_action` / `input_activity_detected` / `activation_failed` | 按人工批准、用户活动或前台状态处理，不重启桥。 |
+| `raw_cdp_blocked` | `cdp_command` / `cdp_batch` 的投递前策略拒绝；使用专用工具，不重启或原样重试。 |
+| `requires_user_action` | 批准失败时按 `reason` 区分 `elicitation_unsupported` / `declined` / `timeout` / `cancelled` / `error`，不重启桥或切 profile 绕过拒绝。 |
+| `input_activity_detected` / `activation_failed` | 按用户活动或前台状态处理，不重启桥。 |
 | `challenge_stalled` | 将同一 tab 交给用户，不另起独立浏览器。 |
 | `unsupported` | 当前浏览器 API 无法提供所需能力或可恢复性，不改走物理输入。 |
 | `manual_recovery` | 权限恢复已停止自动重试；保留 prior setting，按恢复指引处理后显式 reset。 |
 | `bookmark_backup_failed` | 备份未完成，删除未派发；检查本地存储，受管备份子目录不能是符号链接/junction。 |
+
+`get_automation_profile.raw_cdp_policy` 报告 raw CDP 的有效策略。操作员显式设置
+`BROWSERTAP_ALLOW_UNSAFE_CDP=1` 且处于 `lab` 才是 `allow_unsafe`；`safe` 始终 `guarded`。
+整批在第一项执行前验证。该规则只防常见误操作；允许的 JS/CDP 仍有副作用，任务授权继续适用。
+
+MCP annotations 是覆盖全部参数路径的宿主提示，不授予权限、不替代占用检查；可选 JS、clear
+或文件写入使工具不能整体标为只读。扩展默认不再常驻注入 MAIN world 弹窗 helper；旧 document
+上的历史 wrapper 需正常导航/刷新才会消除，Reload 本身不卸载它，也不因此刷新无关标签页。
 
 多浏览器时显式传完整 `session_id`。有直接生命周期证据时结果才会换发
 `rebound_from` / `replacement_session_id` / `tab_identity`；

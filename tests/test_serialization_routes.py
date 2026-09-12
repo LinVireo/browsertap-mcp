@@ -42,7 +42,7 @@ const manualExecutionGenerations = new Map();
 const dialogEventSequences = new Map();
 let nextManualExecutionGeneration = 1;
 function realm() {
-  const context = vm.createContext({});
+  const context = vm.createContext({setTimeout, clearTimeout});
   vm.runInContext('globalThis.window = globalThis', context);
   return context;
 }
@@ -153,6 +153,77 @@ def test_main_fallback_and_raw_manual_have_one_value_contract(code, expected):
     assert result["evaluations"] == 1
     assert result["attached"] is False
     assert result["pending"] == 0
+
+
+@pytest.mark.parametrize("policy", ["accept", "dismiss"])
+def test_cdp_fallback_scoped_dialogs_use_controller_and_restore_page_functions(policy):
+    expression = S._build_cdp_fallback_expression(
+        "window.alert('notice'); window.answer = window.confirm('question'); "
+        "window.text = window.prompt('value', 'seed'); 'done'",
+        policy,
+        2.0,
+    )
+    script = f"""
+const vm = require('node:vm');
+const nativeCalls = [];
+const document = {{
+  createElement() {{ return {{ style: {{}}, remove() {{}}, textContent: '' }}; }},
+  body: {{ appendChild() {{}} }},
+  documentElement: {{ appendChild() {{}} }},
+}};
+const context = {{
+  document,
+  console: {{ log() {{}} }},
+  setTimeout,
+  clearTimeout,
+  alert(message) {{ nativeCalls.push(['alert', message]); }},
+  confirm(message) {{ nativeCalls.push(['confirm', message]); return true; }},
+  prompt(message, value) {{ nativeCalls.push(['prompt', message]); return value ?? ''; }},
+}};
+context.window = context;
+const descriptors = Object.fromEntries(['alert', 'confirm', 'prompt']
+  .map(name => [name, Object.getOwnPropertyDescriptor(context, name)]));
+const realm = vm.createContext(context);
+(async () => {{
+  const outcome = await vm.runInContext({json.dumps(expression)}, realm);
+  const restored = ['alert', 'confirm', 'prompt'].every(name =>
+    Object.getOwnPropertyDescriptor(context, name).value === descriptors[name].value);
+  const nativeBefore = nativeCalls.length;
+  const after = context.confirm('after');
+  process.stdout.write(JSON.stringify({{
+      outcome,
+      answer: context.answer,
+      text: context.text,
+      nativeCalls,
+      nativeBefore,
+      restored,
+      hasController: Object.hasOwn(context, '__btap_dialog_controller'),
+      after,
+      nativeAfter: nativeCalls.length,
+  }}));
+}})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+"""
+    result = subprocess.run(
+        ["node", "-"], input=script, text=True, capture_output=True,
+        timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome["outcome"]["ok"] is True
+    assert outcome["outcome"]["data"]["__btap_dialog_result"] is True
+    assert outcome["outcome"]["data"]["value"] == "done"
+    assert [record["type"] for record in outcome["outcome"]["data"]["dialogs"]] == [
+        "alert", "confirm", "prompt",
+    ]
+    assert all(record["policy"] == policy for record in outcome["outcome"]["data"]["dialogs"])
+    expected_answer = policy == "accept"
+    assert outcome["answer"] is expected_answer
+    assert outcome["text"] == ("seed" if expected_answer else None)
+    assert outcome["nativeBefore"] == 0
+    assert outcome["restored"] is True
+    assert outcome["hasController"] is False
+    assert outcome["after"] is True
+    assert outcome["nativeAfter"] == 1
 
 
 def test_manual_converts_and_releases_objects_before_detaching_without_rewriting_code():

@@ -19,6 +19,8 @@ def _run_node_harness(source: str) -> dict:
     source = "globalThis.smartProcessResult = eval(" + json.dumps(serializer) + ");\n" + source
     guard = BACKGROUND.with_name("guarded_eval.js").read_text(encoding="utf-8")
     source = "globalThis.prepareGuardedEval = eval(" + json.dumps(guard) + ");\n" + source
+    dialogs = DISABLE_DIALOGS.read_text(encoding="utf-8")
+    source = "globalThis.manageDialogScope = eval(" + json.dumps(dialogs) + ");\n" + source
     completed = subprocess.run(
         ["node", "-"],
         input=source,
@@ -37,7 +39,6 @@ def _exec_script_harness(code: str, scope: dict | None) -> dict:
 const fs = require('fs');
 const vm = require('vm');
 const background = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
-const disableDialogs = fs.readFileSync({json.dumps(str(DISABLE_DIALOGS))}, 'utf8');
 const builderStart = background.indexOf('function buildExecScript');
 const builderEnd = background.indexOf('\\nfunction buildPageScript', builderStart);
 if (builderStart < 0 || builderEnd < 0) throw new Error('buildExecScript not found');
@@ -59,11 +60,11 @@ const context = vm.createContext({{
   window, document,
   console: {{ log() {{}} }},
   setTimeout() {{ return 0; }},
+  clearTimeout() {{}},
   Date, Math, JSON, Array, Object, String, Error,
   NodeList: function NodeList() {{}},
   HTMLCollection: function HTMLCollection() {{}},
 }});
-vm.runInContext(disableDialogs, context);
 (async () => {{
   const expression = buildExecScript(
     {json.dumps(code)},
@@ -81,22 +82,14 @@ vm.runInContext(disableDialogs, context);
   }} catch (error) {{
     if (error?.code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw error;
     harnessTimedOut = true;
-    const token = {json.dumps(scope.get("token") if scope else None)};
-    const dialogs = (Array.isArray(window.__btap_dialog_records)
-      ? window.__btap_dialog_records : []).filter(record => record.token === token);
-    result = {{ ok: true, data: {{
-      __btap_dialog_result: true,
-      value: null,
-      dialogs,
-      manual_blocked: true,
-    }} }};
+    result = null;
   }}
   process.stdout.write(JSON.stringify({{
     result,
     harnessTimedOut,
     after: window.after,
     nativeConfirmCalls,
-    scopesInstalled: Array.isArray(window.__btap_dialog_scopes),
+    scopesInstalled: Object.prototype.hasOwnProperty.call(window, '__btap_dialog_controller'),
     suppressUntil: window.__btap_suppress_until ?? null,
   }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
@@ -870,10 +863,9 @@ process.stdout.write(JSON.stringify({{
 
 
 def test_subframe_scope_makes_an_iframe_dialog_answerable():
-    """disable_dialogs.js runs in every frame and reads the scope out of its own
-    window; the exec preamble only lands in the top frame.
+    """Only the target tab's answering execution installs subframe hooks.
 
-    Without the sub-frame registration an iframe's confirm() falls through to the
+    Without the subframe scope an iframe's confirm() falls through to the
     native dialog and blocks the injection that was supposed to be dialog-proof.
     """
     outcome = _run_node_harness(
@@ -881,7 +873,6 @@ def test_subframe_scope_makes_an_iframe_dialog_answerable():
 const fs = require('fs');
 const vm = require('vm');
 const background = fs.readFileSync({json.dumps(str(BACKGROUND))}, 'utf8');
-const disableDialogs = fs.readFileSync({json.dumps(str(DISABLE_DIALOGS))}, 'utf8');
 const builderStart = background.indexOf('function buildExecScript');
 const builderEnd = background.indexOf('\\nfunction buildPageScript', builderStart);
 eval(background.slice(builderStart, builderEnd));
@@ -906,11 +897,11 @@ function makeFrame() {{
     window, document,
     console: {{ log() {{}} }},
     setTimeout() {{ return 0; }},
+    clearTimeout() {{}},
     Date, Math, JSON, Array, Object, String, Error,
     NodeList: function NodeList() {{}},
     HTMLCollection: function HTMLCollection() {{}},
   }});
-  vm.runInContext(disableDialogs, context);
   return {{ window, context, counters }};
 }}
 
@@ -918,13 +909,17 @@ const scope = {{ token: 'scope-1', policy: 'dismiss', timeoutMs: 5000 }};
 const unscoped = makeFrame();
 const scoped = makeFrame();
 vm.runInContext(buildSubframeScopeScript(scope), scoped.context);
+const scopedAnswer = vm.runInContext("window.confirm('really?')", scoped.context);
+const scopedNativeCalls = scoped.counters.nativeConfirmCalls;
+vm.runInContext(`(${{globalThis.manageDialogScope.toString()}})('release', ${{JSON.stringify(scope)}})`, scoped.context);
 
 process.stdout.write(JSON.stringify({{
   unscopedAnswer: vm.runInContext("window.confirm('really?')", unscoped.context),
   unscopedNativeCalls: unscoped.counters.nativeConfirmCalls,
-  scopedAnswer: vm.runInContext("window.confirm('really?')", scoped.context),
-  scopedNativeCalls: scoped.counters.nativeConfirmCalls,
-  scopedRecords: (scoped.window.__btap_dialog_records || []).map(r => r.token),
+  scopedAnswer,
+  scopedNativeCalls,
+  afterRelease: vm.runInContext("window.confirm('after')", scoped.context),
+  afterReleaseNativeCalls: scoped.counters.nativeConfirmCalls,
 }}));
 """
     )
@@ -935,7 +930,8 @@ process.stdout.write(JSON.stringify({{
     # Scope registered: dismiss answers false and the native dialog never opens.
     assert outcome["scopedNativeCalls"] == 0
     assert outcome["scopedAnswer"] is False
-    assert outcome["scopedRecords"] == ["scope-1"]
+    assert outcome["afterRelease"] is True
+    assert outcome["afterReleaseNativeCalls"] == 1
 
 
 def test_exec_injection_reaches_every_frame_but_returns_the_top_one():
@@ -1725,17 +1721,21 @@ def test_late_attach_and_manual_results_are_explicit():
 
 
 def test_injected_confirm_has_no_unconditional_accept():
-    source = DISABLE_DIALOGS.read_text(encoding="utf-8")
-    confirm = source.split("window.confirm = function", 1)[1].split(
-        "window.prompt = function", 1
-    )[0]
-    assert "return true" not in confirm
-    assert "policy === 'accept'" in confirm or 'policy === "accept"' in confirm
+    outcome = _exec_script_harness(
+        "window.confirm('question')", {"token": "reject", "policy": "dismiss"}
+    )
+    assert outcome["result"]["data"]["value"] is False
+    assert outcome["nativeConfirmCalls"] == 0
 
 
 def test_injected_dialog_observations_are_bounded_and_policy_driven():
-    source = DISABLE_DIALOGS.read_text(encoding="utf-8")
-    assert "__btap_dialog_records" in source
-    assert "slice(" in source or "shift()" in source
-    assert "defaultPrompt" in source
-    assert "openedAt" in source
+    outcome = _exec_script_harness(
+        "for (let i = 0; i < 60; i++) window.confirm(String(i)); 'done'",
+        {"token": "bounded", "policy": "dismiss"},
+    )
+    records = outcome["result"]["data"]["dialogs"]
+    assert len(records) == 50
+    assert records[0]["message"] == "10"
+    assert records[-1]["message"] == "59"
+    assert all(record["policy"] == "dismiss" and record["defaultPrompt"] == "" for record in records)
+    assert all(record["openedAt"] > 0 for record in records)
