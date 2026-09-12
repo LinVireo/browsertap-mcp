@@ -142,50 +142,57 @@ def test_the_scan_output_cannot_be_committed_by_accident():
             assert " #" not in stripped, line
 
 
-def test_local_agent_permission_state_cannot_be_committed_by_accident():
-    """The one file in this tree that was untracked *and* unignored.
-
-    `.claude/` is deliberately not ignored -- skills and commands there are part
-    of the published surface -- but `settings.local.json` records one machine's
-    permission decisions (absolute interpreter paths, home-directory read
-    allowances, the names of that machine's other MCP servers), and the backup an
-    agent tool writes when it switches permission modes was matched by no rule at
-    all. `git add -A` would have published it.
-    """
-    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    for pattern in (
-        ".claude/settings.local.json",
-        ".claude/settings.local.json.*",
-        "*.bak-*",
-        "*.bak",
-    ):
-        assert f"\n{pattern}\n" in gitignore, pattern
-    # The directory itself must stay publishable, or the skills go with it.
-    assert "\n.claude/\n" not in gitignore
-
-
-def test_git_agrees_that_those_files_are_ignored():
-    """The rules above are only worth having if git resolves them that way.
-
-    A pattern can be present and still not match -- `.claude/settings.local.json`
-    with a `!` negation later in the file, or an ordering that re-includes the
-    directory. Ask git rather than reasoning about precedence.
-    """
+def test_local_agent_material_is_not_tracked():
+    """Ignore rules do not remove already tracked collaboration files."""
     if shutil.which("git") is None or not (ROOT / ".git").exists():
         pytest.skip("needs a git checkout")
-    names = [
-        ".claude/settings.local.json",
-        ".claude/settings.local.json.bak-bypass",
-        "some-config.json.bak-anything",
-    ]
     completed = subprocess.run(
-        ["git", "check-ignore", "--no-index", *names],
+        ["git", "ls-files", "-z", "--", ".agents", ".claude", ".trellis"],
         cwd=ROOT,
         capture_output=True,
         text=True,
+        check=True,
     )
-    ignored = set(completed.stdout.split())
-    assert ignored == set(names), completed.stdout or completed.stderr
+    tracked = [name for name in completed.stdout.split("\0") if name]
+    assert not tracked, f"local collaboration files are tracked: {tracked}"
+
+
+def test_git_excludes_local_agents_and_preserves_public_inputs():
+    """Ask Git about local data, packaged skills, and root-only rule scope."""
+    if shutil.which("git") is None or not (ROOT / ".git").exists():
+        pytest.skip("needs a git checkout")
+    local_names = [
+        ".agents/skills/trellis-start/SKILL.md",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/settings.local.json.bak-bypass",
+        ".claude/skills/trellis-check/SKILL.md",
+        ".trellis/config.yaml",
+        ".trellis/tasks/example/research/handoff.md",
+        ".trellis/workspace/example/journal-1.md",
+        "AGENTS.local.md",
+        "some-config.json.bak-anything",
+        "some-config.json.bak",
+    ]
+    public_names = [
+        "AGENTS.md",
+        ".github/workflows/test.yml",
+        "src/browsertap_mcp/skills/browsertap-default/SKILL.md",
+        "src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
+        "tests/fixtures/.agents/example.json",
+        "tests/fixtures/.claude/example.json",
+        "tests/fixtures/.trellis/example.json",
+    ]
+    completed = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-z", "--stdin"],
+        input="\0".join(local_names + public_names) + "\0",
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ignored = {name for name in completed.stdout.split("\0") if name}
+    assert ignored == set(local_names), completed.stdout or completed.stderr
 
 
 def test_every_action_is_pinned_to_a_commit_except_the_one_documented_exception():

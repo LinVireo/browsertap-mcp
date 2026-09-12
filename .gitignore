@@ -56,10 +56,11 @@ DELIVER.md
 # AGENTS.md; anything here that outlives its task belongs there instead.
 docs/superpowers/
 
-# Local task handoffs, session journals, and Chrome Web Store drafts.
-# Trellis scripts/specs and packaged extension icons remain public.
-/.trellis/tasks/
-/.trellis/workspace/
+# Local development-agent frameworks, task records, and store drafts.
+# Caller skills under src/browsertap_mcp/skills are part of the product.
+/.agents/
+/.claude/
+/.trellis/
 /store-assets/
 
 # local scratch files, repository root only
@@ -83,28 +84,14 @@ docs/superpowers/
 # client config into the repository root. Those files carry an absolute
 # interpreter path and sometimes an API key in `env`, which is machine
 # configuration and occasionally a secret -- neither belongs in a public tree.
-# `.claude/` and `.github/` are deliberately not ignored: agent skills and
-# workflows are part of the published surface.
+# CI workflows under `.github/` are part of the public project.
 .mcp.json
 .vscode/
 .idea/
 .cursor/mcp.json
 .gemini/settings.json
 
-# local agent permission state, and backups of it
-#
-# `.claude/` is deliberately absent from the list above: a project's agent skills
-# and commands are part of the published surface. `settings.local.json` is the
-# opposite -- it records one machine's permission decisions, which means absolute
-# interpreter paths, home-directory read allowances and the names of the other
-# local MCP servers that machine runs. It was covered only by whatever global
-# ignore file the maintainer happened to have, and the backup an agent tool
-# writes when it switches permission modes
-# (`.claude/settings.local.json.bak-bypass`) was covered by nothing at all: it
-# sat untracked and unignored, one `git add -A` away from being published.
-# `*.bak-*` is the general form -- a backup of a local config is local too.
-.claude/settings.local.json
-.claude/settings.local.json.*
+# Backups of local configuration can also appear outside ignored directories.
 *.bak-*
 *-bak-*
 
