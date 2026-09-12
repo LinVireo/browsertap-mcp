@@ -24,16 +24,17 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence
 from urllib.parse import urlsplit
 
 import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image as MCPImage
-from mcp.shared.exceptions import UrlElicitationRequiredError
-from mcp.types import CallToolResult, TextContent
+from mcp.shared.exceptions import McpError, UrlElicitationRequiredError
+from mcp.types import METHOD_NOT_FOUND, CallToolResult, TextContent
 from pydantic import BaseModel, Field, StrictBool
 
 # Only explicitly serialized process-wide tools take this lock. Page tools use
@@ -66,6 +67,7 @@ from .browser_bridge import (  # noqa: E402
     state_paths_report,
     tcp_port_open,
 )
+from .cdp_policy import validate_raw_cdp_batch, validate_raw_cdp_method  # noqa: E402
 from .command_scope import command_scope  # noqa: E402
 from .extension_build import (  # noqa: E402
     ExtensionStampError,
@@ -91,6 +93,7 @@ from .runtime_identity import (  # noqa: E402
     current_source_identity,
     loaded_source_identity,
 )
+from .tool_annotations import annotations_for_tool  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,9 @@ _RESULT_SERIALIZER_SOURCE = (ROOT / "chrome_extension" / "result_serialization.j
     encoding="utf-8"
 )
 _GUARDED_EVAL_SOURCE = (ROOT / "chrome_extension" / "guarded_eval.js").read_text(
+    encoding="utf-8"
+)
+_DIALOG_SCOPE_SOURCE = (ROOT / "chrome_extension" / "disable_dialogs.js").read_text(
     encoding="utf-8"
 )
 
@@ -441,7 +447,7 @@ def _result_diagnostics(payload: Any, *, tool: str) -> dict[str, Any]:
         "zombie", "zombie_detail",
         "input_quiet", "input_reachability", "screen_bounds", "ownership", "desktop",
         "owner_id", "generation", "extension_build_verdict", "status", "code",
-        "hint", "directory_applied", "requested_directory", "render_state",
+        "hint", "reason", "directory_applied", "requested_directory", "render_state",
         "content_ready", "render", "recheck_required", "recheck_action",
     ):
         if key in payload:
@@ -1092,6 +1098,7 @@ def _automation_profile() -> dict[str, Any]:
     return {
         "mode": mode,
         "no_elicit": no_elicit,
+        "raw_cdp_policy": "allow_unsafe" if _raw_cdp_unsafe_enabled() else "guarded",
         "auto_beforeunload_hosts": _auto_beforeunload_hosts(),
         "physical_approval": (
             "every_action" if mode == "safe"
@@ -1104,6 +1111,11 @@ def _automation_profile() -> dict[str, Any]:
             else "once_per_session"
         ),
     }
+
+
+def _raw_cdp_unsafe_enabled() -> bool:
+    # lab is the shipped default, so mode alone must not authorize the bypass.
+    return _automation_mode() == "lab" and _env_enabled("BROWSERTAP_ALLOW_UNSAFE_CDP")
 
 
 def _approval_key(ctx: Context) -> str:
@@ -1163,9 +1175,14 @@ def _default_target_snapshot(driver: Any) -> tuple[Any, bool]:
 def _threaded_tool(*d_args: Any, **d_kwargs: Any):
     # Target locks protect the complete call; unrelated tabs can run together.
     serialize = bool(d_kwargs.pop("serialize", False))
-    decorator = _mcp_tool(*d_args, **d_kwargs)
 
     def wrap(fn):
+        options = dict(d_kwargs)
+        name = options.get("name") or (d_args[0] if d_args else None) or fn.__name__
+        if options.get("annotations") is None:
+            options["annotations"] = annotations_for_tool(name)
+        decorator = _mcp_tool(*d_args, **options)
+
         def invoke_sync(*args: Any, **kwargs: Any) -> Any:
             target = _call_target(fn, args, kwargs)
             try:
@@ -1843,7 +1860,9 @@ _WRITE_TOOLS = frozenset({
 })
 _MIXED_EFFECT_TOOLS = frozenset({
     "execute_js", "cdp_command", "cdp_batch", "call_extension",
-    "inspect_native_file_dialog",
+    "inspect_native_file_dialog", "scan_page", "wait_for",
+    "get_console_messages", "capture_page_screenshot", "get_execute_js_result",
+    "get_setup_status",
 })
 
 def _build_tool_capabilities() -> dict[str, dict[str, Any]]:
@@ -2012,13 +2031,14 @@ def set_automation_profile(mode: str) -> dict[str, Any]:
         "restart_mcp_session or restart_bridge; *_build_enforced=false is unknown. "
         "state_paths distinguishes missing/empty/ready/unreadable/invalid_encoding token files "
         "without exposing token content; unreadable metadata has unknown existence. "
+        "On Windows, inspecting an existing token file may tighten its ACL to the current user. "
+        "Bridge startup or authentication initialization may create a missing token file. "
         "A malformed remote diagnosis reports bridge_unreachable with malformed_diagnosis, "
         "not evidence of an old build. "
         "Answers while another tool "
         "is still running; default_session_id is isolated from other calls' temporary targets. "
-        "capability_registry is the runtime page/browser/desktop inventory; each entry includes "
-        "target (none/optional/required), side_effect (read/write/mixed), result_contract, and "
-        "desktop_opt_in."
+        "capability_registry reports declared/registered tool counts, completeness and "
+        "page/browser/desktop groups. Each tool's MCP annotations describe its potential effects."
     ),
     serialize=False,
 )
@@ -2387,7 +2407,9 @@ def get_setup_status() -> dict[str, Any]:
         "List connected tabs across all connected browsers; each tab has a browser field "
         "(chrome/edge/opera) and a session id to pass verbatim. Answers while another tool is "
         "still running. The default_session_id snapshot is isolated from other calls' "
-        "temporary targets. Pass session_id explicitly when agents share one MCP process."
+        "temporary targets. Pass session_id explicitly when agents share one MCP process. "
+        "A timed-out inventory releases only that read's bridge reservation; pending "
+        "mutations keep their reservations."
     ),
     serialize=False,
 )
@@ -3243,7 +3265,9 @@ def handle_dialog(
     description=(
         "Resolve an intended beforeunload leave in one bounded workflow: protocol accept twice, "
         "return immediately when no dialog exists, then use a lab-only foreground Enter fallback "
-        "after the normal physical-input approval gate only when protocol handling actually fails."
+        "after the normal physical-input approval gate only when protocol handling actually fails. "
+        "Approval failures expose reason in the result and diagnostics: elicitation_unsupported, "
+        "declined, timeout, cancelled or error."
     )
 )
 async def resolve_leave_dialog(
@@ -3346,17 +3370,36 @@ async def resolve_leave_dialog(
             "physical": physical,
             "hint": "The default browser-dialog action was sent; verify the destination URL before continuing.",
         }
-    return {
+    result = {
         "status": "requires_user_action",
         "session_id": target_sid,
         "attempts": attempts,
         "physical": physical,
         "hint": "Click Leave in the browser dialog, then retry the intended navigation.",
     }
+    if "reason" in physical:
+        result["reason"] = physical["reason"]
+    return result
 
 
 # --- Tool: open_new_tab (owned tabs) -----------------------------------------
-@mcp.tool(description="Open one real-browser tab in the background by default with an operation_id-backed at-most-once create. Uses the browser selected by this MCP task unless session_id or client_id names another browser. With several browsers connected, first use switch_tab or pass a concrete session_id/client_id. Pass active=true only when foreground work is required. Before create is dispatched, an unresolved probe returns status=unknown, may_have_created=false, retry_safe=true. When retry_safe=true, retry with no operation_id to start a fresh create. If the create ACK is lost with retry_safe=false, call this tool again with the returned operation_id, client_id and owner_id to reconcile the same operation without dispatching another create. A completed result is registered only with its exact client_id, tab_id, and generation. An uncertain dispatched create returns status=unknown, may_have_created=true,retry_safe=false and the operation_id. An unresolved recovery preserves that uncertainty and its owner_id even when the status probe fails. After worker restart, orphaned pending creates become terminal unknown; bounded retirement retains replay guards. If reconciliation.resume_required=false, including an initial not_found, follow its list_tabs() inspection guidance instead of repeating the same recovery read; a fresh create may duplicate the original. Never infer ownership or absence from URLs, tab counts, missing records or a refused retired ID.")
+@mcp.tool(description=(
+    "Create one background browser tab, deduplicated by operation_id. Uses this MCP task's "
+    "selected browser; select one with switch_tab or session_id/client_id when several are "
+    "connected. Pass active=true for foreground work. Save owner_id for cleanup; ownership "
+    "requires a completed record with exact client_id, tab_id and generation. "
+    "Before dispatch, an unresolved probe returns unknown, may_have_created=false, "
+    "retry_safe=true: resolve its cause and retry without operation_id. After uncertain "
+    "dispatch, may_have_created=true,retry_safe=false: pass the returned operation_id, "
+    "client_id and owner_id to this tool to read the same creation record without replaying. "
+    "Failed recovery preserves uncertainty and ownership. A failed probe's separate "
+    "reconciliation.bridge_operation.operation_id can be read with get_execute_js_result; "
+    "its reservation_held=false does not prove non-creation or permit replay. After worker "
+    "restart pending creates become terminal unknown; retired IDs retain replay guards. "
+    "If reconciliation.resume_required=false, including initial not_found, follow its "
+    "list_tabs() inspection guidance and stop repeating recovery. Matching URLs, unchanged "
+    "tab counts, missing records and retired IDs prove neither non-creation nor ownership."
+))
 def open_new_tab(
     url: str,
     timeout: float = 15.0,
@@ -3539,6 +3582,20 @@ def open_new_tab(
             timeout=status_timeout,
         )
 
+    def probe_error(exc: Exception, phase: str) -> dict[str, Any]:
+        detail: dict[str, Any] = {"error": str(exc), "phase": phase}
+        _, _, _, diagnostics = _exception_result_metadata(exc)
+        if diagnostics.get("operation_id"):
+            # This is the bridge's status-query receipt, not the durable tab
+            # creation handle. Poll it without replaying a create; its release
+            # says nothing about whether an earlier create reached the browser.
+            detail["bridge_operation"] = {
+                key: diagnostics[key] for key in (
+                    "operation_id", "poll_with", "reservation_held", "delivery_state", "retry_safe",
+                ) if key in diagnostics
+            }
+        return detail
+
     # Pin one concrete extension before the first mutation. This works with no
     # content sessions and prevents create/status from drifting across browsers.
     try:
@@ -3551,7 +3608,7 @@ def open_new_tab(
         raise
     except Exception as exc:
         return unknown_result(
-            {"error": str(exc), "phase": "client_discovery"},
+            probe_error(exc, "client_discovery"),
             may_have_created=False,
             retry_safe=True,
         )
@@ -3661,12 +3718,12 @@ def open_new_tab(
                     retry_safe=False,
                 )
             last_status = status_info
-        except TimeoutError:
+        except TimeoutError as exc:
+            last_status = {**last_status, **probe_error(exc, "reconciliation")}
             continue
         except Exception as exc:
             last_status = {
-                "error": str(exc),
-                "phase": "reconciliation",
+                **probe_error(exc, "reconciliation"),
                 "operation_id": operation_id,
                 "operation_status": "unknown",
             }
@@ -4598,9 +4655,9 @@ def _page_render_state(driver: Any, session_id: Optional[str], timeout: float) -
     description=(
         "Read the current page as simplified HTML/text, preserving login state from the real "
         "browser. cutlist collapses long repeated lists and reports a CSS selector for each "
-        "container it collapsed, derived from that container's own structure. This tool does not "
-        "modify the page -- no attribute, no id, no window global -- so a scan is invisible to "
-        "the page's own scripts. "
+        "container it collapsed, derived from that container's own structure. The built-in scan "
+        "does not write page attributes, ids, or window globals. Optional extra_js runs caller "
+        "code and can modify the page or send requests. "
         "Background tabs may report viewport height zero; ordinary DOM/text/API work still works "
         "there, and only visual/layout fidelity requires explicit activate_tab. "
         "The result also includes render_state/content_ready when the page can be probed: "
@@ -4827,7 +4884,8 @@ def _poll_wait_condition(
         "polling scan_page (each scan re-serializes the whole DOM). Exactly one of "
         "selector / text / url_pattern / js must be given: selector waits for a CSS "
         "match, text for a substring in body text, url_pattern for a regex on the URL, "
-        "js for a JS expression to become truthy. The server schedules short synchronous "
+        "js for a JS expression to become truthy. Caller js is evaluated repeatedly and can "
+        "have side effects; use a read-only predicate. The server schedules short synchronous "
         "page checks under one deadline. A delayed reply returns its operation_id for "
         "get_execute_js_result; it is never replayed while pending. Timed-out "
         "selector/text/URL checks can release the tab while keeping that receipt: "
@@ -5213,25 +5271,37 @@ def _normalize_execute_js_dialog_result(result: dict[str, Any]) -> dict[str, Any
 
 def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> str:
     token = f"cdp-{time.monotonic_ns()}"
-    deadline_ms = max(1, min(120000, int(float(timeout) * 1000)))
+    # Fix the page deadline before transport/debugger work. A late CDP delivery
+    # must not start a fresh timeout or install a new scope after the caller's
+    # remaining budget expired. The browser and Python run on the same host.
+    deadline_ms = int(time.time() * 1000) + max(1, min(120000, int(float(timeout) * 1000)))
     return f"""
     (async () => {{
       {_RESULT_SERIALIZER_SOURCE}
       {_GUARDED_EVAL_SOURCE}
+      {_DIALOG_SCOPE_SOURCE}
       const rawJsCode = {json.dumps(script)}.trim();
       const policy = {json.dumps(policy)};
       const token = {json.dumps(token)};
-      const deadline = Date.now() + {deadline_ms};
+      const deadline = {deadline_ms};
       const scoped = policy === 'accept' || policy === 'dismiss';
-      if (scoped) {{
-        const scopes = Array.isArray(window.__btap_dialog_scopes)
-          ? window.__btap_dialog_scopes : [];
-        scopes.push({{token, policy, deadline}});
-        window.__btap_dialog_scopes = scopes;
-        window.__btap_suppress_until = Math.max(
-          deadline, ...scopes.map(scope => Number(scope.deadline) || 0));
-      }}
+      let dialogLease = null;
       try {{
+        if (Date.now() >= deadline) {{
+          return {{ok: false, error: {{
+            name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+            code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+          }}}};
+        }}
+        if (scoped) {{
+          dialogLease = manageDialogScope('enter', {{token, policy, deadline}});
+          if (!dialogLease) {{
+            return {{ok: false, error: {{
+              name: 'TimeoutError', message: 'Dialog scope expired before caller execution',
+              code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+            }}}};
+          }}
+        }}
         const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
         let value;
         const _btapEvalGuard = (() => {{
@@ -5239,29 +5309,43 @@ def _build_cdp_fallback_expression(script: str, policy: str, timeout: float) -> 
           catch (error) {{ return {{ error }}; }}
         }})();
         try {{
+          // Scope installation and compile-only probes can consume the last
+          // budget. Recheck after preparation, immediately before each caller.
+          if (Date.now() >= deadline) {{
+            return {{ok: false, error: {{
+              name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+              code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+            }}}};
+          }}
           if (_btapEvalGuard.error) throw _btapEvalGuard.error;
           value = eval(_btapEvalGuard.source);
           if (value instanceof Promise) value = await value;
         }} catch (error) {{
           const parseFailed = _btapEvalGuard.error || !_btapEvalGuard.started();
           if (parseFailed && error instanceof SyntaxError &&
-              (_btapEvalGuard.error || /return/i.test(error.message)))
-            value = await (new AsyncFunction(prepareGuardedEval.asyncBody(rawJsCode)))();
-          else throw error;
+              (_btapEvalGuard.error || /return/i.test(error.message))) {{
+            const asyncCaller = new AsyncFunction(prepareGuardedEval.asyncBody(rawJsCode));
+            if (Date.now() >= deadline) {{
+              return {{ok: false, error: {{
+                name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+                code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+              }}}};
+            }}
+            value = await asyncCaller();
+          }} else throw error;
         }} finally {{
           if (_btapEvalGuard.cleanup) _btapEvalGuard.cleanup();
         }}
-        return {{ok: true, data: smartProcessResult(value)}};
+        const processed = smartProcessResult(value);
+        const dialogs = dialogLease ? dialogLease.records() : [];
+        return {{ok: true, data: dialogs.length ? {{
+          __btap_dialog_result: true, value: processed, dialogs,
+        }} : processed}};
       }} catch (error) {{
-        return {{ok: false, error: {{name: error.name || 'Error',
-          message: error.message || String(error), stack: error.stack || ''}}}};
+        return {{ok: false, error: {{name: error?.name || 'Error',
+          message: error?.message || String(error), stack: error?.stack || ''}}}};
       }} finally {{
-        if (scoped && Array.isArray(window.__btap_dialog_scopes)) {{
-          window.__btap_dialog_scopes = window.__btap_dialog_scopes
-            .filter(scope => scope.token !== token && Date.now() < scope.deadline);
-          window.__btap_suppress_until = window.__btap_dialog_scopes.reduce(
-            (latest, scope) => Math.max(latest, Number(scope.deadline) || 0), 0);
-        }}
+        if (dialogLease) dialogLease.release();
       }}
     }})()
     """
@@ -5322,16 +5406,35 @@ def _execute_js_cdp_fallback(
             "bridge_route_error": str(route_error),
             "error": str(message or "CDP evaluation failed"),
         }
-    return {
+    return _normalize_execute_js_dialog_result({
         "status": "success",
         "js_return": wrapped.get("data"),
         "tab_id": tab_id,
         "execution_mode": "cdp_fallback",
         "bridge_route_error": str(route_error),
-    }
+    })
 
 
-@mcp.tool(description="Execute arbitrary JS in the requested real-browser tab under one total deadline. BTAP pins every monitor/retry/result roundtrip to an explicit session, uses the service-worker/page route first, and falls back to directed Runtime.evaluate on SPA/CSP bridge failures without retargeting. Script errors after execution starts do not trigger another execution. Use an explicit return in complex async bodies, preferably an async IIFE. Results use the same bounded conversion on all routes: undefined/non-finite numbers become null, BigInt/symbol become strings, DOM/Error/functions become readable values, and cycles/depth 6/iterables above 200 items have markers. Set wait=false for a genuinely long task: BTAP returns an operation_id after delivery acknowledgement, and get_execute_js_result claims the late result without replaying side effects. Use wait_for/wait_for_url instead of setTimeout or sleep Promises when waiting for page state. JSON-encoded js_return values above the 24 KiB UTF-8 inline limit, or containing unpaired UTF-16 code units at any size, use a private temporary JSON file with result_file, result_bytes, result_sha256, result_format and result_file_scope=js-value. When result_file_encoding=json, parse the path field once as JSON before opening the file; unmarked paths are used directly. The file preserves the complete converted value, including any conversion markers. If file writing fails, result_json contains the complete ASCII JSON backup with result_json_scope=js-value; parse it once. This explicit fallback can exceed the inline limit and preserves the original result and retry verdicts.")
+@mcp.tool(description=(
+    "Execute arbitrary JS, which can cause side effects, in session_id's browser tab under one "
+    "total deadline. Pin an explicit session_id; fallbacks keep that target and never replay "
+    "an already-started script. For complex async bodies use an explicit return in an async IIFE. "
+    "accept/dismiss prepare current injectable frames on extension routes; the legacy CDP "
+    "fallback covers only its current evaluation context. manual keeps native dialogs. "
+    "wait=false returns operation_id after delivery acknowledgement; collect with "
+    "get_execute_js_result in the same MCP session, without replay. partial/unknown results "
+    "or an expired handle do not prove non-execution; inspect retry_safe before retrying. "
+    "Use wait_for/wait_for_url for page state instead of sleep Promises. "
+    "Conversion on all routes: undefined/non-finite numbers become null; BigInt/symbol become "
+    "strings; DOM/Error/functions become readable values; cycles/depth 6/iterables above 200 "
+    "items have markers. JSON UTF-8 over 24 KiB or any unpaired UTF-16 uses a private JSON "
+    "result_file with result_bytes, result_sha256, result_format and result_file_scope=js-value. "
+    "result_file_encoding=json means JSON-decode the path once; otherwise use it directly. "
+    "Parse the UTF-8 file once; it preserves the full converted value and markers. "
+    "If file writing fails, parse the complete ASCII result_json once "
+    "(result_json_scope=js-value); this fallback may exceed the inline limit and preserves "
+    "original result/retry verdicts."
+))
 def execute_js(
     script: str,
     session_id: Optional[str] = None,
@@ -5600,13 +5703,32 @@ def execute_js(
                 except Exception as cleanup_error:
                     if primary_error is None:
                         raise
-                    logger.warning("execute_js dialog policy cleanup failed: %s", cleanup_error)
+                    logger.warning(
+                        "execute_js dialog policy cleanup failed: error_type=%s",
+                        type(cleanup_error).__name__,
+                    )
         finally:
             if session_id is not None:
                 driver.default_session_id = prev_default
 
 
-@mcp.tool(description="Read or briefly wait for an operation_id returned by execute_js or another timed-out bridge command. Call from the same MCP session that submitted it. This call never replays the operation. Completed results can be read repeatedly after a lost query response, within the retention limits: up to 10 minutes and at most 512 completed records, with earlier eviction under capacity pressure. After reservation expiry, the first valid late terminal reply appears as late_result (success and data) with late_reply_age in seconds; the original unknown receipt and retry_safe=false remain. Large or unpaired-UTF-16 successful values use execute_js result_file metadata, or result_json if file writing fails, with scope=js-value. For late replies the descriptor is inside late_result and data becomes null; JSON-decode the path first only when result_file_encoding=json, then parse the UTF-8 file or result_json once as JSON. Export failure preserves the complete value and original retry verdict. Late replies do not renew retention or reserve the tab again. An unknown/expired handle does not prove the operation was never executed. timeout may be 0-120 seconds. Ordinary pending operations keep their tabs reserved, but a timed-out server-generated read-only wait probe can release its tab before its reply arrives. Use reservation_held to check actual ownership; other tabs remain usable.")
+@mcp.tool(description=(
+    "Read or wait for an operation_id from execute_js or another timed-out bridge command, "
+    "including open_new_tab's nested reconciliation.bridge_operation.operation_id. "
+    "The outer tab-creation ID uses open_new_tab recovery. Call from the submitting MCP "
+    "session; this tool never replays operations. timeout is 0-120 seconds. Completed "
+    "results are repeatable for up to 10 minutes and 512 records, with earlier capacity "
+    "eviction. Unknown/expired does not prove non-execution. After reservation expiry, "
+    "the first valid terminal reply is late_result (success,data), with late_reply_age "
+    "in seconds; unknown and retry_safe=false remain. Late replies neither renew retention "
+    "nor reserve targets again. Known read-only wait, inventory and creation-status probes "
+    "can release on timeout; reservation_held describes that probe, not a prior mutation. "
+    "Large or unpaired-UTF-16 values use execute_js result_file metadata or fallback "
+    "result_json, with scope=js-value. Late descriptors are inside late_result with "
+    "data=null. JSON-decode the path only when result_file_encoding=json, then parse the "
+    "UTF-8 file or result_json once as JSON. Export failure preserves the complete value "
+    "and original retry verdict."
+))
 def get_execute_js_result(
     operation_id: str,
     timeout: float = 0.0,
@@ -5656,7 +5778,15 @@ def get_execute_js_result(
     )
 
 
-@mcp.tool(description="Call one Chrome DevTools Protocol command. session_id accepts client:tabId; tab_id accepts either a native number or the same composite session string.")
+@mcp.tool(description=(
+    "Raw CDP can cause side effects in a tab, extension target or the entire browser profile. "
+    "Choose session_id (client:tabId), tab_id (number or composite), extension_id or target_id "
+    "deliberately. Listed high-risk methods are blocked before dispatch unless mode=lab "
+    "AND operator env BROWSERTAP_ALLOW_UNSAFE_CDP=1; safe always blocks them "
+    "(raw_cdp_blocked, delivery_state=undelivered, retry_safe=false, retryable=false). This guard prevents "
+    "common destructive calls; allowed CDP/JavaScript can still change pages or profile state. Inspect state "
+    "after uncertain delivery before retrying."
+))
 def cdp_command(
     method: str,
     params_json: str = "{}",
@@ -5666,7 +5796,10 @@ def cdp_command(
     target_id: Optional[str] = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
+    validate_raw_cdp_method(method, allow_unsafe=_raw_cdp_unsafe_enabled())
     params = json.loads(params_json or "{}")
+    if not isinstance(params, dict):
+        raise ValueError("params_json must be a JSON object")
     payload: dict[str, Any] = {"cmd": "cdp", "method": method, "params": params}
     if extension_id is not None or target_id is not None:
         # Non-tab debuggee. Routed via ext_cmd so it works with no tabs open.
@@ -5808,13 +5941,22 @@ def debugger_targets(session_id: Optional[str] = None) -> dict[str, Any]:
     return driver.ext_cmd({"cmd": "debugger_targets"}, client_id=client_id, timeout=20.0)
 
 
-@mcp.tool(description="Run a CDP bridge batch command; pass the full JSON command object as text.")
+@mcp.tool(description=(
+    "Raw CDP batches can cause side effects across multiple targets or the entire browser profile. "
+    "Pass the full JSON object with cmd='batch'; child targets may inherit or override top-level "
+    "tabId. Policy checks complete for the whole batch before dispatch. Listed high-risk "
+    "methods require mode=lab AND operator env BROWSERTAP_ALLOW_UNSAFE_CDP=1; safe always "
+    "blocks them (raw_cdp_blocked, delivery_state=undelivered, retry_safe=false, retryable=false). "
+    "Allowed CDP/JavaScript can still change pages or profile state. Inspect state after uncertain delivery "
+    "before retrying a batch."
+))
 def cdp_batch(batch_json: str, session_id: Optional[str] = None) -> dict[str, Any]:
     payload = json.loads(batch_json)
     if not isinstance(payload, dict):
         raise ValueError("batch_json must be a JSON object with cmd='batch'")
     if payload.get("cmd") != "batch":
         raise RuntimeError("batch_json must be a JSON object with cmd='batch'")
+    validate_raw_cdp_batch(payload, allow_unsafe=_raw_cdp_unsafe_enabled())
     return _extension_batch(payload, session_id=session_id, timeout=30.0)
 
 
@@ -6994,50 +7136,30 @@ def _approval_timeout() -> float:
     try:
         value = float(raw)
     except ValueError:
-        logger.warning("%s=%r is not a number; using %ss",
-                       _APPROVAL_TIMEOUT_ENV, raw, _DEFAULT_APPROVAL_TIMEOUT)
+        logger.warning("%s is not a number; using %ss",
+                       _APPROVAL_TIMEOUT_ENV, _DEFAULT_APPROVAL_TIMEOUT)
         return _DEFAULT_APPROVAL_TIMEOUT
-    return value if value > 0 else _DEFAULT_APPROVAL_TIMEOUT
+    return value if math.isfinite(value) and value > 0 else _DEFAULT_APPROVAL_TIMEOUT
 
 
 async def _request_site_permission_approval(
     ctx: Context, permission: str, origin: str, duration_seconds: int
-) -> bool:
-    profile = _automation_profile()
-    if profile["mode"] == "lab" and profile["no_elicit"]:
-        return True
-    approval_key = _approval_key(ctx)
-    if profile["mode"] == "lab" and approval_key in _LAB_SITE_PERMISSION_APPROVALS:
-        return True
-    try:
-        with anyio.fail_after(_approval_timeout()):
-            result = await ctx.elicit(
-                message=("BTAP requests temporary site permission: "
-                         f"allow {permission} for {origin} for {duration_seconds} seconds"),
-                schema=SitePermissionApproval,
-            )
-        approved = (
-            result.action == "accept" and result.data is not None
-            and result.data.approve is True
-        )
-        if approved and profile["mode"] == "lab":
-            _LAB_SITE_PERMISSION_APPROVALS.add(approval_key)
-        return approved
-    except TimeoutError:
-        logger.warning(
-            "Site-permission approval for %s on %s went unanswered for %ss; treating it as "
-            "declined so the tool lock is released.",
-            permission, origin, _approval_timeout(),
-        )
-        return False
-    except Exception:
-        return False
+) -> _ApprovalDecision:
+    return await _request_approval(
+        ctx,
+        message=("BTAP requests temporary site permission: "
+                 f"allow {permission} for {origin} for {duration_seconds} seconds"),
+        schema=SitePermissionApproval,
+        approvals=_LAB_SITE_PERMISSION_APPROVALS,
+        category="Site-permission",
+    )
 
 
-def _site_permission_requires_user_action() -> dict[str, Any]:
+def _site_permission_requires_user_action(reason: _ApprovalReason | None) -> dict[str, Any]:
     return {
         "status": "requires_user_action",
         "message": "Temporary site-permission approval was declined, cancelled, or unavailable.",
+        "reason": reason,
     }
 
 
@@ -7062,6 +7184,8 @@ def _site_permission_extension_result(response: Any) -> dict[str, Any]:
         "clipboard returns unsupported because its prior state cannot be restored. "
         "safe asks on every allow; lab skips prompts by default and restores session approval only "
         "when BROWSERTAP_LAB_NO_ELICIT is explicitly disabled. Leases attempt to restore their prior setting. "
+        "requires_user_action.reason distinguishes elicitation_unsupported, declined, timeout, cancelled "
+        "and error; an unsuccessful approval never sends a permission grant. "
         "If restoration becomes unsupported, manual_recovery retains that setting and recovery guidance "
         "without automatic retries; an explicit reset can retry after the cause is resolved."
     )
@@ -7104,10 +7228,12 @@ async def set_site_permission(
         normalized_origin,
     ) = await anyio.to_thread.run_sync(prepare)
     try:
-        if normalized_setting == "allow" and not await _request_site_permission_approval(
-            ctx, spec["setting"], normalized_origin, duration
-        ):
-            return _site_permission_requires_user_action()
+        if normalized_setting == "allow":
+            decision = await _request_site_permission_approval(
+                ctx, spec["setting"], normalized_origin, duration
+            )
+            if not decision.approved:
+                return _site_permission_requires_user_action(decision.reason)
         response = await anyio.to_thread.run_sync(
             lambda: driver.ext_cmd(
                 {
@@ -7908,52 +8034,110 @@ def _pyautogui():
 
 
 
-# --- Physical input: operator approval gate ----------------------------------
+# --- Site permissions and physical input: operator approval gate -------------
 
 class PhysicalInputApproval(BaseModel):
     approve: StrictBool = Field(description="Approve this one physical input action")
 
 
+_ApprovalReason = Literal[
+    "elicitation_unsupported", "declined", "timeout", "cancelled", "error",
+]
 
-async def _request_physical_approval(ctx: Context, summary: str) -> bool:
-    """Ask the client for approval without touching any physical-input APIs."""
+
+@dataclass(frozen=True)
+class _ApprovalDecision:
+    approved: bool
+    reason: _ApprovalReason | None = None
+
+
+def _supports_form_elicitation(ctx: Context) -> bool:
+    if not callable(getattr(ctx, "elicit", None)):
+        return False
+    request_context = getattr(ctx, "request_context", None)
+    session = getattr(request_context, "session", None)
+    # Context doubles / in-process callers can implement elicit themselves.
+    # Real MCP sessions expose their initialized client capabilities.
+    if session is None or not hasattr(session, "client_params"):
+        return True
+    client_params = session.client_params
+    capability = (
+        getattr(client_params.capabilities, "elicitation", None)
+        if client_params is not None else None
+    )
+    if capability is None:
+        return False
+    # Legacy elicitation={} means form support. A URL-only client cannot
+    # answer this primitive boolean form; newer clients advertise form={}.
+    return capability.form is not None or capability.url is None
+
+
+async def _request_approval(
+    ctx: Context,
+    *,
+    message: str,
+    schema: type[SitePermissionApproval] | type[PhysicalInputApproval],
+    approvals: set[str],
+    category: Literal["Site-permission", "Physical-input"],
+) -> _ApprovalDecision:
+    """Ask for a strict boolean form without performing the approved action."""
     profile = _automation_profile()
     if profile["mode"] == "lab" and profile["no_elicit"]:
-        return True
-    approval_key = _approval_key(ctx)
-    if profile["mode"] == "lab" and approval_key in _LAB_PHYSICAL_APPROVALS:
-        return True
+        return _ApprovalDecision(True)
     try:
+        approval_key = _approval_key(ctx)
+        if profile["mode"] == "lab" and approval_key in approvals:
+            return _ApprovalDecision(True)
+        if not _supports_form_elicitation(ctx):
+            return _ApprovalDecision(False, "elicitation_unsupported")
         with anyio.fail_after(_approval_timeout()):
-            result = await ctx.elicit(
-                message=f"BTAP requests one physical input action: {summary}",
-                schema=PhysicalInputApproval,
-            )
-        approved = (
-            result.action == "accept" and result.data is not None
-            and result.data.approve is True
-        )
-        if approved and profile["mode"] == "lab":
-            _LAB_PHYSICAL_APPROVALS.add(approval_key)
-        return approved
-    except TimeoutError:
-        # Never fall through to "approved" on a timeout, and never keep holding
-        # the tool lock waiting for a human who has walked away.
+            result = await ctx.elicit(message=message, schema=schema)
+        if result.action == "decline":
+            return _ApprovalDecision(False, "declined")
+        if result.action == "cancel":
+            return _ApprovalDecision(False, "cancelled")
+        if (
+            result.action != "accept" or result.data is None
+            or type(result.data.approve) is not bool
+        ):
+            return _ApprovalDecision(False, "error")
+        if result.data.approve is not True:
+            return _ApprovalDecision(False, "declined")
+        if profile["mode"] == "lab":
+            approvals.add(approval_key)
+        return _ApprovalDecision(True)
+    except Exception as exc:
+        # Task cancellation inherits BaseException and must still propagate,
+        # allowing each caller's finally block to clean up its claimed state.
+        reason: _ApprovalReason = "error"
+        if isinstance(exc, TimeoutError):
+            reason = "timeout"
+        elif isinstance(exc, NotImplementedError) or (
+            isinstance(exc, McpError) and exc.error.code == METHOD_NOT_FOUND
+        ):
+            reason = "elicitation_unsupported"
         logger.warning(
-            "Physical-input approval (%s) went unanswered for %ss; treating it as declined.",
-            summary, _approval_timeout(),
+            "%s approval: reason=%s error_type=%s",
+            category, reason, type(exc).__name__,
         )
-        return False
-    except Exception:
-        # Older MCP clients may not implement elicitation. Physical input is
-        # deliberately unavailable in that case instead of silently proceeding.
-        return False
+        return _ApprovalDecision(False, reason)
 
 
-def _requires_user_action() -> dict[str, Any]:
+async def _request_physical_approval(ctx: Context, summary: str) -> _ApprovalDecision:
+    return await _request_approval(
+        ctx,
+        message=f"BTAP requests one physical input action: {summary}",
+        schema=PhysicalInputApproval,
+        approvals=_LAB_PHYSICAL_APPROVALS,
+        category="Physical-input",
+    )
+
+
+def _requires_user_action(reason: _ApprovalReason | None) -> dict[str, Any]:
     return {
         "status": "requires_user_action",
         "message": "One-action physical-input approval was declined, cancelled, or unavailable.",
+        "reason": reason,
     }
 
 
@@ -7982,18 +8166,24 @@ def inspect_native_file_dialog(desktop_opt_in: StrictBool = False) -> dict[str, 
     "sends one bounded message to that Cancel control without activating a window. Reports "
     "cancelled only after observing the dialog HWND gone; uncertain delivery or closure is "
     "unknown with retry_safe=false. Inspect state before another action. Returns desktop, "
-    "on_screen and input_quiet diagnostics; unsupported native layouts are refused."
+    "on_screen and input_quiet diagnostics; unsupported native layouts are refused. "
+    "Approval failures expose reason in the result and diagnostics: elicitation_unsupported, "
+    "declined, timeout, cancelled or error."
 ))
 async def cancel_native_file_dialog(
     ticket: str, ctx: Context, desktop_opt_in: StrictBool = False,
 ) -> dict[str, Any]:
     with native_dialog._claim_cancellation(ticket, desktop_opt_in=desktop_opt_in) as cancellation:
-        approved = True
+        decision = _ApprovalDecision(True)
         if cancellation.needs_approval():
-            approved = await _request_physical_approval(ctx, "cancel the inspected native file dialog")
-        return await anyio.to_thread.run_sync(functools.partial(
-            cancellation.cancel, approved=approved,
+            decision = await _request_physical_approval(ctx, "cancel the inspected native file dialog")
+        result = await anyio.to_thread.run_sync(functools.partial(
+            cancellation.cancel, approved=decision.approved,
         ))
+        if not decision.approved:
+            # Ticket expiry/identity errors keep their original error code.
+            result["reason"] = decision.reason
+        return result
 
 
 async def _run_approved_physical_action(
@@ -8005,8 +8195,9 @@ async def _run_approved_physical_action(
     activate_session: Optional[str] = None,
     points: Optional[Sequence[tuple[Any, Any]]] = None,
 ) -> dict[str, Any]:
-    if not await _request_physical_approval(ctx, summary):
-        return _requires_user_action()
+    decision = await _request_physical_approval(ctx, summary)
+    if not decision.approved:
+        return _requires_user_action(decision.reason)
 
     should_activate = session_id is not None or activate_session not in (None, "none")
     action_started = False

@@ -5,9 +5,10 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '2752911b822fab7e';
+const BTAP_BUILD = '1b751886b135aa05';
 importScripts('result_serialization.js');
 importScripts('guarded_eval.js');
+importScripts('disable_dialogs.js');
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
   // Drop the old browser-wide CSP-stripping rule if this is an upgrade.
@@ -2758,20 +2759,30 @@ async function enablePageForNavigation(tabId, deadlineEpochMs) {
 //
 // The budget is a deadline rather than a per-attempt timeout: the retry below
 // must not double it.
-async function runCdpExecFallback(tabId, wrappedCode, budgetMs = null) {
-  const deadline = Date.now() + boundedCdpTimeout(budgetMs, DEFAULT_CDP_TIMEOUT_MS);
+async function runCdpExecFallback(tabId, wrappedCode, budgetMs = null, deadlineEpochMs = null) {
+  const deadline = Number.isFinite(deadlineEpochMs) ? deadlineEpochMs
+    : Date.now() + boundedCdpTimeout(budgetMs, DEFAULT_CDP_TIMEOUT_MS);
+  const budgetExpired = () => ({
+    ok: false,
+    error: {
+      name: 'TimeoutError', message: 'CDP fallback exhausted the command deadline before dispatch',
+      stack: '', code: 'cdp_timeout', dispatched: false, may_have_executed: false,
+    },
+  });
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let lease = null;
     let commandInvoked = false;
     const dispatchState = { dispatched: false };
     try {
-      lease = await attachBtapDebugger({ tabId });
+      if (Date.now() >= deadline) return budgetExpired();
+      lease = await attachBtapDebugger({ tabId }, deadline - Date.now());
+      if (Date.now() >= deadline) return budgetExpired();
       commandInvoked = true;
       const cdpRes = await sendDebuggerCommandWithTimeout(
         lease, 'Runtime.evaluate', {
           expression: wrappedCode, awaitPromise: true, returnByValue: true,
-        }, Math.max(100, deadline - Date.now()), 100, dispatchState,
+        }, Math.max(1, deadline - Date.now()), 1, dispatchState,
         (attachment) => settleZombieAfterTimeout(tabId, attachment),
       );
       // A successful command necessarily reached Chrome. This also keeps the
@@ -2813,8 +2824,9 @@ async function runCdpExecFallback(tabId, wrappedCode, budgetMs = null) {
         }
         return { ok: false, error: failure };
       }
+      if (Date.now() >= deadline) return budgetExpired();
       console.log('[BTAP-WS] CDP fallback attach failed (' + code + '), one retry for tab', tabId);
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, Math.min(50, deadline - Date.now())));
     } finally {
       if (lease) { try { await detachBtapDebugger(lease); } catch (_) {} }
     }
@@ -4209,46 +4221,40 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
   const dialogPolicy = hasDialogScope ? dialogScope.policy : null;
   const execSourceUrl = typeof sourceUrl === 'string' && sourceUrl
     ? sourceUrl.replace(/[\r\n]/g, '') : null;
+  const dialogManager = hasDialogScope ? `(${globalThis.manageDialogScope.toString()})` : 'null';
+  const scopeDeadline = Number.isFinite(dialogScope?.deadline) ? String(dialogScope.deadline)
+    : `Date.now() + ${dialogScopeWindowMs(dialogScope)}`;
   return `(async () => {
     const smartProcessResult = (${globalThis.smartProcessResult.toString()});
     const prepareGuardedEval = (${globalThis.prepareGuardedEval.toString()});
-    // Dialog suppression is scoped to this command: disable_dialogs.js defers
-    // to the native alert/confirm/prompt unless this deadline is in the future,
-    // so the user's own confirmations keep working during normal browsing.
-    //
-    // A DEADLINE rather than a boolean, because a boolean stays stuck on if the
-    // script throws past the finally, the tab navigates mid-command, or the
-    // worker is evicted — and a stuck flag silently eats the user's own
-    // confirm() dialogs, which is the very bug this was meant to fix.
-    //
-    // Each command captures its OWN deadline. Two concurrent commands used to
-    // share one window.__btap_suppress_until slot: whichever finished first
-    // zeroed it, un-suppressing the dialog while the other command's script
-    // was still mid-flight. Only the command that set the CURRENT value may
-    // clear it.
+    // Ordinary and manual execution never install a MAIN-world dialog hook.
+    // Answering commands own a lease; the last release restores the originals.
     const _btapHasDialogScope = ${JSON.stringify(hasDialogScope)};
-    const _btapDeadline = _btapHasDialogScope
-      ? Date.now() + ${dialogScopeWindowMs(dialogScope)} : 0;
-    const _btapDialogToken = ${JSON.stringify(dialogToken)};
-    if (_btapHasDialogScope) {
-      const _btapDialogScope = {
-        token: _btapDialogToken,
-        policy: ${JSON.stringify(dialogPolicy)},
-        deadline: _btapDeadline,
-      };
-      const _btapScopes = Array.isArray(window.__btap_dialog_scopes)
-        ? window.__btap_dialog_scopes : [];
-      _btapScopes.push(_btapDialogScope);
-      window.__btap_dialog_scopes = _btapScopes;
-      window.__btap_suppress_until = Math.max(
-        _btapDeadline,
-        ..._btapScopes.map(scope => Number(scope.deadline) || 0),
-      );
-    }
-    const _btapRecords = () => (Array.isArray(window.__btap_dialog_records)
-      ? window.__btap_dialog_records : [])
-      .filter(record => record.token === _btapDialogToken);
+    const _btapManageDialogScope = ${dialogManager};
+    const _btapStartDeadline = ${JSON.stringify(dialogScope?.startDeadline ?? null)};
+    let _btapDialogLease = null;
+    let _btapCallerStarted = false;
     try {
+      if (Number.isFinite(_btapStartDeadline) && Date.now() >= _btapStartDeadline) {
+        return { ok: false, error: {
+          name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+          code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+        } };
+      }
+      if (_btapHasDialogScope) {
+        _btapDialogLease = _btapManageDialogScope('enter', {
+          token: ${JSON.stringify(dialogToken)},
+          policy: ${JSON.stringify(dialogPolicy)},
+          deadline: ${scopeDeadline},
+          startDeadline: _btapStartDeadline,
+        });
+        if (!_btapDialogLease) {
+          return { ok: false, error: {
+            name: 'TimeoutError', message: 'Dialog scope expired before caller execution',
+            code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+          } };
+        }
+      }
       const rawJsCode = ${JSON.stringify(code)}.trim();
       const _btapExecSourceUrl = ${JSON.stringify(execSourceUrl)};
       const _btapWithSourceUrl = c => _btapExecSourceUrl
@@ -4261,6 +4267,13 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
         catch (error) { return { error }; }
       })();
       try {
+        // Scope installation and compilation spend the original caller budget.
+        if (Number.isFinite(_btapStartDeadline) && Date.now() >= _btapStartDeadline) {
+          return { ok: false, error: {
+            name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+            code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+          } };
+        }
         if (_btapEvalGuard.error) throw _btapEvalGuard.error;
         r = eval(_btapWithSourceUrl(_btapEvalGuard.source));
         if (r instanceof Promise) r = await r;
@@ -4271,9 +4284,18 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
         // before execution. A started script is never retried.
         if (parseFailed && e instanceof SyntaxError &&
             (_btapEvalGuard.error || /return/i.test(e.message))) {
-          r = await (new AsyncFunction(_btapWithSourceUrl(_air(rawJsCode))))();
+          const asyncCaller = new AsyncFunction(_btapWithSourceUrl(_air(rawJsCode)));
+          if (Number.isFinite(_btapStartDeadline) && Date.now() >= _btapStartDeadline) {
+            return { ok: false, error: {
+              name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+              code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+            } };
+          }
+          _btapCallerStarted = true;
+          r = await asyncCaller();
         } else throw e;
       } finally {
+        _btapCallerStarted ||= Boolean(_btapEvalGuard.started?.());
         if (_btapEvalGuard.cleanup) _btapEvalGuard.cleanup();
       }
       const processed = smartProcessResult(r);
@@ -4281,22 +4303,14 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
         return { ok: true, data: {
           __btap_dialog_result: true,
           value: processed,
-          dialogs: _btapRecords(),
+          dialogs: _btapDialogLease.records(),
         } };
       }
       return { ok: true, data: processed };
     } catch (e) {
       ${errorHandler}
     } finally {
-      if (_btapHasDialogScope && Array.isArray(window.__btap_dialog_scopes)) {
-        window.__btap_dialog_scopes = window.__btap_dialog_scopes
-          .filter(scope => scope.token !== _btapDialogToken && Date.now() < scope.deadline);
-        window.__btap_suppress_until = window.__btap_dialog_scopes.reduce(
-          (latest, scope) => Math.max(latest, Number(scope.deadline) || 0), 0
-        );
-      } else if (_btapHasDialogScope && window.__btap_suppress_until === _btapDeadline) {
-        window.__btap_suppress_until = 0;
-      }
+      if (_btapDialogLease) _btapDialogLease.release();
     }
   })()`;
 }
@@ -4308,14 +4322,14 @@ function buildExecScript(code, errorHandler, dialogScope = null, sourceUrl = nul
 // exact failure the deadline mechanism exists to prevent.
 //
 // The grace is added AFTER the ceiling, never clamped into it: the scope has to
-// outlive the command a little, because the extension-side record is stamped
-// when set_dialog_policy arrives while the page-side deadline starts later, when
-// the injection actually lands, and a script may run right up to its deadline.
+// outlive the command a little, because a script may run right up to its
+// deadline. handleWsExec fixes the page deadline before preparing any frames;
+// neither frame scheduling nor a CSP retry may restart that lifetime.
 // Clamping the sum would leave a max-budget command with no grace at all.
 const DIALOG_SCOPE_GRACE_MS = 10000;
 const DIALOG_SCOPE_MAX_BUDGET_MS = 120000;  // same ceiling set_dialog_policy applies
 
-// --- Script builders: page, subframe and CDP variants ---------------------
+// --- Script builders: page and CDP variants -----------------------------
 function dialogScopeWindowMs(scope) {
   const requested = Number(scope?.timeoutMs);
   const budget = Number.isFinite(requested) && requested > 0
@@ -4323,42 +4337,13 @@ function dialogScopeWindowMs(scope) {
   return Math.max(1000, budget) + DIALOG_SCOPE_GRACE_MS;
 }
 
-// The scope registration for frames that the exec preamble never reaches.
-// disable_dialogs.js runs in EVERY frame (manifest all_frames: true) and
-// activeScope() reads window.__btap_dialog_scopes out of its own frame's window,
-// but the preamble above only lands in the top frame. Without this an iframe's
-// confirm() falls through to the native dialog and blocks the very injection
-// that was supposed to be dialog-proof, with nothing reporting why.
-//
-// Sub-frame scopes are not explicitly cleared: activeScope() drops expired
-// entries as it reads, so the deadline is what bounds them. That is the whole
-// reason the deadline is derived from the command budget.
-function buildSubframeScopeScript(dialogScope) {
-  const active = Boolean(
-    dialogScope?.token &&
-    (dialogScope.policy === 'dismiss' || dialogScope.policy === 'accept')
-  );
-  if (!active) return 'void 0';
-  const scope = {
-    token: String(dialogScope.token),
-    policy: dialogScope.policy,
-  };
-  return `(() => {
-    const _btapScope = ${JSON.stringify(scope)};
-    _btapScope.deadline = Date.now() + ${dialogScopeWindowMs(dialogScope)};
-    const _btapScopes = Array.isArray(window.__btap_dialog_scopes)
-      ? window.__btap_dialog_scopes : [];
-    _btapScopes.push(_btapScope);
-    window.__btap_dialog_scopes = _btapScopes;
-  })()`;
-}
-
 function buildPageScript(code, dialogScope = null) {
   return buildExecScript(code, `
       const errMsg = e.message || String(e);
       const isCspEvalError = typeof EvalError === 'function' && e instanceof EvalError;
       return { ok: false, error: { name: e.name || 'Error', message: errMsg, stack: e.stack || '' },
-        csp: isCspEvalError && /refused to evaluate|unsafe-eval|content security policy/i.test(errMsg) };
+        csp: !_btapCallerStarted && isCspEvalError &&
+          /refused to evaluate|unsafe-eval|content security policy/i.test(errMsg) };
   `, dialogScope);
 }
 
@@ -5195,6 +5180,16 @@ async function handleWsExec(data) {
     send({ type: 'error', id: data.id, error: 'No tabId provided' });
     return;
   }
+  const answeringScope = dialogScope?.policy === 'accept' || dialogScope?.policy === 'dismiss';
+  const scopeStartedAt = Date.now();
+  const executionDeadline = answeringScope
+    ? scopeStartedAt + boundedCdpTimeout(data.timeoutMs ?? dialogScope.timeoutMs, DEFAULT_CDP_TIMEOUT_MS)
+    : null;
+  const frameDialogScope = answeringScope ? {
+    ...dialogScope,
+    startDeadline: executionDeadline,
+    deadline: scopeStartedAt + dialogScopeWindowMs({ timeoutMs: executionDeadline - scopeStartedAt }),
+  } : dialogScope;
   // Use onCreated listener to reliably capture new tabs (avoids race condition with query-diff).
   // Only count tabs THIS script opened (openerTabId === tabId): without the
   // filter every new tab in the browser — including ones the user opens by
@@ -5202,6 +5197,31 @@ async function handleWsExec(data) {
   const newTabIds = new Set();
   const onCreated = (tab) => { if (tab.openerTabId === tabId) newTabIds.add(tab.id); };
   chrome.tabs.onCreated.addListener(onCreated);
+  let dialogScopesCleared = false;
+  const clearFrameDialogScopes = async () => {
+    if (dialogScopesCleared || !answeringScope) return;
+    // Mark before awaiting: an uncertain cleanup response must not trigger a
+    // second injection. Each frame also has its own deadline and cleanup timer.
+    dialogScopesCleared = true;
+    let cleanupTimer = null;
+    try {
+      const cleanup = chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        world: 'MAIN',
+        func: globalThis.manageDialogScope,
+        args: ['release', { token: dialogScope.token }],
+      }).catch(() => {});
+      const remaining = Math.min(1000, executionDeadline - Date.now());
+      if (remaining <= 0) return;
+      await Promise.race([
+        cleanup,
+        // A frame that stopped answering must not hide an already-known exec
+        // outcome. Its page timer still expires the scope independently.
+        new Promise(resolve => { cleanupTimer = setTimeout(resolve, remaining); }),
+      ]);
+    } catch (_) { /* navigation/restricted frames: deadline remains the fallback */ }
+    finally { if (cleanupTimer !== null) clearTimeout(cleanupTimer); }
+  };
   try {
     let res;
     if (dialogScope?.policy === 'manual') {
@@ -5210,13 +5230,67 @@ async function handleWsExec(data) {
       // a Function constructor, so manual evaluations never use executeScript.
       res = await executeManualScript(tabId, data.code, dialogScope);
     } else {
+      const executionFailure = (message, dispatched = false, code = 'exec_timeout') => ({
+        ok: false,
+        error: {
+          name: code === 'exec_timeout' ? 'TimeoutError' : 'Error',
+          message, stack: '', code, dispatched, may_have_executed: dispatched, retryable: false,
+        },
+        dispatched, may_have_executed: dispatched,
+      });
+      const withinDeadline = async (operation, callerMayRun) => {
+        if (!answeringScope) return { value: await operation() };
+        const remaining = executionDeadline - Date.now();
+        if (remaining <= 0) return { failure: executionFailure('Command deadline expired before dispatch') };
+        let timer = null;
+        try {
+          return await Promise.race([
+            operation().then(value => ({ value })),
+            new Promise(resolve => {
+              timer = setTimeout(() => resolve({ failure: executionFailure(
+                callerMayRun
+                  ? 'Command deadline expired waiting for executeScript; the script may already have executed'
+                  : 'Command deadline expired preparing dialog scopes; caller code was not dispatched',
+                callerMayRun,
+              ) }), remaining);
+            }),
+          ]);
+        } finally { if (timer !== null) clearTimeout(timer); }
+      };
+      if (answeringScope) {
+        try {
+          // Chrome does not order allFrames injections. Finish every scope
+          // installation before any caller can reach a sibling frame's dialog.
+          // A direct function injection works even where page CSP blocks eval.
+          const prepared = await withinDeadline(() => chrome.scripting.executeScript({
+            target: { tabId, allFrames: true },
+            world: 'MAIN',
+            func: globalThis.manageDialogScope,
+            args: ['install', frameDialogScope],
+          }), false);
+          const entries = prepared.value;
+          const confirmed = Array.isArray(entries) && entries.length > 0 && entries.every(entry => {
+            const ack = entry?.result;
+            return ack?.__btap_dialog_scope_installed === true &&
+              ack.token === String(frameDialogScope.token) && ack.policy === frameDialogScope.policy &&
+              ack.deadline === frameDialogScope.deadline && typeof ack.top === 'boolean';
+          }) && entries.filter(entry => entry.result.top).length === 1;
+          if (prepared.failure) res = prepared.failure;
+          else if (!confirmed) res = executionFailure(
+            'Dialog scope preparation did not confirm every target frame; caller code was not dispatched',
+            false, 'dialog_scope_setup_failed',
+          );
+        } catch (e) {
+          res = executionFailure(
+            'Dialog scope preparation failed; caller code was not dispatched: ' + (e?.message || String(e)),
+            false, 'dialog_scope_setup_failed',
+          );
+        }
+      }
       const inject = async () => {
-        // allFrames so the dialog scope reaches the sub-frames whose own
-        // disable_dialogs.js would otherwise fall through to a native dialog and
-        // block this injection (see buildSubframeScopeScript). The caller's code
-        // still runs in the top frame only — sub-frames evaluate the scope
-        // registration and nothing else.
-        const result = await chrome.scripting.executeScript({
+        // Frames already hold the scope. This pass runs caller code only in
+        // the top frame; subframes do not eval or acquire another lease.
+        const injection = await withinDeadline(() => chrome.scripting.executeScript({
           target: { tabId, allFrames: true },
           world: 'MAIN',
           // Always wrap the top-frame value in a marker. Without this layer a
@@ -5224,8 +5298,16 @@ async function handleWsExec(data) {
           // injection response that never carried a top-frame result, and the
           // old caller treated both as CSP. The marker also preserves explicit
           // null/false/0/empty-string values across the scripting boundary.
-          func: async (s, sub) => {
+          func: async (s, deadline) => {
             if (window.top === window) {
+              // Chrome can deliver an injection after its worker timed out.
+              // Do not install a fresh scope or run a late caller in that case.
+              if (Number.isFinite(deadline) && Date.now() >= deadline) {
+                return { __btap_top_frame_result: true, value: { ok: false, error: {
+                  name: 'TimeoutError', message: 'Command deadline expired before caller execution',
+                  code: 'exec_timeout', dispatched: false, may_have_executed: false, retryable: false,
+                } } };
+              }
               try {
                 return { __btap_top_frame_result: true, value: await eval(s) };
               } catch (e) {
@@ -5255,13 +5337,15 @@ async function handleWsExec(data) {
                 };
               }
             }
-            return eval(sub);
+            return null;
           },
           args: [
-            buildPageScript(data.code, dialogScope),
-            buildSubframeScopeScript(dialogScope),
+            buildPageScript(data.code, frameDialogScope),
+            executionDeadline,
           ]
-        });
+        }), true);
+        if (injection.failure) return injection.failure;
+        const result = injection.value;
         // Pick the top frame by the marker produced by the injected function,
         // not by frameId or array position. Chrome can return a top-level
         // document under a non-zero frame id (observed after navigation on MDN),
@@ -5295,12 +5379,15 @@ async function handleWsExec(data) {
         // declarativeNetRequest rule change makes Chrome re-evaluate the tab's
         // requests — doing that in the same await chain as the injection made
         // executeScript hang indefinitely (ACK sent, result never returned).
-        res = await inject();
+        if (!res) res = await inject();
         // Only a CSP-flavoured failure justifies relaxing the header, and then
         // only for this tab, for this one retry.
         if (res && !res.ok && res.csp) {
           console.log('[BTAP-WS] retrying injection with CSP relaxed for tab', tabId);
-          try { res = await withCspOff(tabId, inject); } catch (e) {
+          try {
+            const relaxed = await withinDeadline(() => withCspOff(tabId, inject), true);
+            res = relaxed.failure || relaxed.value;
+          } catch (e) {
             console.log('[BTAP-WS] CSP-relaxed retry failed:', e.message);
             // The relaxed attempt reached Chrome. Its rejection does not tell
             // us whether the page function ran before the result channel broke,
@@ -5352,12 +5439,14 @@ async function handleWsExec(data) {
       if (res && !res.ok && res.csp) {
         console.log('[BTAP-WS] CDP fallback for tab', tabId);
         res = await runCdpExecFallback(
-          tabId, buildCdpScript(data.code, dialogScope), data.timeoutMs,
+          tabId, buildCdpScript(data.code, frameDialogScope), data.timeoutMs, executionDeadline,
         );
       }
     }
+    await clearFrameDialogScopes();
     // Grace period for async tab creation (e.g. link click with target=_blank)
-    if (newTabIds.size === 0) await new Promise(r => setTimeout(r, 200));
+    const tabGrace = answeringScope ? Math.min(200, executionDeadline - Date.now()) : 200;
+    if (newTabIds.size === 0 && tabGrace > 0) await new Promise(r => setTimeout(r, tabGrace));
     chrome.tabs.onCreated.removeListener(onCreated);
     // Get full info for captured new tabs
     // Each captured tab is independent, so different tabs can resolve in
@@ -5386,8 +5475,10 @@ async function handleWsExec(data) {
       send({ type: 'error', id: data.id, error: res?.error || 'Unknown error', newTabs, tabId });
     }
   } catch (e) {
+    await clearFrameDialogScopes();
     send({ type: 'error', id: data.id, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' }, tabId });
   } finally {
+    await clearFrameDialogScopes();
     chrome.tabs.onCreated.removeListener(onCreated);
   }
 }

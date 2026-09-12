@@ -113,6 +113,10 @@ Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `re
 Enter 兜底，并对每次站点 `allow` 操作进行询问。两种 profile 均保留输入锁、安静窗口、
 所有权检查、目标激活和屏幕确认。
 
+批准失败时，`requires_user_action` 的 `reason` 区分宿主不支持（`elicitation_unsupported`）、
+用户拒绝（`declined`）、超时（`timeout`）、提示取消（`cancelled`）和交互失败（`error`）；
+这些结果都不派发操作，不能把用户拒绝当作宿主能力缺失。
+
 已打开的 Windows 标准文件框若由已注册 Chrome 或 Edge 持有，先调用
 `inspect_native_file_dialog(desktop_opt_in=true)`，再在同一 MCP 进程中于 15 秒内调用
 `cancel_native_file_dialog(ticket=..., desktop_opt_in=true)`。这两个工具要求 `[desktop]`。
@@ -126,6 +130,8 @@ Enter 兜底，并对每次站点 `allow` 操作进行询问。两种 profile �
 
 - 导航结果会受 JavaScript dialog 或 `beforeunload` 影响时，应显式选择 `dismiss`、`accept`
   或 `manual`。
+- MAIN world 弹窗 helper 仅在 accept/dismiss 范围内存在。升级前已注入的旧 document 需正常
+  导航或刷新才能移除历史 wrapper，单独 Reload 扩展无法完成。
 - 站点权限采用短期租约。`set_site_permission` 记录并恢复原设置；需要立即恢复时调用
   `reset_site_permissions`。
 - Turnstile 等挑战无进展时返回 `challenge_stalled`。后续人工处理应继续使用同一个标签页，

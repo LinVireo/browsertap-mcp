@@ -119,9 +119,10 @@ async def test_lab_approval_is_cached_only_for_the_approved_session(monkeypatch,
     first, second = _ElicitationContext(), _ElicitationContext()
     approve = getattr(S, helper)
 
-    assert await approve(first, *arguments) is True
-    assert await approve(first, *arguments) is True
-    assert await approve(second, *arguments) is True
+    for context in (first, first, second):
+        decision = await approve(context, *arguments)
+        assert decision.approved is True
+        assert decision.reason is None
     assert len(first.calls) == len(second.calls) == 1
     assert len(getattr(S, cache)) == 2
 

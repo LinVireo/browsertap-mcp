@@ -417,10 +417,23 @@ class PendingOperations:
         releasing does not require a second request after the tool times out.
         Caller JS, uncertain outcomes and dialog recovery keep their leases.
         """
+        return self._release_probe(
+            operation_id, requester_id, kind="wait_probe", reason="read_only_wait_probe_timeout",
+        )
+
+    def release_tabs_probe(self, operation_id: str, requester_id: str | None) -> bool:
+        """Release a known tabs read after its wait ends, preserving its receipt."""
+        return self._release_probe(
+            operation_id, requester_id, kind="tabs_read_probe", reason="read_only_tabs_probe_timeout",
+        )
+
+    def _release_probe(
+        self, operation_id: str, requester_id: str | None, *, kind: str, reason: str,
+    ) -> bool:
         with self._lock:
             self.read(operation_id, requester_id)
             operation = self._operations[operation_id]
-            if (operation.kind != "wait_probe" or operation.status != "in_progress"
+            if (operation.kind != kind or operation.status != "in_progress"
                     or not self._holds_targets(operation)
                     or operation.superseded_recoveries
                     or any(self._recoveries.get(target) == operation_id for target in operation.targets)):
@@ -429,7 +442,7 @@ class PendingOperations:
             self._release(operation)
             operation.metadata.update({
                 "reservation_released": True,
-                "released_reason": "read_only_wait_probe_timeout",
+                "released_reason": reason,
                 "released_targets": held,
             })
             return True

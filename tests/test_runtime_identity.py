@@ -16,6 +16,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "src" / "browsertap_mcp"
 IMPORTED_JAVASCRIPT = (
     "chrome_extension/result_serialization.js",
     "chrome_extension/guarded_eval.js",
+    "chrome_extension/disable_dialogs.js",
     "page_scripts/page_outline.js",
     "page_scripts/list_groups.js",
 )
@@ -241,7 +242,7 @@ def test_manifest_covers_python_and_imported_javascript_without_installation_pat
         "__init__.py", "subpackage/lazy.py", *IMPORTED_JAVASCRIPT,
     }
     assert identity.as_dict()["complete"] is True
-    assert identity.as_dict()["file_count"] == 6
+    assert identity.as_dict()["file_count"] == 7
     copy = tmp_path / "different-installation"
     shutil.copytree(root, copy)
     assert I.capture_source_identity(copy) == identity
@@ -610,6 +611,7 @@ def cached_asset():
     return {
         "chrome_extension/result_serialization.js": S._RESULT_SERIALIZER_SOURCE,
         "chrome_extension/guarded_eval.js": S._GUARDED_EVAL_SOURCE,
+        "chrome_extension/disable_dialogs.js": S._DIALOG_SCOPE_SOURCE,
         "page_scripts/page_outline.js": H.js_page_outline,
         "page_scripts/list_groups.js": H.js_list_groups,
     }[name]

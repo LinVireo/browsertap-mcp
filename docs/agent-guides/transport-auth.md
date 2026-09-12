@@ -11,8 +11,16 @@ to that root guide. Commands and release gates remain in
 ## 6. The HTTP port is token-authenticated
 
 Port 18766 (`/link`, `/api/result`, `/api/longpoll`) requires a bearer token,
-which closes the hole where any local process could execute JS in your browser.
-The port-18765 WebSocket used by the extension is checked by origin instead.
+which protects that HTTP command channel from processes without the token.
+The port-18765 WebSocket used by the extension checks its exact Origin instead:
+derive the packaged extension ID from manifest.key when present, or Chromium's
+native-path algorithm for the canonical unpacked directory. Parse key bytes
+using Chromium's strict raw Base64/PEM rules and 100 KiB input limit; raw key
+whitespace is invalid. An unreadable manifest, invalid JSON or invalid key
+leaves no default trusted Origin. Loaded path aliases can require an explicit
+Origin because Chromium hashes the path spelling. Never learn trust from ext_ready/clientId or
+accept every chrome-extension:// Origin. Local non-browser processes can still
+forge an allowed Origin, so this is not local-process authentication.
 `BROWSERTAP_WS_ALLOWED_ORIGINS` applies to both WebSocket and HTTP origin checks;
 HTTP without an Origin header still requires its token. The separate
 `BROWSERTAP_WS_ALLOW_NO_ORIGIN` option applies only to WebSocket clients.
@@ -37,6 +45,19 @@ metadata failures leave existence unknown. Never log token bytes, including a
 `UnicodeDecodeError`'s raw representation, or replace an existing unreadable file.
 Configuration validation must precede network/spawn effects without making
 imports or package-path commands depend on valid network settings.
+
+Windows token I/O uses one native handle for security and contents. Verify a
+protected current-user-only DACL before the first write, and harden/verify an
+existing current-owned regular file before reading it. Security failure must
+not replace an existing token, take another user's ownership or invent an
+in-memory fallback. New creation remains exclusive until its final write;
+failed creation cleanup addresses that handle, never a newly resolved pathname.
+POSIX writes and fsyncs a private same-directory candidate with mode 0600,
+closes it, then publishes it with an atomic no-replace hard link. Readers must
+never observe a partially written token; a competing existing token wins.
+Token-state inspection itself does not create a missing file. The enclosing
+setup request can still initialize authentication or start a daemon, either of
+which can create it, and a Windows inspection can harden an existing DACL.
 
 The WebSocket port is the asymmetric half, and the thing that makes it
 survivable is not the origin check. `clientId` arrives in the message body and
@@ -68,9 +89,11 @@ Because this lives in the bridge, a change here needs a bridge restart
 
 ## 8. Odds and ends
 
-- What may be written into that log is a **policy**, not a formatting choice:
-  `redact_url` at every logging call site, `redact_pattern` for a caller's search
-  string, and never the token in any form. `SECURITY.md` states it to operators
-  and `tests/test_log_redaction.py` scans the module's source for a `logger.*`
-  line carrying a raw `.url` / `['url']` / `url_pattern`, so a new log line that
-  writes a URL straight through fails the offline suite rather than shipping.
+- Logging uses `redact_url` for URLs, `redact_pattern` for caller patterns and
+  hash references for arbitrary protocol identifiers. Exception boundaries log
+  fixed operation names and exception types only; do not attach an exception
+  object, traceback, source line or raw browser payload to a LogRecord. Catch
+  unexpected HTTP callback failures before Bottle's wsgi.errors fallback while
+  preserving HTTPResponse/authentication handling and body draining. Behavioral
+  regressions in `tests/test_log_payload_boundary.py` use synthetic sensitive
+  strings; `tests/test_log_redaction.py` also checks URL/pattern call sites.

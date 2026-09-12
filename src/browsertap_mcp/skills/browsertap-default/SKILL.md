@@ -16,7 +16,7 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
 ## 执行顺序
 
 1. 用 `list_tabs` 确认目标浏览器和当前 `session_id`。多 profile 同名时选完整句柄，
-   不只按浏览器名猜测。需要查看实际可用工具时用 `get_setup_status`。
+   不只按浏览器名猜测。连接和能力分组用 `get_setup_status` 检查，实际工具与参数读宿主收到的 schema。
 2. 按下表决定借用还是新建标签页。使用 `open_new_tab(active=false)` 创建工作页时，
    保存返回的 `session_id + generation + owner_id`；每次页面操作显式传 `session_id`。
 3. `scan_page` 读取当前页面后再定位。点击/表单输入优先 `page_click`、`page_type`；
@@ -53,6 +53,11 @@ BTAP 复用用户已登录的 Chrome、Edge、Opera/profile，默认后台工作
   或本任务所有权；只凭已有的精确 session/generation 和 owner 登记清理，证据不足时
   保留未知结果。
 
+状态探针失败若带 `reconciliation.bridge_operation`，同一 MCP 会话可将其中的
+`operation_id` 传给 `get_execute_js_result`；外层创建句柄仍按上述流程恢复。
+已知的 inventory、create-status 和只读 wait 探针超时后可释放自己的 bridge 占用，
+并保留收据；`reservation_held=false` 不证明先前未创建，也不允许重放创建。
+
 worker 重启后，遗留的 pending 创建会返回终态 unknown；容量回收后的创建句柄也可能
 由 replay guard 保守拒绝。两者都不能改用新句柄重放同一创建，按上述核对流程处理。
 
@@ -74,6 +79,9 @@ worker 重启后，遗留的 pending 创建会返回终态 unknown；容量回�
 
 ## 工具选择
 
+`tools/list` 的四项 MCP annotations 覆盖工具全部参数路径。可选 JS、clear 或写文件路径会使
+工具不能整体标为只读；这些只是宿主提示，不构成任务授权或并发锁。
+
 | 任务 | 工具与完成信号 |
 | --- | --- |
 | 读页面 | `scan_page` 返回简化 HTML/文本；链接短引用 `#r1` 对应结果中的完整 URL。 |
@@ -85,13 +93,20 @@ worker 重启后，遗留的 pending 创建会返回终态 unknown；容量回�
 | 下载 | `download_file(url=..., session_id=...)`，由浏览器下载管理器使用现有登录态；确认完成状态和最终 `path`。 |
 | 浏览器原生能力 | 标签页、Cookies/storage、书签、扩展、站点权限、原生 CDP 工具，按 schema 选择目标。 |
 
+`cdp_command` / `cdp_batch` 默认拦截文档列出的高风险方法；
+`raw_cdp_blocked` 表示整次调用未投递，改用对应专用工具。批次含未知/嵌套命令也会整体拒绝。
+`get_automation_profile.raw_cdp_policy` 为 `guarded` 或 `allow_unsafe`；例外由操作员设置
+`BROWSERTAP_ALLOW_UNSAFE_CDP=1` 且使用 `lab`，`safe` 始终保留该拦截。
+允许的 CDP/JavaScript 仍能改页面或 profile 状态；此规则不是 sandbox，也不为任务新增授权。
+
 `remove_bookmark` 会先将目标子树原子备份，再删除。保留返回的 `backup_path` 和
 `backup_sha256`；`bookmark_backup_failed` 表示删除未派发。删除回包丢失时先读取
 书签树并核对备份，备份存在本身不证明删除成功。受管 `bookmark-backups` 子目录须为
 普通目录，不能是符号链接/junction。容量与保留期见同版本 README。
 
-`capability_registry` 的 page/browser/desktop 分类与 `target`、`side_effect`、
-`result_contract`、`desktop_opt_in` 描述当前工具面。当前没有通用 desktop 工具；
+`get_setup_status.data.capability_registry` 返回工具计数、完整性和 page/browser/desktop 分组；
+逐工具参数与副作用提示由 MCP `tools/list` 提供。Windows 诊断可能收紧已有 token 文件的 ACL；
+bridge 启动或鉴权初始化可能创建缺失文件，因此 `get_setup_status` 不标为只读。当前没有通用 desktop 工具；
 浏览器 chrome、扩展 UI、原生文件选择器、打印/保存对话框不是页面输入可达的控件。
 页面失败不会自动升级成桌面操作。
 
@@ -152,7 +167,8 @@ Windows 上已打开的标准 Chrome/Edge 文件框可以显式检查/取消，�
 | `cdp_timeout` / `debugger_detached` | 先补查操作句柄并核对页面；通道错误不证明操作没执行。 |
 | `debugger_conflict` | 确认 DevTools/其他 debugger 的占用，由其所有者释放后再执行。 |
 | `challenge_stalled` | 停止自动尝试，把同一标签页交给用户。 |
-| `requires_user_action` | 报告所需人工动作；不通过切 profile 绕过被拒绝的批准。 |
+| `requires_user_action` | 批准失败时读 `reason`：`elicitation_unsupported` / `declined` / `timeout` / `cancelled` / `error`；按原因处理，不切 profile 绕过拒绝。 |
+| `raw_cdp_blocked` | 原始方法在投递前被拒绝；使用专用工具或交操作员处理配置，不原样重试。 |
 | `input_activity_detected` / `activation_failed` | 物理输入未发出，按用户活动或屏幕状态处理，不诊断为桥坏。 |
 
 `get_execute_js_result` 接受异步 JS、同步超时和其他桥命令的句柄。
@@ -165,6 +181,15 @@ Windows 上已打开的标准 Chrome/Edge 文件框可以显式检查/取消，�
 `retry_safe=false` 仍保留；迟到结果只补充执行证据，不恢复占用、不延长保留期。
 `execute_js(wait=false)` 用于确实需要长时间运行的任务，不用来等待页面状态。
 
+弹窗 helper 仅在需要 `accept`/`dismiss` 的操作范围内安装，并在最后一个范围结束或到期时恢复。
+扩展路径先准备当前可注入的 frame，再执行脚本；旧路由的 Python CDP 回退仅覆盖当前求值上下文。
+新 document 不继承这些范围，准备也计入总 deadline。
+调用方抛出 CSP 类错误不代表尚未执行；未知回包同样不得触发重放。
+升级前已注入的旧 document 需正常导航/刷新才会消除历史 wrapper；扩展 Reload 本身不卸载它。
+不为清理历史注入刷新无关标签页。
+
+`scan_page` 的内置扫描不写页面；可选 `extra_js` 可以修改页面或发送请求。
+`wait_for(js=...)` 会重复求值，应使用只读条件表达式。
 `wait_for` / `wait_for_url` 由服务端调度短同步探测。selector/text/URL 只读探针超时
 带句柄时，`reservation_held=false` 表示该探针已释放标签页，可以执行其他命令；
 同一 MCP 会话仍可用 `get_execute_js_result` 领取迟到回包，未完成探针不重发。
@@ -273,7 +298,7 @@ token 仅用于请求，不写进长期文件或公开报告；用完停止捕�
 按 `reload_extension_required` 和 `extension_build_verdict` 判断是否需要人工 Reload，
 不要只比版本号，也不要直接另起独立浏览器代替用户会话。
 `mcp_build_verdict` / `bridge_build_verdict` 为 `stale_process` 时，即使版本相同也要
-重启对应 Python 进程。身份包含包内 `.py` 和 import 缓存的四份 JavaScript；更新这些脚本
+重启对应 Python 进程。身份包含包内 `.py` 和结果转换、受控执行、对话框范围、页面检查所缓存的 JavaScript；更新这些脚本
 也需要重启。`unverifiable` 表示源码身份尚未证实，即使连接状态为 `healthy` 也不能作验收。
 
 配置错误按 `check_config` 处理：基础端口为 `1..65533`，相对状态/token 路径以启动 cwd 为准。

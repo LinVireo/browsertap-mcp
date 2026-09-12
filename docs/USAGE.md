@@ -132,6 +132,11 @@ The default `lab` profile skips elicitation for continuous automation. Set
 Neither profile disables the lock, quiet-input gate, ownership checks, or screen
 confirmation.
 
+When approval fails, `reason` on a `requires_user_action` result distinguishes an unsupported
+host (`elicitation_unsupported`), refusal (`declined`), expiry (`timeout`), prompt
+cancellation (`cancelled`) and exchange failure (`error`). The action is not
+dispatched. Keep the refusal separate from a host capability problem.
+
 For an already-open standard Windows file dialog owned by registered Chrome or
 Edge, call `inspect_native_file_dialog(desktop_opt_in=true)` and then
 `cancel_native_file_dialog(ticket=..., desktop_opt_in=true)` in the same MCP
@@ -148,6 +153,9 @@ Unsupported layouts and platforms remain unsupported. For normal uploads,
 
 - Choose `dismiss`, `accept`, or `manual` explicitly for JavaScript dialogs and
   `beforeunload` when the navigation outcome matters.
+- The MAIN-world dialog helper exists only during accept/dismiss scopes. Old
+  documents injected before an extension upgrade need normal navigation or a
+  page refresh to shed their old wrapper; extension reload alone cannot do it.
 - Treat site permissions as short leases. `set_site_permission` records and
   restores the previous setting; use `reset_site_permissions` for immediate
   cleanup.

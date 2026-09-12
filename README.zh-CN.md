@@ -84,9 +84,13 @@ BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接�
   桌面截图工具保持移除。
 
 `resolve_leave_dialog` 仍是页面范围内、仅限 `lab` 的恢复流程；末尾的 Enter 兜底是受限例外，
-不是通用桌面能力。实际注册表位于 `get_setup_status` 返回值的 `data.capability_registry`，客户端不必
-根据包 extras 或文档猜测当前工具面。每个条目还会说明 target 是 none、optional 还是
-required，操作是 read、write 还是 mixed，以及是否涉及 desktop opt-in。所有公开工具现在都在
+不是通用桌面能力。`get_setup_status` 返回值的 `data.capability_registry` 提供工具计数和能力分组。
+MCP `tools/list` 提供实际工具 schema，并为每个工具显式提供 `readOnlyHint`、`destructiveHint`、
+`idempotentHint` 和 `openWorldHint`；分类覆盖全部参数路径，可执行脚本、清空 buffer 或写文件的
+工具不整体标为只读。这些提示帮助宿主安排调用，不授予操作权限，也不替代 BTAP 的所有权和并发检查。
+`get_setup_status` 可能收紧已有 Windows token 文件的 ACL，因此也按有状态变更分类。
+
+所有公开工具现在都在
 不改工具名的前提下返回 `btap.result.v1` envelope：成功的操作数据放在 `data`，明确的旧版失败
 payload 保留在 `legacy`，`error`/`error_code`、`retryable`、`target` 和 `diagnostics` 提供稳定的
 机器可读状态。失败同时设置 MCP `isError=true`。数组、对象、HTML 和其他大段正文从 `data` 或
@@ -280,9 +284,10 @@ mcp_servers:
 | `BROWSERTAP_BRIDGE_TOKEN` | 未设置 | 旧安装的一次性迁移来源。token 文件不存在时导入一次,此后始终以文件为准。 |
 | `BROWSERTAP_PREFERRED_BROWSER` | 未设置 | `chrome` / `edge` / `opera`。多个浏览器都连上、又没指定标签页时,默认落在哪个浏览器 |
 | `BROWSERTAP_MODE` | `lab` | `lab` 默认免询问连续自动化;`safe` 对每次物理输入/站点 allow 单独询问。也可用 `set_automation_profile` 只改当前 MCP 进程 |
+| `BROWSERTAP_ALLOW_UNSAFE_CDP` | 未设置 | raw CDP 默认拦截 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) 列出的高风险方法。设为 `1` 且处于 `lab` 才放行；`safe` 始终保留该拦截。其它允许的方法仍可改变页面或 profile 状态。 |
 | `BROWSERTAP_LAB_NO_ELICIT` | 启用 | `lab` 默认按 `1` 处理。只有明确设为 `0`/`false` 才恢复会话级询问;跨进程锁、安静窗口、前台确认和 ownership 始终生效 |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | `lab` 下匹配当前 host 时,普通 `open_url` 自动接受 beforeunload;显式 `intent_leave=false` 可强制保留页面 |
-| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | 同时放行 bridge WebSocket 握手和 HTTP origin 检查的额外来源，以英文逗号分隔并精确匹配。扩展 origin 自动允许；HTTP token 鉴权仍生效，无 `Origin` 的 HTTP 请求仍可通过来源检查。 |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | WebSocket 与 HTTP 的额外精确来源，以英文逗号分隔。默认只允许随包扩展的 ID，由 manifest key 或未打包安装路径推导；另放目录的副本需显式配置其完整 Origin。HTTP token 鉴权仍生效，包括无 `Origin` 的请求。 |
 | `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | 未设置 | 仅在可信的非浏览器本机 WebSocket 客户端无法发送 `Origin` 时设为 `1`。默认拒绝无 origin 客户端。 |
 
 ### 命令行
@@ -322,7 +327,7 @@ import、help/version 和包路径命令仍可使用。后续端口探测发生 
 
 `mcp_build_verdict` 与 `bridge_build_verdict` 将各进程首次 import 包时的源码快照与磁盘
 比较，返回 `matches_tree`、`stale_process` 或 `unverifiable`。快照包含包内 Python 文件及
-结果转换、受控执行和页面检查所加载的四份 JavaScript。同版本修改也要求重启对应 MCP 或
+结果转换、受控执行、对话框范围和页面检查所加载的 JavaScript。同版本修改也要求重启对应 MCP 或
 bridge；缺失资源或旧身份 schema 不能证明匹配。该身份不证明运行期 monkeypatch、缓存
 字节码或其他任意资源一致；`*_build_enforced=false` 仍表示未知。
 
@@ -362,7 +367,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 以下版本标记随源码维护，不代表开发工作树已经发布。使用新工具签名或 0.5.0 迁移说明前，
 先核对安装包和对应 release tag。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.0**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.1**。
 
 三个组件分别加载更新：
 
@@ -425,10 +430,20 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 操作逐次确认。所有权和目标检查始终存在；物理路径还保留 OS lock、安静窗口和 `on_screen`
 检查。`input_quiet.enforced` 说明是否获得了可比较的输入标记。
 
+**Raw CDP。** `get_automation_profile.raw_cdp_policy` 为 `guarded` 或 `allow_unsafe`。
+单条命令和整个批次都在投递前检查；关闭标签页、Cookie、权限和 UA 修改优先使用专用工具。
+该检查覆盖常见破坏性方法；允许的 JavaScript/CDP 仍能修改页面。
+完整范围及显式 lab 开关见 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)。
+
 **对话框策略必须显式理解。** `execute_js(dialog_policy=...)`、`open_url(beforeunload=...)` 和
 `handle_dialog(action=...)` 均支持 `dismiss`（默认）、`accept` 和 `manual`。全局默认优先保留页面；
 仅在显式选择 `accept` 或 lab 的 host 规则匹配时自动离开。`handle_dialog` 会在三秒内应答，
 否则返回 `no_dialog` 或结构化错误；`resolve_leave_dialog` 仅在协议方式失败且 lab 允许时使用物理 Enter。
+
+`execute_js` 的扩展路径在 `accept`/`dismiss` 下先准备当前可注入的 frame，再执行调用方脚本，
+并在完成或到期后恢复临时 helper。旧命令路由的 Python CDP 回退仅覆盖当前求值上下文；
+新 document 不继承这两种范围。准备阶段共用总 deadline；脚本抛出类似 CSP 的错误，
+或回包结果不确定，都不能作为重放脚本的理由。
 
 **站点权限是短期租约。** `set_site_permission` 针对单个 origin 生效 60–600 秒，记录原设置，并在
 到期、显式 `reset_site_permissions` 或 service worker 重启后尝试恢复。`safe` profile 的每次 `allow` 都需
@@ -498,7 +513,8 @@ agent 也共享这份所有权。上述保护不保证多步工作流原子性�
 | `dialog_handle_failed` | 已检测到对话框，但应答失败；标签页可能仍处于阻塞状态 |
 | `navigation_failed` / `navigation_timeout` | `open_url` 超时未完成,或浏览器报错 |
 | `triggered` 且 `type="download"` | `open_url` 被浏览器下载取代。只有 CDP 同时报告 `isDownload=true` 时 `ERR_ABORTED` 才可能是正常下载语义;要完成状态和本地路径请用 `download_file` |
-| `requires_user_action` | 批准被拒绝、取消或不可用；未执行操作 |
+| `requires_user_action` | 需要人工处理；批准失败附 `reason`（`elicitation_unsupported`、`declined`、`timeout`、`cancelled` 或 `error`），不执行操作 |
+| `raw_cdp_blocked` | 原始方法绕过受保护的状态/所有权路径；未投递命令。改用专用工具或处理操作员配置，无需原样重试 |
 | `busy` | 另一个 BTAP 进程持有物理输入锁，或标签页已有挂起的 manual 执行；调用立即返回且不排队 |
 | `target_busy` | 标签页被另一调用或仍在执行的浏览器命令占用。检查 `delivery_state` 和 `retry_safe`；涉及多个 tab 的调用可能已经完成前面的步骤 |
 | `capture_busy` | 另一 MCP 会话拥有该 console/network 捕获；原会话停止后，其他会话才能重新启动、停止或清空 |
@@ -577,10 +593,12 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 
 - **get_setup_status** —— 返回 `package_version`、`bridge_version`、`extension_version`、`protocol_version`、连接状态、端口、标签页与恢复动作。允许自动拉起时，未监听的 bridge 会自动启动；`restart_bridge_required=true` 表示仍在运行的 bridge 必须执行 `browsertap bridge --restart` 才能替换。`reload_extension_required=true` 表示 unpacked 扩展受平台限制，必须手动 Reload；**仅版本号不同已不再单独置位它**——Chrome 只在 load 时 parse `manifest.json`、不 Reload 就永远不重新 parse，否则每次涨版本都要人点一次、而那一次唯一改变的就是这个数字。`restart_mcp_session_required=true` 是反方向：某个组件**比运行中的服务更新**，过期的是当前进程，只有重启 MCP 会话或客户端才能消除；此时另外两个标志保持 false，因为重启 bridge 或重新加载扩展只会再报同一个不匹配。`extension_build_stamp` 是更强的信号，回答四个版本字段回答不了的问题：它是编译进 `background.js` 的扩展源码哈希，由**正在运行的** worker 报告，所以把它和 `expected_extension_build_stamp`（当前目录的新鲜哈希）相比，在两个方向上都是决定性的——而版本相等已经两次被实测判错。结论看 `extension_build_verdict`：`matches_tree`（worker 跑的就是这份代码）、`stale_worker`（不是，去 Reload）、`stamp_not_regenerated`（改了扩展文件但没跑 `python -m scripts.extension_stamp --write`，此时比较在两个方向上都不成立）、`unverifiable`（扩展早于该机制，或目录读不出来——见 `extension_build_error`）。`extension_build_enforced=false` 表示这次比较根本没发生，应当按未知处理，不要当成通过。另一个工具正在运行时它照样应答；`default_session_id` 是本次请求取得的 MCP 进程默认目标快照，其他调用的临时目标已隔离，因此 `default_session_settled=true`。无参数
   `extension_status_available=false` 表示尚未取得扩展运行状态：`starting` 要求 `wait_for_extension`，`extension_unavailable` 要求 `check_extension_connection`。仅缺少状态不会要求 Reload；取得运行状态后才检查兼容性，旧扩展的有效回复缺少必需字段时仍会触发原有检查。
+  Windows 上检查已有 token 文件时可能将 ACL 收紧到当前用户。token 文件状态检查本身不创建缺失文件；`get_setup_status` 的 bridge 启动或鉴权初始化仍可能创建。
 - **get_automation_profile** —— 查看当前 MCP 进程使用 `lab` 还是 `safe` profile
 - **set_automation_profile** —— 切换当前 MCP 进程的 `lab|safe` profile;覆盖值不会持久化或重载扩展
   - `mode`(string):`lab` 或 `safe`
 - **list_tabs** —— 在 `data.tabs` 中列出已连接标签页的完整 session 句柄和 `browser` 字段。另一个工具正在运行时照样应答；`default_session_id` 是本次请求取得的 MCP 进程默认目标快照，`default_session_settled=true`。并行 agent 仍应显式指定目标。无参数
+  inventory 读取超时后释放该读探针的 bridge 占用。未完成的修改操作仍保留占用；读探针释放不能证明其它操作是否发生。
 - **list_all_tabs** —— *(零标签页可用)* 列出全部标签页,含 `list_tabs` 隐藏的 `chrome-extension://` 页面。这类页面永远不会成为会话,所以没有 session id,要用 `cdp_command(tab_id=...)` 操作
   - `session_id`(string,可选):问哪个浏览器/profile
 - **switch_tab** —— 指定当前 MCP 进程后续调用的**目标**标签页。`url_pattern` 必须只匹配一个标签页；若匹配多个，需传入完整 `session_id`。`browser` 匹配多个 profile 时也必须显式指定 `session_id`。默认 `activate=false`，不会激活标签页或聚焦浏览器；需要前台时传入 `activate=true` 或调用 `activate_tab`
@@ -594,6 +612,7 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 - **open_new_tab** —— 默认在当前 MCP 进程选中的浏览器/profile 后台创建标签页，也可用 `session_id` 或 `client_id` 指定其他实例。生成唯一 `operation_id`，并在限定时间内等待准确的 session/generation 注册；需要前台时传 `active=true`。返回 `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`。扩展按 operation ID 去重；只有带准确 `client_id+tab_id+generation` 的 completed 记录才登记 ownership，即使 `ready=false`；`ready` 仅表示 session 工具能否立即使用。创建投递前 registry 不确定时返回 `status="unknown",may_have_created=false,retry_safe=true`；投递后不确定时为 `may_have_created=true,retry_safe=false`。若 `may_have_created=false,retry_safe=true`，先解决返回的失败原因，再省略 `operation_id` 重新调用。恢复 `retry_safe=false` 的已投递创建时，传回相同 `operation_id`、返回的 `client_id` 和 `owner_id`，只读取持久化记录，不重放 `tabs/create`；恢复探测失败仍保留不确定性和 owner 凭据。首次恢复探测查不到记录时，`reconciliation.resume_required=false` 指引调用 `list_tabs()` 检查对应浏览器，停止反复恢复同一记录。记录缺失、URL 相同或标签页数量不变均不能证明未创建或本任务所有权；缺少精确身份与任务归属证据时保留未知结果。保留 `owner_id`，仅按已登记的本任务 session/generation 清理。需要可靠开页时使用本工具；页面 `window.open()` 或锚点 click 可能因缺少用户手势被拦截
   - `url`(string)、`timeout`(number,可选):默认 `15`、`active`(boolean,可选):默认 `false`、`session_id`(string,可选):选择浏览器/profile、`owner_id`(string,可选):让同一任务的多个新 tab 共用一个 owner、`operation_id`(string,可选):恢复句柄、`client_id`(string,可选):创建或恢复时锁定浏览器/profile client
   - worker 重启后遗留的 pending 创建变为终态 `unknown`。有界保留会为已回收的 operation ID 留下 replay guard；旧 ID 被拒绝不证明未创建。按 `reconciliation.resume_required=false` 检查该浏览器，保留未知结果和精确 ownership 证据。
+  - 状态探针失败时可能带 `reconciliation.bridge_operation`。同一 MCP 会话可用其中的 wire `operation_id` 调用 `get_execute_js_result`；外层创建 `operation_id` 仍走 `open_new_tab` 恢复。探针的 `reservation_held=false` 不证明之前未创建，也不允许重放创建。
 - **close_tabs** —— *(零标签页可用)* 接受原生数字 tab ID 或完整 `client:tabId` session ID，对 `chrome-extension://` 页面同样有效。默认 `only_if_agent_owned=true`，必须传入 `open_new_tab` 返回的 `owner_id`，并在关闭前核对当前 lifecycle generation；用户预存标签页、其他 Agent 的标签页和复用 ID 的新生命周期均会被拒绝。若用户已关闭 owned 标签页，清理返回 `status=already_gone, closed_by=user`，不会使用旧原生 ID 关闭其他标签页；实际关闭 owned 标签页时返回 `closed_by=agent`；显式关闭非 owned/U 标签页时返回 `closed_by=none`，且不计入本任务 owned 清理。若返回 `already_gone` 但浏览器里仍有同一工作页面，先 `list_all_tabs` 核对 URL/title，再决定是否按新的 session/generation 关闭；BTAP 不会按 URL 自动转移 ownership。只有 Chrome 明确报告 `tabs.onReplaced` 且稳定 tab 身份匹配时，才会安全换发当前 session 句柄并迁移 ownership。仅当用户明确要求关闭非 owned/U 标签页时，才可设置 `only_if_agent_owned=false`
   - `tab_id`(integer/string 或数组)、`session_id`(string,可选)、`owner_id`(string,安全默认下必填)、`only_if_agent_owned`(boolean,默认 `true`)
 </details>
@@ -601,9 +620,9 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 <details>
 <summary><b>页面读取与执行</b></summary>
 
-- **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`。后台标签页可能报告 viewport 高度为 0；普通 DOM/文本/API 工作仍可继续，只有明确需要视觉/布局保真时才调用 `activate_tab`;页面可探测时还会返回 `render_state`/`content_ready`，区分真实正文与 loading、hydrating、shell-only 的 SPA；空壳结果应先重试或使用 `wait_for`。`cutlist`（默认开）会折叠重复的长列表，并为每个被折叠的容器返回一个由该容器自身结构推导出来的 CSS selector。本工具**不修改页面** —— 不写属性、不写 id、不写 `window` 全局变量，所以一次扫描对页面自己的脚本是不可见的
+- **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`。后台标签页可能报告 viewport 高度为 0；普通 DOM/文本/API 工作仍可继续，只有明确需要视觉/布局保真时才调用 `activate_tab`;页面可探测时还会返回 `render_state`/`content_ready`，区分真实正文与 loading、hydrating、shell-only 的 SPA；空壳结果应先重试或使用 `wait_for`。`cutlist`（默认开）会折叠重复的长列表，并为每个被折叠的容器返回一个由该容器自身结构推导出来的 CSS selector。内置扫描不写页面属性、id 或 `window` 全局变量；可选的 `extra_js` 执行调用方代码，可以修改页面或发送请求
   - `session_id`(string,可选)、`text_only`(boolean,可选):默认 `false`、`cutlist`(boolean,可选):默认 `true`,把重复列表裁成少量样本、`maxchars`(integer,可选):默认 `35000`、`instruction`(string,可选)、`extra_js`(string,可选)、`timeout`(number,可选):默认 `15`
-- **wait_for** —— 等待指定条件成立后返回。与轮询 `scan_page` 相比，该工具避免重复序列化完整 DOM。服务端在同一截止时间内调度短同步检查，避免后台页面定时器节流。四个条件必须且只能提供一个；`selector` 接受 CSS 字符串或“后台页面输入”一节所述的结构化 locator。超时带 `operation_id` 时保留原检查的收据。selector/text/URL 只读探针超时后可以释放标签页而保留收据：`reservation_held=false` 时可执行其他命令，并在同一 MCP 会话用 `get_execute_js_result` 领取迟到回包。调用方提供的 `js` 继续保守占用；`reservation_held` 为 true 或未知时，持续查询原操作，直到它结案或释放占用。未完成探针不重放
+- **wait_for** —— 等待指定条件成立后返回。与轮询 `scan_page` 相比，该工具避免重复序列化完整 DOM。服务端在同一截止时间内调度短同步检查，避免后台页面定时器节流。四个条件必须且只能提供一个；`selector` 接受 CSS 字符串或“后台页面输入”一节所述的结构化 locator。调用方 `js` 会重复求值，可能产生副作用，应使用只读条件表达式。超时带 `operation_id` 时保留原检查的收据。selector/text/URL 只读探针超时后可以释放标签页而保留收据：`reservation_held=false` 时可执行其他命令，并在同一 MCP 会话用 `get_execute_js_result` 领取迟到回包。调用方提供的 `js` 继续保守占用；`reservation_held` 为 true 或未知时，持续查询原操作，直到它结案或释放占用。未完成探针不重放
   - `selector`(string/object,可选):CSS 或结构化 locator、`text`(string,可选)、`url_pattern`(string,可选)、`js`(string,可选)、`gone`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`session_id`(string,可选)
 - **wait_for_url** —— 等导航落定:阻塞到标签页 URL 匹配 `url_pattern`(正则,或纯子串,两种都试),并且在 `wait_ready=false` 之外还要求 `document.readyState` 为 `complete`,然后返回最终的 `url`、`title` 和 `ready_state`。在会触发跳转的点击或 `open_url` 之后用它;`wait_for(url_pattern=...)` 只查 URL,新文档还是空白的时候就可能返回。使用与 `wait_for` 相同的有界同步检查和收据恢复流程；未完成探针返回 `reservation_held=false` 时不再阻塞标签页，同一 MCP 会话仍可通过 `get_execute_js_result` 领取迟到回包
   - `url_pattern`(string):匹配 URL 的正则或子串、`timeout`(number,可选):默认 15、`wait_ready`(boolean,可选):要求 `readyState === 'complete'`,默认 `true`、`session_id`(string,可选)
@@ -616,6 +635,7 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
   - 用户代码开始执行后，脚本错误不会触发第二次执行。复杂 async body 使用显式 `return`，推荐 `(async () => { /* work */ return value; })()`；含糊的 body 可能返回 `null`。`await(expr)` 可能被解析成调用名为 `await` 的普通函数，需要消除歧义时使用上述 async IIFE。
   - 含未配对 UTF-16 码元的值或键无论大小均使用文件导出，`result_file_scope="js-value"`。文件写入失败则由 `result_json` 保留完整值，`result_json_scope="js-value"`；解码及原收据语义见[完整 JSON 结果](#完整-json-结果)。
 - **get_execute_js_result** —— 由发起操作的同一 MCP 会话按 `operation_id` 读取或短暂等待结果，接受 `execute_js` 以及其他超时桥命令返回的句柄。查询绝不重放操作；完成结果可重复读取，补查响应丢失后仍可再查。进行中、未知/过期和其他会话的句柄会返回明确状态或错误。占用到期后，首个通过校验的迟到终态回包保存在 `late_result`（`success` 和 `data`），`late_reply_age` 表示收到它后的秒数；原 `unknown` 收据和 `retry_safe=false` 保留，不恢复占用、不延长保留期。结果最多保留 10 分钟，最多保存 512 条已完成操作记录，容量压力可能使其提前淘汰；查不到结果不证明操作未执行。成功返回的大值沿用 `execute_js` 的无损 `result_file` 元数据；迟到大值的文件元数据位于 `late_result` 内，其 `data` 为 null
+  接受 `open_new_tab` 失败状态探针内嵌的 `reconciliation.bridge_operation.operation_id`。已知的只读 wait、inventory 和创建状态探针可在超时后释放占用并保留收据。`reservation_held` 只说明该探针的占用，不能当作创建结果。
   - `operation_id`(string)、`timeout`(number,可选):默认 `0`,范围 `0`–`120`
 - **handle_dialog** —— 检查或应答某个标签页上留着的对话框。`action="manual"` 只上报不选择(`blocked_by_dialog`,没有对话框则是 `no_dialog`);`accept`/`dismiss` 应答并释放被暂停的 `execute_js` 或 `open_url`。`prompt_text` 给被 accept 的 `prompt` 提供文本
   - `action`(string):`dismiss`、`accept` 或 `manual`、`prompt_text`(string,可选)、`session_id`(string,可选)、`timeout`(number,可选):默认 `3`,上限 3 秒
@@ -673,9 +693,9 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 <details>
 <summary><b>CDP</b></summary>
 
-- **cdp_command** —— 发送单条 CDP 命令
+- **cdp_command** —— 向所选标签页或显式 debuggee 发送单条 CDP 命令。列出的高风险方法在投递前返回 `raw_cdp_blocked`；params 必须为 JSON 对象。其它允许的方法仍可改变页面或 profile 状态。范围见上方 raw CDP 说明
   - `method`(string):如 `Page.navigate`、`params_json`(string,可选):JSON 对象的文本形式、`session_id`(string,可选)、`tab_id`(integer/string,可选)、`extension_id`(string,可选)、`target_id`(string,可选)、`timeout`(number,可选):默认 `20`
-- **cdp_batch** —— 批量发送,`batch_json` 必须是带 `cmd: "batch"` 的 JSON 对象
+- **cdp_batch** —— 批量发送；`batch_json` 必须为带 `cmd: "batch"` 和 `commands` 数组的 JSON 对象，成员为 `cdp`、`tabs` 或 `cookies` 对象。整批通过 raw CDP 检查后才执行第一项；拒绝嵌套和未知命令
   - `batch_json`(string)、`session_id`(string,可选)
 - **debugger_targets** —— *(零标签页可用)* 列出所有可 attach 的 CDP 目标,包括 service worker 和扩展背景页 —— 这些在 `list_tabs` 里永远看不到
   - `session_id`(string,可选)

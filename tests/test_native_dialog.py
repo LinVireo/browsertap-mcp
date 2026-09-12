@@ -817,7 +817,7 @@ async def test_registered_native_tools_preserve_envelope_and_existing_approval_g
 
     async def approve(ctx, summary):
         approvals.append(summary)
-        return True
+        return S._ApprovalDecision(True)
 
     monkeypatch.setattr(S, "_request_physical_approval", approve)
     inspect_fn = S.mcp._tool_manager.get_tool("inspect_native_file_dialog").fn
@@ -870,7 +870,7 @@ async def test_registered_cancel_declined_approval_consumes_ticket_and_preserves
     ticket = _inspect(manager)
 
     async def decline(ctx, summary):
-        return False
+        return S._ApprovalDecision(False, "declined")
 
     monkeypatch.setattr(S, "_request_physical_approval", decline)
     function = S.mcp._tool_manager.get_tool("cancel_native_file_dialog").fn
@@ -894,7 +894,7 @@ async def test_registered_cancel_unknown_dispatch_is_not_retryable(native, monke
     os.send_behavior = "marker_removed"
 
     async def approve(ctx, summary):
-        return True
+        return S._ApprovalDecision(True)
 
     monkeypatch.setattr(S, "_request_physical_approval", approve)
     function = S.mcp._tool_manager.get_tool("cancel_native_file_dialog").fn
@@ -981,7 +981,7 @@ async def test_registered_cancel_external_cancellation_consumes_ticket(native, m
         if phase == "approval":
             entered.set()
             await anyio.sleep_forever()
-        return True
+        return S._ApprovalDecision(True)
 
     async def pending_worker(function, *args, **kwargs):
         entered.set()
@@ -1071,7 +1071,7 @@ async def test_registered_cancel_claims_before_concurrent_approval(native, monke
         if len(approvals) == 1:
             entered.set()
             await release.wait()
-        return True
+        return S._ApprovalDecision(True)
 
     async def caller():
         results.append(_structured(await function(ticket=ticket, desktop_opt_in=True, ctx=object())))
@@ -1109,7 +1109,7 @@ async def test_pending_native_approval_keeps_ticket_lifetime_bound(native, monke
     async def approve(ctx, summary):
         entered.set()
         await release.wait()
-        return True
+        return S._ApprovalDecision(True)
 
     async def caller():
         results.append(_structured(await function(ticket=ticket, desktop_opt_in=True, ctx=object())))

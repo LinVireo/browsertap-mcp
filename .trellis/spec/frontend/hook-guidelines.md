@@ -11,6 +11,10 @@ native APIs already used in the extension.
   worker timer and post-collection alarm recovery serve different purposes.
 - Preserve extension self-disable and manual-reload guards. A browser event or
   retry must not revive a stale extension generation.
+- For scoped dialogs and CSP fallback, follow
+  [Scoped page dialogs](../../../docs/agent-guides/runtime-lifecycle.md#scoped-page-dialogs):
+  complete frame preparation before caller dispatch, share the command deadline,
+  and use execution-start evidence before considering a retry.
 - Keep bare page-function references at the end of
   [page_outline.js](../../../src/browsertap_mcp/page_scripts/page_outline.js) and
   [list_groups.js](../../../src/browsertap_mcp/page_scripts/list_groups.js).

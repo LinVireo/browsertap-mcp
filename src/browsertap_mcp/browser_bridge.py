@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional, TypeGuard
 from urllib.parse import urlsplit
@@ -21,9 +22,11 @@ import requests
 from bottle import request
 from simple_websocket_server import WebSocket, WebSocketServer
 
+from . import _token_file
 from ._version import __version__
 from .capture_ownership import CaptureOperation, CaptureOwnershipRegistry
 from .command_scope import guard_targets, has_command_scope, mark_dispatched
+from .extension_origin import origin_is_allowed, origin_policy_report
 from .paths import (
     DEFAULT_STATE_DIR_NAME,
     LEGACY_STATE_DIR_NAME,
@@ -43,6 +46,15 @@ logger = logging.getLogger(__name__)
 _DRIVER_STATE_LOCK = threading.RLock()
 _UNSET_DEFAULT = object()
 MAX_TAB_SNAPSHOT_SIZE = 4096
+
+
+def _log_reference(value: Any) -> str:
+    """Correlate protocol identifiers without logging their arbitrary contents."""
+    if value is None:
+        return '<none>'
+    if not isinstance(value, str):
+        return '<invalid>'
+    return 'sha256:' + hashlib.sha256(value.encode('utf-8', 'surrogatepass')).hexdigest()[:12]
 
 
 def _valid_protocol_id(value: Any) -> TypeGuard[str]:
@@ -698,7 +710,7 @@ def _token_file_state(path: Path) -> _TokenFileState:
     bytes. The value is excluded from repr so inspecting this state stays safe.
     """
     try:
-        value = path.read_text(encoding='utf-8').strip()
+        value = _token_file.read_text(path).strip()
     except FileNotFoundError:
         return _TokenFileState('missing', False)
     except UnicodeError:
@@ -731,8 +743,7 @@ def _persist_token(path: Path, token: str) -> str:
     """Create the token file once; concurrent starters converge on its value."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        try:
+        with _token_file.create(path) as fd:
             pending = memoryview((token + '\n').encode('utf-8'))
             while pending:
                 written = os.write(fd, pending)
@@ -742,17 +753,11 @@ def _persist_token(path: Path, token: str) -> str:
                         f'invalid token write count: {written}'
                     )
                 pending = pending[written:]
-        finally:
-            os.close(fd)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
         return token
     except FileExistsError:
-        # O_EXCL exposes the file just before the winning process writes its
-        # contents. Give that tiny window time to close instead of inventing a
-        # different in-memory token that would immediately split the clients.
+        # POSIX publishes a complete candidate; Windows reads wait for the
+        # creator's exclusive handle. The short empty-file wait also tolerates
+        # older creators without replacing an existing token with our candidate.
         for _ in range(20):
             state = _token_file_state(path)
             if state.status == 'ready':
@@ -761,9 +766,11 @@ def _persist_token(path: Path, token: str) -> str:
                 raise _token_file_error(path, state) from None
             time.sleep(0.01)
         raise RuntimeError(f'BTAP bridge token file is empty: {path}') from None
+    except UnicodeError:
+        raise RuntimeError(f'BTAP cannot persist its bridge token at {path} (invalid_utf8)') from None
     except OSError as exc:
         reason = 'permission_denied' if isinstance(exc, PermissionError) else 'io_error'
-        raise RuntimeError(f'BTAP cannot persist its bridge token at {path} ({reason})') from exc
+        raise RuntimeError(f'BTAP cannot persist its bridge token at {path} ({reason})') from None
 
 
 def bridge_token() -> str:
@@ -1061,7 +1068,7 @@ class Session:
         # MCP session -- and their log lines buried everything else.
         if self.disconnect_at is not None:
             return
-        logger.info("Tab disconnected: %s (session=%s)", redact_url(self.url), self.id)
+        logger.info("Tab disconnected: %s (session=%s)", redact_url(self.url), _log_reference(self.id))
         self.disconnect_at = time.time()
 
 
@@ -1378,7 +1385,29 @@ class BrowserBridge:
         if self.link_token:
             logger.info("Bridge token authentication enabled (file=%s)", bridge_token_path())
 
+        @app.install
+        def _redacted_errors(callback):
+            # Bottle's catchall writes exception text/source lines to wsgi.errors.
+            # Stop unexpected callback failures here, before that logging boundary.
+            operation = callback.__name__
+            if operation not in ('long_poll', 'result', 'link', '_reject_cross_origin'):
+                operation = 'unknown'
+
+            @wraps(callback)
+            def guarded(*args, **kwargs):
+                try:
+                    return callback(*args, **kwargs)
+                except (bottle.HTTPResponse, MemoryError):
+                    raise
+                except Exception as exc:
+                    logger.error("HTTP request failed (operation=%s; error_type=%s)",
+                                 operation, type(exc).__name__)
+                    drain_request_body()
+                    raise bottle.HTTPError(500, 'Internal Server Error') from None
+            return guarded
+
         @app.hook('before_request')
+        @_redacted_errors
         def _reject_cross_origin():
             # These routes execute JS in the user's logged-in tabs, so nothing
             # that carries a web Origin may reach them. In practice bottle's
@@ -1392,13 +1421,9 @@ class BrowserBridge:
             except UnicodeError:
                 drain_request_body()
                 raise bottle.HTTPResponse(status=403, body='forbidden origin') from None
-            if origin and not origin.startswith(
-                    ('chrome-extension://', 'moz-extension://',
-                     'safari-web-extension://', 'extension://')):
-                extra = os.environ.get('BROWSERTAP_WS_ALLOWED_ORIGINS', '')
-                if not any(origin == o.strip() for o in extra.split(',') if o.strip()):
-                    drain_request_body()
-                    raise bottle.HTTPResponse(status=403, body='forbidden origin')
+            if origin and not origin_is_allowed(origin):
+                drain_request_body()
+                raise bottle.HTTPResponse(status=403, body='forbidden origin')
 
         @app.route('/api/longpoll', method=['GET', 'POST'])
         def long_poll():
@@ -1427,7 +1452,7 @@ class BrowserBridge:
                     session = self.sessions[session_id] = Session(
                         session_id, session_info, queue.Queue())
                     logger.info("Browser HTTP connected: %s (session=%s)",
-                                redact_url(session.url), session_id)
+                                redact_url(session.url), _log_reference(session_id))
                 elif session.type == _QUEUE_TYPE:
                     # The same client polling again, so rebind it to the queue it
                     # already has rather than a fresh one: a command handed over
@@ -1455,12 +1480,13 @@ class BrowserBridge:
             # leaves is the only evidence there is that it was delivered.
             try:
                 exec_id = json.loads(msg).get('id')
-            except Exception:
+            except Exception as exc:
                 # Everything on this queue was serialised by `_send_to_session`,
                 # so a payload that will not parse is this bridge's own bug, not
                 # a client's. Hand it over anyway -- refusing would strand a
                 # caller already waiting on its result -- but say so.
-                logger.exception("unparseable long-poll payload for session=%s", session_id)
+                logger.error("unparseable long-poll payload (session=%s; error_type=%s)",
+                             _log_reference(session_id), type(exc).__name__)
             else:
                 # An id-less payload acknowledges nothing. Recording it under the
                 # empty string, as this did, put a key in `acks` that no waiter
@@ -1596,7 +1622,7 @@ class BrowserBridge:
                         route_options['read_only_probe'] = True
                     result = self.execute_js(code, timeout=timeout, session_id=session_id,
                                               allow_failover=allow_failover, **route_options)
-                    logger.debug("Remote execute_js completed (session=%s)", session_id)
+                    logger.debug("Remote execute_js completed (session=%s)", _log_reference(session_id))
                     return json.dumps({'r': result}, ensure_ascii=True)
                 except Exception as e:
                     return json.dumps({'r': _error_payload(e)}, ensure_ascii=True)
@@ -1679,27 +1705,18 @@ class BrowserBridge:
             return ''
 
     def _origin_allowed(self, sock) -> bool:
-        """Only the extension service worker may drive the bridge.
+        """Match the packaged extension ID, never just an extension scheme.
 
-        Its handshake Origin is chrome-extension://<id> (also
-        moz-extension:// / safari-web-extension:// on other browsers). Web
-        pages always send https?://..., so a prefix allowlist keeps every
-        site out while needing no shared secret — which matters because an
-        extension cannot read a token file off disk.
-
-        A non-browser local client (curl, a test script) sends no Origin at
-        all. That is allowed only when BROWSERTAP_WS_ALLOW_NO_ORIGIN=1,
-        so the default posture stays closed.
+        A browser fixes its extension's Origin, so a different installed
+        extension cannot publish a second clientId. A local non-browser process
+        can still forge headers; this is not a local-process authentication
+        boundary. Additional exact Origins and origin-less clients require
+        their existing explicit operator overrides.
         """
         origin = self._ws_origin(sock)
         if not origin:
             return os.environ.get('BROWSERTAP_WS_ALLOW_NO_ORIGIN', '') == '1'
-        allowed = ('chrome-extension://', 'moz-extension://',
-                   'safari-web-extension://', 'extension://')
-        if origin.startswith(allowed):
-            return True
-        extra = os.environ.get('BROWSERTAP_WS_ALLOWED_ORIGINS', '')
-        return any(origin == o.strip() for o in extra.split(',') if o.strip())
+        return origin_is_allowed(origin)
 
     def clean_sessions(self):
         now = time.time()
@@ -1831,8 +1848,12 @@ class BrowserBridge:
                         driver._record_operation_reply(data, transport='ws', owner=self)
                     elif data.get('type') == 'error':
                         driver._record_operation_reply(data, transport='ws', owner=self)
-                except Exception:  # noqa: S110 - server close is best-effort before rebuild
-                    logger.exception("Error handling WebSocket message")
+                except Exception as exc:
+                    operation = data.get('type') if isinstance(data, dict) else None
+                    if operation not in ('ready', 'ext_ready', 'tabs_update', 'ping', 'ack', 'result', 'error'):
+                        operation = 'unknown'
+                    logger.error("Error handling WebSocket message (operation=%s; error_type=%s)",
+                                 operation, type(exc).__name__)
             def connected(self):
                 # WebSocket is exempt from the same-origin policy and needs no
                 # CORS preflight, so without this check ANY page the user visits
@@ -1843,7 +1864,8 @@ class BrowserBridge:
                 # worker, whose handshake Origin is chrome-extension://<id>.
                 if not driver._origin_allowed(self):
                     origin = driver._ws_origin(self)
-                    logger.warning("Rejected WS connection from %s, origin=%r", self.address, origin)
+                    logger.warning("Rejected WS connection from %s, origin=%s",
+                                   self.address, _log_reference(origin))
                     try: self.close()
                     except Exception: pass  # noqa: S110 - rejected socket is already unusable
                     return
@@ -1865,8 +1887,9 @@ class BrowserBridge:
             while True:
                 try:
                     srv.serve_forever()
-                except Exception:  # noqa: S110 - rebuild loop must continue after close failure
-                    logger.exception("WS server loop crashed; rebuilding in 1s")
+                except Exception as exc:
+                    logger.error("WS server loop crashed; rebuilding in 1s (error_type=%s)",
+                                 type(exc).__name__)
                 try:
                     srv.close()
                 except Exception:  # noqa: S110 - server close is best-effort before rebuild
@@ -1875,8 +1898,8 @@ class BrowserBridge:
                 try:
                     srv = self.server = WebSocketServer(host, self.port, JSExecutor)
                     logger.info("WS server rebuilt on ws://%s:%s", self.host, self.port)
-                except Exception:
-                    logger.exception("WS server rebuild failed")
+                except Exception as exc:
+                    logger.error("WS server rebuild failed (error_type=%s)", type(exc).__name__)
                     time.sleep(2)
 
         server_thread = threading.Thread(target=run)
@@ -1892,7 +1915,8 @@ class BrowserBridge:
         def _sid(tab_id): return f"{client_id}:{tab_id}"
 
         current_tab_ids = {_sid(tab['id']) for tab in tabs}
-        logger.debug("Received tabs update from %s (%s): %s", client_id, browser, current_tab_ids)
+        logger.debug("Received tabs update from %s (browser=%s; count=%s)",
+                     _log_reference(client_id), _log_reference(browser), len(current_tab_ids))
         rebindings = getattr(self, '_rebindings', None)
         if rebindings is None:
             rebindings = self._rebindings = {}
@@ -1952,9 +1976,9 @@ class BrowserBridge:
                 }
                 logger.info(
                     "Tab handle rebound for identity %s: %s -> %s",
-                    identity,
-                    old_sid,
-                    session_id,
+                    _log_reference(identity),
+                    _log_reference(old_sid),
+                    _log_reference(session_id),
                 )
             old_generation = sess.info.get('generation') if sess else None
             new_generation = session_info.get('generation')
@@ -1966,9 +1990,9 @@ class BrowserBridge:
                 # for the tab chrome.tabs.create just returned.
                 logger.info(
                     "Tab generation changed for %s: %s -> %s",
-                    session_id,
-                    old_generation,
-                    new_generation,
+                    _log_reference(session_id),
+                    _log_reference(old_generation),
+                    _log_reference(new_generation),
                 )
                 sess.mark_disconnected()
                 self._finish_tab_operations(session_id, 'generation_changed')
@@ -2039,10 +2063,10 @@ class BrowserBridge:
             session = self.sessions.get(session_id)
             if session is None:
                 session = self.sessions[session_id] = Session(session_id, session_info, client)
-                logger.info("New tab connected: %s (session=%s)", redact_url(session.url), session_id)
+                logger.info("New tab connected: %s (session=%s)", redact_url(session.url), _log_reference(session_id))
             else:
                 session.reconnect(client, session_info)
-                logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), session_id)
+                logger.info("Tab reconnected: %s (session=%s)", redact_url(session.url), _log_reference(session_id))
 
             self.latest_session_id = session_id
             if self.default_session_id is None: self.default_session_id = session_id
@@ -2117,12 +2141,12 @@ class BrowserBridge:
                 logger.warning(
                     "Refused WS takeover of client_id=%r from %s: the socket holding it "
                     "was heard from %.1fs ago (grace %.0fs)",
-                    str(client_id)[:64], getattr(client, 'address', '?'), idle,
+                    _log_reference(client_id), getattr(client, 'address', '?'), idle,
                     CLIENT_TAKEOVER_GRACE_SECONDS)
                 return False
             logger.warning(
                 "Handing client_id=%r to a new socket: the previous one went silent "
-                "%.1fs ago", str(client_id)[:64], idle)
+                "%.1fs ago", _log_reference(client_id), idle)
         self.ext_clients[client_id] = {'ws': client, 'browser': browser, 'ts': now}
         return True
 
@@ -2171,7 +2195,7 @@ class BrowserBridge:
             if resolved:
                 selected = str(resolved['session_id'])
                 if selected != str(cur):
-                    logger.info("Default session %s rebound to %s", cur, selected)
+                    logger.info("Default session %s rebound to %s", _log_reference(cur), _log_reference(selected))
                     self.default_session_id = selected
                 return selected
         # Snapshot before iterating: the WS thread may insert/remove sessions
@@ -2194,7 +2218,7 @@ class BrowserBridge:
         latest = self.sessions.get(self.latest_session_id) if self.latest_session_id is not None else None
         chosen = latest if latest is not None and latest in alive else alive[-1]
         if cur:
-            logger.info("Default session %s is stale; selected %s", cur, chosen.id)
+            logger.info("Default session %s is stale; selected %s", _log_reference(cur), _log_reference(chosen.id))
         self.default_session_id = chosen.id
         return chosen.id
 
@@ -2277,7 +2301,7 @@ class BrowserBridge:
         if session_id is not None:
             guard_targets(f"{getattr(self, 'host', '127.0.0.1')}:{getattr(self, 'port', 18765)}", [str(session_id)])
         if self.is_remote:
-            logger.debug("Dispatching remote execute_js (session=%s)", session_id)
+            logger.debug("Dispatching remote execute_js (session=%s)", _log_reference(session_id))
             # HTTP timeout must outlast the JS timeout or long scripts die at
             # the transport layer before the bridge can answer. The daemon
             # answers *at* `timeout`, so an equal socket deadline is a coin flip
@@ -2356,8 +2380,8 @@ class BrowserBridge:
                         session = self._pick_failover_session(pool)
                         logger.warning(
                             "Session %s is disconnected; switched to active session %s",
-                            session_id,
-                            session.id,
+                            _log_reference(session_id),
+                            _log_reference(session.id),
                         )
                         switched_from = session_id
                         session_id = self.default_session_id = session.id
@@ -2843,6 +2867,13 @@ class BrowserBridge:
         exec_id = str(operation_id or uuid.uuid4())
         self._sync_pending_operations()
         closing_tabs = cmd['cmd'] == 'tabs' and cmd.get('method') in {'close', 'remove'}
+        # Only these two routes are known reads in the extension. Keep unknown
+        # methods and batches conservative even if a current router lists tabs
+        # for an unrecognized method. The normal target/scope locks still apply
+        # while this call waits; only its own read timeout can release the hold.
+        read_only_tabs = cmd['cmd'] == 'tabs' and (
+            'method' not in cmd or cmd.get('method') == 'create_status'
+        )
         close_generations: dict[str, str | None] = {}
         if closing_tabs:
             for target in targets:
@@ -2853,7 +2884,8 @@ class BrowserBridge:
                     else None
                 )
         self._operation_state().reserve(
-            exec_id, targets, requester_id, kind=str(cmd['cmd']),
+            exec_id, targets, requester_id,
+            kind='tabs_read_probe' if read_only_tabs else str(cmd['cmd']),
             cleanup=cmd['cmd'] in {'clear_dialog_policy', 'handle_dialog'} or closing_tabs,
             close_targets=closing_tabs,
             recover_dead_owner=closing_tabs,
@@ -2915,7 +2947,14 @@ class BrowserBridge:
                         f"asleep, or no scriptable tab to wake it)")
                     timeout_error.delivery_state = "sent_unconfirmed"
                     timeout_error.retry_safe = False
-                    _attach_operation(timeout_error, exec_id)
+                    if read_only_tabs:
+                        operations = self._operation_state()
+                        operations.release_tabs_probe(exec_id, requester_id)
+                        timeout_error.reservation_held = operations.read(exec_id, requester_id)['reservation_held']
+                    _attach_operation(
+                        timeout_error, exec_id,
+                        reservation_held=getattr(timeout_error, 'reservation_held', True),
+                    )
                     raise timeout_error
             if not isinstance(result, dict):
                 raise RuntimeError("ext_cmd completed without a result")
@@ -3138,6 +3177,7 @@ class BrowserBridge:
             "bridge_uptime_seconds": round(max(0.0, uptime), 1) if uptime is not None else None,
             "startup_grace_seconds": BRIDGE_STARTUP_GRACE_SECONDS,
             "clients": per_client,
+            "ws_origin_policy": origin_policy_report(),
             # Zero unless something spoke the extension's protocol while the
             # real extension still held the namespace; see _claim_ext_client.
             "rejected_client_takeovers": self.rejected_client_takeovers,
@@ -3209,7 +3249,7 @@ class BrowserBridge:
         self.default_session_id, info = matched[0]
         logger.info(
             "Default session set to %s: %s",
-            self.default_session_id,
+            _log_reference(self.default_session_id),
             redact_url(info.get('url')),
         )
         return self.default_session_id

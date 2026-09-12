@@ -41,7 +41,7 @@ MCP server、常驻 bridge 和 MV3 扩展分别加载代码。更新包后要检
 不能只比较 `get_setup_status.package_version` 与扩展 manifest 版本。
 
 `mcp_build_verdict` 和 `bridge_build_verdict` 比较首次包 import 时的源码快照与磁盘当前
-身份，包含包内 `.py` 及结果转换、受控执行、页面检查所缓存的四份 JavaScript。
+身份，包含包内 `.py` 及结果转换、受控执行、对话框范围和页面检查所缓存的 JavaScript。
 `stale_process` 需要重启对应进程，即使版本号相同；缺失资源或旧 schema 不能证明一致。
 `unverifiable` / `*_build_enforced=false` 仍表示未知，即使连接状态为 `healthy` 也不能
 作验收。该比较不认证运行时 monkeypatch、缓存字节码或其他任意资源。
@@ -65,8 +65,15 @@ BTAP 不允许自动禁用自身来强制刷新；被禁用后它无法重新启
 
 默认 bridge 使用 WebSocket 18765、HTTP 18766；自定义地址/端口以 doctor 报告为准。
 扩展 WebSocket 检查 origin，HTTP 同时检查 origin 和共享 Bearer token。
+默认只允许随包扩展的精确 ID：有 manifest key 时按 key 推导，否则按未打包目录推导。
+桥诊断的 `ws_origin_policy.default_origin` / `identity_source` 可与已安装 ID 对照。
+另放目录、目录大小写别名或 junction 加载的副本可能需显式完整 Origin；以浏览器实际 ID 为准。
+`unavailable` 时先修复包内 manifest JSON/key；key 支持严格 Base64 或 Chromium 兼容 PEM，
+原始 Base64 中的空白无效。保持拒绝陌生扩展。
 `BROWSERTAP_WS_ALLOWED_ORIGINS` 的额外来源列表作用于两条通道；
 `BROWSERTAP_WS_ALLOW_NO_ORIGIN` 只控制 WebSocket。HTTP 无 Origin 请求仍需通过 token 鉴权。
+token 文件状态检查本身只读取并在 Windows 上加固已有文件，不创建缺失文件；
+`get_setup_status` 的 bridge 启动或鉴权初始化仍可能创建文件，因此检查连接也可能改变本地状态。
 
 | 检查 | 成功能证明什么 | 失败后看哪里 |
 | --- | --- | --- |
@@ -198,6 +205,11 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
   数量不变都不能证明未创建或所有权；清理仍要求已登记的精确 session/generation
   和本任务 owner，证据不足时保留未知结果。
 
+若状态探针失败带 `reconciliation.bridge_operation`，同一 MCP 会话可把其中的
+wire `operation_id` 交给 `get_execute_js_result`，外层创建句柄继续走上述恢复流程。
+已知的 inventory、create-status 和只读 wait 探针超时可释放自身 bridge 占用，收据仍可补查；
+`reservation_held=false` 不证明之前未创建，不改变创建操作的 `retry_safe`。
+
 只有 `delivery_state=undelivered` 才证明未投递，且必须同时允许 `retry_safe=true`
 才可重试；显式 false 始终禁止自动重发。空或未知结构的回包不算成功。
 `sent_unconfirmed`、
@@ -205,6 +217,8 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
 都不能作为自动重放的理由。debugger detach 不证明页面 JS 停止；
 `reservation_held` 缺失时也不能猜测目标已释放。
 
+`scan_page(extra_js=...)` 执行调用方代码，`wait_for(js=...)` 会重复求值；两者都可能
+修改页面或发送请求，不能按内置只读探针处理，应使用只读条件表达式。
 `wait_for` / `wait_for_url` 的 selector/text/URL 只读探针超时后可释放标签页并保留
 原句柄；`reservation_held=false` 时可执行其他命令，同一 MCP 会话仍可补查迟到回包。
 为 true 或未知时，持续查询原操作直到结案或释放。调用方 `wait_for(js=...)`、旧桥、
@@ -222,11 +236,24 @@ JS/桥命令有 `operation_id` 时，在**原 MCP 会话**调用 `get_execute_js
 | `cross_origin_frame` / `unsupported_frame_transform` | 当前定位路径不受支持，不能用重连修复。 |
 | `cdp_timeout` / `debugger_detached` | 核对原操作是否可能继续；先补查，不换通道重复输入。 |
 | `debugger_conflict` | 由 DevTools/竞争 debugger 的使用者释放占用。 |
-| `requires_user_action` / `input_activity_detected` / `activation_failed` | 按人工批准、用户活动或前台状态处理，不重启桥。 |
+| `raw_cdp_blocked` | `cdp_command` / `cdp_batch` 的投递前策略拒绝；使用专用工具，不重启或原样重试。 |
+| `requires_user_action` | 批准失败时按 `reason` 区分 `elicitation_unsupported` / `declined` / `timeout` / `cancelled` / `error`，不重启桥或切 profile 绕过拒绝。 |
+| `input_activity_detected` / `activation_failed` | 按用户活动或前台状态处理，不重启桥。 |
 | `challenge_stalled` | 将同一 tab 交给用户，不另起独立浏览器。 |
 | `unsupported` | 当前浏览器 API 无法提供所需能力或可恢复性，不改走物理输入。 |
 | `manual_recovery` | 权限恢复已停止自动重试；保留 prior setting，按恢复指引处理后显式 reset。 |
 | `bookmark_backup_failed` | 备份未完成，删除未派发；检查本地存储，受管备份子目录不能是符号链接/junction。 |
+
+`get_automation_profile.raw_cdp_policy` 报告 raw CDP 的有效策略。操作员显式设置
+`BROWSERTAP_ALLOW_UNSAFE_CDP=1` 且处于 `lab` 才是 `allow_unsafe`；`safe` 始终 `guarded`。
+整批在第一项执行前验证文档列出的高风险方法。允许的 JS/CDP 仍可改变页面或 profile 状态，任务授权继续适用。
+
+MCP annotations 是覆盖全部参数路径的宿主提示，不授予权限、不替代占用检查；可选 JS、clear
+或文件写入使工具不能整体标为只读。扩展默认不再常驻注入 MAIN world 弹窗 helper；旧 document
+上的历史 wrapper 需正常导航/刷新才会消除，Reload 本身不卸载它，也不因此刷新无关标签页。
+扩展路径的 `accept`/`dismiss` 会先准备当前可注入的 frame，再执行脚本；旧路由的 Python CDP 回退
+仅覆盖当前求值上下文。新 document 不继承这些范围。
+准备共用总 deadline；脚本自己的 CSP 类错误和未知回包都不能作为重放依据。
 
 多浏览器时显式传完整 `session_id`。有直接生命周期证据时结果才会换发
 `rebound_from` / `replacement_session_id` / `tab_identity`；

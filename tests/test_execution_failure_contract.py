@@ -319,6 +319,38 @@ def test_cdp_fallback_cannot_dispatch_after_its_deadline(execution):
                                    route_error=RuntimeError("unknown command"))
 
 
+@pytest.mark.parametrize("old_router", ["unknown", "missing_token"])
+def test_python_cdp_dialog_envelope_is_normalized_before_public_return(
+    execution, monkeypatch, old_router,
+):
+    driver, _, _ = execution
+    dialogs = [{"type": "confirm", "policy": "dismiss", "message": "question"}]
+    calls = []
+
+    def policy(*args, **kwargs):
+        if old_router == "unknown":
+            raise RuntimeError("Unknown cmd: set_dialog_policy")
+        return {"data": {}}
+
+    def evaluate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"result": {"value": {"ok": True, "data": {
+            "__btap_dialog_result": True, "value": False, "dialogs": dialogs,
+        }}}}
+
+    driver.ext_cmd = policy
+    monkeypatch.setattr(S, "_direct_cdp", evaluate)
+    result = S.execute_js("window.confirm('question')", session_id="chrome:7", timeout=1)
+    assert result["js_return"] is False
+    assert result["dialogs"] == dialogs
+    assert result["dialog"] == dialogs[-1]
+    assert result["status"] == "ok"
+    assert result["execution_mode"] == "cdp_fallback"
+    assert len(calls) == 1
+    assert calls[0][1]["session_id"] == "chrome:7"
+    assert driver.default_session_id == "chrome:1"
+
+
 @pytest.mark.parametrize("timeout", [None, "bad", -1, 121, float("nan")])
 def test_result_poll_rejects_invalid_timeouts_before_contacting_bridge(execution, timeout):
     with pytest.raises(ValueError, match="timeout"):

@@ -5,10 +5,41 @@ Coordinator: `codex-resume-01a0881c`, native session
 `01a09113-7fb4-71d1-b6ef-34cc2d6c9712`.
 Original shared checkout: `D:/browsertap-mcp`, branch `local`.
 
-This is the tracked handoff before the final source commit. The generated
-`out/bug-cleanup-20260912/final-verification.json` supplies the later exact
-commit, tag, complete-suite results, coverage, distribution and installation
-receipts. Do not infer final success from this pre-seal record alone.
+## Current Fable follow-up (0.5.1)
+
+The current isolated candidate is `D:/coding/btap-fable-fixes-20260912`, based
+on f63c4a7. Follow [Fable integration](research/fable-final-integration-20260912.md)
+for F1-F8, independent-review receipts, and the additional token/publication,
+read-probe reservation and dialog execution fixes. Legacy Python CDP fallback
+now installs/releases the controller in the current evaluation context. The
+Python and extension builders recheck the original deadline immediately before
+starting caller code, including time spent installing or compiling wrappers.
+
+Final committed-tree gates, the next unused local `v0.5.1-rc.*` tag and canonical
+checkout integration are not established by this tracked record. Their actual
+outcomes belong in `out/fable-review-20260912/final-verification.json`, which
+binds source HEAD/stamp, review inputs, complete-suite evidence, build and full
+installation. The root worktree retains original failures and byte snapshots.
+Canonical source was independently committed as `564e2509` and `6b391d88` while
+root was integrating later fixes. Their frozen review found the intermediate
+source bytes already covered by prior reviews, followed by version/record
+updates. Preserve both commits by merging their history into the candidate,
+then recheck that the original checkout is clean and its expected HEAD is an
+ancestor before fast-forwarding. The former dirty-path stash plan no longer
+applies. Unexpected source changes are reconciled before any transfer.
+
+No new-build live run, bridge/MCP restart or manual extension Reload is claimed.
+The external 0.5.0 Attempt 2 was 58 passed / 3 failed and did not establish user
+tab preservation; it is retained as failed historical evidence. M01 full
+retention, real A7, native Linux/macOS and historical wait latency remain open.
+SPEC rev7 remains `delivered_stub`; a local candidate tag is not a release.
+
+## Historical 0.5.0 cleanup
+
+The following sections preserve the earlier tracked pre-seal handoff. Its later
+results are in `out/bug-cleanup-20260912/final-verification.json` at f63c4a7 and
+local `v0.5.0-rc.1`. Its pending language and extension stamp describe that
+earlier candidate, not the current Fable follow-up.
 
 ## Integrated scope
 

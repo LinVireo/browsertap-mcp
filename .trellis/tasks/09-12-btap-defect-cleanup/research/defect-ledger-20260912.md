@@ -2,6 +2,13 @@
 
 Coordinator: `codex-resume-01a0881c`. Inventory: `/root/btap_bug_inventory`; implementation/review reports are kept separately. Integration baseline: `e631522` (includes the setup and coverage baseline). Current implementation and measured regressions override historical prose.
 
+Current follow-up: [Fable integration](fable-final-integration-20260912.md)
+records F1-F8 and the extra review findings on the 0.5.1 candidate. Its final
+commit, complete-suite seal, local RC tag and canonical integration are recorded
+in `out/fable-review-20260912/final-verification.json`. The older tables below
+retain the 0.5.0 cleanup history and its separate evidence; pending statements
+there are superseded only by the corresponding actual verification receipt.
+
 Canonical follow-up: the first full attempt at `147c781` had 3965 passes and
 one failure because `tests/test_offline.py` retained the old 49-name expected
 set. A standalone invocation reproduced the exact missing-two-tools mismatch.

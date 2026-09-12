@@ -20,8 +20,10 @@ failures. For normal operating workflows, see the [usage guide](USAGE.md).
 Bridge logs are stored at `~/.browsertap/bridge.log`, capped at 5 MB with one
 previous generation kept as `bridge.log.old`. URLs are redacted where they are
 logged -- scheme, host and a truncated path survive, query strings and fragments
-do not -- but the log still identifies which sites the browser visited and still
-carries error text from the page, so review both files before sharing them.
+do not. Bridge exception handlers omit payload text and tracebacks; arbitrary
+protocol identifiers use hash references. The log still identifies sites and
+contains local paths, socket addresses and timings, so review both files before
+sharing them.
 [SECURITY.md](../SECURITY.md) states exactly what may and may not appear there.
 
 ## Connection problems
@@ -32,6 +34,20 @@ Confirm that the unpacked extension is enabled and that at least one normal
 `http` or `https` page is open. Blank pages and browser-internal pages do not
 create a normal page session. After reloading the extension, refresh the page
 or open a new URL, then run `doctor` again.
+
+The bridge pins the exact Origin of the extension from `browsertap extension-path`.
+Its diagnosis includes `ws_origin_policy.default_origin` and `identity_source`
+(`manifest_key`, `unpacked_path`, or `unavailable`). Compare the ID with the
+installed extension on `chrome://extensions`. A copied extension directory has
+a different ID when no manifest key is present: load the reported package path,
+or explicitly trust the copy's complete `chrome-extension://<id>` through
+`BROWSERTAP_WS_ALLOWED_ORIGINS` in the bridge environment. Restart the bridge
+after correcting its configuration. An unavailable identity requires repairing
+the package manifest JSON/key. A key accepts strict Base64 or Chromium-compatible
+PEM; whitespace in raw Base64 is invalid. On Windows, loading via a path with
+different directory casing or a junction can also change the unpacked ID;
+compare the actual installed ID instead of assuming aliases are interchangeable.
+A new `clientId` never grants trust to an unrelated ID.
 
 ### The MCP client cannot start the server
 
@@ -254,10 +270,31 @@ available while that tab is blocked.
 
 ### Physical input returns `requires_user_action`
 
-The MCP client may not implement elicitation, or the action may have been
-declined. Prefer `page_click`, `page_type`, `page_press`, and `page_drag`, which
-do not require desktop input. In `safe` mode, a site permission with
-`setting="allow"` also requires elicitation.
+When approval was not granted, inspect `reason` in the result (also retained in
+`legacy` and `diagnostics`). No approved action is dispatched for these reasons:
+
+| `reason` | Meaning |
+| --- | --- |
+| `elicitation_unsupported` | The MCP host cannot present an approval request. |
+| `declined` | The user declined the request. |
+| `timeout` | The approval deadline elapsed. |
+| `cancelled` | The approval prompt was cancelled. |
+| `error` | The approval exchange failed. |
+
+Prefer `page_click`, `page_type`, `page_press`, and `page_drag` when the task can
+use page input. In `safe` mode, a site permission with `setting="allow"` also
+requires elicitation. A refusal is not permission to change profile or replay
+the action. Cancellation of the entire MCP task still propagates normally.
+
+### Dialog helper globals remain after an extension upgrade
+
+The extension no longer installs a MAIN-world dialog helper on every document.
+An operation using `accept`/`dismiss` installs it for that scope, then restores
+the page descriptors and removes its temporary controller when the final scope
+ends; a bounded expiry handles abandoned scopes. Existing documents injected by
+an older extension retain the old wrapper even after an extension reload. Normal
+navigation or a page refresh creates a clean document. BTAP does not refresh
+unrelated tabs to remove historical injection.
 
 ### Physical input returns `busy`
 

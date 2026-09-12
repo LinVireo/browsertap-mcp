@@ -2,7 +2,7 @@
   "id": "btap-defect-cleanup",
   "name": "btap-defect-cleanup",
   "title": "Clear remaining BTAP defects and reconcile recorded bugs",
-  "description": "Inventory current project and knowledge-vault bug records, reproduce unresolved defects, fix and verify bounded slices in the original shared checkout, reconcile stale records, and update version/local tags when justified by completed checks; user is unavailable for manual extension Reload.",
+  "description": "Inventory project and knowledge-vault bug records, reproduce unresolved defects, fix and verify bounded slices in coordinated isolated trees, integrate reviewed results into the original shared checkout, reconcile stale records, and update version/local tags after completed checks; user is unavailable for manual extension Reload.",
   "status": "in_progress",
   "dev_type": null,
   "scope": null,
@@ -21,10 +21,12 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "Native session 01a09113-7fb4-71d1-b6ef-34cc2d6c9712; original shared checkout D:/browsertap-mcp. Confirmed C01-C26, M02-M06, the M01 descriptor cleanup and FS/ND review fixes are integrated; final independent delta review and committed-tree candidate verification are recorded in handoff.md and out/bug-cleanup-20260912/final-verification.json. This task remains in_progress because full M01 retention, real A7/native platforms, historical wait latency correlation and new-build live/manual Reload are not closed. Source 0.5.0; local v0.5.0-rc.1 is conditional on the exact committed-tree offline seal. No remote publication.",
+  "notes": "Original shared checkout D:/browsertap-mcp. C01-C26, M02-M06, M01 descriptor cleanup and FS/ND fixes were sealed at f63c4a7 / v0.5.0-rc.1. The 0.5.1 Fable follow-up is integrated in D:/coding/btap-fable-fixes-20260912, including the legacy Python dialog controller and caller-start deadline guards. Independent reviews and root regressions are recorded in research/fable-final-integration-20260912.md. Canonical commits 564e2509 and 6b391d88 preserve another session's intermediate implementation/version history; integration retains both histories and fast-forwards only a clean, rechecked canonical tree. The exact final HEAD, offline/build/install gates, local candidate tag and canonical byte comparisons are established by out/fable-review-20260912/final-verification.json, not by this pre-seal record. Task remains in_progress for full M01 retention, real A7/native platforms, historical wait latency correlation and new-build live/manual Reload. No remote publication.",
   "meta": {
     "handoff": ".trellis/tasks/09-12-btap-defect-cleanup/handoff.md",
-    "final_evidence": "out/bug-cleanup-20260912/final-verification.json",
+    "final_evidence": "out/fable-review-20260912/final-verification.json",
+    "previous_evidence": "out/bug-cleanup-20260912/final-verification.json",
+    "candidate_worktree": "D:/coding/btap-fable-fixes-20260912",
     "open_boundaries": ["M01 retention", "A7 native dialog", "macOS/Linux native browser", "historical wait latency correlation", "new-build live and manual Reload"]
   }
 }

@@ -54,9 +54,10 @@ with `expected_python_source_identity`. `mcp_build_verdict` and
 The loaded identity is sealed at the first package import, before the other
 package modules load; a diagnostic request must never refresh it from disk.
 Same-version edits therefore still require the corresponding process restart.
-The `btap.package-source.v2` identity covers package `.py` bytes and the four
-required import-cached scripts: `chrome_extension/result_serialization.js`,
-`chrome_extension/guarded_eval.js`, `page_scripts/page_outline.js` and
+The `btap.package-source.v2` identity covers package `.py` bytes and the required
+import-cached scripts: `chrome_extension/result_serialization.js`,
+`chrome_extension/guarded_eval.js`, `chrome_extension/disable_dialogs.js`,
+`page_scripts/page_outline.js` and
 `page_scripts/list_groups.js`. Missing or unreadable assets and older identity
 schemas cannot prove a match. This does not attest runtime monkeypatches, code
 objects, arbitrary other assets, or a loader's cached bytecode. Freeze source
@@ -167,6 +168,41 @@ under node (`..._runs_the_page_analysis_exactly_once` and
 `..._cutlist_payload_also_runs_its_analysis_exactly_once` -- one test could only
 ever vouch for one file). The bare identifier is also what keeps eslint's
 `no-unused-vars` satisfied without an inline disable.
+
+## Scoped page dialogs
+
+`disable_dialogs.js` exports the shared dialog-scope controller; it is not a
+default MAIN-world content script. For an extension `accept`/`dismiss`
+execution, finish direct helper installation in the current injectable frames
+before dispatching caller code.
+Validate each preparation acknowledgement and exactly one top-frame marker;
+Chrome's `allFrames` scheduling does not guarantee child-before-top execution.
+The prepared scopes belong to those documents, not future frames or navigation.
+Manual execution and monitor-only probes preserve native dialog functions.
+
+An older command router may reject `set_dialog_policy` or omit its token before
+caller dispatch. The Python CDP fallback then imports the same helper and owns
+a lease in the current `Runtime.evaluate` context only; it does not perform the
+worker's all-frame preparation. Fix its wall-clock deadline before sending,
+install inside `try`, release in `finally`, and normalize the dialog envelope
+before returning the public result. Installation failure or an expired deadline
+must prevent caller execution. The fallback has dedicated regressions in
+[test_python_cdp_dialog_scope.py](../../tests/test_python_cdp_dialog_scope.py).
+
+Preparation, scripting, CSP handling, CDP attachment/evaluation and cleanup
+share one deadline. Late delivery cannot restart that deadline. The top builder
+adopts its prepared scope and releases it in `finally`; worker cleanup releases
+the frame token, with page-side expiry as a fallback. Restore only descriptors
+still owned by the helper. Old documents keep earlier extension wrappers until
+normal navigation/refresh; an extension Reload cannot remove them.
+
+CSP fallback requires evidence that caller code never started. A caller-thrown
+`EvalError` containing CSP text is not such evidence. Preserve the eval guard's
+`started()` signal and the AsyncFunction dispatch boundary. Missing results,
+rejected dispatch and timeout after injection remain uncertain and must not
+replay caller code. See the complete-worker regressions in
+[test_dialog_frame_preparation.py](../../tests/test_dialog_frame_preparation.py)
+and [test_dialog_scope_installation.py](../../tests/test_dialog_scope_installation.py).
 
 ## 5. MV3 `chrome.alarms` has a 60-second floor
 

@@ -103,11 +103,17 @@ interface that matches the task:
 
 `resolve_leave_dialog` remains a page-scoped, lab-only recovery workflow; its
 final Enter fallback is a restricted exception, not a general desktop surface.
-The live registry is returned in `get_setup_status`'s `data.capability_registry`, so a
-client can inspect the actual tool inventory instead of guessing from package
-extras or documentation. Each entry also reports whether a target is none,
-optional, or required, whether the operation reads, writes, or may do either,
-and whether desktop opt-in is involved. Every public tool now returns the
+`get_setup_status` returns tool counts and capability groups in
+`data.capability_registry`. MCP `tools/list` supplies the actual tool schemas and
+explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`
+for every tool. These describe all supported parameter paths: tools with optional
+script execution, buffer clearing, or file writes are not classified as read-only.
+`get_setup_status` can tighten an existing Windows token file's ACL and is also
+classified as state-changing.
+Annotations help hosts plan calls; they do not grant permission or replace
+BTAP's ownership and concurrency checks.
+
+Every public tool now returns the
 `btap.result.v1` envelope without renaming tools: successful operation data is
 in `data`, explicit legacy failure payloads remain in `legacy`, and
 `error`/`error_code`, `retryable`, `target`, and `diagnostics` provide stable
@@ -327,9 +333,10 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 | `BROWSERTAP_BRIDGE_TOKEN` | unset | Legacy one-time migration source. If the token file does not exist, BTAP imports this value once; the file wins thereafter. |
 | `BROWSERTAP_PREFERRED_BROWSER` | unset | `chrome`, `edge`, or `opera`. Which browser wins when several are connected and no tab is specified. |
 | `BROWSERTAP_MODE` | `lab` | `lab` prioritizes uninterrupted automation and skips physical-input/site-allow elicitation; `safe` prompts for every such action. `set_automation_profile` changes only the current MCP process. |
+| `BROWSERTAP_ALLOW_UNSAFE_CDP` | unset | Raw CDP blocks the high-risk methods listed in [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md). `1` permits them only in `lab`; `safe` retains the guard. Other allowed methods can still change page or profile state. |
 | `BROWSERTAP_LAB_NO_ELICIT` | enabled | Lab skips elicitation by default. Set this to `0`/`false` only when you want session-level lab approval prompts; the cross-process lock, quiet-input gate, foreground confirmation, and ownership checks always apply. |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | In lab, ordinary `open_url` accepts beforeunload on matching current hosts. `intent_leave=false` always preserves the page. |
-| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins allowed by both the bridge WebSocket handshake and HTTP origin check. Extension origins are allowed automatically. HTTP token authentication still applies; HTTP requests without `Origin` remain allowed by the origin check. |
+| `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins for WebSocket and HTTP. The packaged extension ID is pinned by default, from its manifest key or unpacked path; separate copies need their own explicit Origin. HTTP token authentication still applies, including without `Origin`. |
 | `BROWSERTAP_WS_ALLOW_NO_ORIGIN` | unset | Set to `1` only for a trusted non-browser local WebSocket client that cannot send `Origin`. The default rejects origin-less clients. |
 
 ### CLI
@@ -381,8 +388,8 @@ Existing empty or unreadable files are not overwritten.
 
 `mcp_build_verdict` and `bridge_build_verdict` compare each process's package-import
 source snapshot with disk: `matches_tree`, `stale_process`, or `unverifiable`.
-The snapshot includes package Python files and the four imported JavaScript
-assets used for result conversion, guarded execution and page inspection.
+The snapshot includes package Python files and import-cached JavaScript used
+for result conversion, guarded execution, scoped dialogs and page inspection.
 Same-version edits still require the corresponding MCP or bridge restart.
 Missing assets or older identity schemas cannot prove a match. This source
 identity does not attest runtime monkeypatches, cached bytecode or arbitrary
@@ -431,7 +438,7 @@ The marker below is maintained with this source tree. It is not proof that a
 development checkout has been published; compare the installed package with its
 release tag before using new tool signatures or the 0.5.0 migration notes.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.0**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.1**.
 
 The three components load updates separately:
 
@@ -479,7 +486,21 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 
 **Automation profiles.** With `BROWSERTAP_MODE` unset, BTAP defaults to `lab` with `BROWSERTAP_LAB_NO_ELICIT=1` semantics. Lab permits site `allow` and the restricted leave-dialog fallback without elicitation; `safe` prompts for each site `allow` and refuses the physical Enter fallback. Neither profile is a confirmation prompt for every browser action. Ownership and target checks still apply, and the physical path keeps its OS lock, quiet-input gate and `on_screen` check. `input_quiet.enforced` says whether comparable input markers were available.
 
+**Raw CDP.** `get_automation_profile.raw_cdp_policy` reports `guarded` or
+`allow_unsafe`. Single commands and entire batches are checked before dispatch;
+use dedicated tools for tab closure, cookies, permissions and user-agent changes.
+The guard covers common destructive methods, while allowed JavaScript/CDP can
+still change a page. The complete policy and explicit lab override are in
+[SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md).
+
 **Dialogs are explicit.** `execute_js(dialog_policy=...)`, `open_url(beforeunload=...)`, and `handle_dialog(action=...)` take `dismiss` (default), `accept`, or `manual`. The global default still preserves the page; only an explicit accept or lab's configured shell/IDE host heuristic leaves automatically. `handle_dialog` answers within three seconds or reports `no_dialog`/an explicit error. `resolve_leave_dialog` tries protocol accept twice and uses physical Enter only as a final, lab-approved fallback.
+
+The extension route for `execute_js` prepares the current injectable frames for
+`accept`/`dismiss` before running the caller and restores temporary helpers on
+completion or expiry. The Python CDP fallback for an older command router covers
+only its current evaluation context. New documents do not inherit either scope.
+Preparation shares the command deadline; a caller's CSP-like error or an
+uncertain result never justifies replaying it.
 
 **Permissions use temporary leases.** `set_site_permission` covers one origin for 60–600 seconds, records the prior setting, and attempts restoration on expiry/reset/service-worker restart. `safe` prompts for every `allow`; default `lab` applies it without elicitation. Unsupported restoration is retained as `manual_recovery` with the prior setting and recovery guidance, and automatic retries stop. Correct the cause before an explicit `reset_site_permissions` retry. Unsupported initial grants return `unsupported` or `requires_user_action`.
 
@@ -541,7 +562,8 @@ and as small top-level compatibility fields. Failures set MCP `isError=true`:
 | `dialog_handle_failed` | A dialog was seen but answering it failed; the tab may still be blocked. |
 | `navigation_failed` / `navigation_timeout` | `open_url` did not complete within its timeout, or the browser reported an error. |
 | `triggered` with `type="download"` | `open_url` was replaced by a browser download. `ERR_ABORTED` can be normal only when CDP also reports `isDownload=true`; use `download_file` for completion and the local path. |
-| `requires_user_action` | Approval was declined, cancelled, or unavailable — nothing was done. |
+| `requires_user_action` | The action needs user intervention; approval failures include `reason` (`elicitation_unsupported`, `declined`, `timeout`, `cancelled`, or `error`) and do not execute the action. |
+| `raw_cdp_blocked` | A raw method bypasses a protected state/ownership path. No command was dispatched; use a dedicated tool or resolve the operator configuration instead of retrying unchanged. |
 | `busy` | Another BTAP process holds the physical-input lock, or the tab already has a pending manual execution. Returned immediately, never queued. |
 | `target_busy` | This tab is reserved by another call or a still-pending browser command. Check `delivery_state` and `retry_safe`; a call involving multiple tabs may have completed earlier steps. |
 | `capture_busy` | Another MCP session owns this console/network capture. Its owner must stop it before another session can restart, stop, or clear it. |
@@ -632,10 +654,12 @@ browser/profile selection.
 
 - **get_setup_status** — report `package_version`, `bridge_version`, `extension_version`, `protocol_version`, connection state, ports, tabs, and the required recovery action. A missing bridge listener is started automatically when spawning is enabled; `restart_bridge_required=true` means a bridge that is still running must be replaced with `browsertap bridge --restart`. `reload_extension_required=true` identifies the unpacked-extension platform limit and requires a manual Reload; a version number that differs on its own no longer sets it, because Chrome parses `manifest.json` at load time and never re-parses it without a Reload, so a release bump would otherwise demand a click whose only effect is on that number. `restart_mcp_session_required=true` is the opposite direction: a component is *newer* than the running server, so the stale build is this process and only restarting the MCP session or client clears it — the other two flags stay false, because a restart or reload would report the same mismatch again. `extension_build_stamp` is the stronger signal and answers the question the four version fields cannot: it is a hash of the extension sources compiled into `background.js`, reported by the worker actually running, so comparing it to `expected_extension_build_stamp` (a fresh hash of the directory) is decisive in both directions where version equality was measured wrong twice. Read the answer from `extension_build_verdict`: `matches_tree` (the worker is running this code), `stale_worker` (it is not -- Reload), `stamp_not_regenerated` (an extension file was edited without running `python -m scripts.extension_stamp --write`, so the comparison proves nothing either way) or `unverifiable` (the extension predates the stamp, or the directory could not be read -- see `extension_build_error`). `extension_build_enforced=false` means no comparison happened, so treat it as unknown rather than as a pass. Answers while another tool is still running; `default_session_id` is this request's snapshot of the MCP process default and `default_session_settled=true` because another call's temporary target is isolated. No parameters.
   `extension_status_available=false` means the extension has not supplied runtime status: `starting` asks to `wait_for_extension`, and `extension_unavailable` asks to `check_extension_connection`. Missing status alone does not request a Reload. Compatibility checks, including legacy replies missing required fields, apply once runtime status is available.
+  On Windows, inspecting an existing token file can tighten its ACL to the current user. The token-file state check itself does not create a missing file; `get_setup_status` may still create one during bridge startup or authentication initialization.
 - **get_automation_profile** — inspect whether the current MCP process uses `lab` or `safe`.
 - **set_automation_profile** — switch the current MCP process between `lab|safe`; the override is not persisted and does not reload the extension.
   - `mode` (string): `lab` or `safe`
 - **list_tabs** — list connected tabs under `data.tabs`, including their full session handles and `browser` fields. Answers while another tool is still running; `default_session_id` is this request's snapshot of the MCP process default and `default_session_settled=true`. Parallel agents should still pass an explicit target. No parameters.
+  A timed-out inventory releases that read's bridge reservation. Pending mutations keep their reservations; a release does not establish whether another operation happened.
 - **list_all_tabs** — *(no tab needed)* list every open tab, including `chrome-extension://` pages that `list_tabs` hides. Those never become sessions, so they have no session id; drive them with `cdp_command(tab_id=...)`.
   - `session_id` (string, optional): which browser/profile to ask.
 - **switch_tab** — set this MCP process's *target* tab for later calls. A `url_pattern` must match exactly one tab; if several match, select one with its full `session_id`. A `browser` filter matching multiple profiles also requires an explicit `session_id`. It does **not** raise the tab or focus the browser: `activate` defaults to `false`. Pass `activate=true`, or call `activate_tab`, when you need the tab in front.
@@ -649,6 +673,7 @@ browser/profile selection.
 - **open_new_tab** — open a background tab in this MCP process's selected browser/profile, unless `session_id` or `client_id` selects another. Creates a unique `operation_id` and waits a bounded time for exact session/generation registration; pass `active=true` for foreground work. Returns `{operation_id,tab_id,session_id,generation,ready,owned,opener,owner_id,load_status}`. The extension deduplicates by operation id. Ownership requires a completed record with exact `client_id+tab_id+generation`, even when `ready=false`; `ready` only reports immediate availability for session tools. Before create dispatch, registry uncertainty returns `status="unknown",may_have_created=false,retry_safe=true`; after dispatch, uncertainty returns `may_have_created=true,retry_safe=false`. With `may_have_created=false,retry_safe=true`, resolve the reported failure and retry without `operation_id`. To recover a dispatched create with `retry_safe=false`, pass the same `operation_id`, returned `client_id`, and `owner_id`: recovery reads the durable record without replaying `tabs/create`. A failed recovery probe preserves that uncertainty and owner capability. If the initial recovery probe finds no record, `reconciliation.resume_required=false` directs the caller to `list_tabs()` and inspection of that browser instead of another recovery call. Missing records, matching URLs, or unchanged tab counts cannot prove non-creation or ownership; keep the outcome unknown unless exact identity and task ownership resolve it. Keep `owner_id` for cleanup of registered task-owned tabs with their exact session/generation. Use this native API for reliable new tabs; page `window.open()` or anchor clicks may be blocked without a user gesture.
   - `url` (string), `timeout` (number, optional): default `15`, `active` (boolean, optional): default `false`, `session_id` (optional browser/profile selector), `owner_id` (optional capability to group several tabs under one task owner), `operation_id` (optional recovery handle), `client_id` (optional browser/profile client selector for creation or recovery)
   - A pending create left by a worker restart becomes terminal `unknown`. Bounded record retention also keeps a replay guard for retired operation IDs; a refused old ID does not prove non-creation. Follow `reconciliation.resume_required=false` with inspection of that browser, preserving unknown outcomes and exact ownership evidence.
+  - A failed status probe may return `reconciliation.bridge_operation`. Its wire `operation_id` can be queried with `get_execute_js_result` in the same MCP session; the outer creation `operation_id` still belongs to `open_new_tab` recovery. The probe's `reservation_held=false` does not prove an earlier create was absent or safe to replay.
 - **close_tabs** — *(no tab needed)* accept native numeric tab ids or full `client:tabId` session ids, including `chrome-extension://` tabs. The default `only_if_agent_owned=true` requires the `owner_id` returned by `open_new_tab` and verifies the current lifecycle generation before closing, so pre-existing user tabs and another agent's tabs are refused. If the user already closed an owned tab, cleanup returns `status=already_gone, closed_by=user` without reusing its native id. An actual owned close returns `closed_by=agent`; an explicit unowned/operator override returns `closed_by=none` so it is not counted as task-owned cleanup. If `already_gone` is returned but a page with the same work is still visible, call `list_all_tabs` and verify URL/title before deciding whether a new session/generation should be closed; BTAP never auto-transfers ownership by URL. A Chrome `tabs.onReplaced` identity mapping is safe and also migrates the ownership claim. Set `only_if_agent_owned=false` only when the operator explicitly asked to close an unowned/user tab.
   - `tab_id`, `session_id` (optional browser constraint), `owner_id` (required by the safe default), `only_if_agent_owned` (boolean, default `true`)
 </details>
@@ -656,9 +681,9 @@ browser/profile selection.
 <details>
 <summary><b>Page reading and execution</b></summary>
 
-- **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. A background tab may report viewport height zero; ordinary DOM/text/API work still continues there, and only visual/layout fidelity requires explicit `activate_tab`. When the page can be probed, `render_state`/`content_ready` distinguish real content from a loading, hydrating, or shell-only SPA; retry or use `wait_for` before treating an empty shell as final content. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. This tool does not modify the page -- no attribute, no id, no `window` global -- so a scan is invisible to the page's own scripts.
+- **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. A background tab may report viewport height zero; ordinary DOM/text/API work still continues there, and only visual/layout fidelity requires explicit `activate_tab`. When the page can be probed, `render_state`/`content_ready` distinguish real content from a loading, hydrating, or shell-only SPA; retry or use `wait_for` before treating an empty shell as final content. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. The built-in scan does not write page attributes, ids, or `window` globals. Optional `extra_js` runs caller code and can modify the page or send requests.
   - `session_id` (string, optional), `text_only` (boolean, optional): default `false`, `cutlist` (boolean, optional): default `true`; collapse repetitive lists, `maxchars` (integer, optional): default `35000`, `instruction` (string, optional), `extra_js` (string, optional), `timeout` (number, optional): default `15`
-- **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. The server schedules short synchronous page checks under one deadline, avoiding background-page timer throttling. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input. A timeout with `operation_id` retains a pending check. Timed-out selector/text/URL probes can release the tab without discarding that receipt: `reservation_held=false` permits another command, and `get_execute_js_result` in the same MCP session can collect the delayed reply. Caller-provided `js` stays reserved. When `reservation_held` is true or unknown, keep querying the original operation until it settles or releases its reservation. A pending probe is never replayed.
+- **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. The server schedules short synchronous page checks under one deadline, avoiding background-page timer throttling. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input. Caller-provided `js` is evaluated repeatedly and can have side effects; use a read-only predicate. A timeout with `operation_id` retains a pending check. Timed-out selector/text/URL probes can release the tab without discarding that receipt: `reservation_held=false` permits another command, and `get_execute_js_result` in the same MCP session can collect the delayed reply. Caller-provided `js` stays reserved. When `reservation_held` is true or unknown, keep querying the original operation until it settles or releases its reservation. A pending probe is never replayed.
   - `selector` (string/object, optional): CSS or structured locator, `text` (string, optional): substring of body text, `url_pattern` (string, optional): regex on the URL, `js` (string, optional): expression to become truthy, `gone` (boolean, optional): wait for the condition to stop holding; default `false`, `timeout` (number, optional): default `15`, `session_id` (string, optional)
 - **wait_for_url** — wait for navigation to settle: blocks until the tab URL matches `url_pattern` (regex, or plain substring — both are tried) and, unless `wait_ready=false`, `document.readyState` is `complete`; then returns final `url`, `title` and `ready_state`. Use after a click or `open_url` that navigates; `wait_for(url_pattern=...)` only checks the URL and can return while the new document is still blank. Uses the same bounded synchronous checks and receipt recovery as `wait_for`. A pending probe with `reservation_held=false` no longer blocks the tab; its delayed reply remains available through `get_execute_js_result` in the same MCP session.
   - `url_pattern` (string): regex or substring to match against the URL, `timeout` (number, optional): default 15, `wait_ready` (boolean, optional): require `readyState === 'complete'`, default `true`, `session_id` (string, optional)
@@ -671,6 +696,7 @@ browser/profile selection.
   - Once user code starts, a script error does not trigger a second execution. Use an explicit `return` in a complex async body, preferably `(async () => { /* work */ return value; })()`. Ambiguous bodies may complete with `null`; `await(expr)` can parse as a call to an ordinary function named `await`, so use the async IIFE when that distinction matters.
   - Unpaired UTF-16 values or keys use the same file export at any size, with `result_file_scope="js-value"`. If writing fails, `result_json` preserves the complete value with `result_json_scope="js-value"`; see [Complete JSON results](#complete-json-results) for decoding and receipt semantics.
 - **get_execute_js_result** — read or briefly wait for an `operation_id`, from the same MCP session that submitted it. Accepts handles from `execute_js` and other timed-out bridge commands. Querying never replays the operation. A completed result can be read repeatedly, including after a lost query response; pending, unknown/expired, and foreign handles return explicit statuses or errors. After reservation expiry, the first valid late terminal reply is retained as `late_result` (`success` and `data`), with `late_reply_age` in seconds. The original `unknown` receipt and `retry_safe=false` remain; the late reply neither restores the reservation nor renews retention. Results are retained for up to 10 minutes, with at most 512 completed operation records; capacity pressure can evict them earlier. A missing result does not prove the operation was never executed. Large successful values use the same lossless `result_file` metadata as `execute_js`; for a late value, that metadata is inside `late_result` and its `data` becomes null.
+  Accepts the nested `reconciliation.bridge_operation.operation_id` from a failed `open_new_tab` status probe. A known read-only wait, inventory or creation-status probe may release its reservation on timeout while retaining its receipt. Check `reservation_held`; it describes that probe, not the outcome of the tab creation.
   - `operation_id` (string), `timeout` (number, optional): default `0`, range `0`–`120`
 - **handle_dialog** — inspect or answer a dialog left open on a tab. `action="manual"` reports it without choosing (`blocked_by_dialog`, or `no_dialog` if nothing is open); `accept`/`dismiss` answer it and release any paused `execute_js` or `open_url`. `prompt_text` supplies the text for an accepted `prompt`.
   - `action` (string), `prompt_text` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `3`, capped at three seconds
@@ -723,9 +749,9 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
 <details>
 <summary><b>CDP</b></summary>
 
-- **cdp_command** — send one CDP command.
+- **cdp_command** — send one CDP command to the selected tab or explicit debuggee. Listed high-risk methods return `raw_cdp_blocked` before dispatch; params must be a JSON object. Other allowed methods can still change page or profile state. See the raw CDP policy above.
   - `method` (string): e.g. `Page.navigate`, `params_json` (string, optional): JSON object as text, `session_id` (string, optional), `tab_id` (integer/string, optional), `extension_id` (string, optional), `target_id` (string, optional), `timeout` (number, optional): default `20`
-- **cdp_batch** — send a batch; `batch_json` must be a JSON object with `cmd: "batch"`.
+- **cdp_batch** — send a batch; `batch_json` must be a JSON object with `cmd: "batch"` and a `commands` array of `cdp`, `tabs`, or `cookies` objects. The whole batch passes the raw CDP policy before its first member runs; nested/unknown commands are rejected.
   - `batch_json` (string), `session_id` (string, optional)
 - **debugger_targets** — *(no tab needed)* list every CDP-attachable target, including service workers and extension background pages that `list_tabs` never shows.
   - `session_id` (string, optional)

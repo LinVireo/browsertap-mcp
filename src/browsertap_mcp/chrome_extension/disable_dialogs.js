@@ -1,29 +1,109 @@
-// Suppress alert/confirm/prompt so page JS can't block automation.
-//
-// This runs in the MAIN world on every page at document_start, so it MUST NOT
-// change behaviour during ordinary human browsing. It used to replace confirm()
-// with a function that always returned true — which silently auto-accepted the
-// user's own "Delete this repository?" / "Discard unsaved changes?" dialogs.
-//
-// Now the natives stay in place until automation explicitly turns suppression
-// on for this tab. The injected script preamble pushes a scope onto
-// window.__btap_dialog_scopes (same MAIN world) carrying a policy and a
-// deadline, and activeScope() below is the single reader of that list.
-//
-// Deadlines rather than a boolean, because a boolean stays stuck on if the
-// script throws, the tab navigates mid-command, or the worker is evicted — and
-// a stuck flag silently eats the user's own confirm() dialogs, which is the very
-// bug this was meant to fix. Note the preamble also maintains a legacy
-// window.__btap_suppress_until mirror. Nothing in this extension consumes it
-// as a policy decision -- the only read is the preamble zeroing its own value
-// on the way out -- so do not rely on it. It is kept because a page or
-// userscript may still be looking at it; deleting it is an observable change.
-(function() {
+// Loaded by the worker, not by ordinary pages. The complete function is sent
+// only to the target tab for explicit accept/dismiss commands. Keep it
+// self-contained: both scripting injection and the CDP builder serialize it.
+function manageDialogScope(action, scope) {
+  const key = '__btap_dialog_controller';
+  const slot = Object.getOwnPropertyDescriptor(window, key);
+  const current = slot?.value;
+  const isController = current?.version === 1 &&
+    typeof current.enter === 'function' && typeof current.releaseToken === 'function';
+  if (action === 'release') {
+    if (isController) current.releaseToken(String(scope?.token));
+    return null;
+  }
+  const installing = action === 'install';
+  if ((!installing && action !== 'enter') || !scope?.token ||
+      (scope.policy !== 'accept' && scope.policy !== 'dismiss') ||
+      !Number.isFinite(scope.deadline) || scope.deadline <= Date.now() ||
+      (Number.isFinite(scope.startDeadline) && scope.startDeadline <= Date.now())) return null;
+  // InjectionResult must contain plain data, not the lease's closure functions.
+  // The top builder adopts its prepared entry; subframes keep theirs until the
+  // worker releases the token or the original absolute deadline expires.
+  const resultFor = lease => installing ? {
+    __btap_dialog_scope_installed: true,
+    token: String(scope.token),
+    policy: scope.policy,
+    deadline: scope.deadline,
+    top: window.top === window,
+  } : lease;
+  if (slot) {
+    if (!isController) throw new Error('dialog scope controller conflicts with a page property');
+    return resultFor(current.enter(scope, installing));
+  }
+
+  // This slot exists only while a scope is active. It coordinates overlapping
+  // executions in one frame; records and original descriptors stay in closures.
+  // MAIN world is page-controlled, so this is not an anti-tampering boundary.
+  const names = ['alert', 'confirm', 'prompt'];
+  const originals = Object.fromEntries(names.map(name => [name, {
+    descriptor: Object.getOwnPropertyDescriptor(window, name),
+    value: window[name],
+  }]));
+  const wrappers = {};
+  let scopes = [];
+  let expiryTimer = null;
+  let restored = false;
+  const armTimer = setTimeout.bind(window);
+  const cancelTimer = clearTimeout.bind(window);
   const _log = console.log.bind(console);
-  const native = {
-    alert: window.alert,
-    confirm: window.confirm,
-    prompt: window.prompt,
+
+  function restore() {
+    if (restored) return;
+    restored = true;
+    if (expiryTimer !== null) cancelTimer(expiryTimer);
+    expiryTimer = null;
+    for (const name of names) {
+      // A page may replace a function during automation. Restore only our own
+      // wrapper, never overwrite that later page change with an old snapshot.
+      if (Object.getOwnPropertyDescriptor(window, name)?.value !== wrappers[name]) continue;
+      try {
+        const descriptor = originals[name].descriptor;
+        if (descriptor) Object.defineProperty(window, name, descriptor);
+        else delete window[name];
+      } catch (_) { /* a page can make its own property non-configurable */ }
+    }
+    if (Object.getOwnPropertyDescriptor(window, key)?.value === controller) {
+      try { delete window[key]; } catch (_) {}
+    }
+  }
+
+  function refresh() {
+    const now = Date.now();
+    scopes = scopes.filter(entry => now < entry.deadline);
+    if (expiryTimer !== null) cancelTimer(expiryTimer);
+    expiryTimer = null;
+    if (!scopes.length) {
+      restore();
+      return;
+    }
+    expiryTimer = armTimer(refresh, Math.max(1, Math.min(...scopes.map(entry => entry.deadline)) - now));
+  }
+
+  const controller = {
+    version: 1,
+    enter(value, preparing = false) {
+      const prepared = !preparing && scopes.find(entry => entry.prepared &&
+        entry.token === String(value.token) && entry.policy === value.policy &&
+        entry.deadline === value.deadline);
+      const entry = prepared || {
+        token: String(value.token), policy: value.policy, deadline: value.deadline,
+        records: [], prepared: preparing,
+      };
+      if (prepared) entry.prepared = false;
+      else scopes.push(entry);
+      refresh();
+      return {
+        records: () => entry.records.slice(),
+        release() {
+          scopes = scopes.filter(candidate => candidate !== entry);
+          refresh();
+        },
+      };
+    },
+    releaseToken(token) {
+      scopes = scopes.filter(entry => entry.token !== token);
+      refresh();
+    },
   };
 
   function toast(type, msg) {
@@ -39,59 +119,64 @@
         transition:'opacity .5s', pointerEvents:'none'
       });
       (document.body || document.documentElement).appendChild(d);
-      setTimeout(() => { d.style.opacity = '0'; }, 3000);
-      setTimeout(() => { d.remove(); }, 3600);
+      armTimer(() => { d.style.opacity = '0'; }, 3000);
+      armTimer(() => { d.remove(); }, 3600);
     } catch (_) {}
   }
 
   function activeScope() {
-    const now = Date.now();
-    const scopes = Array.isArray(window.__btap_dialog_scopes)
-      ? window.__btap_dialog_scopes.filter(scope => scope && now < scope.deadline &&
-          (scope.policy === 'dismiss' || scope.policy === 'accept'))
-      : [];
-    if (Array.isArray(window.__btap_dialog_scopes)) {
-      window.__btap_dialog_scopes = scopes;
-    }
-    if (scopes.length) return scopes[scopes.length - 1];
-    return null;
+    // Background tabs can throttle timers. Never answer a dialog after its
+    // deadline merely because the cleanup timer has not had a turn yet.
+    refresh();
+    return scopes[scopes.length - 1] || null;
   }
 
-  function recordDialog(scope, type, msg, defaultPrompt) {
-    const records = Array.isArray(window.__btap_dialog_records)
-      ? window.__btap_dialog_records : [];
-    records.push({
-      token: scope.token,
-      policy: scope.policy,
+  function recordDialog(entry, type, msg, defaultPrompt) {
+    entry.records.push({
+      token: entry.token,
+      policy: entry.policy,
       type,
       message: String(msg ?? ''),
       defaultPrompt: defaultPrompt === undefined ? '' : String(defaultPrompt),
       openedAt: Date.now(),
     });
-    window.__btap_dialog_records = records.slice(-50);
+    entry.records = entry.records.slice(-50);
   }
 
-  // Note the asymmetry in the fallbacks: when NOT automating we defer to the
-  // native dialog, so the user's own confirmations behave exactly as the page
-  // intended. Only under automation do we answer on their behalf.
-  window.alert = function(msg) {
+  wrappers.alert = function(msg) {
     const scope = activeScope();
-    if (!scope) return native.alert.call(window, msg);
+    if (!scope) return originals.alert.value.call(window, msg);
     recordDialog(scope, 'alert', msg);
     toast('alert', msg);
   };
-  window.confirm = function(msg) {
+  wrappers.confirm = function(msg) {
     const scope = activeScope();
-    if (!scope) return native.confirm.call(window, msg);
+    if (!scope) return originals.confirm.value.call(window, msg);
     recordDialog(scope, 'confirm', msg);
     toast('confirm', msg);
     return scope.policy === 'accept';
   };
-  window.prompt = function(msg, def) {
+  wrappers.prompt = function(msg, def) {
     const scope = activeScope();
-    if (!scope) return native.prompt.call(window, msg, def);
+    if (!scope) return originals.prompt.value.call(window, msg, def);
     recordDialog(scope, 'prompt', msg, def);
     toast('prompt', msg);
     return scope.policy === 'accept' ? (def ?? '') : null;
   };
-})();
+  try {
+    Object.defineProperty(window, key, { value: controller, configurable: true });
+    for (const name of names) {
+      const descriptor = originals[name].descriptor;
+      Object.defineProperty(window, name, descriptor && 'value' in descriptor
+        ? { ...descriptor, value: wrappers[name] }
+        : { value: wrappers[name], writable: true, configurable: true,
+            enumerable: descriptor?.enumerable ?? true });
+    }
+    return resultFor(controller.enter(scope, installing));
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}
+
+manageDialogScope;

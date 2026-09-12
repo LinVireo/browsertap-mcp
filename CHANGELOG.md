@@ -6,6 +6,58 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-12
+
+### Added
+
+- Explicit MCP effect annotations for every tool, covering optional script,
+  clear and file-write paths as well as Windows token ACL hardening.
+- Structured approval failure reasons for physical input and temporary site
+  permissions: unsupported elicitation, decline, timeout, cancellation or error.
+
+### Security
+
+- Pin browser WebSocket and HTTP Origins to the packaged extension's identity
+  by default. Existing installs loaded from the reported extension path keep
+  their ID; extra copies or path aliases require an explicit exact Origin.
+  Manifest keys follow Chromium's strict Base64/PEM rules.
+- Create Windows bridge-token files with a protected current-user-only DACL,
+  and harden existing current-owned files before reading. A security failure
+  does not replace an existing token or fall back to an in-memory token.
+- Publish POSIX bridge tokens only after a private candidate is fully written,
+  preventing concurrent clients from adopting an incomplete token.
+- Guard the public raw-CDP tools against a documented list of high-risk
+  methods, including the Page download-behavior alias. Validate an entire batch
+  before dispatch. An override requires both lab mode and explicit operator
+  configuration; allowed raw methods can still modify page or profile state.
+- Keep request/result payloads and exception tracebacks out of bridge logs;
+  protocol identifiers use hash references for correlation.
+
+### Changed
+
+- Release a timed-out inventory or creation-status probe's bridge reservation
+  while preserving its operation receipt and late-result ownership. Keep
+  pending mutation reservations and the caller's OS scope lock. Failed tab
+  creation probes expose a separate bridge receipt for result lookup.
+- Install page dialog helpers only for active accept/dismiss scopes and restore
+  their owned properties after the last scope or expiry. An extension Reload
+  does not remove an old helper from an existing document; normal navigation or
+  refresh starts a clean document.
+- The extension prepares current injectable frames before caller execution under
+  the same deadline, including CSP fallback. A caller-thrown CSP-like error no longer
+  causes the script to run again; uncertain delivery remains non-replayable.
+- Apply the same dialog controller to the Python CDP fallback for older routers,
+  scoped to its current evaluation context. Restore its lease on failure or
+  completion, retain the sending deadline, and return dialog records separately
+  from the caller's value.
+- Recheck the original deadline after scope installation or script compilation,
+  before either JavaScript execution route starts the caller.
+- Include the dialog helper among the five import-cached JavaScript assets
+  checked by runtime source identity, so a changed helper requires a fresh MCP
+  process even when the package version still matches.
+- Put effects, target choice and uncertain-delivery handling first in JavaScript
+  and raw-CDP tool descriptions while retaining the result-file contract.
+
 ## [0.5.0] - 2026-09-12
 
 ### Added
@@ -1416,7 +1468,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...v0.5.0
 [0.4.20]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...v0.4.20
 [0.4.19]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.18...v0.4.19

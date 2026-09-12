@@ -897,8 +897,11 @@ def test_scan_page_does_not_write_to_the_users_page():
             "disclosure that outlives the behaviour sends the reader looking in "
             "their own DOM for something that is not there"
         )
-    assert "does not modify the page" in documents["README.md"]
-    assert "does not modify the page" in documents["server.py"]
+    for name in ("README.md", "server.py"):
+        assert "built-in scan does not write page attributes" in documents[name]
+        assert "extra_js" in documents[name]
+        assert "modify the page or send requests" in documents[name]
     # The Chinese table says the same thing in Chinese; sharing the English phrase
     # would only prove that someone pasted one in.
-    assert "不修改页面" in documents["README.zh-CN.md"]
+    assert "内置扫描不写页面属性" in documents["README.zh-CN.md"]
+    assert "`extra_js` 执行调用方代码，可以修改页面或发送请求" in documents["README.zh-CN.md"]
