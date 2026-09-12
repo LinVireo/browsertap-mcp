@@ -40,6 +40,26 @@ to load Python server changes. Bridge changes require a bridge restart, and
 extension source changes require a manual reload from the browser's extensions
 page.
 
+### Commit hooks
+
+The optional [pre-commit](https://pre-commit.com/) configuration runs the
+repository's lint, tool-documentation, version, staged-whitespace and secret
+checks. Install Gitleaks on your `PATH`, run `npm ci`, and use the activated
+development environment:
+
+```text
+python -m pip install "pre-commit>=3.2,<5"
+pre-commit install
+pre-commit run --all-files
+```
+
+Local hooks use tools from that environment; they do not install a second lint
+toolchain. Missing tools fail the hook. The lint report is written to
+`out/pre-commit/lint.json`, and the next check requires enforced JavaScript and
+type results. Gitleaks scans the staged diff even with `--all-files`.
+The hooks do not run tests, builds, live browser actions or release sealing;
+run the relevant checks below before committing.
+
 ## Tests
 
 The default suite is offline: it does not drive the user's browser. Run these

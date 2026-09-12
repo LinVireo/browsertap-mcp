@@ -35,6 +35,23 @@ browsertap extension-path
 Python server 改动需要重启 MCP 会话，bridge 改动需要重启 bridge；
 扩展源码改动需要在浏览器扩展管理页手动重新加载。
 
+### 提交钩子
+
+可选的 [pre-commit](https://pre-commit.com/) 配置会执行仓库现有的 lint、工具文档、
+版本、暂存区空白和密钥检查。先将 Gitleaks 安装到 `PATH`、运行 `npm ci`，
+并使用已激活的开发环境：
+
+```text
+python -m pip install "pre-commit>=3.2,<5"
+pre-commit install
+pre-commit run --all-files
+```
+
+本地钩子直接使用该环境的工具，不会另装一套 lint 工具链；缺少工具会失败。
+lint 报告写入 `out/pre-commit/lint.json`，后续检查要求 JavaScript 与类型检查
+确实执行。即使传 `--all-files`，Gitleaks 检查的仍是暂存差异。
+钩子不运行测试、构建、浏览器操作或发布封存；提交前仍须执行下文中与改动相关的检查。
+
 ## 测试
 
 默认测试是离线的，不操作用户的浏览器。在仓库根目录使用开发环境的 Python 运行：
