@@ -215,9 +215,11 @@ jobs:
       - name: Prepare evidence directory
         run: mkdir -p artifacts
       # No coverage gate here either: the threshold is enforced once, on Linux.
+      # Keep the current node ID and a stack dump if a test stalls. A quiet
+      # progress line alone cannot locate a macOS runner's job-timeout failure.
       - name: Run offline tests
         run: >-
-          python -m pytest tests -q
+          python -m pytest tests -vv -o faulthandler_timeout=60
           --junitxml=artifacts/macos-offline-junit.xml
       # Console scripts and package data on the third platform. Newest
       # interpreter only, to keep the job short.

@@ -9,10 +9,15 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from ctypes import wintypes
+from importlib import import_module
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 _WINDOWS = os.name == "nt"
+# The Windows-only ctypes API is dynamic on hosts whose stubs omit it.
+# Keep the module object so patched functions and thread-local errors stay current.
+_win32: ModuleType = ctypes
 _READ_CONTROL = 0x00020000
 _WRITE_DAC = 0x00040000
 _DELETE = 0x00010000
@@ -39,8 +44,9 @@ class _WindowsSecurity:
     """Small, lazy Win32 binding; no DLL loads on POSIX or package import."""
 
     def __init__(self) -> None:
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.security = ctypes.WinDLL("advapi32", use_last_error=True)
+        loader = _win32.WinDLL
+        self.kernel = loader("kernel32", use_last_error=True)
+        self.security = loader("advapi32", use_last_error=True)
         pointer = ctypes.c_void_p
         out_pointer = ctypes.POINTER(pointer)
         dword = wintypes.DWORD
@@ -90,7 +96,7 @@ class _WindowsSecurity:
     @staticmethod
     def _check(ok: Any) -> None:
         if not ok:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32.WinError(_win32.get_last_error())
 
     def _current_user(self) -> tuple[Any, int, str]:
         token = wintypes.HANDLE()
@@ -101,7 +107,7 @@ class _WindowsSecurity:
             size = wintypes.DWORD()
             if self.security.GetTokenInformation(token, 1, None, 0, ctypes.byref(size)):
                 raise _unsafe_file()
-            if ctypes.get_last_error() != 122 or size.value < ctypes.sizeof(ctypes.c_void_p):
+            if _win32.get_last_error() != 122 or size.value < ctypes.sizeof(ctypes.c_void_p):
                 raise _unsafe_file()
             buffer = ctypes.create_string_buffer(size.value)
             self._check(self.security.GetTokenInformation(
@@ -140,7 +146,7 @@ class _WindowsSecurity:
             ctypes.byref(dacl), None, ctypes.byref(descriptor),
         )
         if result:
-            raise ctypes.WinError(result)
+            raise _win32.WinError(result)
         try:
             yield owner, dacl, descriptor
         finally:
@@ -175,7 +181,7 @@ class _WindowsSecurity:
                 None, None, dacl, None,
             )
             if result:
-                raise ctypes.WinError(result)
+                raise _win32.WinError(result)
 
     def verify(self, handle: int) -> None:
         with self.file_security(handle) as (owner, dacl, descriptor):
@@ -210,10 +216,10 @@ class _WindowsSecurity:
                 )
                 if handle != ctypes.c_void_p(-1).value:
                     return handle
-                error = ctypes.get_last_error()
+                error = _win32.get_last_error()
                 # A creating process holds an exclusive handle until its final byte.
                 if create or error != 32 or attempt == 20:
-                    raise ctypes.WinError(error)
+                    raise _win32.WinError(error)
                 time.sleep(0.01)
         raise _unsafe_file()
 
@@ -229,7 +235,7 @@ class _WindowsSecurity:
 
 @contextmanager
 def _windows_file(path: Path, *, create: bool) -> Iterator[int]:
-    import msvcrt
+    msvcrt = import_module("msvcrt")
 
     api = _WindowsSecurity()
     handle = api.open(path, create)
@@ -241,7 +247,9 @@ def _windows_file(path: Path, *, create: bool) -> Iterator[int]:
             api.protect_existing(handle)
         api.verify(handle)
         # open_osfhandle transfers handle ownership to the CRT only on success.
-        fd = msvcrt.open_osfhandle(handle, os.O_BINARY | (os.O_WRONLY if create else os.O_RDONLY))
+        windows_os: ModuleType = os
+        flags = windows_os.O_BINARY | (os.O_WRONLY if create else os.O_RDONLY)
+        fd = msvcrt.open_osfhandle(handle, flags)
         yield fd
         completed = True
     finally:

@@ -463,5 +463,6 @@ def test_the_offline_gate_runs_on_macos_as_well():
     assert "runs-on: macos-latest" in workflow
     macos = workflow.split("macos-offline:", 1)[1]
     assert "--junitxml=artifacts/macos-offline-junit.xml" in macos
-    assert "python -m pytest tests -q" in macos
+    assert "python -m pytest tests -vv" in macos
+    assert "-o faulthandler_timeout=60" in macos
     assert "shell: bash" in macos

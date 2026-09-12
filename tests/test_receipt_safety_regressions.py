@@ -183,7 +183,8 @@ __CONNECT_SOURCE__
         .replace("__CONNECT_SOURCE__", _websocket_connect_source())
     )
     process = subprocess.run(
-        ["node", "-"], input=harness, text=True, capture_output=True, timeout=10, check=False,
+        ["node", "-"], input=harness, text=True, encoding="utf-8",
+        capture_output=True, timeout=10, check=False,
     )
     assert process.returncode == 0, process.stderr
     outcome = json.loads(process.stdout)

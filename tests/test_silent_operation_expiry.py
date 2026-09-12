@@ -350,35 +350,49 @@ def test_the_applied_deadline_is_recorded_on_the_abandoned_record(clock):
     assert snapshot["abandoned_after_seconds"] == 20.0 + pending_module.SILENT_GRACE_SECONDS
 
 
-def test_execute_js_charges_the_hold_against_its_own_timeout(monkeypatch):
+@pytest.mark.parametrize("elapsed", [0.0, 2.5])
+def test_execute_js_charges_the_hold_against_its_own_timeout(clock, monkeypatch, elapsed):
     # Without this the new parameter has no reader and the field is decoration.
     bridge = make_bridge()
     seen: dict[str, object] = {}
     inner = PendingOperations.reserve
+    resolve_target = bridge.resolve_session_target
+
+    def resolve(*args, **kwargs):
+        clock[0] += elapsed
+        return resolve_target(*args, **kwargs)
 
     def spy(self, *args, **kwargs):
         seen.update(kwargs)
         return inner(self, *args, **kwargs)
 
+    monkeypatch.setattr(bridge, "resolve_session_target", resolve)
     monkeypatch.setattr(PendingOperations, "reserve", spy)
     bridge.execute_js("return 1", timeout=20, session_id="browser:1")
 
-    assert 0 < float(seen["caller_budget"]) <= 20
+    assert float(seen["caller_budget"]) == 20 - elapsed
 
 
-def test_ext_cmd_charges_the_hold_against_its_own_timeout(monkeypatch):
+@pytest.mark.parametrize("elapsed", [0.0, 2.5])
+def test_ext_cmd_charges_the_hold_against_its_own_timeout(clock, monkeypatch, elapsed):
     bridge = make_bridge()
     seen: dict[str, object] = {}
     inner = PendingOperations.reserve
+    select_client = bridge.select_client_id
+
+    def select(*args, **kwargs):
+        clock[0] += elapsed
+        return select_client(*args, **kwargs)
 
     def spy(self, *args, **kwargs):
         seen.update(kwargs)
         return inner(self, *args, **kwargs)
 
+    monkeypatch.setattr(bridge, "select_client_id", select)
     monkeypatch.setattr(PendingOperations, "reserve", spy)
     bridge.ext_cmd({"cmd": "tabs", "method": "list"}, timeout=15, client_id="browser")
 
-    assert 0 < float(seen["caller_budget"]) <= 15
+    assert float(seen["caller_budget"]) == 15 - elapsed
 
 
 def test_a_recovery_borrow_is_released_too(clock):

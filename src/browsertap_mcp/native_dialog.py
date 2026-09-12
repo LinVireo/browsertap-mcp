@@ -574,7 +574,7 @@ def _last_error() -> int:
 
 
 def _read_app_paths() -> dict[str, tuple[str, ...]]:
-    import winreg
+    winreg = importlib.import_module("winreg")
 
     registered: dict[str, tuple[str, ...]] = {}
     for browser, executable in _BROWSER_EXECUTABLES.items():
@@ -605,7 +605,7 @@ class _WindowsAdapter:
 
     def __init__(self, *, user32: Any = None, kernel32: Any = None, dwmapi: Any = None):
         if user32 is None or kernel32 is None or dwmapi is None:
-            loader = ctypes.WinDLL
+            loader = importlib.import_module("ctypes").WinDLL
             user32 = loader("user32", use_last_error=True)
             kernel32 = loader("kernel32", use_last_error=True)
             dwmapi = loader("dwmapi", use_last_error=True)
