@@ -46,9 +46,14 @@ earlier candidate, not the current Fable follow-up.
 The [defect ledger](research/defect-ledger-20260912.md) maps every confirmed
 candidate to its disposition. C01-C26, M02-M06, the M01 `_Scope.close` handle
 leak, and the FS-R1/ND-R1/ND-R2 review findings have implementations and scoped
-regressions. Source version is 0.5.0 with 51 registered tools; the two explicit
+regressions. Source version is 0.5.1 with 51 registered tools; the two explicit
 native-file-dialog tools preserve opt-in, approval and ownership checks. The
 seven removed generic OS-input tools remain removed.
+
+The first clean-commit finalizer attempt rejected version 0.5.0 because the
+latest reachable RC tag already carries 0.5.0 and this candidate changes
+production source. The repository's version-increment gate therefore requires
+0.5.1; the failed attempt stopped before archiving or running release gates.
 
 All writers used bounded isolated copies or worktrees; only root applied source
 patches to the original checkout. The external configuration/coverage/Unicode
@@ -107,10 +112,11 @@ The previous `build/` was preserved at
 `build-preservation-reconciled.json`. The finalizer archives old canonical
 artifacts recoverably. Never overwrite a failed run to make it appear passed.
 
-The intended local tag is `v0.5.0-rc.1`, pointing to the sealed commit. Source
-versions remain numeric because the repository versioner has that contract.
-No formal `v0.5.0` tag, remote push, PyPI upload or Registry publication is
-part of this handoff. `--skip-live` does not establish release readiness.
+The intended local tag is `v0.5.1-rc.1`, pointing to the sealed commit. The
+existing `v0.5.0-rc.1` remains on its historical candidate. Source versions
+remain numeric because the repository versioner has that contract. No formal
+`v0.5.1` tag, remote push, PyPI upload or Registry publication is part of this
+handoff. `--skip-live` does not establish release readiness.
 
 ## Open work and runtime facts
 
@@ -132,7 +138,7 @@ part of this handoff. `--skip-live` does not establish release readiness.
 - Historical wait latency still lacks correlated send/receive evidence. No
   root cause is claimed. Result-file retention and the pending product-policy
   decisions were not silently changed into cleanup work.
-- Source identity covers package Python source and four imported JavaScript
+- Source identity covers package Python source and five imported JavaScript
   assets. It does not prove arbitrary bytecode, custom loaders, monkeypatches,
   code-object identity or malicious same-user ABA races.
 
