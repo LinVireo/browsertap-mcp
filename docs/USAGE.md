@@ -12,6 +12,12 @@ from `data`, inspect `error`/`error_code` and `retryable` on failures, and use
 `target`/`diagnostics` when deciding whether a retry is safe. Established fields
 may still appear at the top level for compatibility.
 
+Version 0.5.2 has unresolved live failures involving native file-dialog
+cancellation, JavaScript timeouts, sandboxed iframes, and extension removal.
+Review the [known limitations and recovery guidance](TROUBLESHOOTING.md) when
+planning a workflow that depends on these paths; offline CI does not verify
+unattended recovery.
+
 ## 1. Operation levels
 
 BTAP page operations are divided into two levels:
@@ -107,7 +113,8 @@ inside a page, scrolling, and drag operations. `page_click`, `page_type`,
 screen-coordinate surface to escalate to. A failing `page_click` is a targeting
 problem: read `obscured` / `outside_viewport` / `not_found` off the result and
 fix the target. Browser UI, extension popups and OS dialogs are outside page-level
-input. A supported Windows file dialog has the explicit cancellation flow below.
+input. The explicit Windows cancellation attempt below has not been verified
+to recover the real Chrome file dialog encountered in live testing.
 
 Foreground activation on its own — `activate_tab`, or `switch_tab(activate=true)`
 — sends no input; use it when the user must see a tab.
@@ -137,7 +144,13 @@ host (`elicitation_unsupported`), refusal (`declined`), expiry (`timeout`), prom
 cancellation (`cancelled`) and exchange failure (`error`). The action is not
 dispatched. Keep the refusal separate from a host capability problem.
 
-For an already-open standard Windows file dialog owned by registered Chrome or
+For uploads, use `upload_files` on the page input without opening a native file
+chooser. Do not open a chooser solely to test cancellation: a real Chrome dialog
+can fail inspection because its owner is in another process, and closing its
+tab can leave the dialog open. Manual closure does not count as automatic
+recovery; successful automatic cancellation remains unverified in live checks.
+
+If recovery is needed for an already-open standard Windows file dialog owned by registered Chrome or
 Edge, call `inspect_native_file_dialog(desktop_opt_in=true)` and then
 `cancel_native_file_dialog(ticket=..., desktop_opt_in=true)` in the same MCP
 process within 15 seconds. Install `[desktop]` first. The inspection temporarily
@@ -146,11 +159,15 @@ identity, hit targets and observed quiet input, then sends one Cancel message.
 `safe` requires approval; default `lab` skips elicitation. Refusals consume opted-in
 tickets too. Only `cancelled=true` with `status="success"` confirms closure;
 `unknown` or `retry_safe=false` calls for inspection before another action.
-Unsupported layouts and platforms remain unsupported. For normal uploads,
-`upload_files` targets the page input directly and does not need a native dialog.
+Unsupported layouts and platforms remain unsupported. If inspection is refused,
+no cancellation ticket is available; report the limitation and the need for
+manual closure instead of repeating the action.
 
 ## 6. Dialogs, permissions, and challenges
 
+- A JavaScript timeout ends waiting, not execution. Even `exec_timeout` with
+  `reservation_held=false` can leave a script running; inspect the original
+  operation and avoid replay or conflicting work in that tab.
 - Choose `dismiss`, `accept`, or `manual` explicitly for JavaScript dialogs and
   `beforeunload` when the navigation outcome matters.
 - The MAIN-world dialog helper exists only during accept/dismiss scopes. Old

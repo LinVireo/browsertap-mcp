@@ -69,6 +69,22 @@ BTAP 连接的是真实浏览器 profile，不是临时沙箱。只连接允许�
 - **并行任务隔离**：显式浏览器/标签页目标和按所有权清理。不同标签页可并行，但同一 profile 的状态不隔离。
 - **多浏览器共存**：同一 bridge 可连接 Chrome、Edge、Opera 和多个 profile；部分浏览器级操作不需要页面标签页。
 
+## 0.5.2 已知限制
+
+2026-09-12 的真实浏览器验证暴露了以下尚未解决的问题：
+
+- **原生文件框**：自动取消未成功。真实 Chrome 文件框的跨进程 owner 会导致检查被拒绝，
+  无法取得取消票据。用户手动关闭不算自动恢复；普通上传用 `upload_files`，无需弹出文件框。
+- **JavaScript 超时**：返回 `exec_timeout` 后可能提前释放标签页占用，旧脚本仍继续运行并在
+  稍后修改页面。失败回执或 `reservation_held=false` 均不能证明执行已停止。
+- **sandbox iframe**：未包含 `allow-scripts` 的子 frame 可能使默认对话框策略准备返回
+  `dialog_scope_setup_failed`，连带阻断本可执行脚本的主页面。
+- **扩展卸载**：`uninstall_extension` 的两种确认设置都曾被 Chrome 的用户手势要求拒绝，
+  可能仍需用户手动移除。
+
+离线 CI 通过不能证明这些真实浏览器路径成功，也不能证明可无人值守恢复。这些修复留待后续版本；
+现有处理方式见[故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
+
 ## 能力分层
 
 BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接口：
@@ -77,7 +93,7 @@ BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接�
   `page_*` CDP 输入。普通网页工作默认走这一层，不使用操作系统鼠标或键盘。
 - **Browser 能力**：真实 Chromium profile 及其浏览器原生能力，包括标签页、下载、Cookies、
   storage、站点权限、书签、扩展、service worker 消息和原生 CDP；很多操作不需要前台标签页。
-- **Desktop 能力**：显式检查并取消由已注册 Chrome 或 Edge 持有的当前前景 Windows
+- **Desktop 能力**：显式检查并尝试取消由已注册 Chrome 或 Edge 持有的当前前景 Windows
   标准文件对话框。先用 `inspect_native_file_dialog` 取得短期票据，再交给
   `cancel_native_file_dialog`；两者均需 `desktop_opt_in=true` 和 `[desktop]`。
   其他浏览器 UI 及不受支持的原生布局仍不在此能力内。0.5.0 移除的七个全局 OS 键鼠/
@@ -481,13 +497,16 @@ agent 也共享这个默认值，因此 `switch_tab` 不代表 agent 身份。�
 不会改变其他调用的目标或进程默认值。
 
 跨进程协作锁覆盖一次完整 MCP 调用及其内部浏览器往返，竞争同一标签页的调用返回 `target_busy`。
-bridge 还会记录已派发命令的目标占用：`wait=false` 或响应超时后仍保留，直到收到确定的浏览器结果或确认
-标签页生命周期结束。用发起操作的同一 MCP 会话调用 `get_execute_js_result` 领取 JS 结果，
+bridge 还会记录已派发命令的目标占用：`wait=false` 和部分超时路径会保留占用，等待确定的浏览器结果
+或确认标签页生命周期结束；超时处理存在下述例外。用发起操作的同一 MCP 会话调用
+`get_execute_js_result` 领取 JS 结果，
 不要重放仍在执行的脚本。直接 `/link` 和 Python driver 调用也受 bridge 的单命令占用保护，
 但跨多次浏览器往返的完整调用锁需要 MCP command scope。
 
-调试器超时或断开后，JavaScript 可能仍在运行。此时轮询返回 `status=in_progress`、
-`operation_status=outcome_unknown` 和 `reservation_held=true`，不得重放脚本。
+调试器超时或断开后，JavaScript 可能仍在运行。部分路径返回 `status=in_progress`、
+`operation_status=outcome_unknown` 和 `reservation_held=true`；已知的 `exec_timeout` 路径
+却可能在脚本继续运行时返回 `reservation_held=false`。失败回执和占用释放均不能证明执行停止；
+结果不确定期间，不重放脚本，也不在该页开始会与旧脚本冲突的操作。
 手动弹窗也保留占用，只有发起执行的 MCP 会话能调用 `handle_dialog`。处理完弹窗不代表脚本已结束；
 扩展无法回传最终结果时仍保留 `outcome_unknown`。调用方可以用 `close_tabs(..., owner_id=...)`
 关闭自己创建的标签页，结束该生命周期。
@@ -630,6 +649,7 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
   - `to`(string,可选):默认 `bottom`,也可传 `top`、像素偏移或要滚到可见的 CSS 选择器、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
 - **execute_js** —— 在页面中执行 JavaScript 并返回结果。`timeout` 是覆盖对话框策略设置、monitor 快照、投递/重试、导航检查和清理的单一总 deadline；显式 `session_id` 在这些浏览器往返中保持不变，不依赖进程默认目标。真正的长任务可设 `wait=false`：扩展确认收到后，BTAP 立即返回 `status="in_progress"` 和 `operation_id`，后续用 `get_execute_js_result` 领取结果，不得重放脚本；后台模式有意不支持 `dialog_policy="manual"`。脚本导致页面导航时返回 `status="navigated"` 和 `landed_url`，而不是 `success`，且脚本返回值不可用。`dialog_policy` 控制 `alert`/`confirm`/`prompt`：`dismiss`（默认）和 `accept` 直接应答并记录到 `dialogs`；`manual` 只用于同步调用，保持原生对话框打开、暂停脚本并返回 `blocked_by_dialog`，后续由 `handle_dialog` 处理。标签页已有 manual 执行暂停时立即返回 `busy`。等待页面状态应使用 `wait_for`/`wait_for_url`，不要在 `execute_js` 中嵌入延迟 `setTimeout` 或 sleep Promise。JSON 编码后的 `js_return` 超过 24 KiB UTF-8 内联上限时，BTAP 会把完整值写入私有临时 JSON 文件，并返回 `result_file`、`result_bytes`、`result_sha256` 和 `result_format`，不再返回会被截断的半截内容
   - 遇到 `Cannot access contents of the page` 先分流再重试：如果脚本尝试了 `window.open` 或导航，使用 `open_new_tab`（Chrome 没有用户手势时可能拦截）；如果是当前 tab 本身不允许注入，换可脚本化的普通 `http/https` tab 或使用支持的 CDP 路径。不要把这句错误直接理解成“当前页面读不到”。
+  - `timeout` 不会取消已派发的 JavaScript。未包含 `allow-scripts` 的 sandbox 子 iframe 还可能使主页面的默认对话框策略准备返回 `dialog_scope_setup_failed`；见 [0.5.2 已知限制](#052-已知限制)。
   - `script`(string)、`session_id`(string,可选)、`no_monitor`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`dialog_policy`(string,可选):`dismiss`(默认)、`accept` 或 `manual`、`wait`(boolean,可选):默认 `true`
   - 各通道使用相同结果转换：`undefined` 和非有限数变为 `null`，BigInt/symbol 变为字符串，DOM、Error 和函数变为可读值。循环和深度 6 有标记；迭代结果最多保留 200 项并附截断标记。`result_file` 保存完整的**转换后**值，包括这些标记。
   - 用户代码开始执行后，脚本错误不会触发第二次执行。复杂 async body 使用显式 `return`，推荐 `(async () => { /* work */ return value; })()`；含糊的 body 可能返回 `null`。`await(expr)` 可能被解析成调用名为 `await` 的普通函数，需要消除歧义时使用上述 async IIFE。
@@ -715,7 +735,7 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
   - `session_id`(string,可选)
 - **set_extension_enabled** —— *(零标签页可用)* 启用或禁用已安装的扩展。Chrome 没有任何 API 可以*安装*扩展,所以这里只能开关已存在的
   - `extension_id`(string)、`enabled`(boolean)、`session_id`(string,可选)
-- **uninstall_extension** —— *(零标签页可用)* 卸载其他扩展；默认显示 Chrome 确认框。仅对明确选定的测试扩展设置 `show_confirm_dialog=false`；活动通道无法卸载 BTAP 自身
+- **uninstall_extension** —— *(零标签页可用)* 请求卸载其他扩展；默认显示 Chrome 确认框。仅对明确选定的测试扩展设置 `show_confirm_dialog=false`；Chrome 可能因缺少用户手势拒绝任一设置，切换确认参数不会提供该手势。活动通道无法卸载 BTAP 自身
   - `extension_id`(string)、`show_confirm_dialog`(boolean,可选):默认 `true`、`session_id`(string,可选)
 - **get_bookmarks** —— *(零标签页可用)* 读取书签树
   - `session_id`(string,可选)
@@ -757,7 +777,9 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 - **cancel_native_file_dialog** —— 消费新鲜检查票据，对该文件框的 Cancel 控件发送一次有界消息。需要 `[desktop]` 并遵循当前 safe/lab 物理批准策略；派发前重新核验跨进程锁、Windows 输入静默信号、按住的键/按钮、身份、前景和命中点。只有观测到原窗口消失才返回 `status="success", cancelled=true`；投递或关闭无法确认时返回 `unknown`、`retry_safe=false`，后续先检查状态。每次显式 opt-in 尝试均消费票据，包括拒绝。两个工具都返回 `desktop`、`on_screen` 和 `input_quiet` 诊断。
   - `ticket`（string，必填）、`desktop_opt_in`（boolean，可选）：默认 `false`；取消时须显式为 `true`。
 
-上传使用 `upload_files` 和页面文件输入控件。原生取消用于已打开且受支持的文件框恢复；
+上传使用 `upload_files` 和页面文件输入控件。原生取消仅是对已打开且受支持文件框的恢复尝试。
+实测中，真实 Chrome 文件框因跨进程 owner 未能取得票据，尚未验证自动取消成功。
+不要仅为测试恢复而弹出文件框；关闭所属标签页也可能留下该窗口，用户手动关闭不算自动化成功。
 `safe` 要求批准，默认 `lab` 免 elicitation，但仍要求显式 opt-in。每个 MCP 进程最多八张
 票据，消费、到期、驱逐或正常退出时清理各自标记。这些检查不构成原子桌面事务；
 维护约束见[原生文件框设计](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/agent-guides/native-dialogs.md)。

@@ -11,6 +11,10 @@
 `error` / `error_code` / `retryable`，并结合 `target` / `diagnostics` 判断是否可以安全重试。
 为保持兼容，既有操作字段仍可能投影在顶层。
 
+0.5.2 的原生文件框取消、JavaScript 超时、sandbox iframe 和扩展卸载仍有实测未解决问题。
+工作流依赖这些路径时，先查看[已知限制与恢复说明](TROUBLESHOOTING.zh-CN.md)；
+离线 CI 通过不能证明可无人值守恢复。
+
 ## 1. 操作层级
 
 BTAP 的页面操作分为两个层级：
@@ -77,7 +81,7 @@ Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `re
   操作系统级桌面截图已在 0.5.0 移除：它拍的是当时恰好在前台的窗口，这跟「这个标签页显示
   的是什么」是两个问题。
 
-这两个工具以及 `save_pdf` 的 `save_path` 都是**相对路径**，落在 `~/Downloads/browsertap`
+`capture_page_screenshot` 和 `save_pdf` 的 `save_path` 都是**相对路径**，落在 `~/Downloads/browsertap`
 下。绝对路径或 `..` 越界会抛 `ValueError`；该沙箱不通过环境变量配置。
 
 工具成功返回图片附件或保存路径，仅表示截图已生成，不表示当前模型或宿主具备像素读取能力。
@@ -92,8 +96,8 @@ Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `re
 
 **那七个操作系统级工具已在 0.5.0 移除**，所以没有屏幕坐标面可以「升级」过去。
 `page_click` 失败是定位问题：按返回的 `obscured` / `outside_viewport` / `not_found` 修正
-目标。浏览器自身界面、扩展弹窗和操作系统对话框不属于页面级输入范围；受支持的 Windows
-文件框可使用下述显式取消流程。
+目标。浏览器自身界面、扩展弹窗和操作系统对话框不属于页面级输入范围；下述 Windows 文件框
+显式取消尝试，尚未成功恢复实测中遇到的真实 Chrome 文件框。
 
 单纯的前台激活（`activate_tab`、`switch_tab(activate=true)`）不发送任何输入；用户需要看到
 某个标签页时用它。
@@ -117,17 +121,23 @@ Enter 兜底，并对每次站点 `allow` 操作进行询问。两种 profile �
 用户拒绝（`declined`）、超时（`timeout`）、提示取消（`cancelled`）和交互失败（`error`）；
 这些结果都不派发操作，不能把用户拒绝当作宿主能力缺失。
 
-已打开的 Windows 标准文件框若由已注册 Chrome 或 Edge 持有，先调用
+上传用 `upload_files` 操作页面文件输入控件，无需打开原生文件框。不要仅为验证取消功能而弹框：
+真实 Chrome 文件框可能因跨进程 owner 被检查拒绝，关闭所属标签页也可能留下窗口。
+用户手动关闭不算自动恢复；现有实测尚未验证自动取消成功。
+
+若确需恢复已打开、由已注册 Chrome 或 Edge 持有的 Windows 标准文件框，先调用
 `inspect_native_file_dialog(desktop_opt_in=true)`，再在同一 MCP 进程中于 15 秒内调用
 `cancel_native_file_dialog(ticket=..., desktop_opt_in=true)`。这两个工具要求 `[desktop]`。
 检查会临时标记精确窗口；取消会消费票据，核验前景、身份、命中点和真实输入静默信号后，
 只发送一次 Cancel 消息。`safe` 要求批准，默认 `lab` 免 elicitation；显式 opt-in 后的
 拒绝也消费票据。只有 `status="success", cancelled=true` 确认关闭；`unknown` 或
-`retry_safe=false` 时先检查状态。不支持的布局和平台仍会拒绝。普通上传直接用
-`upload_files` 操作页面输入控件，无需打开原生文件框。
+`retry_safe=false` 时先检查状态。不支持的布局和平台仍会拒绝。检查被拒绝时没有取消票据，
+应报告限制及需要手动关闭的事实，停止重复尝试。
 
 ## 6. 对话框、权限与挑战页
 
+- JavaScript 超时结束的是等待，不是执行。即使收到 `exec_timeout` 和 `reservation_held=false`，
+  旧脚本也可能继续运行；先检查原操作，不重放或在该页开始会与旧脚本冲突的工作。
 - 导航结果会受 JavaScript dialog 或 `beforeunload` 影响时，应显式选择 `dismiss`、`accept`
   或 `manual`。
 - MAIN world 弹窗 helper 仅在 accept/dismiss 范围内存在。升级前已注入的旧 document 需正常

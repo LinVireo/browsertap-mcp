@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+### Documentation
+
+- Record four unresolved limitations from live verification: native file-dialog
+  cancellation, JavaScript continuing after a timeout releases its reservation,
+  sandboxed child frames blocking main-page dialog-policy setup, and Chrome's
+  user-gesture requirement for extension removal. Fixes remain deferred.
+- Update both READMEs, usage guides, and troubleshooting guides with the observed
+  failure modes and current recovery guidance. Offline CI passing does not
+  establish live success; manual dialog closure is not automated recovery.
+
 ## [0.5.2] - 2026-09-12
 
 ### Security

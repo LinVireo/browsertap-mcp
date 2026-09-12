@@ -5,6 +5,52 @@
 本文档说明连接、版本、对话框、权限和物理输入相关问题。常规操作流程见
 [使用指南](USAGE.zh-CN.md)。
 
+## 0.5.2 已知限制
+
+以下问题在 2026-09-12 的真实浏览器验证后仍未解决，修复留待后续版本。
+离线测试或 CI 通过不能证明这些场景已能在真实浏览器中自动恢复。
+
+### 原生文件框一直未关闭
+
+实测真实 Chrome 文件框时，检查因 native owner 属于另一进程而返回
+`native_dialog_unverifiable`。没有票据，`cancel_native_file_dialog` 无法完成成功取消路径；
+关闭所属标签页后，该文件框仍然存在。因此尚未验证这一能力可无人值守恢复。
+
+上传使用 `upload_files` 和页面文件输入控件，避免弹出文件框。已打开的文件框仍受既有 Windows
+布局和所有权检查限制；检查拒绝或关闭结果不确定时，停止重试并说明可能需要手动关闭。
+`handle_dialog` 处理的是 JavaScript 对话框，不能关闭操作系统文件框。
+不要再弹一个文件框来验证恢复。用户手动关闭，或后来观察到窗口消失，都不能证明 BTAP 自动取消成功。
+
+### `exec_timeout` 后 JavaScript 仍继续执行
+
+响应 deadline 不会终止已派发的 JavaScript。实测观察到 `exec_timeout` 与
+`reservation_held=false` 返回后，第二个 MCP 进程能修改同一页面，而旧脚本随后仍写入页面。
+失败回执和占用释放因此不能证明页面空闲；其他超时路径也可能继续持有 `outcome_unknown` 占用。
+
+有 `operation_id` 时，用发起操作的同一 MCP 会话调用 `get_execute_js_result` 检查；
+轮询不会重放，也不会取消脚本。执行状态不确定时，不重放脚本，也不在该页开始会与旧脚本冲突的工作。
+可以携带 `owner_id` 关闭本任务创建的标签页以结束该 document 生命周期；不要为清理关闭用户标签页。
+结束生命周期不能撤销已经发送的请求或其他副作用。
+
+### sandbox 子 frame 阻断主页面执行
+
+带 `sandbox` 且未允许 `allow-scripts` 的 iframe（包括 `sandbox="allow-same-origin"`）
+可能使默认 `execute_js` 对话框策略准备返回 `dialog_scope_setup_failed`。当前准备流程要求子
+frame 确认，禁脚本的 frame 因而可能阻断整个调用，即使主页面本身允许执行脚本。
+这也会造成前面的页面输入已成功，最后脚本读取结果却失败。
+
+应将其识别为 frame 准备限制，不能据此判定主页面禁止脚本或前面的输入失败。
+任何重试前先检查已有状态；重复相同的默认调用不能修复 frame 限制。
+保留页面原有 sandbox 设置，并报告受阻步骤。
+
+### 扩展卸载需要用户手势
+
+实测中，`uninstall_extension` 在 `show_confirm_dialog=true` 和 `false` 两种设置下均返回
+`chrome.management.uninstall requires a user gesture.`。切换确认参数不会提供 Chrome 要求的手势。
+被拒绝时，需要用户在 `chrome://extensions` 或对应浏览器的扩展管理页移除选定扩展。
+再用 `list_extensions` 核对；人工移除后扩展消失，不算卸载工具成功。
+BTAP 也无法通过活动响应通道卸载自身。
+
 ## 诊断顺序
 
 1. 运行 `browsertap doctor`。
@@ -117,6 +163,8 @@ session id，并在重复状态变更操作前确认页面；没有这些字段�
 60 秒，并填写可执行文件绝对路径。单个浏览器工具超时时，继续使用明确的 `session_id`，仅在已知
 操作本身较慢时增加该工具的 `timeout`，并检查 `~/.browsertap/bridge.log`。未确认副作用是否
 已发生前，不得循环重试状态变更操作。
+JavaScript 还存在[超时后继续执行](#exec_timeout-后-javascript-仍继续执行)的问题；
+占用释放不能证明脚本已停止。
 
 ### Bridge 端口冲突或自定义端口
 
@@ -209,7 +257,7 @@ browsertap bridge --restart
 
 ### 标签页持续返回 `blocked_by_dialog` 或 `busy`
 
-使用 `dialog_policy="manual"` 的调用可能保留了原生对话框，并暂停对应执行。应使用相同的
+使用 `dialog_policy="manual"` 的调用可能保留了 JavaScript 对话框，并暂停对应执行。应使用相同的
 `session_id` 调用 `handle_dialog(action="accept")` 或
 `handle_dialog(action="dismiss")`。该标签页阻塞期间，其他标签页仍可正常使用。
 

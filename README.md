@@ -82,6 +82,28 @@ come from the connected server, not from a different version of the README.
 - **Separate concurrent tasks:** explicit browser/tab targets and owner-aware cleanup. Different tabs can run concurrently; shared-profile state is not isolated.
 - **Connect multiple browsers:** one bridge can serve Chrome, Edge, Opera, and multiple profiles. Browser-level operations can work without a page tab.
 
+## Known limitations in 0.5.2
+
+Live verification on 2026-09-12 exposed these unresolved cases:
+
+- **Native file dialogs:** automatic cancellation did not succeed. Inspection
+  can reject a real Chrome dialog with a cross-process owner before issuing a
+  ticket. Manual closure does not count as automatic recovery; use `upload_files`
+  for page uploads without opening the chooser.
+- **JavaScript timeouts:** an `exec_timeout` result can release the tab's
+  reservation while the old script continues and later changes the page.
+  A failed result or `reservation_held=false` does not prove execution stopped.
+- **Sandboxed iframes:** a child frame without `allow-scripts` can make default
+  dialog-policy setup fail with `dialog_scope_setup_failed`, blocking execution
+  in an otherwise scriptable main page.
+- **Extension removal:** Chrome rejected `uninstall_extension` for lack of a
+  user gesture with both confirmation settings. Manual removal may be required.
+
+Passing offline CI does not establish success for these live browser paths or
+unattended recovery. These fixes remain deferred. See
+[Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md)
+for symptoms and current recovery guidance.
+
 ## Capability model
 
 BTAP exposes three capability layers so an agent can choose the narrowest
@@ -94,7 +116,7 @@ interface that matches the task:
   tabs, downloads, cookies, storage, permissions, bookmarks, extensions,
   service-worker messaging, and raw CDP. These operations can work without a
   foreground tab.
-- **Desktop capability** — explicit inspection and cancellation of a foreground
+- **Desktop capability** — explicit inspection and cancellation attempts for a foreground
   Windows standard file dialog owned by registered Chrome or Edge. Call
   `inspect_native_file_dialog` first, then use its short-lived ticket with
   `cancel_native_file_dialog`; both require `desktop_opt_in=true` and `[desktop]`.
@@ -523,16 +545,20 @@ does not change another call's target or the process default.
 
 A cooperative target lock covers each complete MCP call and its internal browser
 roundtrips. A competing call to the same tab returns `target_busy`. The bridge
-also reserves the target of each dispatched command: `wait=false` and response
-timeouts keep that reservation until a definitive browser result or a confirmed tab
-lifecycle end. Claim an `execute_js` result with `get_execute_js_result` from the
+also records reservations for dispatched commands: `wait=false` and some timeout
+paths retain the reservation pending a definitive browser result or a confirmed
+tab lifecycle end. The timeout exception is described below.
+Claim an `execute_js` result with `get_execute_js_result` from the
 same MCP session; do not replay a script whose result is pending. Direct `/link`
 and Python driver calls receive the bridge's per-command reservation, but need
 an MCP command scope for the lock across multiple browser roundtrips.
 
-A debugger timeout or detach can leave JavaScript running. Polling then reports
+A debugger timeout or detach can leave JavaScript running. Some paths report
 `status=in_progress`, `operation_status=outcome_unknown`, and
-`reservation_held=true`; it does not permit replay. Manual dialogs keep the same
+`reservation_held=true`. The known `exec_timeout` path can instead report
+`reservation_held=false` while the script continues. Neither a failed receipt
+nor a released reservation proves execution stopped; avoid replay or conflicting
+work in that tab while the outcome is uncertain. Manual dialogs keep their
 reservation, and only the originating MCP session can call `handle_dialog`.
 Handling a dialog does not prove the script finished: when the extension cannot
 return its final result, the operation remains `outcome_unknown`. The caller can
@@ -691,6 +717,7 @@ browser/profile selection.
   - `to` (string, optional): default `bottom`; also accepts `top`, a pixel offset, or a CSS selector to bring into view, `session_id` (string, optional), `timeout` (number, optional): default `15`
 - **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the process default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
   - A `Cannot access contents of the page` error must be classified before retrying: if the script attempted `window.open` or navigation, use `open_new_tab` (Chrome may block it without a user gesture); if injection into the current tab is forbidden, choose a normal scriptable `http/https` tab or the supported CDP route. Do not treat the message as proof that reading the current page failed.
+  - `timeout` does not cancel dispatched JavaScript. A sandboxed child iframe without `allow-scripts` can also block the default dialog-policy setup for the main page with `dialog_scope_setup_failed`. See [known limitations](#known-limitations-in-052).
   - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`, `wait` (boolean, optional): default `true`
   - All routes use the same result conversion: `undefined` and non-finite numbers become `null`; BigInt/symbol become strings; DOM, Error and function values become readable representations. Cycles and depth 6 have markers; iterables keep up to 200 items plus a truncation marker. A `result_file` preserves the complete **converted** value, including those markers.
   - Once user code starts, a script error does not trigger a second execution. Use an explicit `return` in a complex async body, preferably `(async () => { /* work */ return value; })()`. Ambiguous bodies may complete with `null`; `await(expr)` can parse as a call to an ordinary function named `await`, so use the async IIFE when that distinction matters.
@@ -769,7 +796,7 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
   - `session_id` (string, optional)
 - **set_extension_enabled** — *(no tab needed)* enable or disable an installed extension. Chrome exposes no API to *install* one, so this only toggles what is already there.
   - `extension_id` (string), `enabled` (boolean), `session_id` (string, optional)
-- **uninstall_extension** — *(no tab needed)* uninstall another extension. Confirmation defaults on; set it off only for an explicitly selected disposable/test extension. BTAP cannot uninstall itself through its active response channel.
+- **uninstall_extension** — *(no tab needed)* request removal of another extension. Confirmation defaults on; set it off only for an explicitly selected disposable/test extension. Chrome can refuse either setting because a user gesture is required; changing the flag does not supply that gesture. BTAP cannot uninstall itself through its active response channel.
   - `extension_id` (string), `show_confirm_dialog` (boolean, optional): default `true`, `session_id` (string, optional)
 - **get_bookmarks** — *(no tab needed)* read the bookmark tree.
   - `session_id` (string, optional)
@@ -812,7 +839,11 @@ Temporary, origin-scoped permission leases backed by `chrome.contentSettings`. E
   - `ticket` (string, required), `desktop_opt_in` (boolean, optional): default `false`; must be `true` to cancel.
 
 For uploads, use `upload_files` with the page's file input. Native cancellation
-is an explicit recovery action for an already-open supported dialog. `safe`
+is an explicit recovery attempt for an already-open supported dialog. Live
+verification did not obtain a valid ticket for a real Chrome dialog with a
+cross-process owner, so successful automatic cancellation remains unverified.
+Do not open a chooser solely to test recovery. Closing its tab may leave the
+dialog open, and a user's manual closure is not an automated success. `safe`
 requires approval; default `lab` skips elicitation but still requires opt-in.
 Tickets expire, are limited to eight per MCP process, and clean up their own
 markers on consumption, expiry, eviction or orderly shutdown. These checks are

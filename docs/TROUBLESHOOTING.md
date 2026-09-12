@@ -5,6 +5,67 @@ English | [中文](TROUBLESHOOTING.zh-CN.md)
 This guide covers connection, version, dialog, permission, and physical-input
 failures. For normal operating workflows, see the [usage guide](USAGE.md).
 
+## Known limitations in 0.5.2
+
+The following cases remain unresolved after live verification on 2026-09-12.
+Their fixes are deferred. Passing offline tests or CI does not establish
+successful browser recovery for these cases.
+
+### A native file chooser stays open
+
+Live inspection of a real Chrome file dialog returned
+`native_dialog_unverifiable` because the native owner belonged to another
+process. Without a ticket, `cancel_native_file_dialog` could not reach its
+successful cancellation path. Closing the originating tab also left the chooser
+open. This is not a verified unattended recovery capability.
+
+Use `upload_files` with the page's file input to avoid opening a chooser.
+For an already-open dialog, inspection and cancellation remain limited to the
+documented Windows layouts and ownership checks. If inspection refuses or
+closure is uncertain, stop retrying and report that manual closure may be
+needed. `handle_dialog` handles JavaScript dialogs, not OS file choosers.
+Do not open another chooser just to test recovery. A user's manual closure or
+a later observation that the window is gone does not prove BTAP cancelled it.
+
+### JavaScript continues after `exec_timeout`
+
+A response deadline does not terminate dispatched JavaScript. Live checks
+observed `exec_timeout` with `reservation_held=false`, a second MCP process
+modifying the same page, and then a late write from the original script.
+The failed receipt and released reservation therefore cannot prove that the
+page is idle. Other timeout paths may keep an `outcome_unknown` reservation.
+
+Use `get_execute_js_result` from the originating MCP session to inspect an
+available `operation_id`; polling does not replay or cancel the script.
+Avoid replay and conflicting work in the affected tab while execution is
+uncertain. Closing a tab owned by the current task with its `owner_id` ends
+that document's lifecycle; do not close a user's tab for cleanup. A lifecycle
+end does not undo requests or other effects already sent.
+
+### A sandboxed child frame blocks main-page execution
+
+An iframe with `sandbox` but without `allow-scripts`, including
+`sandbox="allow-same-origin"`, can cause default `execute_js` dialog-policy
+setup to return `dialog_scope_setup_failed`. Preparation currently requires
+acknowledgements from child frames, so a frame that forbids scripts can block
+the call even when the main document is scriptable. This can also fail a
+script readback after an earlier page input succeeded.
+
+Classify this as the frame-preparation limitation rather than assuming the main
+page forbids scripts or the preceding input failed. Inspect the existing state
+before any retry; repeating the same default call does not fix the frame
+restriction. Preserve the page's sandbox settings and report the blocked step.
+
+### Extension removal requires a user gesture
+
+Chrome returned `chrome.management.uninstall requires a user gesture.` for
+`uninstall_extension` with both `show_confirm_dialog=true` and `false` in live
+checks. Changing the confirmation flag does not supply the required gesture.
+If refused, the user must remove the selected extension through
+`chrome://extensions` or the browser's equivalent management page. Recheck with
+`list_extensions`; disappearance after manual removal is not tool success.
+BTAP also cannot uninstall itself through its active response channel.
+
 ## Diagnostic order
 
 1. Run `browsertap doctor`.
@@ -150,6 +211,8 @@ absolute executable path. If one browser tool times out, keep its explicit
 `session_id`, increase that tool's `timeout` only when the operation is known to
 be slow, and inspect `~/.browsertap/bridge.log`. Do not repeatedly retry
 a state-changing operation without first verifying whether it landed.
+For JavaScript, also see [continued execution after timeout](#javascript-continues-after-exec_timeout):
+a released reservation does not prove the script stopped.
 
 ### Bridge port conflict or custom port
 
@@ -263,7 +326,7 @@ mismatch, which is why `restart_bridge_required` and
 
 ### A tab remains `blocked_by_dialog` or `busy`
 
-A call using `dialog_policy="manual"` may have left a native dialog open and the
+A call using `dialog_policy="manual"` may have left a JavaScript dialog open and the
 corresponding execution paused. Call `handle_dialog(action="accept")` or
 `handle_dialog(action="dismiss")` with the same `session_id`. Other tabs remain
 available while that tab is blocked.
