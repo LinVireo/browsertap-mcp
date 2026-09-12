@@ -6,32 +6,29 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
-## [0.5.1] - 2026-09-12
-
-### Added
-
-- Explicit MCP effect annotations for every tool, covering optional script,
-  clear and file-write paths as well as Windows token ACL hardening.
-- Structured approval failure reasons for physical input and temporary site
-  permissions: unsupported elicitation, decline, timeout, cancellation or error.
+## [0.5.2] - 2026-09-12
 
 ### Security
 
-- Pin browser WebSocket and HTTP Origins to the packaged extension's identity
-  by default. Existing installs loaded from the reported extension path keep
-  their ID; extra copies or path aliases require an explicit exact Origin.
-  Manifest keys follow Chromium's strict Base64/PEM rules.
-- Create Windows bridge-token files with a protected current-user-only DACL,
-  and harden existing current-owned files before reading. A security failure
-  does not replace an existing token or fall back to an in-memory token.
 - Publish POSIX bridge tokens only after a private candidate is fully written,
   preventing concurrent clients from adopting an incomplete token.
-- Guard the public raw-CDP tools against a documented list of high-risk
-  methods, including the Page download-behavior alias. Validate an entire batch
-  before dispatch. An override requires both lab mode and explicit operator
-  configuration; allowed raw methods can still modify page or profile state.
-- Keep request/result payloads and exception tracebacks out of bridge logs;
-  protocol identifiers use hash references for correlation.
+- Match Chromium's strict Base64/PEM manifest-key parsing, including its input
+  limit and padding rules. Preserve existing unpacked installation identities;
+  document Windows path spelling and junction aliases that need an exact Origin.
+
+### Fixed
+
+- Prepare all current injectable frames before caller execution under the same
+  deadline, including CSP fallback. A caller-thrown CSP-like error no longer
+  causes the script to run again; uncertain delivery remains non-replayable.
+- Keep the legacy Python CDP fallback's dialog lease inside its cleanup scope,
+  retain the original sending deadline and normalize dialog records separately
+  from caller results. That fallback covers only its current evaluation context.
+- Recheck the original deadline after scope installation or script compilation,
+  before either JavaScript execution route starts the caller.
+- Return stable approval failure reasons for temporary site permissions as well
+  as physical input: unsupported elicitation, decline, timeout, cancellation or
+  error. A refused action does not grant permission or dispatch input.
 
 ### Changed
 
@@ -39,24 +36,48 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   while preserving its operation receipt and late-result ownership. Keep
   pending mutation reservations and the caller's OS scope lock. Failed tab
   creation probes expose a separate bridge receipt for result lookup.
-- Install page dialog helpers only for active accept/dismiss scopes and restore
-  their owned properties after the last scope or expiry. An extension Reload
-  does not remove an old helper from an existing document; normal navigation or
-  refresh starts a clean document.
-- The extension prepares current injectable frames before caller execution under
-  the same deadline, including CSP fallback. A caller-thrown CSP-like error no longer
-  causes the script to run again; uncertain delivery remains non-replayable.
-- Apply the same dialog controller to the Python CDP fallback for older routers,
-  scoped to its current evaluation context. Restore its lease on failure or
-  completion, retain the sending deadline, and return dialog records separately
-  from the caller's value.
-- Recheck the original deadline after scope installation or script compilation,
-  before either JavaScript execution route starts the caller.
-- Include the dialog helper among the five import-cached JavaScript assets
-  checked by runtime source identity, so a changed helper requires a fresh MCP
-  process even when the package version still matches.
-- Put effects, target choice and uncertain-delivery handling first in JavaScript
-  and raw-CDP tool descriptions while retaining the result-file contract.
+- Classify setup diagnostics as state-changing because Windows token inspection
+  can harden an existing ACL. Keep all 51 tools' effect hints explicit.
+- Clarify the raw-CDP guard's finite high-risk list, including the Page
+  download-behavior alias. Allowed CDP and JavaScript can still modify page or
+  profile state; the guard is not a sandbox. Descriptions lead with effects,
+  target choice and uncertain delivery while retaining the result-file contract.
+- Document optional `scan_page` scripts and repeated `wait_for(js=...)`
+  evaluation, current-frame scope limits, and old document helpers that survive
+  an extension Reload until normal navigation or refresh.
+
+## [0.5.1] - 2026-09-12
+
+### Added
+
+- Explicit MCP tool effect annotations for all 51 tools, including read-only,
+  destructive and idempotent hints derived from the public capability inventory.
+- Source identity now covers `chrome_extension/disable_dialogs.js` in addition
+  to the four JavaScript assets already frozen by 0.5.0.
+
+### Fixed
+
+- JavaScript dialog interception is installed only for explicit accept/dismiss
+  scopes, is shared by the extension and Python CDP fallback, records bounded
+  alert/confirm/prompt results, and restores native page descriptors after the
+  last lease or deadline.
+- Physical approval failures expose stable reasons without dispatching input;
+  cancellation still propagates while native-dialog tickets are cleaned up.
+- Bridge and MCP logging boundaries retain useful categories while preventing
+  browser payloads, protocol identifiers, Origin values, and configuration
+  secrets from reaching logs or WSGI tracebacks.
+- Bridge token creation and reads now preserve exclusive per-user ownership,
+  reject unsafe existing files, and keep secret bytes out of exception chains.
+
+### Security
+
+- WebSocket and HTTP Origin checks trust only the exact packaged extension
+  identity, derived from Chromium-compatible manifest keys or unpacked paths;
+  explicit allowlist entries are exact matches and HTTP bodies are drained on
+  rejection.
+- Raw CDP browser-wide writes and common ownership/recovery bypasses are blocked
+  before dispatch. They require both lab mode and the explicit
+  `BROWSERTAP_ALLOW_UNSAFE_CDP=1` operator opt-in; safe mode always refuses them.
 
 ## [0.5.0] - 2026-09-12
 
@@ -1468,7 +1489,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...v0.5.0
 [0.4.20]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.19...v0.4.20

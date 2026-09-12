@@ -3,7 +3,7 @@
 Coordinator: `codex-resume-01a0881c`. Inventory: `/root/btap_bug_inventory`; implementation/review reports are kept separately. Integration baseline: `e631522` (includes the setup and coverage baseline). Current implementation and measured regressions override historical prose.
 
 Current follow-up: [Fable integration](fable-final-integration-20260912.md)
-records F1-F8 and the extra review findings on the 0.5.1 candidate. Its final
+records F1-F8 and the extra review findings on the 0.5.2 candidate. Its final
 commit, complete-suite seal, local RC tag and canonical integration are recorded
 in `out/fable-review-20260912/final-verification.json`. The older tables below
 retain the 0.5.0 cleanup history and its separate evidence; pending statements
@@ -71,7 +71,7 @@ generated result outside the tracked tree keeps the seal valid.
 | M04 | Acceptance report content itself has no consistency check; DELIVER 363 | Integrated deterministic comparison against sealed inputs without self-hash cycles; root 162 evidence tests passed. Final canonical seal pending. |
 | M05 | JUnit gate does not establish complete collection; DELIVER 365 | Integrated expected collection and run receipts, including rejection of incomplete successful XML; same 162-test union. Final canonical seal pending. |
 | M06 | Empty diagnosis is mislabeled stale bridge, rather than malformed; Q 1179 | Integrated final configuration r2 structured malformed-diagnosis handling; root 690 scoped tests passed. |
-| M07 | Local version/tag history trails current source | The 0.5.0 clean-commit seal was rejected because production source changed after the existing 0.5.0 RC baseline. Source version is now 0.5.1; local `v0.5.1-rc.1` awaits the final committed-tree offline seal. Existing tags stay intact; no remote publication. |
+| M07 | Local version/tag history trails current source | Existing `v0.5.0-rc.1` and `v0.5.1-rc.1` remain historical. The successor source is 0.5.2 because the local gate treats the 0.5.1 RC as its increment baseline; the next unused 0.5.2 RC awaits the final clean-tree seal. Actual tag and canonical transfer belong in the Fable receipt. No remote publication. |
 | M08 | Coverage intentionally measures the package, not scripts | Existing coverage contract; no denominator expansion under the guise of fixing a bug. |
 | G01 | SPEC rev7 A7 requires genuine native verification | Narrow Windows file-dialog inspect/cancel tools and desktop registry are implemented, including ND-R1/R2; root 291 native/input/envelope tests passed. Real A7 remains unrun; the offline implementation does not establish R6 or formal delivery. |
 | G02 | macOS/Linux native browser verification absent | Record unavailable platforms accurately; offline tests do not substitute. |

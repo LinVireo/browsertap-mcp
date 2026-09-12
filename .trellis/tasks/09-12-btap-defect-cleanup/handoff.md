@@ -5,7 +5,7 @@ Coordinator: `codex-resume-01a0881c`, native session
 `01a09113-7fb4-71d1-b6ef-34cc2d6c9712`.
 Original shared checkout: `D:/browsertap-mcp`, branch `local`.
 
-## Current Fable follow-up (0.5.1)
+## Current Fable follow-up (0.5.2)
 
 The current isolated candidate is `D:/coding/btap-fable-fixes-20260912`, based
 on f63c4a7. Follow [Fable integration](research/fable-final-integration-20260912.md)
@@ -15,7 +15,7 @@ now installs/releases the controller in the current evaluation context. The
 Python and extension builders recheck the original deadline immediately before
 starting caller code, including time spent installing or compiling wrappers.
 
-Final committed-tree gates, the next unused local `v0.5.1-rc.*` tag and canonical
+Final committed-tree gates, the next unused local `v0.5.2-rc.*` tag and canonical
 checkout integration are not established by this tracked record. Their actual
 outcomes belong in `out/fable-review-20260912/final-verification.json`, which
 binds source HEAD/stamp, review inputs, complete-suite evidence, build and full
@@ -23,10 +23,13 @@ installation. The root worktree retains original failures and byte snapshots.
 Canonical source was independently committed as `564e2509` and `6b391d88` while
 root was integrating later fixes. Their frozen review found the intermediate
 source bytes already covered by prior reviews, followed by version/record
-updates. Preserve both commits by merging their history into the candidate,
-then recheck that the original checkout is clean and its expected HEAD is an
-ancestor before fast-forwarding. The former dirty-path stash plan no longer
-applies. Unexpected source changes are reconciled before any transfer.
+updates. Merge `d42a6fc` now preserves both commits on top of the reviewed
+implementation `3b57c09`; all production/test bytes stayed unchanged. The
+existing `v0.5.1-rc.1` requires a successor numeric version under the local
+increment gate, so this candidate is 0.5.2. Recheck that the original checkout
+is clean and its expected HEAD is an ancestor before fast-forwarding. The
+former dirty-path stash plan no longer applies. Unexpected source changes are
+reconciled before any transfer.
 
 No new-build live run, bridge/MCP restart or manual extension Reload is claimed.
 The external 0.5.0 Attempt 2 was 58 passed / 3 failed and did not establish user
@@ -34,12 +37,14 @@ tab preservation; it is retained as failed historical evidence. M01 full
 retention, real A7, native Linux/macOS and historical wait latency remain open.
 SPEC rev7 remains `delivered_stub`; a local candidate tag is not a release.
 
-## Historical 0.5.0 cleanup
+## Historical 0.5.0 cleanup and 0.5.1 intermediate candidate
 
-The following sections preserve the earlier tracked pre-seal handoff. Its later
-results are in `out/bug-cleanup-20260912/final-verification.json` at f63c4a7 and
-local `v0.5.0-rc.1`. Its pending language and extension stamp describe that
-earlier candidate, not the current Fable follow-up.
+The following sections preserve the earlier tracked handoff and the canonical
+session's later 0.5.1 annotations. The older complete receipt remains
+`out/bug-cleanup-20260912/final-verification.json` at f63c4a7 and local
+`v0.5.0-rc.1`; the intermediate `v0.5.1-rc.1` points to `6b391d88` and has
+separate archived evidence. The pending language and old extension stamp below
+remain historical; current successor outcomes use the Fable receipt above.
 
 ## Integrated scope
 

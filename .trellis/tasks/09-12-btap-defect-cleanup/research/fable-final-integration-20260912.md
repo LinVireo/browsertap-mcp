@@ -1,6 +1,6 @@
 # Fable follow-up integration
 
-Owner: codex-resume-01a0881c. Baseline: f63c4a7. Candidate version: 0.5.1.
+Owner: codex-resume-01a0881c. Baseline: f63c4a7. Candidate version: 0.5.2.
 This is a source-review record before committed-tree sealing. Later gate/tag
 and original-checkout results belong in `out/fable-review-20260912/final-verification.json`.
 
@@ -83,21 +83,42 @@ not a substitute for the candidate's final gate receipts. Both commits remain
 in the integration history; root retains the later reviewed fixes and task
 metadata pointing to this follow-up rather than the historical 0.5.0 receipt.
 
+The reviewed implementation is committed as `3b57c09`, and merge `d42a6fc`
+retains both canonical commits. All 26 conflicted files were resolved by 79
+explicit hunk decisions: root handled 21 documentation and 43 runtime/test
+hunks; the bridge reviewer handled 15 security/test hunks. The runtime review
+worker hit a service rate limit before delivery, so root completed that review
+from the frozen inputs. Every resolved file matches its root stage-2 bytes;
+all production source and tests remain byte-identical to `3b57c09`. The merge
+adds only the independently reviewed canonical research record and historical
+handoff/ledger updates. `out/fable-review-20260912/merge-integration.json` binds
+the decisions, source comparison and clean two-parent commit.
+
 ## Finalization and remaining work
 
-Commit the reviewed candidate first, then run the finalizer with `--bump none
---skip-live`, a full dependency-install check in a fresh environment, and the
-evidence-manifest check. Preserve prior build/evidence outputs. Only a passing
-exact-tree seal permits the next unused local `v0.5.1-rc.*` candidate tag. Keep
-any pre-existing candidate tags unchanged. No push or public
-release is authorized by that local receipt.
+Complete the 0.5.2 version and journal commits, then run the finalizer with
+`--bump none --skip-live`, a full dependency-install check in a fresh
+environment, and the evidence-manifest check. Preserve prior build/evidence
+outputs. The install receipt binds both archive inputs to the seal before the
+command and rechecks their SHA256 and byte lengths afterwards. Only a passing
+exact-tree seal permits the next unused local `v0.5.2-rc.*` candidate tag. Keep
+pre-existing candidate tags unchanged. The local receipt authorizes no push
+or public release.
 
 During final preparation another session created `v0.5.1-rc.1` at `6b391d88`
-and ran its canonical r3 finalizer in the original checkout. Root leaves that
-process and tag intact. The successor candidate uses a later unused RC number;
-source/artifact transfer waits for the other gate process to finish and rechecks
-canonical state. That older candidate's gate results cannot certify the later
-dialog deadline and other root increments.
+and started its canonical r3 finalizer in the original checkout. Its resumed
+peer reports that chain stopped after offline testing and retains the older
+complete seal in the archive; root observed no remaining finalizer process.
+The repository's increment gate uses the reachable RC as its baseline, so the
+successor numeric version is 0.5.2. The extension stamp remains
+`1b751886b135aa05` after regeneration because version metadata is normalized by
+the stamp algorithm. Root preserves the existing tag and all older evidence;
+their results do not certify the later deadline and other successor changes.
+
+The resumed peer `codex-resume-01a0932f` owns five vault current-state pages and
+will reconcile them to the final successor receipt. Root owns the Fable
+inspection page; the separate coordination record is
+`out/fable-review-20260912/coordination-to-01a0932f-20260912.md` in canonical.
 
 Before canonical fast-forward, require a clean checkout at the reviewed HEAD,
 verify that HEAD is an ancestor of the sealed candidate, and recheck its index
