@@ -45,3 +45,61 @@ Integrated F1, LOW-5 and portability prerequisites onto sealed r6; fixed generat
 
 - Use the local native-validation bundle on available macOS/Linux desktops. A7 needs a product decision and a registered capability or a revised approved contract.
 - Historical wait delay remains unproven; add correlated extension and WebSocket timestamps if it recurs. Persistent host MCP activation is a separate step. No push, tag, publication or release finalizer.
+
+
+## Session 2: Fable remediation and 0.5.2 offline candidate preparation
+<!-- trellis-session: v=2 fp=cb0cc4fc63fdafe9 -->
+
+**Date**: 2026-09-12
+**Task**: Fable remediation and 0.5.2 offline candidate preparation
+**Branch**: `codex/fable-fixes-20260912`
+
+### Summary
+
+Integrate F1-F8 and additional execution fixes, preserve canonical history, and prepare exact-tree offline verification; live and compatibility boundaries remain open.
+
+### Main Changes
+
+The Fable F1-F8 follow-up is integrated with exact extension Origin trust,
+Windows token security, complete POSIX token publication, all-tool effect hints,
+bounded raw-CDP restrictions, stable approval reasons, scoped dialog handling,
+payload-free exception logging and aligned caller documentation.
+
+Review also repaired read-only inventory/status reservation cleanup and both
+JavaScript execution routes. Scope preparation and compilation share the
+original deadline; caller-thrown CSP-like errors do not replay caller code.
+The legacy Python CDP fallback applies the controller in its current context.
+
+The implementation commit is 3b57c09. The integration preserves canonical
+564e2509 and 6b391d88 in history. Conflict hunks were reviewed separately by
+root and two existing collaborators; the selected production/test bytes remain
+the reviewed successor. Existing 0.5.0 and 0.5.1 RC tags remain unchanged.
+The successor source version is 0.5.2 because the existing 0.5.1 RC is the local
+finalizer's increment baseline.
+
+The final affected union passed 632 tests before the version-only integration;
+the original twelve-scenario extension probe reproduced eight late callers on
+the old source and none after the fix, with all descriptors/markers restored.
+The authoritative final complete-suite, lint, build, fresh full-install and
+canonical transfer outcomes are recorded after this journal commit in
+out/fable-review-20260912/final-verification.json. This journal does not assert
+future gate success. Full installation binds before/after archive hashes.
+
+The task remains in_progress for complete M01 persistent-file retention, real
+A7 and native macOS/Linux acceptance, historical wait correlation and current
+build activation/live verification. SPEC rev7 remains delivered_stub. No live
+run, automatic Reload, user-page refresh, shared-venv reinstall, push or public
+release is part of this successor preparation.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3b57c09` | fix: harden BTAP transport and scoped execution for 0.5.1 |
+| `d42a6fc` | merge: preserve canonical BTAP candidate history |
+| `a2a5927eb54e6c734fa7c11233189e6ec497cf31` | chore: prepare BTAP 0.5.2 offline candidate |
+
+### Status
+
+[OK] **Completed**
