@@ -1,3 +1,0 @@
-{"file":"docs/agent-guides/validation.md","reason":"Verify changed paths without overwriting sealed evidence."}
-{"file":"docs/agent-guides/tool-contracts.md","reason":"Check all public diagnostic consumers."}
-{"file":".trellis/spec/backend/setup-diagnostics.md","reason":"Verify startup, legacy-response, envelope and preflight contracts."}

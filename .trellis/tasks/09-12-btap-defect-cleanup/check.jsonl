@@ -1,4 +1,0 @@
-{"file":"docs/agent-guides/validation.md","reason":"Verify source identity, offline coverage, runtime ownership and exact artifacts."}
-{"file":"docs/agent-guides/tool-contracts.md","reason":"Check public diagnostics and tool behavior in all callers."}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Review timeout, unknown outcome, cancellation and cleanup semantics."}
-{"file":".trellis/spec/guides/collaboration.md","reason":"Review bounded worktree handoffs and retain unrelated changes."}

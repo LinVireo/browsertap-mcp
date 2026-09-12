@@ -1,3 +1,0 @@
-{"file": "docs/agent-guides/tabs-and-input.md", "reason": "tab reservation, timeout, dialog recovery, and uncertain execution constraints"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "bounded outcome_unknown retention and retry contract"}
-{"file": ".trellis/tasks/09-10-zombie-js-after-cdp-timeout/research/from-source-review-2026-09-10.md", "reason": "permanent target_busy finding and implemented disposition"}

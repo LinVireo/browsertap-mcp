@@ -1,5 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"Python contracts and quality gates"}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Structured failures and no blind replay"}
-{"file":"docs/agent-guides/runtime-lifecycle.md","reason":"Process startup, connection ages and loaded components"}
-{"file":"docs/agent-guides/transport-auth.md","reason":"Token ownership and safe diagnostics"}
-{"file":".trellis/tasks/09-12-btap-defect-cleanup/research/config-repair-request-from-root-20260912.md","reason":"Coordinator allocation and overlapping regions"}

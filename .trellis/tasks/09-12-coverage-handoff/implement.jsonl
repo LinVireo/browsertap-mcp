@@ -1,6 +1,0 @@
-{"file":"AGENTS.md","reason":"Preserve implementation and verification contracts while preparing the handoff"}
-{"file":".trellis/spec/guides/collaboration.md","reason":"Use shared task records and bounded ownership"}
-{"file":".trellis/tasks/09-12-coverage-handoff/prd.md","reason":"Limit this batch to the existing coverage handoff"}
-{"file":"docs/agent-guides/validation.md","reason":"Preserve offline checks, evidence ownership and LF constraints"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Use repository validation gates for the original tree"}
-{"file":".trellis/tasks/09-11-setup-diagnostics/research/setup-verification-from-01a09113-20260912.md","reason":"Honor the frozen source and agreed integration window"}

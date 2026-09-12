@@ -1,3 +1,0 @@
-{"file":"docs/agent-guides/runtime-lifecycle.md","reason":"Preserve component identity and manual reload rules."}
-{"file":"docs/agent-guides/tool-contracts.md","reason":"Keep diagnostics and packaged caller guidance consistent."}
-{"file":".trellis/spec/backend/setup-diagnostics.md","reason":"Distinguish unavailable runtime status from confirmed incompatibility."}

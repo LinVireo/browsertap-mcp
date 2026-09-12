@@ -56,6 +56,12 @@ DELIVER.md
 # AGENTS.md; anything here that outlives its task belongs there instead.
 docs/superpowers/
 
+# Local task handoffs, session journals, and Chrome Web Store drafts.
+# Trellis scripts/specs and packaged extension icons remain public.
+/.trellis/tasks/
+/.trellis/workspace/
+/store-assets/
+
 # local scratch files, repository root only
 #
 # Anchored with a leading slash on purpose. Unanchored, `_*.json` matches at
