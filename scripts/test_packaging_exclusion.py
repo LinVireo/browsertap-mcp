@@ -5,9 +5,9 @@ Packaging exclusion regression test.
 Verifies that private key materials (*.pem, *.key, *.p12, *.pfx) are excluded
 from both wheel and sdist distributions, even when present in the source tree.
 
-This test uses synthetic sentinel files to avoid reading or packaging real
-private keys. It independently reproduces the packaging rules from pyproject.toml
-and MANIFEST.in to verify exclusion behavior.
+This test uses a completely isolated synthetic fixture project that reproduces
+the packaging rules from the real pyproject.toml and MANIFEST.in, avoiding any
+writes to the actual source tree.
 
 Usage:
     python scripts/test_packaging_exclusion.py
@@ -24,29 +24,78 @@ import zipfile
 from pathlib import Path
 from tarfile import TarFile
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib  # type: ignore[import-not-found]
+
 SENTINEL_CONTENT = "SYNTHETIC_PRIVATE_KEY_SENTINEL_DO_NOT_PACKAGE"
 PRIVATE_KEY_PATTERNS = ["*.pem", "*.key", "*.p12", "*.pfx"]
 
 
-def create_synthetic_fixtures(extension_dir: Path) -> list[Path]:
-    """Create synthetic private key files with sentinel content."""
-    fixtures = []
+def create_isolated_fixture(work_dir: Path, project_root: Path) -> Path:
+    """Create a completely isolated fixture project with synthetic private keys.
+
+    Returns the fixture root directory. The fixture reproduces the packaging
+    rules from the real project but builds in complete isolation.
+    """
+    fixture_root = work_dir / "fixture"
+    fixture_src = fixture_root / "src" / "browsertap_mcp" / "chrome_extension"
+    fixture_src.mkdir(parents=True)
+
+    # Make it a package
+    (fixture_src.parent / "__init__.py").write_text("", encoding="utf-8")
+
+    # Create synthetic private key files
     for pattern in PRIVATE_KEY_PATTERNS:
         ext = pattern[1:]  # Remove *
-        fixture = extension_dir / f"test_private{ext}"
-        fixture.write_text(SENTINEL_CONTENT, encoding="utf-8")
-        fixtures.append(fixture)
-    return fixtures
+        (fixture_src / f"test_private{ext}").write_text(SENTINEL_CONTENT, encoding="utf-8")
+
+    # Create a public file that SHOULD be packaged
+    (fixture_src / "manifest.json").write_text('{"name": "test"}', encoding="utf-8")
+
+    # Read real packaging rules
+    real_pyproject = (project_root / "pyproject.toml").read_bytes()
+    real_manifest = (project_root / "MANIFEST.in").read_bytes()
+
+    config = tomllib.loads(real_pyproject.decode("utf-8"))
+    setuptools_config = config["tool"]["setuptools"]
+    include_patterns = setuptools_config.get("package-data", {}).get("browsertap_mcp", [])
+    exclude_patterns = setuptools_config.get("exclude-package-data", {}).get("browsertap_mcp", [])
+
+    # Create minimal pyproject.toml with same packaging rules
+    fixture_pyproject = (
+        '[build-system]\n'
+        'requires = ["setuptools>=77"]\n'
+        'build-backend = "setuptools.build_meta"\n'
+        '\n'
+        '[project]\n'
+        'name = "btap-packaging-test-fixture"\n'
+        'version = "0.0.0"\n'
+        '\n'
+        '[tool.setuptools.packages.find]\n'
+        'where = ["src"]\n'
+        '\n'
+        '[tool.setuptools.package-data]\n'
+        'browsertap_mcp = ' + json.dumps(include_patterns) + '\n'
+        '\n'
+        '[tool.setuptools.exclude-package-data]\n'
+        'browsertap_mcp = ' + json.dumps(exclude_patterns) + '\n'
+    )
+    (fixture_root / "pyproject.toml").write_text(fixture_pyproject, encoding="utf-8")
+    (fixture_root / "MANIFEST.in").write_bytes(real_manifest)
+
+    return fixture_root
 
 
-def build_distributions(work_dir: Path) -> tuple[Path, Path]:
-    """Build wheel and sdist in isolated directory."""
+def build_distributions(fixture_root: Path, work_dir: Path) -> tuple[Path, Path]:
+    """Build wheel and sdist from the isolated fixture."""
     dist_dir = work_dir / "dist"
     dist_dir.mkdir()
 
-    # Build using project's build-system configuration
+    # Build the fixture project, not the real one
     result = subprocess.run(
-        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(dist_dir)],
+        [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(dist_dir), str(fixture_root)],
         capture_output=True,
         text=True,
         check=False,
@@ -99,52 +148,41 @@ def check_sdist(sdist_path: Path) -> list[str]:
 def main():
     """Run packaging exclusion regression test."""
     project_root = Path(__file__).parent.parent
-    extension_dir = project_root / "src" / "browsertap_mcp" / "chrome_extension"
-
-    if not extension_dir.exists():
-        print(f"Extension directory not found: {extension_dir}", file=sys.stderr)
-        sys.exit(1)
 
     with tempfile.TemporaryDirectory(prefix="packaging_test_") as tmpdir:
         work_dir = Path(tmpdir)
 
-        # Create synthetic private key fixtures
-        print("Creating synthetic private key fixtures...")
-        fixtures = create_synthetic_fixtures(extension_dir)
-        print(f"  Created {len(fixtures)} sentinel files")
+        # Create isolated fixture project
+        print("Creating isolated fixture project...")
+        fixture_root = create_isolated_fixture(work_dir, project_root)
+        print(f"  Fixture: {fixture_root}")
 
-        try:
-            # Build distributions
-            print("\nBuilding distributions...")
-            wheel_path, sdist_path = build_distributions(work_dir)
-            print(f"  Wheel: {wheel_path.name}")
-            print(f"  Sdist: {sdist_path.name}")
+        # Build distributions from the fixture
+        print("\nBuilding distributions...")
+        wheel_path, sdist_path = build_distributions(fixture_root, work_dir)
+        print(f"  Wheel: {wheel_path.name}")
+        print(f"  Sdist: {sdist_path.name}")
 
-            # Check for leaks
-            print("\nChecking distributions for private key leaks...")
-            wheel_leaks = check_wheel(wheel_path)
-            sdist_leaks = check_sdist(sdist_path)
+        # Check for leaks
+        print("\nChecking distributions for private key leaks...")
+        wheel_leaks = check_wheel(wheel_path)
+        sdist_leaks = check_sdist(sdist_path)
 
-            # Report
-            report = {
-                "wheel": {"path": str(wheel_path), "leaked": wheel_leaks},
-                "sdist": {"path": str(sdist_path), "leaked": sdist_leaks},
-            }
+        # Report
+        report = {
+            "wheel": {"path": str(wheel_path), "leaked": wheel_leaks},
+            "sdist": {"path": str(sdist_path), "leaked": sdist_leaks},
+        }
 
-            if wheel_leaks or sdist_leaks:
-                print("\n❌ PACKAGING EXCLUSION FAILED", file=sys.stderr)
-                print(json.dumps(report, indent=2), file=sys.stderr)
-                return 1
+        if wheel_leaks or sdist_leaks:
+            print("\n❌ PACKAGING EXCLUSION FAILED", file=sys.stderr)
+            print(json.dumps(report, indent=2), file=sys.stderr)
+            return 1
 
-            print("✓ Wheel: no private keys leaked")
-            print("✓ Sdist: no private keys leaked")
-            print("\n✓ All packaging exclusions verified")
-            return 0
-
-        finally:
-            # Clean up synthetic fixtures
-            for fixture in fixtures:
-                fixture.unlink(missing_ok=True)
+        print("✓ Wheel: no private keys leaked")
+        print("✓ Sdist: no private keys leaked")
+        print("\n✓ All packaging exclusions verified")
+        return 0
 
 
 if __name__ == "__main__":
