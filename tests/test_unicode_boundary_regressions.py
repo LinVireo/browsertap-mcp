@@ -13,7 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from browsertap_mcp import bridge, cli
+from browsertap_mcp import bridge, cli, native_installer
 from browsertap_mcp import browser_bridge as B
 from browsertap_mcp.command_scope import command_scope, guard_targets
 from browsertap_mcp.extension_build import compute_extension_stamp
@@ -98,13 +98,15 @@ def test_doctor_initialization_json_preserves_an_existing_unicode_path(monkeypat
     assert directory.is_dir()
     monkeypatch.setattr(cli, "chrome_extension_dir", lambda: directory)
     monkeypatch.setattr(cli, "get_driver", Mock(side_effect=RuntimeError("synthetic initialization failure")))
+    native_status = {"status": "missing", "installed": False, "manifest_path": str(directory / "native.json")}
+    monkeypatch.setattr(native_installer, "native_host_status", lambda: native_status)
     with output_streams(monkeypatch) as (stdout, stderr):
         status = cli.cmd_doctor()
     assert status == 1
     assert json.loads(stdout.getvalue()) == {
         "status": "initialization_failed", "action": "check_config",
         "extension_path": str(directory), "error": "synthetic initialization failure",
-        "error_type": "RuntimeError",
+        "error_type": "RuntimeError", "native_host": native_status,
     }
     assert b"initialization_failed" in stderr.getvalue()
 

@@ -27,6 +27,7 @@ from ._version import __version__
 from .capture_ownership import CaptureOperation, CaptureOwnershipRegistry
 from .command_scope import guard_targets, has_command_scope, mark_dispatched
 from .extension_origin import origin_is_allowed, origin_policy_report
+from .native_bridge import NativeConnections, extension_transport, register_native_routes
 from .paths import (
     DEFAULT_STATE_DIR_NAME,
     LEGACY_STATE_DIR_NAME,
@@ -1258,6 +1259,7 @@ class BrowserBridge:
 
     def __init__(self, host: str = '127.0.0.1', port: int = 18765):
         port = validate_bridge_port(port)
+        self.transport = extension_transport()
         self.host, self.port = host, port
         self.started_at = time.time()
         self.sessions: dict[str, Session] = {}
@@ -1378,19 +1380,28 @@ class BrowserBridge:
             return None
 
     def start_http_server(self):
+        # Validate before token/file or listener effects, including callers that
+        # intentionally construct a HTTP-only bridge without __init__.
+        self.transport = extension_transport(getattr(self, 'transport', None))
         self.app = app = bottle.Bottle()
         # 启动时锁定一次。所有进程从同一个持久文件取 token；运行期间若有人做完整
         # 用户数据清理，旧 daemon 仍保持原值，必须在清理前先停止它。
         self.link_token = bridge_token()
         if self.link_token:
             logger.info("Bridge token authentication enabled (file=%s)", bridge_token_path())
+        self._native_connections = native_connections = NativeConnections(
+            self._handle_extension_message, self._unregister_client, lock=_DRIVER_STATE_LOCK,
+        )
 
         @app.install
         def _redacted_errors(callback):
             # Bottle's catchall writes exception text/source lines to wsgi.errors.
             # Stop unexpected callback failures here, before that logging boundary.
             operation = callback.__name__
-            if operation not in ('long_poll', 'result', 'link', '_reject_cross_origin'):
+            if operation not in (
+                'long_poll', 'result', 'link', '_reject_cross_origin', 'extension_config',
+                'native_open', 'native_message', 'native_poll', 'native_close',
+            ):
                 operation = 'unknown'
 
             @wraps(callback)
@@ -1424,6 +1435,10 @@ class BrowserBridge:
             if origin and not origin_is_allowed(origin):
                 drain_request_body()
                 raise bottle.HTTPResponse(status=403, body='forbidden origin')
+
+        register_native_routes(
+            app, native_connections, token=self.link_token, transport=self.transport,
+        )
 
         @app.route('/api/longpoll', method=['GET', 'POST'])
         def long_poll():
@@ -1657,6 +1672,15 @@ class BrowserBridge:
                 daemon_threads = True
                 address_family = family
 
+                def service_actions(self):
+                    # Abandoned hosts have no socket close event. Reap them even
+                    # while no MCP client or replacement host is making calls.
+                    try:
+                        native_connections.expire()
+                    except Exception as exc:
+                        logger.error("Native connection maintenance failed (error_type=%s)",
+                                     type(exc).__name__)
+
                 def server_bind(self):
                     # HTTPServer reverse-resolves the bind address before
                     # listen(), which can stall on the macOS system resolver.
@@ -1687,6 +1711,9 @@ class BrowserBridge:
         remote-mode bridge). shutdown() must come from another thread than
         serve_forever, which is exactly the caller's situation here.
         """
+        native_connections = getattr(self, '_native_connections', None)
+        if native_connections is not None:
+            native_connections.close_all()
         server = getattr(self, 'http_server', None)
         if server is None:
             return
@@ -1762,6 +1789,66 @@ class BrowserBridge:
                     or expired(entry.get('ts', now))):
                 self.client_last_seen.pop(cid, None)
 
+    def _handle_extension_message(self, client, data: dict[str, Any]) -> bool:
+        """Dispatch an admitted WS/native frame with one ownership policy.
+
+        Transport adapters own framing, origin/token admission and exception
+        boundaries. The same connection object is registered, queued against,
+        compared for replies, and retired regardless of how its bytes arrive.
+        """
+        if not isinstance(data, dict):
+            return False
+        kind = data.get('type')
+        if kind == 'ready':
+            session_id = data.get('sessionId')
+            if not _valid_protocol_id(session_id) or not _valid_page_fields(data):
+                return False
+            session_info = {'url': data.get('url'), 'title': data.get('title', ''), 'type': 'ws'}
+            self._register_client(session_id, client, session_info)
+        elif kind in ('ext_ready', 'tabs_update'):
+            tabs = data.get('tabs', [])
+            # A per-connection fallback preserves old extensions without making
+            # reused Python object addresses into browser namespaces.
+            client_id = data.get('clientId')
+            if client_id is None or client_id == '':
+                if not hasattr(client, '_fallback_cid'):
+                    client._fallback_cid = f"conn_{uuid.uuid4().hex[:10]}"
+                client_id = client._fallback_cid
+            browser = data.get('browser', '')
+            # Validate the entire snapshot before claiming an owner or publishing
+            # liveness. A refused owner must not change either set of clocks.
+            if (not _valid_protocol_id(client_id) or not isinstance(browser, str)
+                    or not _valid_tab_snapshot(tabs)):
+                return False
+            # Publication and close share one lock, so an old connection's late
+            # cleanup cannot disconnect a partially registered replacement.
+            with _DRIVER_STATE_LOCK:
+                claimed = self._claim_ext_client(client_id, browser, client)
+                if claimed:
+                    self.last_ext_seen = time.time()
+                    self.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
+                    self._apply_extension_tabs(client_id, browser, tabs, client)
+            if not claimed:
+                try: client.close()
+                except Exception: pass  # noqa: S110 - closing a refused connection is best-effort
+                return False
+        elif kind == 'ping':
+            # Keep idle namespaces alive; registration clocks intentionally only
+            # advance on ext_ready/tabs_update, as before.
+            self._touch_ext_client(client)
+            try: client.send_message(json.dumps({'type': 'pong'}))
+            except Exception: pass  # noqa: S110 - peer may have disconnected
+        elif kind in ('ack', 'result', 'error'):
+            # 'ws' names the existing connection-object ownership contract here.
+            # Native uses that exact contract, including late-result admission.
+            # Receipt by this router is separate from admission as an operation
+            # reply: stale/duplicate/foreign replies are ignored by WS, and must
+            # not make a Native host abandon its otherwise healthy transport.
+            self._record_operation_reply(data, transport='ws', owner=client)
+        else:
+            return False
+        return True
+
     def start_ws_server(self) -> None:
         driver = self
         class JSExecutor(WebSocket):
@@ -1778,76 +1865,7 @@ class BrowserBridge:
                     logger.warning('Rejected malformed WebSocket JSON')
                     return
                 try:
-                    if not isinstance(data, dict):
-                        return
-                    if data.get('type') == 'ready':
-                        session_id = data.get('sessionId')
-                        if not _valid_protocol_id(session_id) or not _valid_page_fields(data):
-                            return
-                        session_info = {'url': data.get('url'), 'title': data.get('title', ''),
-                            'type': 'ws'}
-                        driver._register_client(session_id, self, session_info)
-                    elif data.get('type') in ['ext_ready', 'tabs_update']:
-                        tabs = data.get('tabs', [])
-                        # Namespace sessions per browser instance so Chrome/Edge (and
-                        # multiple profiles) don't collide on identical small tab ids.
-                        # Fall back to a per-connection uuid if an older extension
-                        # doesn't send clientId — id(self) is unusable here because
-                        # addresses get reused after GC, colliding namespaces.
-                        client_id = data.get('clientId')
-                        if client_id is None or client_id == '':
-                            if not hasattr(self, '_fallback_cid'):
-                                self._fallback_cid = f"conn_{uuid.uuid4().hex[:10]}"
-                            client_id = self._fallback_cid
-                        browser = data.get('browser', '')
-                        # Validate the WHOLE snapshot before claiming a socket
-                        # or publishing liveness; invalid input changes nothing.
-                        if (not _valid_protocol_id(client_id) or not isinstance(browser, str)
-                                or not _valid_tab_snapshot(tabs)):
-                            return
-                        # Keep the CLIENT-level socket. It is one per browser and
-                        # exists regardless of tab count, so SW-side commands
-                        # (chrome.tabs.create) still work with zero open tabs —
-                        # per-tab sessions can't express that. The claim can be
-                        # refused, and then everything below is skipped on
-                        # purpose: a socket that does not own the namespace must
-                        # not push tabs into it, and must not move the last-seen
-                        # clocks either, or `doctor` would report a dead
-                        # extension as having just checked in. Closing it is what
-                        # makes the refusal self-healing -- the real extension
-                        # reconnects and wins the moment the zombie ages out,
-                        # where a silently ignored socket would look connected
-                        # and receive nothing forever.
-                        # Publish the socket and its tab snapshot together. A
-                        # failed send on another thread may retire the old socket
-                        # while this reconnect is arriving; neither transition
-                        # may act on a half-published replacement.
-                        with _DRIVER_STATE_LOCK:
-                            claimed = driver._claim_ext_client(client_id, browser, self)
-                            if claimed:
-                                driver.last_ext_seen = time.time()
-                                driver.client_last_seen[client_id] = {'ts': time.time(), 'browser': browser}
-                                driver._apply_extension_tabs(client_id, browser, tabs, self)
-                        if not claimed:
-                            try: self.close()
-                            except Exception: pass  # noqa: S110 - closing a refused socket is best-effort
-                            return
-                    elif data.get('type') == 'ping':
-                        # Liveness reply so the extension can tell a live socket
-                        # from a half-open zombie (TCP ESTABLISHED but dead). No
-                        # pong within a couple keepalive ticks => extension force-
-                        # reconnects instead of pushing tabs into a black hole.
-                        # It is also the only regular traffic on an idle browser,
-                        # so it is what keeps a namespace owner's ts fresh.
-                        driver._touch_ext_client(self)
-                        try: self.send_message(json.dumps({'type': 'pong'}))
-                        except Exception: pass  # noqa: S110 - peer may have disconnected
-                    elif data.get('type') == 'ack':
-                        driver._record_operation_reply(data, transport='ws', owner=self)
-                    elif data.get('type') == 'result':
-                        driver._record_operation_reply(data, transport='ws', owner=self)
-                    elif data.get('type') == 'error':
-                        driver._record_operation_reply(data, transport='ws', owner=self)
+                    driver._handle_extension_message(self, data)
                 except Exception as exc:
                     operation = data.get('type') if isinstance(data, dict) else None
                     if operation not in ('ready', 'ext_ready', 'tabs_update', 'ping', 'ack', 'result', 'error'):

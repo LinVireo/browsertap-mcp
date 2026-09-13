@@ -2,6 +2,7 @@
   "extensionName": { "message": "BrowserTap Bridge" },
   "extensionDescription": { "message": "通过浏览器会话和 Cookie 访问连接 BrowserTap。" },
   "indicatorToggleLabel": { "message": "在页面上显示连接状态" },
+  "bridgeStatusLabel": { "message": "桥接连接" },
   "cookieViewerTitle": { "message": "Cookie 查看器" },
   "refreshButton": { "message": "刷新" },
   "copyButton": { "message": "复制" },

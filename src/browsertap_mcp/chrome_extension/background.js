@@ -1,13 +1,16 @@
 // background.js - Cookie + CDP Bridge
+/* global NativeBridgeSocket, NATIVE_HOST_NAME, NATIVE_PROTOCOL */
+/* exported resetConnection */
 // The build this worker was LOADED with. `chrome.runtime.getManifest().version`
 // cannot answer that: Chrome parses the manifest at load time and refreshes it on
 // its own schedule, and this file does not follow it -- measured twice here, once
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '1b751886b135aa05';
+const BTAP_BUILD = 'd149afd3f2d708b3';
 importScripts('result_serialization.js');
 importScripts('guarded_eval.js');
+importScripts('native_messaging.js');
 importScripts('disable_dialogs.js');
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
@@ -3450,6 +3453,16 @@ async function createTabAck(msg) {
 
 // --- Command router: every bridge command dispatches here -----------------
 async function handleExtMessage(msg, sender) {
+  // Popup requesting bridge status
+  if (msg.type === 'get-bridge-status') {
+    const { connected, mode } = bridgeStatusMessage();
+    return {
+      connected,
+      mode,
+      wsPort: bridgePort
+    };
+  }
+
   if (msg.cmd === 'site_permission') {
     // Keep operation failures in a successful bridge envelope so the server
     // can return structured unsupported/error results instead of losing them
@@ -4810,8 +4823,11 @@ async function withCspOff(tabId, fn) {
 }
 
 // --- WebSocket client for BrowserBridge ---
+// NativeBridgeSocket shares this slot, dispatcher, and recovery lifecycle.
 let ws = null;
 let connectInFlight = false;
+let connectionGeneration = 0;
+let nativeFailed = false;
 // Last time the bridge answered our ping with a pong. A half-open zombie
 // socket stays readyState===OPEN and accepts send() without error, so pong
 // silence is the only reliable "this TCP connection is actually dead" signal.
@@ -4841,9 +4857,13 @@ function isWorkerGoneError(e) {
 }
 
 function bridgeStatusMessage() {
+  const connected = Boolean(ws && ws.readyState === WebSocket.OPEN);
   return {
     type: 'btap_status',
-    ws: Boolean(ws && ws.readyState === WebSocket.OPEN),
+    // Content scripts use this legacy field as bridge connectivity.
+    ws: connected,
+    connected,
+    mode: connected ? (ws.transport || 'websocket') : 'disconnected',
   };
 }
 
@@ -4931,6 +4951,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   applyBridgePort(nextPort);
   const previous = ws;
   ws = null;
+  connectionGeneration += 1;
+  nativeFailed = false;
   broadcastBridgeStatus();
   connectInFlight = false;
   lastPongAt = 0;
@@ -5037,20 +5059,25 @@ function scheduleKeepalive() {
   if (keepaliveTimer !== null) return; // already ticking
   keepaliveTimer = setInterval(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      const previous = ws;
       stopKeepalive();
       ws = null;
+      if (previous?.transport === 'native') nativeFailed = true;
+      try { previous?.close(); } catch (_) {}
       broadcastBridgeStatus();
       ensureConnected('keepalive-lost');
       scheduleProbe(); // alarm keeps retrying even if this worker is evicted
       return;
     }
+    const sock = ws;
     // Zombie check: on a half-open socket send() succeeds silently and the OS
     // won't surface the dead peer for minutes, so we'd keep pushing tabs into a
     // black hole. No pong across ~3 ticks => treat the socket as dead.
     if (lastPongAt && Date.now() - lastPongAt > 55000) {
       console.log('[BTAP-WS] pong timeout, forcing reconnect');
-      try { ws.close(); } catch (_) {}
       ws = null;
+      if (sock.transport === 'native') nativeFailed = true;
+      try { sock.close(); } catch (_) {}
       broadcastBridgeStatus();
       lastPongAt = 0;
       stopKeepalive();
@@ -5059,7 +5086,7 @@ function scheduleKeepalive() {
       return;
     }
     try {
-      ws.send(JSON.stringify({ type: 'ping' }));
+      sock.send(JSON.stringify({ type: 'ping' }));
       // After a bridge restart the socket can stay OPEN client-side while the
       // new daemon has an empty session table — re-push tabs every tick so MCP
       // recovers without user action.
@@ -5068,8 +5095,11 @@ function scheduleKeepalive() {
       // write alone were not enough.
       chrome.runtime.getPlatformInfo(() => { void chrome.runtime.lastError; });
     } catch (e) {
+      if (ws !== sock) return; // Native send failure already retired this owner
       console.log('[BTAP-WS] keepalive ping failed:', e.message);
       ws = null;
+      if (sock.transport === 'native') nativeFailed = true;
+      try { sock.close(); } catch (_) {}
       broadcastBridgeStatus();
       stopKeepalive();
       ensureConnected('keepalive-send-failed');
@@ -5080,6 +5110,29 @@ function scheduleKeepalive() {
 
 function stopKeepalive() {
   if (keepaliveTimer !== null) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+}
+
+async function readBridgeTransport(port) {
+  let timer = null;
+  try {
+    const controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), 1500);
+    const response = await fetch(`http://127.0.0.1:${port + 1}/api/extension/config`, {
+      method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error',
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const config = await response.json();
+    if (!config || config.protocol !== NATIVE_PROTOCOL || config.nativeHost !== NATIVE_HOST_NAME) return null;
+    return config.transport === 'native' || config.transport === 'websocket'
+      ? config.transport : null;
+  } catch (_) {
+    // An absent bridge is the usual browser-first startup path. Native starts
+    // it; older bridges without this route can still use WebSocket fallback.
+    return null;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 async function isServerAlive() {
@@ -5115,14 +5168,46 @@ async function isServerAlive() {
   }
 }
 
+// An explicit reset invalidates pending configuration reads before closing the
+// old transport. Its late callbacks cannot claim or clear the new connection.
+function resetConnection() {
+  connectionGeneration += 1;
+  nativeFailed = false;
+  const previous = ws;
+  ws = null;
+  connectInFlight = false;
+  lastPongAt = 0;
+  stopKeepalive();
+  try { previous?.close(); } catch (_) {}
+  broadcastBridgeStatus();
+  ensureConnected('manual-reset');
+}
+
 function ensureConnected(reason) {
   if (!bridgeConfigLoaded) {
     void bridgeConfigReady.finally(() => ensureConnected(reason));
     return;
   }
-  if (ws && ws.readyState <= 1) return;
-  console.log('[BTAP-WS] ensureConnected:', reason || '');
-  connectWS();
+
+  if ((ws && ws.readyState <= 1) || connectInFlight) return;
+  connectInFlight = true;
+  const generation = ++connectionGeneration;
+  console.log('[BTAP] ensureConnected:', reason || '');
+  void readBridgeTransport(bridgePort).then(transport => {
+    if (generation !== connectionGeneration) return;
+    connectInFlight = false;
+    if (transport === 'websocket' || nativeFailed) {
+      connectWS();
+      return;
+    }
+    connectBridgeSocket(() => new NativeBridgeSocket(async socket => {
+      if (generation !== connectionGeneration || socket !== ws) return false;
+      const preference = await readBridgeTransport(socket.bridgePort);
+      if (generation !== connectionGeneration || socket !== ws || socket.readyState !== WebSocket.CONNECTING) return false;
+      applyBridgePort(socket.bridgePort);
+      return preference !== 'websocket';
+    }));
+  });
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -5131,8 +5216,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // lives in the setInterval keepalive (alarms can't fire faster than 60s,
     // so they could never hold the worker up). Keep this as a recovery path:
     // if the worker was evicted anyway, this re-arms everything.
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      scheduleKeepalive();
+    if (ws && ws.readyState <= WebSocket.OPEN) {
+      if (ws.readyState === WebSocket.OPEN) scheduleKeepalive();
     } else {
       ws = null;
       broadcastBridgeStatus();
@@ -5164,7 +5249,7 @@ async function handleWsExec(data) {
   // the CDP fallback can run for seconds while the bridge restarts under us.
   const sock = ws;
   const send = (obj) => {
-    if (sock && sock.readyState === WebSocket.OPEN) {
+    if (sock && sock === ws && sock.readyState === WebSocket.OPEN) {
       try { sock.send(JSON.stringify(obj)); return true; } catch (_) { return false; }
     }
     return false;
@@ -5484,6 +5569,10 @@ async function handleWsExec(data) {
 }
 
 function connectWS() {
+  connectBridgeSocket(() => new WebSocket(WS_URL));
+}
+
+function connectBridgeSocket(createSocket) {
   if (ws && ws.readyState <= 1) return; // CONNECTING or OPEN
   if (connectInFlight) return;
   connectInFlight = true;
@@ -5496,7 +5585,7 @@ function connectWS() {
   // must NOT null out the new connection or tear down its keepalive.
   let self;
   try {
-    self = new WebSocket(WS_URL);
+    self = createSocket();
     ws = self;
   } catch (e) {
     console.error('[BTAP-WS] Constructor error:', e);
@@ -5534,17 +5623,19 @@ function connectWS() {
       const clientId = await getClientId();
       const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
       if (self !== ws || self.readyState !== WebSocket.OPEN) return; // died during await
+      const snapshot = await Promise.all(tabs.map(async t => ({
+        id: t.id,
+        url: t.url,
+        title: t.title,
+        generation: await tabGenerationFor(t.id),
+        tab_identity: await tabIdentityFor(t.id),
+      })));
+      if (self !== ws || self.readyState !== WebSocket.OPEN) return;
       self.send(JSON.stringify({
         type: 'ext_ready',
         clientId,
         browser: getBrowserType(),
-        tabs: await Promise.all(tabs.map(async t => ({
-          id: t.id,
-          url: t.url,
-          title: t.title,
-          generation: await tabGenerationFor(t.id),
-          tab_identity: await tabIdentityFor(t.id),
-        })))
+        tabs: snapshot,
       }));
       console.log('[BTAP-WS] Sent ext_ready with', tabs.length, 'tabs as', clientId);
     } catch (e) {
@@ -5575,7 +5666,7 @@ function connectWS() {
       return res;
     };
     const reply = (obj) => {
-      if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
+      if (sock && sock === ws && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(obj));
     };
     try {
       const data = JSON.parse(event.data);
@@ -5628,10 +5719,17 @@ function connectWS() {
     ws = null;
     broadcastBridgeStatus();
     connectInFlight = false;
+    lastPongAt = 0;
     // Stop holding the worker alive for a socket that's gone; the probe alarm
     // takes over reconnect duty and survives eviction.
     stopKeepalive();
     scheduleProbe();
+    if (self.transport === 'native') {
+      // The retired Native port is already closed. This worker makes one
+      // fallback attempt, then only the existing WS recovery loop retries.
+      nativeFailed = true;
+      connectWS();
+    }
   };
   ws.onerror = (e) => {
     console.error('[BTAP-WS] Error:', e);

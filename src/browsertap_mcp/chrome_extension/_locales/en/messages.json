@@ -2,6 +2,7 @@
   "extensionName": { "message": "BrowserTap Bridge" },
   "extensionDescription": { "message": "BrowserTap bridge with browser session and cookie access." },
   "indicatorToggleLabel": { "message": "Show connection status on pages" },
+  "bridgeStatusLabel": { "message": "Bridge connection" },
   "cookieViewerTitle": { "message": "Cookie viewer" },
   "refreshButton": { "message": "Refresh" },
   "copyButton": { "message": "Copy" },

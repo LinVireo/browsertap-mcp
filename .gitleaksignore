@@ -1,0 +1,53 @@
+# Test fixtures and extension public keys
+# Format: file:rule:line
+
+# Extension manifest public key (not a secret - derived from dev private key)
+src/browsertap_mcp/chrome_extension/manifest.json:generic-api-key:8
+
+# Test fixtures - btapTabGenerationsV1 is a storage key name, not a secret
+tests/test_native_extension.py:generic-api-key:379
+tests/test_native_extension.py:generic-api-key:390
+
+tests/test_native_host.py:generic-api-key:45
+tests/test_native_host.py:generic-api-key:170
+tests/test_native_host.py:generic-api-key:205
+tests/test_native_host.py:generic-api-key:226
+tests/test_native_host.py:generic-api-key:227
+tests/test_native_host.py:generic-api-key:230
+tests/test_native_host.py:generic-api-key:236
+tests/test_native_host.py:generic-api-key:237
+tests/test_native_host.py:generic-api-key:253
+tests/test_native_host.py:generic-api-key:254
+tests/test_native_host.py:generic-api-key:259
+tests/test_native_host.py:generic-api-key:261
+tests/test_native_host.py:generic-api-key:265
+tests/test_native_host.py:generic-api-key:281
+tests/test_native_host.py:generic-api-key:298
+tests/test_native_host.py:generic-api-key:299
+tests/test_native_host.py:generic-api-key:301
+tests/test_native_host.py:generic-api-key:304
+tests/test_native_host.py:generic-api-key:308
+tests/test_native_host.py:generic-api-key:311
+tests/test_native_host.py:generic-api-key:313
+tests/test_native_host.py:generic-api-key:315
+tests/test_native_host.py:generic-api-key:323
+tests/test_native_host.py:generic-api-key:326
+tests/test_native_host.py:generic-api-key:333
+tests/test_native_host.py:generic-api-key:335
+tests/test_native_host.py:generic-api-key:342
+tests/test_native_host.py:generic-api-key:383
+tests/test_native_host.py:generic-api-key:398
+tests/test_native_host.py:generic-api-key:400
+tests/test_native_host.py:generic-api-key:402
+tests/test_native_host.py:generic-api-key:410
+tests/test_native_host.py:generic-api-key:413
+tests/test_native_host.py:generic-api-key:415
+tests/test_native_host.py:generic-api-key:416
+tests/test_native_host.py:generic-api-key:417
+tests/test_native_host.py:generic-api-key:425
+tests/test_native_host.py:generic-api-key:429
+tests/test_native_host.py:generic-api-key:430
+tests/test_native_host.py:generic-api-key:435
+tests/test_native_host.py:generic-api-key:439
+tests/test_native_host.py:generic-api-key:442
+tests/test_native_host.py:generic-api-key:466

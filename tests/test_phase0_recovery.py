@@ -3097,7 +3097,7 @@ process.stdout.write(JSON.stringify({
     assert result["sent"] == [{"type": "ping"}]
     assert result["sendTabsUpdates"] == 1
     assert result["platformTouches"] == 1
-    assert result["closedSockets"] == 1
+    assert result["closedSockets"] == 2
     assert result["statusBroadcasts"] == 3
     assert result["clearedIntervals"] == [1, 2, 3]
     assert result["reconnects"] == [
@@ -4227,32 +4227,38 @@ process.stdout.write(JSON.stringify({{
 """
     result = _run_node_script(script)
 
+    connected_status = {
+        "type": "btap_status", "ws": True, "connected": True, "mode": "websocket",
+    }
+    disconnected_status = {
+        "type": "btap_status", "ws": False, "connected": False, "mode": "disconnected",
+    }
     assert result == {
         "firstDisconnectCalls": 1,
         "secondDisconnectCalls": 0,
         "ensureConnectedCalls": 3,
         "tabsUpdateCalls": 2,
         "firstStatuses": [
-            {"type": "btap_status", "ws": False},
-            {"type": "btap_status", "ws": True},
+            disconnected_status,
+            connected_status,
         ],
         "secondStatuses": [
-            {"type": "btap_status", "ws": True},
-            {"type": "btap_status", "ws": False},
+            connected_status,
+            disconnected_status,
         ],
         "otherFrameStatuses": [
-            {"type": "btap_status", "ws": True},
-            {"type": "btap_status", "ws": False},
+            connected_status,
+            disconnected_status,
         ],
         "tabMessages": [
             {
                 "tabId": 42,
-                "message": {"type": "btap_status", "ws": True},
+                "message": connected_status,
                 "options": {"frameId": 0},
             },
             {
                 "tabId": 42,
-                "message": {"type": "btap_status", "ws": True},
+                "message": connected_status,
                 "options": {"frameId": 0},
             },
         ],

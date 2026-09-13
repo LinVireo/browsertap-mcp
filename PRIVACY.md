@@ -1,6 +1,6 @@
 # BrowserTap Bridge Privacy Policy
 
-**Effective Date:** September 12, 2026
+**Effective Date:** September 13, 2026
 
 ## Scope
 
@@ -32,6 +32,7 @@ The permissions support these data uses:
 | Extension metadata | Read installed extensions and perform requested extension management operations. |
 | Bookmarks | Read or change the profile's bookmarks when requested. |
 | Download records | Inspect download metadata and start or manage requested downloads. |
+| Native Messaging | Start the installed local companion and exchange browser commands and results with it. |
 
 For requested page execution, the extension may temporarily remove
 Content-Security-Policy response headers for the selected tab. These rules are
@@ -41,9 +42,9 @@ worker startup. Session rules do not persist across browser restarts.
 
 ## Data Flow
 
-The extension's built-in bridge transport connects to `127.0.0.1` loopback on the same computer. Results are returned to the configured MCP client. If that client uses a remote model or service, it may send task data to that provider under its own terms. Requested page operations can also contact websites or download endpoints.
+The extension connects to the installed Native Messaging host on the same computer. The host starts or connects to the local BrowserTap bridge at `127.0.0.1`; the extension uses a WebSocket connection to that loopback address as a fallback. Results are returned to the configured MCP client. If that client uses a remote model or service, it may send task data to that provider under its own terms. Requested page operations can also contact websites or download endpoints.
 
-The loopback transport uses unencrypted local HTTP and WebSocket connections.
+Native Messaging uses Chrome's local process input/output channel. The host talks to the bridge over authenticated local HTTP. The loopback transport uses unencrypted local HTTP and WebSocket connections.
 
 The maintainer does not receive task data through an analytics or collection endpoint. This does not mean that every task stays offline, nor that BrowserTap controls a third-party AI provider's retention or use of submitted data.
 

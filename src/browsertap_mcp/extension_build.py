@@ -110,6 +110,8 @@ def _entries(directory: Path) -> list[tuple[str, bytes]]:
     for path in sorted(directory.rglob("*")):
         if not path.is_file():
             continue
+        if path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}:
+            raise ExtensionStampError("Private key material must be outside the extension directory")
         relative = path.relative_to(directory).as_posix()
         content = path.read_bytes()
         if path.suffix.lower() in _TEXT_SUFFIXES:
