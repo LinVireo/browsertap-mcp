@@ -1,5 +1,9 @@
 recursive-include src/browsertap_mcp/chrome_extension *
 exclude src/browsertap_mcp/chrome_extension/config.js
+exclude src/browsertap_mcp/chrome_extension/*.pem
+exclude src/browsertap_mcp/chrome_extension/*.key
+exclude src/browsertap_mcp/chrome_extension/*.p12
+exclude src/browsertap_mcp/chrome_extension/*.pfx
 recursive-include src/browsertap_mcp/page_scripts *.js
 include .gitignore
 include README.md
@@ -31,3 +35,5 @@ include MANIFEST.in
 recursive-include scripts *.py
 recursive-include tests *.py
 global-exclude __pycache__ *.py[cod]
+# Git ignore rules do not control setuptools package data.
+global-exclude *.[pP][eE][mM] *.[kK][eE][yY] *.[pP]12 *.[pP][fF][xX]
