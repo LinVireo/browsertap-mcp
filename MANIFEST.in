@@ -34,7 +34,6 @@ include pyproject.toml
 include MANIFEST.in
 recursive-include scripts *.py
 recursive-include tests *.py
-recursive-include tests/node *.cjs
 global-exclude __pycache__ *.py[cod]
 # Git ignore rules do not control setuptools package data.
 global-exclude *.[pP][eE][mM] *.[kK][eE][yY] *.[pP]12 *.[pP][fF][xX]

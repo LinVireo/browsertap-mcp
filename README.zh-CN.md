@@ -195,34 +195,6 @@ Edge 或 Opera 可在 `edge://extensions` 或 `opera://extensions` 中加载同�
 打开扩展弹窗并取消勾选**在页面上显示连接状态**即可隐藏角标；隐藏角标不会停止
 bridge、keepalive 或自动重连。
 
-#### 随 Chrome 自动启动
-
-在准备长期保留的 Python 环境中执行一次：
-
-```text
-browsertap install-native-host
-```
-
-此后扩展连接时，Chrome 可以启动 Native Messaging Host，由 Host 启动或复用共享桥，
-无需安装开机启动服务。扩展优先使用 Native，Host 不可用时自动回退 WebSocket；
-MCP 客户端原有的按需启动桥机制继续有效。关闭 Native 连接不会停止共享桥。
-
-安装仅作用于当前用户：Windows 使用 HKCU 注册表，macOS 使用
-`~/Library/Application Support/Google/Chrome/NativeMessagingHosts`，Linux 使用
-`$XDG_CONFIG_HOME/google-chrome/NativeMessagingHosts`，默认位于 `~/.config` 下。
-该命令注册 Chrome；其他 Chromium 浏览器继续支持 WebSocket。
-启动器保存显式设置的 host、port、状态目录、token 文件位置和传输模式，安装时将相对路径
-转为绝对路径，不保存原始 token。更换这些设置或移动 Python 环境后重新运行安装命令。
-Fork 可用 `--extension-id <32字母ID>` 指定扩展身份。
-
-随包公钥现在固定扩展 ID，移动安装目录不会改变它。从旧版路径派生 ID 升级时，Chrome
-可能视其为另一扩展；必要时移除旧条目，再加载随包目录一次，并检查权限、重新设置 popup
-选项。更新扩展源码后仍需在 `chrome://extensions` 手动点击 **重新加载**。
-
-`browsertap doctor` 的 `native_host` 字段只读检查注册状态；注册成功不代表已验证 Chrome
-实际启动。运行 `browsertap uninstall-native-host` 可移除本次安装的注册和启动器文件，
-保留桥 token 与日志。被修改或属于其他安装的文件会保留并报告。
-
 ### 3. 在客户端里添加这个服务
 
 以下通用配置适用于大多数 MCP 客户端：
@@ -320,7 +292,6 @@ mcp_servers:
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | 桥的绑定地址 |
-| `BROWSERTAP_TRANSPORT` | `native` | 桥提供给扩展的连接偏好。设为 `websocket` 并重启桥可选择原有 WebSocket；以相同设置重新运行 `install-native-host` 可让浏览器启动 Host 时也采用该偏好。 |
 | `BROWSERTAP_BRIDGE_PORT` | `18765` | `1` 到 `65533` 的整数。WebSocket 使用基础端口，HTTP 使用 `PORT+1`，host 锁使用 `PORT+2`。无效配置在网络或 spawn 操作前拒绝；状态目录中的 `spawn.lock` 另行避免并发启动守护进程。使用自定义端口时还需配置扩展，见 [docs/TROUBLESHOOTING.zh-CN.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
 | `BROWSERTAP_STATE_DIR` | `~/.browsertap` | 覆盖状态目录。非空相对路径在启动 daemon 前按发起进程的工作目录解析。未设置时保留已有的旧目录回退规则。 |
 | `BROWSERTAP_NO_SPAWN` | 未设置 | 设为 `1` 后 MCP 服务不自动启动 bridge，适用于由运维流程单独管理 bridge 的环境 |
@@ -342,10 +313,7 @@ browsertap                      # 运行 MCP 服务(stdio)
 browsertap extension-path       # 打印未打包扩展的目录
 browsertap skill-path           # 打印随包发布的 agent skill 所在目录
 browsertap doctor               # 诊断本地环境,输出 JSON
-browsertap install-native-host  # 为当前用户注册 Chrome Native Host
-browsertap uninstall-native-host # 移除本次安装的 Native 注册
 browsertap bridge               # 在前台运行桥
-browsertap bridge --mode native # 运行二进制 stdio Host，通常由 Chrome 启动
 browsertap print-hermes-config  # 打印 Hermes 配置片段
 ```
 
@@ -354,10 +322,6 @@ browsertap print-hermes-config  # 打印 Hermes 配置片段
 `bridge_unreachable`；`advice` 提供对应恢复建议。`starting` 表示 bridge 刚启动，正在等待扩展
 握手；此时 `action` 为 `wait_for_extension`，等待几秒后再次运行 `doctor`。`registering` 表示
 扩展已连接，但尚无正常的 `http(s)` 内容标签页完成注册。
-
-Native 复用带鉴权的 HTTP 桥和原有连接归属检查。仅 `GET /api/extension/config` 免 token，
-只返回传输偏好、Host 名称与协议版本，并继续检查 Origin；Native 消息接口始终需要 token。
-`bridge --mode native` 不能与管理共享桥的 `--stop`、`--restart` 同用。
 
 启动期结束后仍未取得扩展运行状态时，setup 状态为 `extension_unavailable`，
 `action` 为 `check_extension_connection`。检查目标浏览器中的 BrowserTap Bridge
@@ -436,14 +400,13 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 
 ### 卸载
 
-1. 打开 `chrome://extensions`（Edge/Opera 使用对应扩展管理页），移除以未打包方式加载的
+1. 运行 `browsertap bridge --stop` 停止托管的 bridge 守护进程。
+2. 打开 `chrome://extensions`（Edge/Opera 使用对应扩展管理页），移除以未打包方式加载的
    **BrowserTap Bridge** 扩展。
-2. 在移除 Python 环境前运行 `browsertap uninstall-native-host`。
-3. 运行 `browsertap bridge --stop` 停止托管的 bridge 守护进程。
-4. 从每个 MCP 客户端配置中移除 `browsertap` 条目。
-5. 在安装时使用的环境中运行 `pip uninstall browsertap-mcp`。若使用专用虚拟环境，退出该
+3. 从每个 MCP 客户端配置中移除 `browsertap` 条目。
+4. 在安装时使用的环境中运行 `pip uninstall browsertap-mcp`。若使用专用虚拟环境，退出该
    环境后再移除其明确目录。
-6. 可选彻底清理：确认所有 BTAP bridge 均已停止后，移除 `~/.browsertap`。这会删除持久
+5. 可选彻底清理：确认所有 BTAP bridge 均已停止后，移除 `~/.browsertap`。这会删除持久
    bridge token 和日志；默认保留这些数据，以便重装后无需重新配置即可继续使用。
 
 ## 工作原理

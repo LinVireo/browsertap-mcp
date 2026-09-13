@@ -5,7 +5,6 @@
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
   "minimum_chrome_version": "121",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuK5xhZhdtI3A4O/pFTwEuprkli8U/khi2aazQ/s64kPLG+AvveCs46yyjD5SCfYzVX3UHvtRMEgEJweqvuVBVwTgHtZRbwGk5UdOn4YB+HmgbW3JKNVD4TpiAKmApblhoagBJN8MwKYAEQ9HYrHRO8qHnPg6AHPPrNIbVKGpT2xyM2xTm/BzzrbsF5olY2O30ZhOLncJAYCM9zYjKGfgN+4hhwcGNFYe9X58wyio6HJ3iCUSaCaEKmS+i7aO0n+9G8hMlMk9XsirpwI+fI23Jm3S9g1Gn7rAhFbkikkQGqGJvk2Wx6KQMzDlmKvMdNDPXdnP8E/+Uox4If8UxsLi1QIDAQAB",
   "icons": {
     "16": "icon16.png",
     "32": "icon32.png",
@@ -23,8 +22,7 @@
     "declarativeNetRequest",
     "management",
     "bookmarks",
-    "downloads",
-    "nativeMessaging"
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"

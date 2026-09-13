@@ -6,17 +6,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
-### Added
-
-- Add a Chrome Native Messaging host with binary stdio framing, bounded message
-  chunking and authenticated forwarding to the shared bridge. Native Messaging
-  is preferred, with automatic WebSocket fallback.
-- Add per-user `install-native-host` and `uninstall-native-host` commands for
-  Windows, macOS and Linux, plus `doctor` registration status and
-  `bridge --mode native`. Installation preserves foreign or modified files.
-- Pin the packaged extension identity; document the one-time migration from a
-  path-derived ID and manual extension reload.
-
 ### Documentation
 
 - Record four unresolved limitations from live verification: native file-dialog

@@ -22,7 +22,6 @@ SHIPPED_EXTENSION_FILES = frozenset(
         "background.js",
         "guarded_eval.js",
         "result_serialization.js",
-        "native_messaging.js",
         "content.js",
         "disable_dialogs.js",
         "manifest.json",
@@ -651,7 +650,6 @@ def test_the_privacy_policy_discloses_every_permission_that_reads_user_data():
         "management": "installed extensions",
         "bookmarks": "Bookmarks",
         "downloads": "downloads",
-        "nativeMessaging": "Native Messaging",
     }
     undocumented = sorted(disclosable - set(required_phrase))
     assert not undocumented, (

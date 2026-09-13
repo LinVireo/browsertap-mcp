@@ -17,7 +17,6 @@ venv/
 !.env.example
 .DS_Store
 src/browsertap_mcp/chrome_extension/config.js
-src/browsertap_mcp/chrome_extension/*.pem
 *.log
 log
 temp_desktop.png

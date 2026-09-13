@@ -57,27 +57,7 @@ def _print_diagnostic(message: str) -> None:
     print(message.encode("ascii", errors="backslashreplace").decode("ascii"), file=sys.stderr)
 
 
-def cmd_native_install(*, uninstall: bool = False, extension_id: str | None = None) -> int:
-    from .native_installer import NativeInstallError, install_native_host, uninstall_native_host
-
-    try:
-        payload = uninstall_native_host() if uninstall else install_native_host(extension_id=extension_id)
-    except (NativeInstallError, OSError, ValueError) as exc:
-        payload = {
-            "status": "uninstall_failed" if uninstall else "install_failed",
-            "error_type": type(exc).__name__,
-            "error_code": getattr(exc, "code", "native_install_failed"),
-            "error": str(exc) if isinstance(exc, NativeInstallError) else "Native host files or configuration are unavailable.",
-        }
-        print(json.dumps(payload, ensure_ascii=True, indent=2))
-        return 1
-    print(json.dumps(payload, ensure_ascii=True, indent=2))
-    return 0
-
-
 def cmd_doctor() -> int:
-    from .native_installer import native_host_status
-
     payload: dict[str, Any]
     try:
         driver = get_driver()
@@ -91,7 +71,6 @@ def cmd_doctor() -> int:
             "extension_path": str(chrome_extension_dir()),
             "error": str(init_error),
             "error_type": type(init_error).__name__,
-            "native_host": native_host_status(),
         }
         print(json.dumps(payload, ensure_ascii=True, indent=2))
         _print_diagnostic(
@@ -175,16 +154,11 @@ def cmd_doctor() -> int:
         "tabs": sessions,
         "diagnosis": payload.get("diagnosis", diag),
         "error": err,
-        "native_host": native_host_status(),
-        "next_steps": {
-            "restart_bridge": [
-                "Run `browsertap bridge --restart`, then run `browsertap doctor` for browsertap-mcp again.",
-            ],
-            "reload_extension": ["Reload BrowserTap Bridge once in chrome://extensions."],
-            "restart_mcp_session": ["Restart the MCP session/client that runs browsertap-mcp."],
-            "wait_for_extension": ["Wait for the extension handshake, then run `browsertap doctor` again."],
-            "check_extension_connection": ["Open the BrowserTap popup, check its connection status, and reconnect."],
-        }.get(payload.get("action", "none"), []),
+        "next_steps": [
+            "Load the unpacked extension in chrome://extensions from extension_path.",
+            "Open a normal http/https page in Chrome.",
+            "Run your MCP client's connection check for `browsertap-mcp` after adding the config.",
+        ],
     })
     print(json.dumps(payload, ensure_ascii=True, indent=2))
     # Surface the one-line verdict last so it's the first thing the eye lands on.
@@ -222,14 +196,7 @@ def cmd_doctor() -> int:
     return 0 if payload.get("status") in {"healthy", "starting"} and not port_probe_errors else 1
 
 
-def cmd_bridge(*, stop: bool = False, restart: bool = False, mode: str = "websocket") -> int:
-    if mode == "native":
-        if stop or restart:
-            _print_diagnostic("bridge --mode native cannot be combined with --stop or --restart")
-            return 2
-        from .native_host import main as native_main
-        return native_main([])
-
+def cmd_bridge(*, stop: bool = False, restart: bool = False) -> int:
     from .bridge import main as bridge_main
     from .bridge import stop_bridge_daemon
 
@@ -280,12 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("doctor", help="Run local diagnostics and print JSON status")
     sub.add_parser("print-hermes-config", help="Print a ready-to-paste Hermes MCP config snippet")
-    install = sub.add_parser("install-native-host", help="Register the Chrome Native Messaging host for this user")
-    install.add_argument("--extension-id", help="Explicit 32-letter extension ID for a fork; defaults to the packaged public key")
-    sub.add_parser("uninstall-native-host", help="Remove this installation's Chrome Native Messaging registration")
     bridge = sub.add_parser("bridge", help="Run or manage the browser bridge daemon")
-    bridge.add_argument("--mode", choices=("websocket", "native"), default="websocket",
-                        help="Run the shared daemon (websocket, default) or Chrome stdio host (native)")
     bridge_actions = bridge.add_mutually_exclusive_group()
     bridge_actions.add_argument("--stop", action="store_true", help="Stop the exact managed bridge process")
     bridge_actions.add_argument("--restart", action="store_true", help="Restart the managed bridge in the background")
@@ -304,13 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor()
     if args.command == "print-hermes-config":
         return cmd_print_hermes_config()
-    if args.command == "install-native-host":
-        return cmd_native_install(extension_id=args.extension_id)
-    if args.command == "uninstall-native-host":
-        return cmd_native_install(uninstall=True)
     if args.command == "bridge":
-        if args.mode == "native":
-            return cmd_bridge(stop=args.stop, restart=args.restart, mode="native")
         return cmd_bridge(stop=args.stop, restart=args.restart)
 
     configure_stdio_logging()

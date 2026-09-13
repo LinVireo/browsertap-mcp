@@ -228,13 +228,7 @@ browsertap_mcp = [
 ]
 
 [tool.setuptools.exclude-package-data]
-browsertap_mcp = [
-  "chrome_extension/config.js",
-  "*.[pP][eE][mM]", "**/*.[pP][eE][mM]",
-  "*.[kK][eE][yY]", "**/*.[kK][eE][yY]",
-  "*.[pP]12", "**/*.[pP]12",
-  "*.[pP][fF][xX]", "**/*.[pP][fF][xX]",
-]
+browsertap_mcp = ["chrome_extension/config.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

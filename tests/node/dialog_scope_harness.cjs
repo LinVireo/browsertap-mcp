@@ -113,7 +113,6 @@ async function worker(frames = [], options = {}) {
     runtime: {
       id: 'synthetic-extension',
       getManifest: () => manifest,
-      getPlatformInfo: callback => callback({ os: 'synthetic' }),
       onInstalled: event(), onStartup: event(), onConnect: event(), onMessage: event(),
     },
     storage: { local: storage(), session: storage(), onChanged: event() },
@@ -183,7 +182,6 @@ async function worker(frames = [], options = {}) {
       },
     },
   };
-  if (options.configureChrome) options.configureChrome(chrome);
   let context;
   class OfflineWebSocket {
     static OPEN = 1;
@@ -194,14 +192,12 @@ async function worker(frames = [], options = {}) {
   }
   let timerId = 0;
   const timers = new Map();
-  const intervals = new Map();
   context = vm.createContext({
     chrome,
     Date: time.Date,
     console: { log() {}, error: (...args) => errors.push(args.map(String).join(' ')) },
     navigator: { userAgent: 'Chrome/130.0.0.0' },
-    WebSocket: options.WebSocket || OfflineWebSocket,
-    AbortController, TextEncoder,
+    WebSocket: OfflineWebSocket,
     setTimeout(callback, delay) {
       if (delay === 200) queueMicrotask(callback); // async-tab grace; no real wait
       const id = ++timerId;
@@ -209,13 +205,8 @@ async function worker(frames = [], options = {}) {
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
-    setInterval(callback, delay) {
-      const id = ++timerId;
-      intervals.set(id, { callback, delay });
-      return id;
-    },
-    clearInterval(id) { intervals.delete(id); },
-    fetch: options.fetch || (() => { throw new Error('network access forbidden in offline dialog harness'); }),
+    setInterval() { return ++timerId; }, clearInterval() {},
+    fetch() { throw new Error('network access forbidden in offline dialog harness'); },
     importScripts(...files) {
       for (const file of files) {
         assert.equal(path.basename(file), file, 'unexpected worker dependency path');
@@ -234,21 +225,15 @@ async function worker(frames = [], options = {}) {
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(errors, [], 'worker startup logged errors');
   return {
-    context, chrome, messages, injections, cdpCalls, imports, time, errors,
+    context, chrome, messages, injections, cdpCalls, imports, time,
     advance(ms, fire = true) {
       time.advance(ms, fire);
       for (const frame of frames) frame.time.advance(ms, fire);
     },
     pendingTimerDelays() { return [...timers.values()].map(timer => timer.delay); },
-    pendingIntervalDelays() { return [...intervals.values()].map(timer => timer.delay); },
-    tickIntervals(delay) {
-      for (const timer of [...intervals.values()]) {
-        if (timer.delay === delay) timer.callback();
-      }
-    },
     expireTimers(delay) {
       let count = 0;
-      for (const [id, timer] of [...timers]) {
+      for (const [id, timer] of timers) {
         if (timer.delay !== delay) continue;
         timers.delete(id);
         timer.callback();
@@ -284,4 +269,4 @@ async function worker(frames = [], options = {}) {
   };
 }
 
-module.exports = { assert, event, extension, manifest, page, worker };
+module.exports = { assert, extension, manifest, page, worker };

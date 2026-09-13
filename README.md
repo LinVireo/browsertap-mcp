@@ -226,41 +226,6 @@ If you also use Edge or Opera, repeat the same steps at `edge://extensions` or `
 
 Then open a normal `http://` or `https://` page. A blank tab is not enough — content scripts cannot run on `about:blank`, so no session is established.
 
-#### Start automatically with Chrome
-
-Run this once from the Python environment that will remain installed:
-
-```text
-browsertap install-native-host
-```
-
-Chrome can then start the Native Messaging host when the extension connects;
-the host starts or reuses the shared bridge. No startup service is installed.
-The extension prefers Native Messaging and falls back to WebSocket if the host
-is unavailable. MCP clients retain their existing bridge startup behavior.
-Closing a native connection leaves the shared bridge running.
-
-Registration is per user: HKCU on Windows, Chrome's `NativeMessagingHosts`
-directory under `~/Library/Application Support/Google/Chrome` on macOS, and
-`$XDG_CONFIG_HOME/google-chrome` (default `~/.config/google-chrome`) on Linux.
-This command registers Chrome; other Chromium browsers retain WebSocket support.
-The launcher saves explicit host, port, state-directory, token-file and transport
-settings, resolving relative paths at installation. It never stores a raw token.
-Run the command again after changing these settings or moving the Python
-environment. `--extension-id <32-letter-id>` supports a fork's explicit identity.
-
-The packaged public key now fixes the extension ID across installation paths.
-An upgrade from an older path-derived ID can appear as a different extension:
-remove the old entry and load the packaged directory once if necessary, then
-review permissions and reapply popup settings. Extension source updates still
-require manual **Reload** in `chrome://extensions`.
-
-`browsertap doctor` includes a read-only `native_host` registration diagnosis;
-an installed registration alone does not prove Chrome has launched it.
-Use `browsertap uninstall-native-host` to remove this installation's registration
-and owned launcher files while retaining the bridge token and logs. Modified
-or foreign files are preserved and reported instead of being overwritten.
-
 #### Connection status badge
 
 The extension may show a small `BTAP: checking`, `BTAP: connected`, or
@@ -382,7 +347,6 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 | Variable | Default | Purpose |
 |---|---|---|
 | `BROWSERTAP_BRIDGE_HOST` | `127.0.0.1` | Bridge bind address. |
-| `BROWSERTAP_TRANSPORT` | `native` | Extension connection preference, served by the bridge. Set `websocket` and restart the bridge to select the existing WebSocket transport. Re-run `install-native-host` with the same setting to persist it for browser-driven startup. |
 | `BROWSERTAP_BRIDGE_PORT` | `18765` | Integer from `1` through `65533`. WebSocket uses this base, HTTP uses `PORT+1`, and the host lock uses `PORT+2`. Invalid values fail before network or spawn actions. The separate `spawn.lock` file prevents concurrent daemon starts. For a custom port, also configure the extension — see [docs/TROUBLESHOOTING.md](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md). |
 | `BROWSERTAP_STATE_DIR` | `~/.browsertap` | Override the state directory. A nonempty relative path is anchored to the launching process's working directory before daemon spawn. Existing legacy-directory fallback remains available when no override is set. |
 | `BROWSERTAP_NO_SPAWN` | unset | Set to `1` to stop the MCP server from auto-starting the bridge. Use it when you run the bridge yourself. |
@@ -405,10 +369,7 @@ browsertap --version            # print the installed package version
 browsertap extension-path       # print the unpacked extension directory
 browsertap skill-path           # print the directory holding the shipped agent skills
 browsertap doctor               # diagnose the local setup, as JSON
-browsertap install-native-host  # register Chrome's native host for this user
-browsertap uninstall-native-host # remove this installation's native registration
 browsertap bridge               # run the bridge in the foreground
-browsertap bridge --mode native # run the binary stdio host; normally launched by Chrome
 browsertap bridge --restart     # restart the managed bridge; does not touch the browser
 browsertap bridge --stop        # stop the exact managed bridge process
 browsertap print-hermes-config  # print a Hermes config snippet
@@ -422,12 +383,6 @@ means the bridge has just started and is waiting for the extension handshake;
 its `action` is `wait_for_extension`, so wait a few seconds and run `doctor`
 again. `registering` means the extension is connected but no normal `http(s)`
 content tab is ready.
-
-Native mode uses the same authenticated HTTP bridge and connection ownership as
-WebSocket. Only `GET /api/extension/config` is token-free; it contains the
-transport preference, host name and protocol version, and still checks Origin.
-Native message routes always require a token. `bridge --mode native` cannot be
-combined with `--stop` or `--restart`, which manage the shared daemon.
 
 When no extension runtime status is available after startup, the setup status is
 `extension_unavailable` with `action: check_extension_connection`. Check that
@@ -522,15 +477,14 @@ The other two will not help, so read the field rather than doing all three.
 
 ### Uninstall
 
-1. Open `chrome://extensions` (or the equivalent page in Edge/Opera) and remove the
+1. Stop the managed daemon with `browsertap bridge --stop`.
+2. Open `chrome://extensions` (or the equivalent page in Edge/Opera) and remove the
    unpacked **BrowserTap Bridge** extension.
-2. Run `browsertap uninstall-native-host` before removing its Python environment.
-3. Stop the managed daemon with `browsertap bridge --stop`.
-4. Remove the `browsertap` entry from each MCP client's configuration.
-5. Run `pip uninstall browsertap-mcp` in the environment where it was installed. If
+3. Remove the `browsertap` entry from each MCP client's configuration.
+4. Run `pip uninstall browsertap-mcp` in the environment where it was installed. If
    you created a dedicated virtual environment, remove that specific environment after
    deactivating it.
-6. Optional full cleanup: after confirming every BTAP bridge is stopped, remove
+5. Optional full cleanup: after confirming every BTAP bridge is stopped, remove
    `~/.browsertap`. This deletes the persistent bridge token and logs; the data is
    retained by default so reinstalling continues to work without reconfiguration.
 

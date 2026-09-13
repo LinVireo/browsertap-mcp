@@ -4,13 +4,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('copy').addEventListener('click', copyCookies);
   document.getElementById('indicator-visible').addEventListener('change', saveIndicatorVisibility);
   loadIndicatorVisibility();
-  updateBridgeStatus();
-  // Listen for bridge status updates from background
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'bridge-status') {
-      updateBridgeStatus(msg);
-    }
-  });
   // Nothing reads cookies on open. This used to call fetchCookies(), whose tail
   // wrote every cookie of the active tab to the clipboard -- so opening the popup
   // for the indicator checkbox above silently replaced the clipboard with session
@@ -39,33 +32,6 @@ function localizeDocument() {
   document.querySelectorAll('[data-i18n]').forEach((element) => {
     element.textContent = message(element.dataset.i18n);
   });
-}
-
-async function updateBridgeStatus(statusMsg) {
-  const modeEl = document.getElementById('bridge-mode');
-  if (!modeEl) return;
-
-  // If no status provided, request from background
-  if (!statusMsg) {
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'get-bridge-status' });
-      if (resp) statusMsg = resp;
-    } catch (_) {}
-  }
-
-  if (!statusMsg || !statusMsg.connected) {
-    modeEl.textContent = '❌ Disconnected';
-    modeEl.style.color = '#ef4444';
-  } else if (statusMsg.mode === 'native') {
-    modeEl.textContent = '✓ Native Messaging';
-    modeEl.style.color = '#10b981';
-  } else if (statusMsg.mode === 'websocket') {
-    modeEl.textContent = '✓ WebSocket';
-    modeEl.style.color = '#3b82f6';
-  } else {
-    modeEl.textContent = '⚠ Unknown';
-    modeEl.style.color = '#f59e0b';
-  }
 }
 
 async function loadIndicatorVisibility() {

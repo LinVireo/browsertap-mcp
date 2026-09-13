@@ -16,14 +16,10 @@ from pathlib import Path
 REQUIRED_WHEEL_METADATA_SUFFIXES = ("/licenses/LICENSE",)
 REQUIRED_WHEEL_SUFFIXES = (
     "/browsertap_mcp/browser_bridge.py",
-    "/browsertap_mcp/native_host.py",
-    "/browsertap_mcp/native_installer.py",
-    "/browsertap_mcp/native_bridge.py",
     "/browsertap_mcp/chrome_extension/background.js",
     "/browsertap_mcp/chrome_extension/content.js",
     "/browsertap_mcp/chrome_extension/disable_dialogs.js",
     "/browsertap_mcp/chrome_extension/manifest.json",
-    "/browsertap_mcp/chrome_extension/native_messaging.js",
     "/browsertap_mcp/chrome_extension/popup.html",
     "/browsertap_mcp/chrome_extension/popup.js",
     "/browsertap_mcp/chrome_extension/_locales/en/messages.json",
@@ -50,10 +46,6 @@ REQUIRED_SDIST_SUFFIXES = (
     # URL the Chrome Web Store listing serves as its privacy policy.
     "/PRIVACY.md",
     "/src/browsertap_mcp/browser_bridge.py",
-    "/src/browsertap_mcp/native_host.py",
-    "/src/browsertap_mcp/native_installer.py",
-    "/src/browsertap_mcp/native_bridge.py",
-    "/src/browsertap_mcp/chrome_extension/native_messaging.js",
     "/src/browsertap_mcp/skills/browsertap-default/SKILL.md",
     "/src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",
     # Same reason as the wheel, plus one the wheel does not have: the sdist
@@ -75,8 +67,6 @@ REQUIRED_SDIST_SUFFIXES = (
     "/scripts/tool_coverage_report.py",
     "/tests/conftest.py",
     "/tests/tool_coverage_manifest.py",
-    "/tests/node/dialog_scope_harness.cjs",
-    "/tests/node/native_transport_harness.cjs",
 )
 
 
@@ -109,8 +99,6 @@ def _forbidden_reason(name: str) -> str | None:
         return "generated extension config"
     if basename == "bridge-token":
         return "bridge authentication token"
-    if basename.endswith((".pem", ".key", ".p12", ".pfx")):
-        return "private key or certificate bundle"
     if basename == ".env" or (basename.startswith(".env.") and basename != ".env.example"):
         return "environment secrets file"
     if basename.endswith(".har"):
