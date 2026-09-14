@@ -571,7 +571,8 @@ class TestBackgroundPageInput:
               <button class="duplicate">Duplicate target</button>
               <div id="open-host"></div>
               <div id="closed-host"></div>
-              <iframe id="opaque-frame" sandbox srcdoc="<button>Opaque</button>"></iframe>
+              <iframe id="opaque-frame" sandbox="allow-scripts"
+                srcdoc="<input type='checkbox' aria-label='Opaque target'>"></iframe>
             `;
             window.__locatorEvents = [];
             const record = value => window.__locatorEvents.push(value);
@@ -658,6 +659,17 @@ class TestBackgroundPageInput:
         )
         assert typed["status"] == shadow_typed["status"] == "success"
 
+        # allow-scripts permits dialog-scope preparation while the sandbox
+        # still gives this document an opaque, cross-origin identity.
+        assert S.page_click(
+            selector={"css": "input", "frame": [{"css": "#opaque-frame"}]},
+            session_id=scratch_session,
+        )["status"] == "success"
+        assert S.wait_for(
+            selector={"css": "input:checked", "frame": [{"css": "#opaque-frame"}]},
+            session_id=scratch_session,
+        )["status"] == "success"
+
         failures = {
             "missing": S.page_click(
                 selector={"css": "#missing-target"}, session_id=scratch_session
@@ -670,10 +682,6 @@ class TestBackgroundPageInput:
                 selector={"css": "button", "shadow": ["#closed-host"]},
                 session_id=scratch_session,
             ),
-            "cross_origin": S.page_click(
-                selector={"css": "button", "frame": [{"css": "#opaque-frame"}]},
-                session_id=scratch_session,
-            ),
             "disabled": S.page_click(
                 selector="#disabled-target", session_id=scratch_session
             ),
@@ -684,7 +692,6 @@ class TestBackgroundPageInput:
         assert failures["missing"]["status"] == "not_found"
         assert failures["ambiguous"]["status"] == "ambiguous"
         assert failures["closed"]["status"] == "closed_shadow_root"
-        assert failures["cross_origin"]["status"] == "cross_origin_frame"
         assert failures["disabled"]["status"] == "not_interactable"
         assert failures["aria_disabled"]["status"] == "not_interactable"
 
@@ -695,6 +702,7 @@ class TestBackgroundPageInput:
               events: window.__locatorEvents,
               topValue: document.querySelector('#label-target').value,
               shadowValue: root.querySelector('#shadow-input').value,
+              opaqueDocumentBlocked: document.querySelector('#opaque-frame').contentDocument === null,
             });
             """,
             session_id=scratch_session,
@@ -705,6 +713,7 @@ class TestBackgroundPageInput:
             "events": ["role", "text", "deep", "shadow"],
             "topValue": "top-level",
             "shadowValue": "inside-shadow",
+            "opaqueDocumentBlocked": True,
         }
 
     def test_page_drag_events_reach_scratch_without_raising_it(self, scratch_session):

@@ -485,14 +485,15 @@ agent 也共享这个默认值，因此 `switch_tab` 不代表 agent 身份。�
 
 跨进程协作锁覆盖一次完整 MCP 调用及其内部浏览器往返，竞争同一标签页的调用返回 `target_busy`。
 bridge 还会记录已派发命令的目标占用：`wait=false` 和部分超时路径会保留占用，等待确定的浏览器结果
-或确认标签页生命周期结束；超时处理存在下述例外。用发起操作的同一 MCP 会话调用
+或确认标签页生命周期结束，也可能在下述有限保留期结束后释放。用发起操作的同一 MCP 会话调用
 `get_execute_js_result` 领取 JS 结果，
 不要重放仍在执行的脚本。直接 `/link` 和 Python driver 调用也受 bridge 的单命令占用保护，
 但跨多次浏览器往返的完整调用锁需要 MCP command scope。
 
-调试器超时或断开后，JavaScript 可能仍在运行。部分路径返回 `status=in_progress`、
-`operation_status=outcome_unknown` 和 `reservation_held=true`；已知的 `exec_timeout` 路径
-却可能在脚本继续运行时返回 `reservation_held=false`。失败回执和占用释放均不能证明执行停止；
+脚本 deadline、调试器超时或断开后，JavaScript 可能仍在运行。已派发的 `exec_timeout`
+与其他未知执行路径一样，在有限保留期内返回 `status=in_progress`、
+`operation_status=outcome_unknown` 和 `reservation_held=true`。占用到期后仍保留未知回执与
+`retry_safe=false`。失败回执和占用到期均不能证明执行停止；
 结果不确定期间，不重放脚本，也不在该页开始会与旧脚本冲突的操作。
 手动弹窗也保留占用，只有发起执行的 MCP 会话能调用 `handle_dialog`。处理完弹窗不代表脚本已结束；
 扩展无法回传最终结果时仍保留 `outcome_unknown`。调用方可以用 `close_tabs(..., owner_id=...)`

@@ -193,41 +193,93 @@ async def _concurrent_calls(first, second, sid_a, sid_b, gates):
 
 
 async def _pending_operations(first, second, sid_a, sid_b, gates):
-    for wait in (False, True):
-        await _js(first, "window.__executions = 0; return true", sid_a)
-        with _request_gate(gates) as (path, started):
-            pending = asyncio.create_task(_call(
-                first, "execute_js", script=_held_script(path), session_id=sid_a,
-                no_monitor=True, wait=wait, timeout=3 if wait else 15,
-            ))
-            try:
-                await _started(started)
-                result, payload = await pending
-                raw = payload.get("legacy", payload.get("data", payload))
-                if wait:
-                    assert result.isError and raw["status"] == "no_response", payload
-                else:
-                    assert not result.isError and raw["status"] == "in_progress", payload
-                operation_id = raw["operation_id"]
-                foreign_result, foreign_payload = await _call(
-                    second, "get_execute_js_result", operation_id=operation_id,
-                )
-                assert foreign_result.isError and foreign_payload["error_code"] == "operation_owner_mismatch", foreign_payload
-                for peer in (first, second):
-                    await _busy(peer, sid_a)
-                assert await _js(second, "return window.__agent", sid_b) == "second"
-                progress = await _ok(first, "get_execute_js_result", operation_id=operation_id)
+    await _js(first, "window.__executions = 0; return true", sid_a)
+    with _request_gate(gates) as (path, started):
+        pending = asyncio.create_task(_call(
+            first, "execute_js", script=_held_script(path), session_id=sid_a,
+            no_monitor=True, wait=False, timeout=15,
+        ))
+        try:
+            await _started(started)
+            result, payload = await pending
+            raw = payload.get("legacy", payload.get("data", payload))
+            assert not result.isError and raw["status"] == "in_progress", payload
+            operation_id = raw["operation_id"]
+            foreign_result, foreign_payload = await _call(
+                second, "get_execute_js_result", operation_id=operation_id,
+            )
+            assert foreign_result.isError and foreign_payload["error_code"] == "operation_owner_mismatch", foreign_payload
+            for peer in (first, second):
+                await _busy(peer, sid_a)
+            assert await _js(second, "return window.__agent", sid_b) == "second"
+            progress = await _ok(first, "get_execute_js_result", operation_id=operation_id)
+            assert progress["status"] == "in_progress", progress
+        finally:
+            gates[path][1].set()
+            await pending
+    finished = await _ok(first, "get_execute_js_result", operation_id=operation_id, timeout=15)
+    assert finished["js_return"] == 1, finished
+    repeated = await _ok(first, "get_execute_js_result", operation_id=operation_id)
+    assert repeated["operation_id"] == finished["operation_id"] == operation_id
+    assert repeated["status"] == finished["status"] == "success"
+    assert repeated["js_return"] == finished["js_return"] == 1
+    assert await _js(first, "return window.__executions", sid_a) == 1
+
+
+async def _timed_out_execution(first, second, sid, other_sid, gates):
+    # A local HTTP gate controls both the held Promise and independent proof
+    # that the old script wrote to the page after the response deadline.
+    with _request_gate(gates) as (path, started), _request_gate(gates) as (late_path, continued):
+        gates[late_path][1].set()
+        script = f"""
+            return fetch({json.dumps(path)}).then(() => {{
+                window.__lateEffect = 'after-timeout';
+                return fetch({json.dumps(late_path)});
+            }}).then(() => window.__lateEffect);
+        """
+        pending = asyncio.create_task(_call(
+            first, "execute_js", script=script, session_id=sid,
+            no_monitor=True, timeout=3,
+        ))
+        try:
+            await _started(started)
+            result, payload = await pending
+            raw = payload.get("legacy", payload.get("data", payload))
+            # The daemon deadline and the extension watchdog may answer in
+            # either order. Neither reply proves that the script stopped.
+            assert result.isError and raw["status"] in {"no_response", "failed"}, payload
+            operation_id = raw["operation_id"]
+            for _attempt in range(30):
+                _result, receipt = await _call(first, "get_execute_js_result", operation_id=operation_id)
+                progress = receipt.get("legacy", receipt.get("data", receipt))
+                if progress.get("operation_status") == "outcome_unknown":
+                    break
                 assert progress["status"] == "in_progress", progress
-            finally:
-                gates[path][1].set()
-                await pending
-        finished = await _ok(first, "get_execute_js_result", operation_id=operation_id, timeout=15)
-        assert finished["js_return"] == 1, finished
-        repeated = await _ok(first, "get_execute_js_result", operation_id=operation_id)
-        assert repeated["operation_id"] == finished["operation_id"] == operation_id
-        assert repeated["status"] == finished["status"] == "success"
-        assert repeated["js_return"] == finished["js_return"] == 1
-        assert await _js(first, "return window.__executions", sid_a) == 1
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail(f"executeScript watchdog did not retain an unknown outcome: {progress}")
+            assert "exec_timeout" in str(progress), progress
+            foreign_result, foreign_payload = await _call(
+                second, "get_execute_js_result", operation_id=operation_id,
+            )
+            assert foreign_result.isError and foreign_payload["error_code"] == "operation_owner_mismatch", foreign_payload
+            assert not continued.is_set()
+            for release in (False, True):
+                if release:
+                    gates[path][1].set()
+                    await _started(continued)
+                _result, receipt = await _call(first, "get_execute_js_result", operation_id=operation_id)
+                progress = receipt.get("legacy", receipt.get("data", receipt))
+                assert progress["operation_id"] == operation_id
+                assert progress["operation_status"] == "outcome_unknown", progress
+                assert progress["reservation_held"] is True and progress["retry_safe"] is False, progress
+                for peer in (first, second):
+                    await _busy(peer, sid)
+                assert await _js(second, "return window.__agent", other_sid) == "second"
+            return operation_id
+        finally:
+            gates[path][1].set()
+            await pending
 
 
 async def _capture_ownership(first, second, sid_a, sid_b):
@@ -280,8 +332,14 @@ async def _abandoned_execution(recovering, other, created, other_sid, gates):
         )
 
 
-async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual):
+async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual, fixture_url):
     if manual:
+        # Registration does not prove that the initial document has finished
+        # navigating. Arm the native dialog only after that boundary settles.
+        ready = await _ok(
+            first, "wait_for_url", url_pattern=fixture_url, session_id=sid, timeout=15,
+        )
+        assert ready["status"] == "success" and ready["ready_state"] == "complete", ready
         _result, payload = await _call(
             first, "execute_js", script="confirm('BTAP concurrency fixture'); 7",
             session_id=sid, no_monitor=True, dialog_policy="manual", timeout=10,
@@ -295,6 +353,7 @@ async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual):
         for _attempt in range(30):
             observed = await _ok(first, "handle_dialog", action="manual", session_id=sid)
             if observed["pending_execution"] is False:
+                assert observed["status"] == "no_dialog", observed
                 break
             await asyncio.sleep(0.05)
         else:
@@ -359,7 +418,7 @@ async def _matrix(url, client_ids, gates):
             await _concurrent_calls(first, second, sid_a, sid_b, gates)
             evidence.append("same-process and cross-process calls run on different tabs; same-tab calls get target_busy")
             await _pending_operations(first, second, sid_a, sid_b, gates)
-            evidence.append("async and timed-out scripts retain their target until completion; repeatable result reads never replay execution")
+            evidence.append("async scripts retain their target until completion; repeatable result reads never replay execution")
             await _capture_ownership(first, second, sid_a, sid_b)
             evidence.append("capture ownership survives calls and rejects another process stopping or clearing it")
             await _abandoned_capture(second, sid_b)
@@ -402,17 +461,21 @@ async def _matrix(url, client_ids, gates):
             await _abandoned_execution(first, second, owned[0][1], sid_b, gates)
             owned.pop(0)
             evidence.append("MCP exit keeps pending JS isolated; the tab owner can close its own tab to recover")
-            for manual in (False, True):
+            for mode in ("execute_script", "cdp", "manual"):
                 created = await _owned_tab(first, url, client_ids[0], owned)
                 sid = created["session_id"]
-                operation_id = await _uncertain_execution(
-                    first, second, sid, sid_b, gates, manual=manual,
-                )
+                if mode == "execute_script":
+                    operation_id = await _timed_out_execution(first, second, sid, sid_b, gates)
+                else:
+                    operation_id = await _uncertain_execution(
+                        first, second, sid, sid_b, gates, manual=mode == "manual",
+                        fixture_url=url,
+                    )
                 await _ok(first, "close_tabs", tab_id=sid, session_id=sid, owner_id=created["owner_id"])
                 owned.pop()
                 ended = await _ok(first, "get_execute_js_result", operation_id=operation_id)
                 assert ended["status"] == "navigated" and ended["reservation_held"] is False, ended
-            evidence.append("CDP watchdogs and handled manual dialogs retain uncertain execution until owned-tab closure")
+            evidence.append("executeScript/CDP watchdogs and handled manual dialogs retain uncertain execution until owned-tab closure; late page effects never permit conflicting calls")
         finally:
             cleanup_errors = []
             for client, created in reversed(owned):

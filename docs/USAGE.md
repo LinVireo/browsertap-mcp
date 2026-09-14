@@ -181,9 +181,10 @@ manual closure instead of repeating the action.
 
 ## 6. Dialogs, permissions, and challenges
 
-- A JavaScript timeout ends waiting, not execution. Even `exec_timeout` with
-  `reservation_held=false` can leave a script running; inspect the original
-  operation and avoid replay or conflicting work in that tab.
+- A JavaScript timeout does not cancel execution. Dispatched `exec_timeout`
+  retains an `outcome_unknown` reservation for a bounded recovery window.
+  Inspect the original operation; expiry does not prove the script stopped
+  or make replay and conflicting work safe.
 - Choose `dismiss`, `accept`, or `manual` explicitly for JavaScript dialogs and
   `beforeunload` when the navigation outcome matters.
 - The MAIN-world dialog helper exists only during accept/dismiss scopes. Old

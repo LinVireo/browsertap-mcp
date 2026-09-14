@@ -5,11 +5,11 @@ English | [中文](TROUBLESHOOTING.zh-CN.md)
 This guide covers connection, version, dialog, permission, and physical-input
 failures. For normal operating workflows, see the [usage guide](USAGE.md).
 
-## Known limitations in 0.5.2
+## Known limitations and recovery
 
-The following cases remain unresolved after live verification on 2026-09-12–14.
-Their fixes are deferred. Passing offline tests or CI does not establish
-successful browser recovery for these cases.
+The following cases were observed during live verification on 2026-09-12–14.
+Confirmed fixes and remaining limits are distinguished below. Passing offline
+tests or CI alone does not establish successful browser recovery.
 
 ### A native file chooser stays open
 
@@ -29,11 +29,14 @@ a later observation that the window is gone does not prove BTAP cancelled it.
 
 ### JavaScript continues after `exec_timeout`
 
-A response deadline does not terminate dispatched JavaScript. Live checks
-observed `exec_timeout` with `reservation_held=false`, a second MCP process
-modifying the same page, and then a late write from the original script.
-The failed receipt and released reservation therefore cannot prove that the
-page is idle. Other timeout paths may keep an `outcome_unknown` reservation.
+A response deadline does not terminate dispatched JavaScript. Before 0.5.3,
+an `exec_timeout` could release the target while the original script continued,
+allowing a second MCP process to modify the same page. Version 0.5.3 keeps
+dispatched timeouts as `operation_status=outcome_unknown` with
+`reservation_held=true` during the existing bounded recovery window. Commands
+targeting that tab receive `target_busy`; unrelated tabs remain available.
+After retention expires, `retry_safe=false` and the unknown receipt remain.
+Expiry does not prove that the page is idle or cancel late effects.
 
 Use `get_execute_js_result` from the originating MCP session to inspect an
 available `operation_id`; polling does not replay or cancel the script.
@@ -41,6 +44,20 @@ Avoid replay and conflicting work in the affected tab while execution is
 uncertain. Closing a tab owned by the current task with its `owner_id` ends
 that document's lifecycle; do not close a user's tab for cleanup. A lifecycle
 end does not undo requests or other effects already sent.
+
+### Manual dialog recovery reports a CDP timeout
+
+A live manual-dialog check returned `debugger_detached` after
+`Runtime.releaseObjectGroup` exceeded its cleanup deadline. Separate checks on
+fully loaded foreground and background pages handled the dialog successfully;
+the intermittent failure has no confirmed root cause or targeted fix.
+
+After creating or navigating a tab, use `wait_for_url` to verify that the
+requested document is complete before opening a native dialog. If handling
+times out, inspect with `handle_dialog(action="manual")` and query the original
+operation receipt. The dismiss may already have occurred, and a closed dialog
+does not recover a missing script result. Preserve `outcome_unknown` and
+`retry_safe=false`; do not replay the script or infer success from a later retry.
 
 ### A sandboxed child frame blocks main-page execution
 

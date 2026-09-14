@@ -150,8 +150,8 @@ Enter 兜底，并对每次站点 `allow` 操作进行询问。两种 profile �
 
 ## 6. 对话框、权限与挑战页
 
-- JavaScript 超时结束的是等待，不是执行。即使收到 `exec_timeout` 和 `reservation_held=false`，
-  旧脚本也可能继续运行；先检查原操作，不重放或在该页开始会与旧脚本冲突的工作。
+- JavaScript 超时不会取消执行。已派发的 `exec_timeout` 在有限恢复窗口内保留
+  `outcome_unknown` 占用。先检查原操作；占用到期不证明脚本停止，也不证明重放或同页冲突操作安全。
 - 导航结果会受 JavaScript dialog 或 `beforeunload` 影响时，应显式选择 `dismiss`、`accept`
   或 `manual`。
 - MAIN world 弹窗 helper 仅在 accept/dismiss 范围内存在。升级前已注入的旧 document 需正常

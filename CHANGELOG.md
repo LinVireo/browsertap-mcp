@@ -16,6 +16,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Fixed
 
+- Retain dispatched `exec_timeout` operations as unknown outcomes for the
+  bounded recovery window. A response deadline no longer immediately frees a
+  tab while its script can still run; other tabs remain available, and the
+  original receipt stays non-retryable after retention expires.
 - Support nested same-origin, cross-origin and out-of-process iframes directly
   in `page_click`, `page_type` and `wait_for`. Bind DOM identities during each
   call, check parent obstruction and focus before input, and report partial

@@ -5513,6 +5513,8 @@ def _execute_js_cdp_fallback(
     "wait=false returns operation_id after delivery acknowledgement; collect with "
     "get_execute_js_result in the same MCP session, without replay. partial/unknown results "
     "or an expired handle do not prove non-execution; inspect retry_safe before retrying. "
+    "A dispatched exec_timeout retains an outcome_unknown reservation for the bounded "
+    "recovery window; the deadline does not cancel page JS. "
     "Use wait_for/wait_for_url for page state instead of sleep Promises. "
     "Conversion on all routes: undefined/non-finite numbers become null; BigInt/symbol become "
     "strings; DOM/Error/functions become readable values; cycles/depth 6/iterables above 200 "

@@ -559,7 +559,7 @@ def _attach_operation(
 
 
 def _execution_may_continue(result: dict[str, Any]) -> bool:
-    """A protocol watchdog detaches its debugger without cancelling page JS."""
+    """A response watchdog can expire without cancelling dispatched page JS."""
     if result.get('success') is not False:
         return False
     detail = result.get('data')
@@ -580,7 +580,10 @@ def _execution_may_continue(result: dict[str, Any]) -> bool:
     if container.get('zombie', source.get('zombie')) == 'killed':
         return False
     code = container.get('code') or source.get('code') or ''
-    return str(code) in {'cdp_timeout', 'debugger_detached'} or any(
+    # executeScript's deadline races its Promise; it does not cancel the
+    # injection. Apply the same bounded unknown-outcome retention as CDP.
+    # The explicit pre-dispatch and terminated-script guards above still win.
+    return str(code) in {'exec_timeout', 'cdp_timeout', 'debugger_detached'} or any(
         marker in lower for marker in (
             'cdp_timeout:', 'debugger_detached:', 'detached while handling command',
             'csp-relaxed injection timed out',

@@ -527,18 +527,19 @@ does not change another call's target or the process default.
 A cooperative target lock covers each complete MCP call and its internal browser
 roundtrips. A competing call to the same tab returns `target_busy`. The bridge
 also records reservations for dispatched commands: `wait=false` and some timeout
-paths retain the reservation pending a definitive browser result or a confirmed
-tab lifecycle end. The timeout exception is described below.
+paths retain the reservation pending a definitive browser result, a confirmed
+tab lifecycle end, or the bounded retention expiry described below.
 Claim an `execute_js` result with `get_execute_js_result` from the
 same MCP session; do not replay a script whose result is pending. Direct `/link`
 and Python driver calls receive the bridge's per-command reservation, but need
 an MCP command scope for the lock across multiple browser roundtrips.
 
-A debugger timeout or detach can leave JavaScript running. Some paths report
+A script deadline, debugger timeout or detach can leave JavaScript running. Dispatched
+`exec_timeout` replies retain the same bounded reservation as other uncertain outcomes:
 `status=in_progress`, `operation_status=outcome_unknown`, and
-`reservation_held=true`. The known `exec_timeout` path can instead report
-`reservation_held=false` while the script continues. Neither a failed receipt
-nor a released reservation proves execution stopped; avoid replay or conflicting
+`reservation_held=true`. After that retention window, the receipt stays unknown
+and `retry_safe=false`. Neither a failed receipt
+nor an expired reservation proves execution stopped; avoid replay or conflicting
 work in that tab while the outcome is uncertain. Manual dialogs keep their
 reservation, and only the originating MCP session can call `handle_dialog`.
 Handling a dialog does not prove the script finished: when the extension cannot

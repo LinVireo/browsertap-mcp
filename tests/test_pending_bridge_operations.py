@@ -447,6 +447,9 @@ def test_remote_result_still_raises_non_receipt_errors(monkeypatch, error_code):
 
 @pytest.mark.parametrize('detail', [
     {'code': 'cdp_timeout', 'message': 'evaluation timed out', 'dispatched': True},
+    {'code': 'exec_timeout', 'message': 'executeScript deadline expired', 'dispatched': True},
+    {'error': {'code': 'exec_timeout', 'message': 'executeScript deadline expired',
+               'may_have_executed': True}},
     'cdp_timeout: Runtime.evaluate exceeded 20000ms',
     'CSP-relaxed injection timed out',
 ])
@@ -461,15 +464,22 @@ def test_extension_watchdog_keeps_reservation_and_repeatedly_readable_result(det
         reply = bridge.get_execute_js_result(operation_id, requester_id='a')
         assert reply['status'] == 'in_progress'
         assert reply['operation_status'] == 'outcome_unknown'
+        assert reply['reservation_held'] is True
         assert reply['retry_safe'] is False
-        with pytest.raises(TargetBusyError):
-            bridge.execute_js('second', requester_id='a')
+        for requester in ('a', 'b'):
+            with pytest.raises(TargetBusyError):
+                bridge.execute_js('second', requester_id=requester)
+    assert len(bridge.sent) == 1
     finish(bridge, operation_id, 9)
     assert bridge.get_execute_js_result(operation_id, requester_id='a')['data'] == 9
+    reply_on_send(bridge, data='after')
+    assert bridge.execute_js('after', requester_id='b')['data'] == 'after'
 
 
 @pytest.mark.parametrize('detail', [
     {'code': 'cdp_timeout', 'message': 'not dispatched', 'dispatched': False},
+    {'code': 'exec_timeout', 'message': 'not dispatched', 'dispatched': False},
+    {'error': {'code': 'exec_timeout', 'message': 'not dispatched', 'dispatched': False}},
     'cdp_timeout: debugger attach exceeded 5000ms',
     {'message': 'ordinary JavaScript exception'},
 ])

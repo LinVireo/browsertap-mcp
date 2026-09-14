@@ -245,7 +245,7 @@ wire `operation_id` 交给 `get_execute_js_result`，外层创建句柄继续走
 | `stale_frame` | 调用内绑定的 iframe 文档或元素已导航/替换。先检查 `input_dispatched`；部分输入或结果未知时不重放整段。下一次独立调用可以重新定位新文档，不重启桥。 |
 | `stale_extension` | 高层 `frame` 已支持同源、跨域和 OOPIF；当前扩展缺少相应命令，按 `next_action=reload_extension` 手工 Reload。 |
 | `unsupported_frame_transform` | 当前定位路径不受支持，不能用重连修复。 |
-| `cdp_timeout` / `debugger_detached` | 核对原操作是否可能继续；先补查，不换通道重复输入。 |
+| `exec_timeout` / `cdp_timeout` / `debugger_detached` | 已派发的超时保留有限期 `outcome_unknown` 占用；补查原句柄和实际状态，不换通道重复输入。占用到期不证明 JS 停止。 |
 | `debugger_conflict` | 由 DevTools/竞争 debugger 的使用者释放占用。 |
 | `raw_cdp_blocked` | `cdp_command` / `cdp_batch` 的投递前策略拒绝；使用专用工具，不重启或原样重试。 |
 | `requires_user_action` | 批准失败时按 `reason` 区分 `elicitation_unsupported` / `declined` / `timeout` / `cancelled` / `error`，不重启桥或切 profile 绕过拒绝。 |
