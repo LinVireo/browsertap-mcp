@@ -194,7 +194,7 @@ Changelog = "https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md"
 Documentation = "https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md"
 # The index page is the first place a reader looks for where to send a report,
 # and it is the one link that must not go through a public issue.
-Security = "https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md"
+Security = "https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md"
 # The Chrome Web Store listing points at this exact URL, and the store requires
 # the policy it serves to match the listing's data-usage answers. Moving or
 # renaming the file breaks a published link, not just an internal one.

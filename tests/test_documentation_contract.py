@@ -73,9 +73,9 @@ def test_public_guides_cover_install_diagnostics_and_security_boundaries():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
     troubleshooting = (ROOT / "docs" / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
-    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    contributing_zh = (ROOT / "CONTRIBUTING.zh-CN.md").read_text(encoding="utf-8")
+    security = (ROOT / ".github" / "SECURITY.md").read_text(encoding="utf-8")
+    contributing = (ROOT / ".github" / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    contributing_zh = (ROOT / ".github" / "CONTRIBUTING.zh-CN.md").read_text(encoding="utf-8")
 
     for text in (readme, readme_zh):
         assert "git clone https://github.com/LinVireo/browsertap-mcp.git" in text
@@ -294,8 +294,8 @@ def test_public_maintenance_commands_use_module_invocation():
     # where the untracked file still exists, and raised FileNotFoundError
     # anywhere else.
     paths = (
-        ROOT / "CONTRIBUTING.md",
-        ROOT / "CONTRIBUTING.zh-CN.md",
+        ROOT / ".github" / "CONTRIBUTING.md",
+        ROOT / ".github" / "CONTRIBUTING.zh-CN.md",
     )
     for path in paths:
         text = path.read_text(encoding="utf-8")
@@ -479,8 +479,8 @@ def test_prose_tool_counts_track_the_registered_total():
         ROOT / "README.md",
         ROOT / "README.zh-CN.md",
         ROOT / "AGENTS.md",
-        ROOT / "CONTRIBUTING.md",
-        ROOT / "CONTRIBUTING.zh-CN.md",
+        ROOT / ".github" / "CONTRIBUTING.md",
+        ROOT / ".github" / "CONTRIBUTING.zh-CN.md",
         ROOT / "docs" / "USAGE.md",
         ROOT / "docs" / "USAGE.zh-CN.md",
         ROOT / "docs" / "TROUBLESHOOTING.md",
@@ -715,15 +715,15 @@ def test_no_published_document_repeats_a_section():
     paths = [
         ROOT / "README.md",
         ROOT / "README.zh-CN.md",
-        ROOT / "CONTRIBUTING.md",
-        ROOT / "CONTRIBUTING.zh-CN.md",
+        ROOT / ".github" / "CONTRIBUTING.md",
+        ROOT / ".github" / "CONTRIBUTING.zh-CN.md",
         ROOT / "AGENTS.md",
-        ROOT / "SECURITY.md",
+        ROOT / ".github" / "SECURITY.md",
         # Both are published surfaces with the same drift exposure as the rest.
         # `PRIVACY.md` is the exact URL the Chrome Web Store listing serves as its
         # privacy policy, so a section pasted twice there is public.
         ROOT / "PRIVACY.md",
-        ROOT / "CODE_OF_CONDUCT.md",
+        ROOT / ".github" / "CODE_OF_CONDUCT.md",
         ROOT / "docs" / "USAGE.md",
         ROOT / "docs" / "USAGE.zh-CN.md",
         ROOT / "docs" / "TROUBLESHOOTING.md",

@@ -2,9 +2,9 @@
 
 [English](CONTRIBUTING.md) | 简体中文
 
-本指南写给修改或发布 BTAP 的开发者与编码 agent。安装使用从 [README.zh-CN.md](README.zh-CN.md)
+本指南写给修改或发布 BTAP 的开发者与编码 agent。安装使用从 [README.zh-CN.md](../README.zh-CN.md)
 开始；调用浏览器工具的 agent 使用随包 skills，修改本仓库的 agent 还需阅读
-[AGENTS.md](AGENTS.md) 中的实现约束。
+[AGENTS.md](../AGENTS.md) 中的实现约束。
 
 提交的改动应保持 BTAP 的核心行为：操作用户正在使用的真实浏览器会话，优先使用后台
 页面/CDP 能力，只有在明确且确实必要时才使用前台物理输入。
@@ -176,7 +176,7 @@ finalizer 把旧证据归档到 `artifacts/archive/`，然后生成规范报告�
 tests/test_distribution_contract.py -q` 及两种宿主的清单校验。
 使用新构建的源码归档和临时宿主配置目录验证 marketplace 安装；开发工作区可能含私人
 `.mcp.json`、hooks 和 agent 指令，不能直接整体复制进插件缓存。
-宿主命令见[插件指南](docs/PLUGINS.zh-CN.md)。
+宿主命令见[插件指南](../docs/PLUGINS.zh-CN.md)。
 
 skill 管理器应**指向随包发布的那个目录**，不要复制文件。复制出来的副本在内容恰好一致期间
 看不出问题，之后就静默收不到更新 —— 哈希校验就是为了抓这种漂移。如果确实保留了副本，在加

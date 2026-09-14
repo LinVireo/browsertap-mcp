@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
 
-[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [隐私政策](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
+[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md) · [故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md) · [安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md) · [隐私政策](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/CONTRIBUTING.zh-CN.md) · [变更记录](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
 **让 agent 操作你正在使用的 Chrome、Edge 或 Opera。**
 BTAP 通过浏览器扩展连接 MCP 客户端，复用已打开的标签页和现有登录态。
@@ -53,7 +53,7 @@ Cursor、Claude Desktop 等其他客户端使用下方[通用 MCP 安装方式](
 | 安装和使用 BTAP 的用户 | 本 README；具体工作流和边界见[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md)。 |
 | 排查本地连接的用户 | 携带 `browsertap doctor` 结果阅读[故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。 |
 | 调用 BTAP 工具的 agent | 客户端实际收到的工具 schema，以及可选的[调用方 skills](#agent-skill可选)。 |
-| 修改 BTAP 的开发者或 agent | [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md)；编码 agent 还需读 [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md)。 |
+| 修改 BTAP 的开发者或 agent | [贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/CONTRIBUTING.zh-CN.md)；编码 agent 还需读 [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md)。 |
 
 下方[工具列表](#工具列表)保留本源码树完整的参数参考。使用已安装版本时，应对照同版本 tag
 中的文档；开发分支可能包含尚未发布的修改。实际可调用能力以连接的服务端为准。
@@ -282,7 +282,7 @@ mcp_servers:
 | `BROWSERTAP_BRIDGE_TOKEN` | 未设置 | 旧安装的一次性迁移来源。token 文件不存在时导入一次,此后始终以文件为准。 |
 | `BROWSERTAP_PREFERRED_BROWSER` | 未设置 | `chrome` / `edge` / `opera`。多个浏览器都连上、又没指定标签页时,默认落在哪个浏览器 |
 | `BROWSERTAP_MODE` | `lab` | `lab` 默认免询问连续自动化;`safe` 对每次物理输入/站点 allow 单独询问。也可用 `set_automation_profile` 只改当前 MCP 进程 |
-| `BROWSERTAP_ALLOW_UNSAFE_CDP` | 未设置 | raw CDP 默认拦截 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) 列出的高风险方法。设为 `1` 且处于 `lab` 才放行；`safe` 始终保留该拦截。其它允许的方法仍可改变页面或 profile 状态。 |
+| `BROWSERTAP_ALLOW_UNSAFE_CDP` | 未设置 | raw CDP 默认拦截 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md) 列出的高风险方法。设为 `1` 且处于 `lab` 才放行；`safe` 始终保留该拦截。其它允许的方法仍可改变页面或 profile 状态。 |
 | `BROWSERTAP_LAB_NO_ELICIT` | 启用 | `lab` 默认按 `1` 处理。只有明确设为 `0`/`false` 才恢复会话级询问;跨进程锁、安静窗口、前台确认和 ownership 始终生效 |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | `lab` 下匹配当前 host 时,普通 `open_url` 自动接受 beforeunload;显式 `intent_leave=false` 可强制保留页面 |
 | `BROWSERTAP_WS_ALLOWED_ORIGINS` | 未设置 | WebSocket 与 HTTP 的额外精确来源，以英文逗号分隔。默认只允许随包扩展的 ID，由 manifest key 或未打包安装路径推导；另放目录的副本需显式配置其完整 Origin。HTTP token 鉴权仍生效，包括无 `Origin` 的请求。 |
@@ -355,7 +355,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 
 这两份文档写给使用 BTAP 的 agent，不是修改 BTAP 源码的 agent。编码约定与验证命令见
 [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md) 和
-[贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.zh-CN.md)。
+[贡献指南](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/CONTRIBUTING.zh-CN.md)。
 
 请把客户端的 skill 管理器**指向这个目录**，不要复制文件。复制出来的副本在内容恰好一致期间
 看不出问题，等你升级包之后就静默收不到更新了。如果确实保留了副本，可以用
@@ -436,7 +436,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 **Raw CDP。** `get_automation_profile.raw_cdp_policy` 为 `guarded` 或 `allow_unsafe`。
 单条命令和整个批次都在投递前检查；关闭标签页、Cookie、权限和 UA 修改优先使用专用工具。
 该检查覆盖常见破坏性方法；允许的 JavaScript/CDP 仍能修改页面。
-完整范围及显式 lab 开关见 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)。
+完整范围及显式 lab 开关见 [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md)。
 
 **对话框策略必须显式理解。** `execute_js(dialog_policy=...)`、`open_url(beforeunload=...)` 和
 `handle_dialog(action=...)` 均支持 `dismiss`（默认）、`accept` 和 `manual`。全局默认优先保留页面；
@@ -582,7 +582,7 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 `contentSettings`、`declarativeNetRequest`、`management`、`bookmarks`、`downloads` 以及
 `<all_urls>`。`declarativeNetRequest` 仅在指定标签页执行依赖 eval 的命令期间临时移除 CSP
 响应头；规则为 session 级、带引用计数，并在 cleanup 中删除，不是全浏览器持久关闭 CSP。
-完整权限与 loopback 威胁模型见[安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)。
+完整权限与 loopback 威胁模型见[安全说明](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md)。
 
 ## 工具列表
 

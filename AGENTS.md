@@ -1,8 +1,8 @@
 # AGENTS.md
 
 Implementation entry point for agents changing this repository. General setup,
-coding checks, and release gates live in [CONTRIBUTING.md](CONTRIBUTING.md)
-([简体中文](CONTRIBUTING.zh-CN.md)). Public tool parameters remain in the
+coding checks, and release gates live in [CONTRIBUTING.md](.github/CONTRIBUTING.md)
+([简体中文](.github/CONTRIBUTING.zh-CN.md)). Public tool parameters remain in the
 `## Tools` table in [README.md](README.md) and
 [README.zh-CN.md](README.zh-CN.md).
 
@@ -65,7 +65,7 @@ the recorded timing and startup failure cases.
 
 Read [transport authentication](docs/agent-guides/transport-auth.md) before
 changing authentication, rejection responses, socket ownership, or reconnect
-grace periods. [SECURITY.md](SECURITY.md) and
+grace periods. [SECURITY.md](.github/SECURITY.md) and
 [troubleshooting](docs/TROUBLESHOOTING.md) remain the operator references.
 
 Drain rejected HTTP request bodies before returning an authentication error.
@@ -82,7 +82,7 @@ If a source-distribution reference moves, update `MANIFEST.in` and inspect a
 fresh source archive for every referenced guide.
 
 For code changes, run the affected tests and the checks required by
-[CONTRIBUTING.md](CONTRIBUTING.md). Run the release finalizer only when preparing
+[CONTRIBUTING.md](.github/CONTRIBUTING.md). Run the release finalizer only when preparing
 a release candidate. Preserve existing sealed artifacts.
 
 Live tests must identify the running build and clean up only tabs they own.

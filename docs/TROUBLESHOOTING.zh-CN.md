@@ -90,7 +90,7 @@ Bridge 日志位于 `~/.browsertap/bridge.log`，上限 5 MB，轮转时保留�
 去掉 query 与 fragment。桥的异常处理不再写入 payload 文本或 traceback；任意协议标识符使用
 哈希引用。日志仍能识别访问过的站点，并含本地路径、socket 地址和时间信息，两个文件对外提供前
 都要先检查内容。哪些内容允许出现、哪些不允许，见
-[SECURITY.md](../SECURITY.md)。
+[SECURITY.md](../.github/SECURITY.md)。
 
 ## 连接问题
 

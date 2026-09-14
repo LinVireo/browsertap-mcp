@@ -6,7 +6,7 @@ focus emulation, hit testing, quiet-input checks, or debugger ownership.
 Start with [AGENTS.md](../../AGENTS.md) for the task entry point. Numbered
 sections retain the original guide's references; other section numbers refer
 to that root guide. Commands and release gates remain in
-[CONTRIBUTING.md](../../CONTRIBUTING.md).
+[CONTRIBUTING.md](../../.github/CONTRIBUTING.md).
 
 ## 3. Tab ids are not stable -- never remember one
 

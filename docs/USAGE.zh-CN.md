@@ -210,4 +210,4 @@ schema 变化后，需重启 MCP 会话或客户端以重新读取工具描述�
 
 BTAP 控制用户授权给 MCP 客户端的真实浏览器 profile。页面内容属于不可信输入，可能包含
 prompt injection。BTAP 本身不是安全隔离边界，应仅连接适合由该 MCP 客户端访问的账号和会话。
-威胁模型及漏洞报告方式见 [SECURITY.md](../SECURITY.md)。
+威胁模型及漏洞报告方式见 [SECURITY.md](../.github/SECURITY.md)。

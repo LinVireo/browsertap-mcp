@@ -772,7 +772,7 @@ def test_manifest_ships_the_packaged_agent_skills():
         for path in (root / "src" / "browsertap_mcp" / "skills").glob("*/SKILL.md")
     )
     assert shipped_skills, "expected at least one agent skill under src/browsertap_mcp/skills/"
-    assert "include CONTRIBUTING.zh-CN.md" in manifest
+    assert "include .github/CONTRIBUTING.zh-CN.md" in manifest
 
 
 @pytest.mark.parametrize("relative, ignored", [

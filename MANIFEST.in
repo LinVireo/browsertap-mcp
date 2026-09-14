@@ -11,9 +11,11 @@ include README.zh-CN.md
 include LICENSE
 include SECURITY.md
 include PRIVACY.md
-include CODE_OF_CONDUCT.md
+include .github/CODE_OF_CONDUCT.md
 include CONTRIBUTING.md
-include CONTRIBUTING.zh-CN.md
+include .github/CONTRIBUTING.md
+include .github/CONTRIBUTING.zh-CN.md
+include .github/SECURITY.md
 include CHANGELOG.md
 include AGENTS.md
 include .claude-plugin/plugin.json

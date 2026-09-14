@@ -61,7 +61,7 @@ hardware.
 
 The companion stores its bridge token and local logs in the reported state directory. Logs are designed to redact sensitive URL parts and exclude the bridge token. Large results, requested screenshots and downloads may be written to local files. Local files remain until the user or relevant application removes them; removing the extension does not remove companion logs or downloaded files.
 
-See [SECURITY.md](SECURITY.md) for token access protections and their limits, and
+See [SECURITY.md](.github/SECURITY.md) for token access protections and their limits, and
 for the URL information retained in local logs. Review logs before sharing them.
 
 ## Use And Controls
@@ -85,5 +85,5 @@ alongside the extension version you have installed.
 ## Contact
 
 - **Support:** https://github.com/LinVireo/browsertap-mcp/issues
-- **Security Reporting:** https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md
+- **Security Reporting:** https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md
 - **Project Repository:** https://github.com/LinVireo/browsertap-mcp

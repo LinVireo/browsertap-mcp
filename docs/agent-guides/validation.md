@@ -6,7 +6,7 @@ coverage, line-ending policy, or evidence and distribution file rosters.
 Start with [AGENTS.md](../../AGENTS.md) for the task entry point. Numbered
 sections retain the original guide's references; other section numbers refer
 to that root guide. Commands and release gates remain in
-[CONTRIBUTING.md](../../CONTRIBUTING.md).
+[CONTRIBUTING.md](../../.github/CONTRIBUTING.md).
 
 ## 7. Running the tests
 

@@ -254,4 +254,4 @@ capture_page_screenshot on the selected session.
 BTAP controls the real browser profile supplied by the user. Page content is
 untrusted input and can contain prompt injection. The service is not a security
 boundary; limit it to sessions and accounts appropriate for the MCP client.
-See [SECURITY.md](../SECURITY.md) for the threat model and reporting process.
+See [SECURITY.md](../.github/SECURITY.md) for the threat model and reporting process.

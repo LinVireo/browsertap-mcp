@@ -117,7 +117,7 @@ do not. Bridge exception handlers omit payload text and tracebacks; arbitrary
 protocol identifiers use hash references. The log still identifies sites and
 contains local paths, socket addresses and timings, so review both files before
 sharing them.
-[SECURITY.md](../SECURITY.md) states exactly what may and may not appear there.
+[SECURITY.md](../.github/SECURITY.md) states exactly what may and may not appear there.
 
 ## Connection problems
 

@@ -50,7 +50,10 @@ REQUIRED_SDIST_SUFFIXES = (
     "/scripts/sync_plugin_skills.py",
     "/.gitignore",
     "/LICENSE",
-    "/CONTRIBUTING.zh-CN.md",
+    "/.github/CODE_OF_CONDUCT.md",
+    "/.github/CONTRIBUTING.md",
+    "/.github/CONTRIBUTING.zh-CN.md",
+    "/.github/SECURITY.md",
     # Same reason as `server.json` below rather than packaging tidiness: the
     # sdist carries `tests/`, and `test_documentation_contract.py` reads this
     # file to check the policy still covers every permission the manifest asks

@@ -8,7 +8,7 @@ English | [中文文档](https://github.com/LinVireo/browsertap-mcp/blob/main/RE
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/LinVireo/browsertap-mcp/blob/main/LICENSE)
 
-[Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) · [Privacy](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
+[Usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) · [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) · [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md) · [Privacy](https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md) · [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/CONTRIBUTING.md) · [Changelog](https://github.com/LinVireo/browsertap-mcp/blob/main/CHANGELOG.md)
 
 **Browser automation for the Chrome, Edge, or Opera you already use.**
 BTAP connects your MCP client to a browser extension, reusing your open tabs and
@@ -63,7 +63,7 @@ continue to work.
 | Installing the Claude Code or Codex plugin | [Plugin guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/PLUGINS.md). |
 | Diagnosing a local setup | [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md), with the output of `browsertap doctor`. |
 | An agent calling BTAP tools | The client's live tool schemas and the optional [caller skills](#agent-skills-optional). |
-| A human or agent changing BTAP | [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md); coding agents also read [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md). |
+| A human or agent changing BTAP | [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/CONTRIBUTING.md); coding agents also read [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md). |
 
 The [Tools](#tools) section is the complete parameter reference for this source
 tree. For an installed release, use documentation from its matching tag;
@@ -222,7 +222,7 @@ the tab you are looking at:
 
 Treat both as handling live credentials: anything that later reads your
 clipboard receives session cookies, and a screenshot of the popup captures
-them. See [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md)
+them. See [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md)
 for where this sits in the threat model.
 
 ### 3. Add the server to your client
@@ -330,7 +330,7 @@ For the least disruptive workflow, start with [`docs/USAGE.md`](https://github.c
 | `BROWSERTAP_BRIDGE_TOKEN` | unset | Legacy one-time migration source. If the token file does not exist, BTAP imports this value once; the file wins thereafter. |
 | `BROWSERTAP_PREFERRED_BROWSER` | unset | `chrome`, `edge`, or `opera`. Which browser wins when several are connected and no tab is specified. |
 | `BROWSERTAP_MODE` | `lab` | `lab` prioritizes uninterrupted automation and skips physical-input/site-allow elicitation; `safe` prompts for every such action. `set_automation_profile` changes only the current MCP process. |
-| `BROWSERTAP_ALLOW_UNSAFE_CDP` | unset | Raw CDP blocks the high-risk methods listed in [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md). `1` permits them only in `lab`; `safe` retains the guard. Other allowed methods can still change page or profile state. |
+| `BROWSERTAP_ALLOW_UNSAFE_CDP` | unset | Raw CDP blocks the high-risk methods listed in [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md). `1` permits them only in `lab`; `safe` retains the guard. Other allowed methods can still change page or profile state. |
 | `BROWSERTAP_LAB_NO_ELICIT` | enabled | Lab skips elicitation by default. Set this to `0`/`false` only when you want session-level lab approval prompts; the cross-process lock, quiet-input gate, foreground confirmation, and ownership checks always apply. |
 | `BROWSERTAP_AUTO_BEFOREUNLOAD_HOSTS` | `shell.,ttyd,code-server,jupyter,vscode-web` | In lab, ordinary `open_url` accepts beforeunload on matching current hosts. `intent_leave=false` always preserves the page. |
 | `BROWSERTAP_WS_ALLOWED_ORIGINS` | unset | Comma-separated exact extra origins for WebSocket and HTTP. The packaged extension ID is pinned by default, from its manifest key or unpacked path; separate copies need their own explicit Origin. HTTP token authentication still applies, including without `Origin`. |
@@ -424,7 +424,7 @@ That directory contains:
 These are instructions for an agent using BTAP, not for an agent editing BTAP's
 source. Coding rules and test commands belong in
 [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md) and
-[Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md).
+[Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/CONTRIBUTING.md).
 
 Point your client's skill manager **at that directory** rather than copying the
 files. A copy looks correct for as long as the contents happen to agree, then
@@ -494,7 +494,7 @@ Two channels reach the browser: a per-tab session channel, and a direct channel 
 use dedicated tools for tab closure, cookies, permissions and user-agent changes.
 The guard covers common destructive methods, while allowed JavaScript/CDP can
 still change a page. The complete policy and explicit lab override are in
-[SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md).
+[SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md).
 
 **Dialogs are explicit.** `execute_js(dialog_policy=...)`, `open_url(beforeunload=...)`, and `handle_dialog(action=...)` take `dismiss` (default), `accept`, or `manual`. The global default still preserves the page; only an explicit accept or lab's configured shell/IDE host heuristic leaves automatically. `handle_dialog` answers within three seconds or reports `no_dialog`/an explicit error. `resolve_leave_dialog` tries protocol accept twice and uses physical Enter only as a final, lab-approved fallback.
 
@@ -638,7 +638,7 @@ The extension requests broad permissions because the feature set requires them:
 `downloads`, and `<all_urls>`. `declarativeNetRequest` temporarily removes CSP
 response headers only from the tab executing an eval-based command. The rule is
 session-scoped, reference-counted, and removed in cleanup; it is not a
-browser-wide persistent CSP override. See [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/SECURITY.md) for the full
+browser-wide persistent CSP override. See [Security](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md) for the full
 permission and loopback threat model.
 
 ## Tools

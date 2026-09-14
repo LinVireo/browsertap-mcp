@@ -6,7 +6,7 @@ worker keepalive, daemon spawning, or log rotation.
 Start with [AGENTS.md](../../AGENTS.md) for the task entry point. Numbered
 sections retain the original guide's references; other section numbers refer
 to that root guide. Commands and release gates remain in
-[CONTRIBUTING.md](../../CONTRIBUTING.md).
+[CONTRIBUTING.md](../../.github/CONTRIBUTING.md).
 
 ## 1. Three processes, three different ways a change takes effect
 

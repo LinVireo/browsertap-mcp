@@ -11,7 +11,7 @@ body:
         Redact them, or use a synthetic page to reproduce.
 
         Security vulnerabilities do not belong here. Use the private advisory
-        flow described in [SECURITY.md](../blob/main/SECURITY.md).
+        flow described in [SECURITY.md](https://github.com/LinVireo/browsertap-mcp/blob/main/.github/SECURITY.md).
 
   - type: textarea
     id: what-happened

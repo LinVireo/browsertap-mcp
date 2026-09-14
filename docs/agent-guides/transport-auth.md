@@ -6,7 +6,7 @@ client ownership, reconnect grace periods, or logging of browser data.
 Start with [AGENTS.md](../../AGENTS.md) for the task entry point. Numbered
 sections retain the original guide's references; other section numbers refer
 to that root guide. Commands and release gates remain in
-[CONTRIBUTING.md](../../CONTRIBUTING.md).
+[CONTRIBUTING.md](../../.github/CONTRIBUTING.md).
 
 ## 6. The HTTP port is token-authenticated
 
@@ -25,7 +25,7 @@ forge an allowed Origin, so this is not local-process authentication.
 HTTP without an Origin header still requires its token. The separate
 `BROWSERTAP_WS_ALLOW_NO_ORIGIN` option applies only to WebSocket clients.
 Full operator detail is in
-[SECURITY.md](../../SECURITY.md) and [docs/TROUBLESHOOTING.md](../TROUBLESHOOTING.md);
+[SECURITY.md](../../.github/SECURITY.md) and [docs/TROUBLESHOOTING.md](../TROUBLESHOOTING.md);
 the two facts that catch people writing code here:
 
 - A rejected request returns **plain text** `unauthorized: missing or bad bridge
