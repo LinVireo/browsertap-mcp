@@ -161,3 +161,48 @@ def test_owned_tab_registration_failure_keeps_matrix_cleanup_capability(monkeypa
         "tab_id": "browser:1", "session_id": "browser:1", "owner_id": "fixture-owner",
     })
     assert all(name in {"open_new_tab", "list_tabs", "close_tabs"} for name, _ in client.calls)
+
+
+@pytest.mark.parametrize("pending_receipts", [0, 2])
+def test_cdp_watchdog_fixture_keeps_http_gate_held_until_unknown_receipt(monkeypatch, pending_receipts):
+    gates = {}
+    observations = []
+
+    async def call(client, name, **arguments):
+        started, released = next(iter(gates.values()))
+        if name == "cdp_command":
+            started.set()
+            return CallToolResult(content=[], isError=True), {
+                "diagnostics": {"operation_id": "held-cdp", "reservation_held": True},
+            }
+        assert name == "get_execute_js_result", name
+        observations.append(released.is_set())
+        # The transport can time out before Chrome's watchdog. Releasing the
+        # fetch here would let Chrome publish a normal late success instead.
+        if released.is_set():
+            payload = {"status": "success", "reservation_held": False}
+        elif len(observations) <= pending_receipts:
+            payload = {"status": "in_progress", "reservation_held": True}
+        else:
+            payload = {
+                "status": "in_progress", "operation_status": "outcome_unknown",
+                "reservation_held": True, "retry_safe": False,
+            }
+        return CallToolResult(content=[], isError=not released.is_set()), payload
+
+    async def busy(*args):
+        return None
+
+    async def other_page(*args):
+        return "second"
+
+    monkeypatch.setattr(concurrency, "_call", call)
+    monkeypatch.setattr(concurrency, "_busy", busy)
+    monkeypatch.setattr(concurrency, "_js", other_page)
+    operation_id = asyncio.run(concurrency._uncertain_execution(
+        object(), object(), "browser:1", "browser:2", gates,
+        manual=False,
+    ))
+    assert operation_id == "held-cdp"
+    assert observations and not any(observations)
+    assert all(released.is_set() for _started, released in gates.values())

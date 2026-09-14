@@ -32,7 +32,8 @@ const snapshot = () => ({
 const report = (kind, event = null) => {
   const message = {
     token: fixture.token, document: fixture.document, sequence: sequence++, kind,
-    origin: location.origin, id: event?.target?.id || '', key: event?.key || '',
+    origin: location.origin, ready_state: document.readyState,
+    id: event?.target?.id || '', key: event?.key || '',
     trusted: event ? event.isTrusted : null, ...snapshot()
   };
   fetch(fixture.endpoint, {
@@ -50,7 +51,8 @@ for (const kind of ['pointerdown', 'mousedown', 'mouseup', 'click', 'beforeinput
 document.querySelector('#remove-result')?.addEventListener('click', () => {
   document.querySelector('#transient-result')?.remove();
 });
-report('ready');
+// Inline-script completion can precede both the document and child-frame load.
+addEventListener('load', () => report('ready'), {once: true});
 """
 _LEAF_BODY = """
 <div hidden data-template>
@@ -292,7 +294,8 @@ def _load(case, sid):
     result = S.open_url(case.url, session_id=sid, timeout=25)
     assert result["status"] in {"ok", "redirected"}, result
     case.until(lambda events: case.ready_documents <= {
-        event["document"] for event in events if event["kind"] == "ready"
+        event["document"] for event in events
+        if event["kind"] == "ready" and event["ready_state"] == "complete"
     })
 
 
@@ -499,7 +502,7 @@ def test_ambiguous_frame_contents_are_not_gone_and_dispatch_nothing(
     case = iframe_site.case("cross-site-oopif")
     _load(case, scratch_session)
     locator = case.locator(css=".duplicate")
-    waited = _wait(scratch_session, request, selector=locator, gone=True, timeout=2)
+    waited = _wait(scratch_session, request, selector=locator, gone=True, timeout=10)
     assert waited["status"] == "timeout" and waited["locator_status"] == "ambiguous", waited
     clicked = S.page_click(selector=locator, session_id=scratch_session)
     assert clicked["status"] == "ambiguous" and clicked["attempts"] == 0, clicked
@@ -515,7 +518,7 @@ def test_ambiguous_frame_path_is_not_gone_and_dispatches_nothing(
     case = iframe_site.case("cross-site-oopif", ambiguous_frames=True)
     _load(case, scratch_session)
     locator = case.locator(css=".action")
-    waited = _wait(scratch_session, request, selector=locator, gone=True, timeout=2)
+    waited = _wait(scratch_session, request, selector=locator, gone=True, timeout=10)
     assert waited["status"] == "timeout" and waited["locator_status"] == "ambiguous", waited
     assert waited["stage"] == "frame", waited
     clicked = S.page_click(selector=locator, session_id=scratch_session)
@@ -554,9 +557,10 @@ def test_missing_element_and_frame_locators_never_fall_back_to_root(
     locators = [case.locator(css="#absent-control"),
                 {"frame": [{"css": "#absent-frame"}], "css": ".action"}]
     for locator in locators:
-        waited = _wait(scratch_session, request, selector=locator, timeout=2)
+        # This verifies locator scope, not a two-second browser latency target.
+        waited = _wait(scratch_session, request, selector=locator, timeout=10)
         assert waited["status"] == "timeout" and waited["locator_status"] == "not_found", waited
-        assert _wait(scratch_session, request, selector=locator, gone=True, timeout=3)["status"] == "success"
+        assert _wait(scratch_session, request, selector=locator, gone=True, timeout=10)["status"] == "success"
         clicked = S.page_click(selector=locator, session_id=scratch_session)
         assert clicked["status"] == "not_found" and clicked["attempts"] == 0, clicked
         typed = S.page_type("must not appear", selector=locator, clear=True, session_id=scratch_session)

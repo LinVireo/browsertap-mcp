@@ -332,14 +332,20 @@ async def _abandoned_execution(recovering, other, created, other_sid, gates):
         )
 
 
-async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual, fixture_url):
+async def _unknown_execution(client, operation_id):
+    for _attempt in range(30):
+        _result, payload = await _call(client, "get_execute_js_result", operation_id=operation_id)
+        raw = payload.get("legacy", payload.get("data", payload))
+        if raw.get("operation_status") == "outcome_unknown":
+            assert raw["reservation_held"] is True and raw["retry_safe"] is False, raw
+            return
+        assert raw["status"] == "in_progress", payload
+        await asyncio.sleep(0.05)
+    pytest.fail(f"execution did not expose its unknown outcome: {payload}")
+
+
+async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual):
     if manual:
-        # Registration does not prove that the initial document has finished
-        # navigating. Arm the native dialog only after that boundary settles.
-        ready = await _ok(
-            first, "wait_for_url", url_pattern=fixture_url, session_id=sid, timeout=15,
-        )
-        assert ready["status"] == "success" and ready["ready_state"] == "complete", ready
         _result, payload = await _call(
             first, "execute_js", script="confirm('BTAP concurrency fixture'); 7",
             session_id=sid, no_monitor=True, dialog_policy="manual", timeout=10,
@@ -358,6 +364,7 @@ async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual, 
             await asyncio.sleep(0.05)
         else:
             pytest.fail("the handled manual execution did not settle")
+        await _unknown_execution(first, operation_id)
     else:
         with _request_gate(gates) as (path, started):
             pending = asyncio.create_task(_call(
@@ -373,20 +380,14 @@ async def _uncertain_execution(first, second, sid, other_sid, gates, *, manual, 
                 assert result.isError, payload
                 operation_id = payload["diagnostics"]["operation_id"]
                 assert payload["diagnostics"]["reservation_held"] is True, payload
+                # A transport timeout can precede Chrome's watchdog. Keep the
+                # fetch blocked until the browser timeout is actually retained;
+                # releasing it sooner permits a valid late success instead.
+                await _unknown_execution(first, operation_id)
             finally:
                 gates[path][1].set()
                 await pending
 
-    for _attempt in range(30):
-        _result, payload = await _call(first, "get_execute_js_result", operation_id=operation_id)
-        raw = payload.get("legacy", payload.get("data", payload))
-        if raw.get("operation_status") == "outcome_unknown":
-            break
-        assert raw["status"] == "in_progress", payload
-        await asyncio.sleep(0.05)
-    else:
-        pytest.fail(f"execution did not expose its unknown outcome: {payload}")
-    assert raw["reservation_held"] is True and raw["retry_safe"] is False, raw
     for client in (first, second):
         await _busy(client, sid)
     assert await _js(second, "return window.__agent", other_sid) == "second"
@@ -464,12 +465,16 @@ async def _matrix(url, client_ids, gates):
             for mode in ("execute_script", "cdp", "manual"):
                 created = await _owned_tab(first, url, client_ids[0], owned)
                 sid = created["session_id"]
+                # These cases intentionally use short execution deadlines.
+                # Tab registration alone does not finish initial navigation.
+                ready = await _ok(first, "wait_for_url", url_pattern=url,
+                                  session_id=sid, timeout=15)
+                assert ready["status"] == "success" and ready["ready_state"] == "complete", ready
                 if mode == "execute_script":
                     operation_id = await _timed_out_execution(first, second, sid, sid_b, gates)
                 else:
                     operation_id = await _uncertain_execution(
                         first, second, sid, sid_b, gates, manual=mode == "manual",
-                        fixture_url=url,
                     )
                 await _ok(first, "close_tabs", tab_id=sid, session_id=sid, owner_id=created["owner_id"])
                 owned.pop()
