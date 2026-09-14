@@ -370,7 +370,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 以下版本标记随源码维护，不代表开发工作树已经发布。使用新工具签名或 0.5.0 迁移说明前，
 先核对安装包和对应 release tag。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.2**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.3**。
 
 三个组件分别加载更新：
 

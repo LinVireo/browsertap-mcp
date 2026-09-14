@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-14
+
 ### Added
 
 - Claude Code and Codex plugins bundle the MCP server and both public caller
@@ -1525,7 +1527,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/LinVireo/browsertap-mcp/compare/v0.4.20...v0.5.0
