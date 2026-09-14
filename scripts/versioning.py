@@ -35,11 +35,15 @@ README_VERSION_PATTERNS = {
         re.MULTILINE,
     ),
 }
-VERSIONED_PATH_PREFIXES = ("src/", "scripts/")
+PLUGIN_MANIFEST_PATHS = {
+    "claude_plugin": ".claude-plugin/plugin.json",
+    "codex_plugin": ".codex-plugin/plugin.json",
+}
+VERSIONED_PATH_PREFIXES = ("src/", "scripts/", "skills/", ".claude-plugin/", ".codex-plugin/")
 # `server.json` is the MCP Registry listing and states the version twice, so an
 # edit to it changes what a stranger installs. That makes it a production path
 # like `src/` and `scripts/`, not documentation.
-VERSIONED_PATHS = {"pyproject.toml", "server.json"}
+VERSIONED_PATHS = {"pyproject.toml", "server.json", ".agents/plugins/marketplace.json"}
 
 
 class VersionError(RuntimeError):
@@ -161,6 +165,21 @@ def _read_distribution_name(root: Path) -> str:
     return name
 
 
+def _read_plugin_version(root: Path, relative_path: str) -> str:
+    try:
+        data = json.loads((root / relative_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VersionError(f"cannot read {relative_path}: {exc}") from exc
+    expected_name = _read_distribution_name(root)
+    if not isinstance(data, dict) or data.get("name") != expected_name:
+        raise VersionError(f"{relative_path} name must be {expected_name}")
+    version = data.get("version")
+    if not isinstance(version, str):
+        raise VersionError(f"{relative_path} version must be a string")
+    _parse_version(version)
+    return version
+
+
 def _read_server_manifest_version(root: Path) -> str:
     """The version the MCP Registry listing claims, proved to be stated once.
 
@@ -251,6 +270,7 @@ def validate_versions(root: Path = ROOT) -> dict[str, str]:
         "package": _read_package_version(root, source),
         "manifest": _read_manifest_version(root),
         "server_manifest": _read_server_manifest_version(root),
+        **{name: _read_plugin_version(root, path) for name, path in PLUGIN_MANIFEST_PATHS.items()},
         "readme": _read_readme_version(root, "README.md"),
         "readme_zh": _read_readme_version(root, "README.zh-CN.md"),
         "changelog": _read_changelog_version(root),
@@ -318,6 +338,7 @@ def sync_versions(root: Path, version: str) -> list[Path]:
     server_manifest_path = _server_manifest_path(root)
     changelog_path = root / "CHANGELOG.md"
     readme_paths = [root / name for name in README_VERSION_PATTERNS]
+    plugin_paths = [root / name for name in PLUGIN_MANIFEST_PATHS.values()]
 
     current_source = source_path.read_text(encoding="utf-8")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -343,12 +364,18 @@ def sync_versions(root: Path, version: str) -> list[Path]:
         if replacements != 1:
             raise VersionError(f"{path.name} is missing its canonical release version line")
         readme_desired[path] = desired
+    plugin_desired: dict[Path, str] = {}
+    for path in plugin_paths:
+        plugin = json.loads(path.read_text(encoding="utf-8"))
+        plugin["version"] = version
+        plugin_desired[path] = json.dumps(plugin, ensure_ascii=False, indent=2) + "\n"
     desired = {
         source_path: f'__version__ = "{version}"\n',
         manifest_path: json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         server_manifest_path: json.dumps(server_manifest, ensure_ascii=False, indent=2) + "\n",
         changelog_path: _sync_changelog(current_changelog, version),
         **readme_desired,
+        **plugin_desired,
     }
     originals = {
         source_path: current_source,
@@ -356,6 +383,7 @@ def sync_versions(root: Path, version: str) -> list[Path]:
         server_manifest_path: server_manifest_path.read_text(encoding="utf-8"),
         changelog_path: current_changelog,
         **{path: path.read_text(encoding="utf-8") for path in readme_paths},
+        **{path: path.read_text(encoding="utf-8") for path in plugin_paths},
     }
     changed = [path for path, content in desired.items() if originals[path] != content]
     written: list[Path] = []
@@ -363,11 +391,11 @@ def sync_versions(root: Path, version: str) -> list[Path]:
         for path in changed:
             _atomic_write(path, desired[path])
             written.append(path)
+        validate_versions(root)
     except BaseException:
         for path in reversed(written):
             _atomic_write(path, originals[path])
         raise
-    validate_versions(root)
     return changed
 
 

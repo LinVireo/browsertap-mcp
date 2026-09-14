@@ -1,0 +1,34 @@
+{
+  "name": "browsertap-mcp",
+  "version": "0.5.2",
+  "description": "Use your logged-in Chrome, Edge, or Opera to read pages, fill forms, and automate browser workflows.",
+  "author": {
+    "name": "LinVireo",
+    "url": "https://github.com/LinVireo"
+  },
+  "homepage": "https://github.com/LinVireo/browsertap-mcp",
+  "repository": "https://github.com/LinVireo/browsertap-mcp",
+  "license": "MIT",
+  "keywords": ["browser", "automation", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": {
+    "browsertap": {
+      "command": "uv",
+      "args": ["run", "--isolated", "--no-project", "--no-env-file", "--python", "3.13", "--with-editable", ".[desktop]", "python", "-m", "browsertap_mcp.cli"],
+      "cwd": ".",
+      "env": {"UV_NO_PROGRESS": "1"},
+      "startup_timeout_sec": 120
+    }
+  },
+  "interface": {
+    "displayName": "BrowserTap",
+    "shortDescription": "Automate your logged-in browser",
+    "longDescription": "Read pages, fill cross-origin forms, capture screenshots, and manage browser workflows in your existing Chrome, Edge, or Opera profile.",
+    "developerName": "LinVireo",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/LinVireo/browsertap-mcp",
+    "privacyPolicyURL": "https://github.com/LinVireo/browsertap-mcp/blob/main/PRIVACY.md",
+    "defaultPrompt": ["List my open tabs and summarize the page I choose.", "Use BrowserTap to complete this browser workflow."]
+  }
+}

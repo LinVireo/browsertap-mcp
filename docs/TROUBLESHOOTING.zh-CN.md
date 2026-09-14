@@ -7,7 +7,7 @@
 
 ## 0.5.2 已知限制
 
-以下问题在 2026-09-12 的真实浏览器验证后仍未解决，修复留待后续版本。
+以下问题在 2026-09-12 至 14 日的真实浏览器验证后仍未解决，修复留待后续版本。
 离线测试或 CI 通过不能证明这些场景已能在真实浏览器中自动恢复。
 
 ### 原生文件框一直未关闭
@@ -50,6 +50,17 @@ frame 确认，禁脚本的 frame 因而可能阻断整个调用，即使主页�
 被拒绝时，需要用户在 `chrome://extensions` 或对应浏览器的扩展管理页移除选定扩展。
 再用 `list_extensions` 核对；人工移除后扩展消失，不算卸载工具成功。
 BTAP 也无法通过活动响应通道卸载自身。
+
+### 可见按钮返回 `not_interactable` 或 `obscured`
+
+按钮的 DOM 本体可以是 `0×0`，由 CSS `::after` 提供可见点击区域。真实验证中，
+按 role/name 定位此类按钮返回 `not_interactable`；定位其可见文字则返回 `obscured`，
+因为该点实际归按钮自身所有。selector 点击尚未兼容这种布局。
+
+检查当前布局，用 `document.elementFromPoint(x, y)` 确认可见控件内的点实际命中目标按钮，
+再以顶层文档视口的 CSS 坐标调用 `page_click(x=x, y=y, session_id=session_id)`。
+坐标模式不执行 selector 的命中检查，因此调用方应在派发前核对点位，并检查操作后的页面状态。
+重连桥不会改变这一布局限制。
 
 ## 诊断顺序
 
@@ -126,14 +137,13 @@ Bridge 与 MCP 进程必须解析到同一个 token 文件，默认路径为
 
 ### 调用被拒绝并返回 `Session ... is not connected`
 
-这是有意的拒绝。你明确指定了 `session_id`，而该标签页已经不存在，BTAP 不会把这次调用改到
-别的标签页执行：让"点结账"或提交表单落在替代页面上，比报错严重得多。消息会列出仍然连接
-着的标签页：
+这是有意的拒绝。你明确指定了 `session_id`，但 BTAP 无法验证同一个标签页是否有存活的
+session，因此没有派发脚本。消息会列出仍然连接的 session，供你检查真正要操作的目标：
 
 ```text
-Session chrome:123 is not connected. BTAP refused to execute on a different tab.
-Active sessions: chrome:456, chrome:789. Select the intended target with
-switch_tab and retry.
+Session chrome:123 is not connected. BTAP refused to execute because no live session could be verified for the same tab.
+No script was dispatched. Active sessions: chrome:456, chrome:789. Run list_tabs,
+verify the intended target, then select its live session_id with switch_tab and retry.
 ```
 
 用 `switch_tab` 选定真正要操作的标签页，或原样传入列表中的 `session_id`，然后重试。

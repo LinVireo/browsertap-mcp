@@ -149,6 +149,39 @@ def test_distribution_contract_accepts_clean_wheel_and_sdist(tmp_path):
     assert failures == {}
 
 
+@pytest.mark.parametrize("extra", [
+    "skills/private/SKILL.md",
+    "skills/private-notes.txt",
+    "nested/skills/browsertap-default/SKILL.md",
+    ".agents/skills/private/SKILL.md",
+    ".agents/plugins/private.json",
+    ".claude-plugin/private-config.json",
+    ".codex-plugin/private-config.json",
+    "nested/.claude-plugin/plugin.json",
+    ".claude/settings.json",
+    ".codex/config.toml",
+    ".trellis/workflow.md",
+    ".mcp.json",
+    "CLAUDE.md",
+    "AGENTS.local.md",
+])
+def test_public_plugin_metadata_does_not_allow_local_agent_files(tmp_path, extra):
+    sdist = tmp_path / "browsertap_mcp-0.3.4.tar.gz"
+    private = f"browsertap_mcp-0.3.4/{extra}"
+    _write_sdist(sdist, *_sdist_names(), private)
+    violations = validate_archive(sdist)
+    assert len(violations) == 1
+    assert violations[0].startswith(private + ": ")
+
+
+def test_plugin_discovery_copies_are_allowed_only_in_source_archives(tmp_path):
+    wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"
+    _write_wheel(wheel, [*_wheel_names(), "skills/browsertap-default/SKILL.md"])
+    assert validate_archive(wheel) == [
+        "skills/browsertap-default/SKILL.md: agent skill outside the packaged skills directory"
+    ]
+
+
 def test_distribution_contract_rejects_multiple_wheels(tmp_path):
     wheel_members = ["browsertap_mcp/server.py", *_wheel_names()]
     wheel = tmp_path / "browsertap_mcp-0.3.4-py3-none-any.whl"

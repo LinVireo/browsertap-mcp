@@ -191,8 +191,25 @@ They ship as package data, so `pip install browsertap-mcp` carries them and
 `pyproject.toml` are required: they are what put the files in the source archive
 and the wheel respectively, and having only one produces an sdist that carries
 the skills and a wheel that does not — which is the half `pip install` uses.
-`scripts/check_distribution.py` requires them in both archives and refuses a
-`SKILL.md` anywhere else in either one.
+`scripts/check_distribution.py` requires them in both archives. The source
+archive also includes the two plugin discovery copies under root `skills/`;
+other caller copies and private agent configuration are rejected.
+
+### Plugin distribution
+
+Keep `src/browsertap_mcp/skills/` canonical. After editing a public Skill, run
+`python -m scripts.sync_plugin_skills`; use `--check` to detect drift without
+writing. The plugin regression tests enforce byte equality. Both host manifests
+launch this plugin's source with uv, and `scripts.versioning` keeps their versions
+aligned with the package and extension. Publishable metadata is limited to
+`.claude-plugin/`, `.codex-plugin/`, and `.agents/plugins/marketplace.json`.
+
+Run `python -m pytest tests/test_plugins.py tests/test_versioning.py
+tests/test_distribution_contract.py -q` and both hosts' manifest validators.
+Use a freshly built source archive and temporary host configuration directories
+for marketplace installation tests; a working tree can contain private
+`.mcp.json`, hooks, or agent instructions that must not enter a plugin cache.
+See [plugin setup](docs/PLUGINS.md) for the host commands.
 
 Point a skill manager at the shipped directory instead of copying the files. A
 copy reads as correct for as long as the contents agree and then silently stops
@@ -216,7 +233,7 @@ verify.
 
 ## Version and release hygiene
 
-- Keep the Python package, bridge protocol, extension manifest, READMEs, the MCP
+- Keep both plugin manifests, the Python package, bridge protocol, extension manifest, READMEs, the MCP
   Registry manifest (`server.json`) and the latest changelog release
   synchronized. Use `python -m scripts.versioning check` before submitting a
   change. Add user-visible changes under `[Unreleased]`;

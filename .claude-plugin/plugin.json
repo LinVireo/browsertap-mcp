@@ -1,0 +1,21 @@
+{
+  "name": "browsertap-mcp",
+  "version": "0.5.2",
+  "description": "Use your logged-in Chrome, Edge, or Opera to read pages, fill forms, and automate browser workflows.",
+  "author": {
+    "name": "LinVireo",
+    "url": "https://github.com/LinVireo"
+  },
+  "homepage": "https://github.com/LinVireo/browsertap-mcp",
+  "repository": "https://github.com/LinVireo/browsertap-mcp",
+  "license": "MIT",
+  "keywords": ["browser", "automation", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": {
+    "browsertap": {
+      "command": "uv",
+      "args": ["run", "--isolated", "--no-project", "--no-env-file", "--python", "3.13", "--with-editable", "${CLAUDE_PLUGIN_ROOT}[desktop]", "python", "-m", "browsertap_mcp.cli"],
+      "env": {"UV_NO_PROGRESS": "1"}
+    }
+  }
+}

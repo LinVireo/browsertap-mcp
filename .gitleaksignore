@@ -1,0 +1,5 @@
+# Historical Chrome extension identity key: verified as RSA-2048 SPKI public key.
+b13320ac05bd95aed37b83334dcb8c8d61596de6:src/browsertap_mcp/chrome_extension/manifest.json:generic-api-key:8
+
+# Internal session-storage key name `btapTabGenerationsV1` in a synthetic test.
+b13320ac05bd95aed37b83334dcb8c8d61596de6:tests/test_native_extension.py:generic-api-key:379

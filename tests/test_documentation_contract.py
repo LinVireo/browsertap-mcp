@@ -21,6 +21,7 @@ SHIPPED_EXTENSION_FILES = frozenset(
     {
         "background.js",
         "guarded_eval.js",
+        "frame_locator.js",
         "result_serialization.js",
         "content.js",
         "disable_dialogs.js",
@@ -171,15 +172,14 @@ def test_the_readmes_open_with_a_three_step_start():
         assert text.index(heading) < text.index(features), name
         block = text.split(heading, 1)[1].split(features, 1)[0]
 
-        # All three steps, in the one place a stranger will actually read.
-        # The literal is the *published* install, not the editable one it used to
-        # be: since 0.4.12 the package is on PyPI, and a first screen that opens
-        # with `git clone` tells a reader who only wants to use the server to do
-        # work they do not need. The editable install still has its own place
-        # under Getting started, for people changing the project.
-        assert 'pip install "browsertap-mcp[desktop]"' in block, name
-        assert "browsertap extension-path" in block, name
-        assert "claude mcp add browsertap" in block, name
+        # The plugin installs both the MCP server and its caller guidance.
+        # Both hosts must have an executable install path on the first screen.
+        for client, verb in (("claude", "install"), ("codex", "add")):
+            assert f"{client} plugin marketplace add LinVireo/browsertap-mcp" in block, name
+            assert f"{client} plugin {verb} browsertap-mcp@browsertap" in block, name
+        assert "docs.astral.sh/uv/" in block, name
+        assert "get_setup_status" in block and "extension_path" in block, name
+        assert "docs/PLUGINS" in block, name
         # The step that cannot be scripted has to be named as manual here; it is
         # the whole reason the other two being one-liners is not the full story.
         assert "chrome://extensions" in block, name
@@ -226,7 +226,7 @@ def test_troubleshooting_quotes_the_literals_the_code_actually_emits():
 
     literals = (
         "unauthorized: missing or bad bridge token",
-        "is not connected. BTAP refused to execute on a different tab",
+        "is not connected. BTAP refused to execute because no live session could be verified for the same tab",
         "switched_session",
     )
     for literal in literals:

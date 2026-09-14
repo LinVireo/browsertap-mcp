@@ -1,0 +1,12 @@
+{
+  "name": "browsertap",
+  "owner": {"name": "LinVireo"},
+  "metadata": {"description": "BrowserTap plugins for browser automation in your existing browser."},
+  "plugins": [
+    {
+      "name": "browsertap-mcp",
+      "source": "./",
+      "description": "Browser automation in your existing logged-in browser."
+    }
+  ]
+}

@@ -6,15 +6,41 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code and Codex plugins bundle the MCP server and both public caller
+  Skills. Repository marketplaces, isolated uv startup, synchronized versions,
+  and bilingual plugin setup/update guides support installation through each host.
+
+### Fixed
+
+- Support nested same-origin, cross-origin and out-of-process iframes directly
+  in `page_click`, `page_type` and `wait_for`. Bind DOM identities during each
+  call, check parent obstruction and focus before input, and report partial
+  dispatch without replaying a sequence after navigation or an unknown result.
+- Transfer a successful spawn lock to the verified daemon and serialize claim
+  acquisition, stale-owner recovery, and handoff. A dead daemon can restart
+  immediately without removing the protection against duplicate launches.
+- Release the optional built-in scan readiness probe's tab reservation on
+  timeout, so a successful content read does not block the next page command.
+- Ignore hidden and inert SPA form templates in role locators while retaining
+  ambiguity for multiple visible controls.
+- Resolve verified replacements of the same tab that arrive during reconnect
+  waiting; URL-only matches still cannot redirect an explicit target.
+- Exclude the visible BTAP status badge from SPA readiness text counts without
+  changing the page DOM, so the badge cannot make an empty shell look ready.
+- Clarify stale-target and raw tab-create errors while preserving explicit
+  target checks, operation IDs, and creation recovery guidance.
+
 ### Documentation
 
-- Record four unresolved limitations from live verification: native file-dialog
-  cancellation, JavaScript continuing after a timeout releases its reservation,
-  sandboxed child frames blocking main-page dialog-policy setup, and Chrome's
-  user-gesture requirement for extension removal. Fixes remain deferred.
-- Update both READMEs, usage guides, and troubleshooting guides with the observed
-  failure modes and current recovery guidance. Offline CI passing does not
-  establish live success; manual dialog closure is not automated recovery.
+- Focus both READMEs on setup, features, and common workflows; make capability
+  details expandable and add embedded-form support to the feature overview.
+- Keep diagnosed failures and recovery guidance in the troubleshooting guides,
+  linked from the READMEs and usage guides. Include the verified coordinate
+  workaround for zero-size buttons whose hit area comes from CSS pseudo-elements.
+- Explain how to choose direct field input, locator clicks, coordinate clicks,
+  and native select operations in the bilingual usage guides.
 
 ## [0.5.2] - 2026-09-12
 

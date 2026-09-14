@@ -2357,6 +2357,23 @@ class BrowserBridge:
                 session = self.sessions.get(session_id)
                 if session and session.is_active():
                     break
+                # onReplaced can arrive after the initial resolution above.
+                # Accept only the bridge's identity-backed binding, and check
+                # the new target against any caller-held command scope before
+                # dispatching. URL/title similarity is never identity proof.
+                if allow_rebind and session_id is not None:
+                    replacement = self.resolve_session_target(str(session_id))
+                    replacement_id = replacement.get('session_id') if replacement else None
+                    if replacement_id and replacement_id != session_id:
+                        candidate = self.sessions.get(str(replacement_id))
+                        if candidate and candidate.is_active():
+                            guard_targets(
+                                f"{getattr(self, 'host', '127.0.0.1')}:{getattr(self, 'port', 18765)}",
+                                [str(replacement_id)],
+                            )
+                            rebound = replacement
+                            session_id, session = str(replacement_id), candidate
+                            break
                 wait_for = max(0.0, grace_deadline - time.monotonic())
                 if wait_for <= 0:
                     break
@@ -2389,9 +2406,10 @@ class BrowserBridge:
                     if alive_sessions:
                         cands = ', '.join(str(s.id) for s in alive_sessions[:8])
                         exc = SessionNotConnectedError(
-                            f"Session {session_id} is not connected. BTAP refused to execute on a "
-                            f"different tab. Active sessions: {cands}. Select the intended target "
-                            "with switch_tab and retry."
+                            f"Session {session_id} is not connected. BTAP refused to execute because "
+                            "no live session could be verified for the same tab. No script was dispatched. "
+                            f"Active sessions: {cands}. Run list_tabs, verify the intended target, "
+                            "then select its live session_id with switch_tab and retry."
                         )
                         exc.diagnostics = {
                             "stale_session_id": str(session_id),

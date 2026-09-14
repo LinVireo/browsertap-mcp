@@ -59,6 +59,12 @@ docs/superpowers/
 # Local development-agent frameworks, task records, and store drafts.
 # Caller skills under src/browsertap_mcp/skills are part of the product.
 /.agents/
+# Public Codex marketplace metadata; all other local agent files stay ignored.
+!/.agents/
+/.agents/*
+!/.agents/plugins/
+/.agents/plugins/*
+!/.agents/plugins/marketplace.json
 /.claude/
 /.trellis/
 /store-assets/

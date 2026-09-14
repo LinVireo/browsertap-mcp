@@ -231,11 +231,27 @@ for surviving worker collection.
 
 - Concurrently starting MCP instances race to spawn the bridge: "port closed →
   spawn" is a check-then-act that is not atomic across processes. A lock file
-  (`O_EXCL` create + 30-second expiry) guards it. Note that the lock is
-  **not released on success** and relies on expiry: an earlier version released
-  it immediately, later arrivals were still failing the port check (binding takes
-  time), took the lock again and spawned another -- 12 concurrent instances
-  produced 8 daemons. Do not "fix" that back.
+  (`O_EXCL` create + 30-second expiry) guards it. The lock is **not released on
+  success**: an earlier immediate-release change was recorded as producing 8
+  daemons for 12 concurrent instances. Preserve both the retained claim and the
+  port recheck inside the claim; the existing readiness wait already checks the
+  HTTP port before reporting success.
+
+  A successful claim transfers from the spawning MCP PID to the verified daemon
+  PID. Otherwise a daemon that dies within 30 seconds cannot be recovered by its
+  still-running MCP. HTTP can become reachable before `bridge.pid` is published:
+  use the bounded readiness window to match the spawned `instance_id`, configured
+  host and ports, process creation time and executable before transferring it.
+  Unknown identity or a failed atomic write retains the original claim and expiry.
+
+  Creation, stale-owner reclamation, handoff and failed-launch cleanup use the
+  separate `spawn.lock.guard` OS file lock. Keep that guard file in place so all
+  contenders lock the same inode; its OS lock is held only during metadata
+  changes and releases on process death. Compare the acquired claim's fingerprint
+  before handoff or cleanup. Checking a stale PID and later unlinking without the
+  guard lets one reclaimer delete another's new claim. Regression coverage is in
+  [test_spawn_lock_recovery.py](../../tests/test_spawn_lock_recovery.py), including
+  concurrent cold recovery and late-arriving callers using the real spawn flow.
 
 - The bridge log rotates at 5 MB, in **two** places that must keep the same cap
   (`bridge.LOG_MAX_BYTES`). `server._bridge_log_path` renames the file at spawn

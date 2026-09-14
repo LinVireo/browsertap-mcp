@@ -2142,7 +2142,7 @@ def test_execute_js_does_not_move_a_dead_implicit_default_to_another_browser(mon
 
     monkeypatch.setattr(driver, "_wait_for_activity", wait_for_reconnect)
 
-    with pytest.raises(T.SessionNotConnectedError, match="different tab") as raised:
+    with pytest.raises(T.SessionNotConnectedError, match="verified for the same tab") as raised:
         driver.execute_js("return 1", timeout=1)
 
     assert raised.value.diagnostics["stale_session_id"] == stale.id

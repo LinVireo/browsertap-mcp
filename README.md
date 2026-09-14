@@ -23,47 +23,44 @@ are below.
 
 ## Start in 60 seconds
 
-Three setup steps; the manual browser step may take longer than a minute.
+**Claude Code and Codex: install the plugin.** It includes the MCP server and
+caller Skills. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
+first; dependency downloads and the manual browser step can take longer than a minute.
 
-1. **Install** in a virtual environment and locate the extension:
+1. **Add BrowserTap to your agent.** Choose your client:
 
+   Claude Code:
    ```bash
-   python -m venv .venv
-   ./.venv/bin/python -m pip install browsertap-mcp
-   ./.venv/bin/browsertap extension-path
+   claude plugin marketplace add LinVireo/browsertap-mcp
+   claude plugin install browsertap-mcp@browsertap
    ```
 
-   On Windows PowerShell, use `.\.venv\Scripts\python.exe` and
-   `.\.venv\Scripts\browsertap.exe`. The optional desktop fallback and explicit
-   Windows native-file-dialog tools require
-   `pip install "browsertap-mcp[desktop]"` in that same environment; ordinary
-   page and browser tools do not need it.
-
-2. **Load the extension manually.** Open `chrome://extensions`, enable
-   **Developer mode**, choose **Load unpacked**, and select the printed
-   directory. Open a normal `http://` or `https://` page for page tools.
-
-3. **Connect your MCP client** to the installed executable. For Claude Code:
-
+   Codex:
    ```bash
-   claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
+   codex plugin marketplace add LinVireo/browsertap-mcp
+   codex plugin add browsertap-mcp@browsertap
    ```
 
-   Other clients and Windows paths are covered in
-   [Getting started](#getting-started). Virtual-environment activation is not
-   required when using explicit executable paths.
+2. **Load the browser extension manually.** Open a new agent session and ask it
+   to call `get_setup_status` for the `extension_path`. Open `chrome://extensions`,
+   enable **Developer mode**, choose **Load unpacked**, and select that directory.
+   Use `edge://extensions` or `opera://extensions` for those browsers.
 
-Ask the agent: **"List my open tabs, then summarize the page I select without
-navigating or closing it."** If the connection fails or no expected tab appears,
-run `browsertap doctor` from the installed environment and follow its `action`.
-Later commands use the short name `browsertap`; use its full path when it is not
-on your `PATH`.
+3. **Start a browser task:** "List my open tabs, then summarize the page I select
+   without navigating or closing it."
+
+[Plugin setup and updates](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/PLUGINS.md)
+also covers `browsertap doctor` through the plugin's environment.
+For Cursor, Claude Desktop and other MCP clients, use the
+[standard MCP installation](#getting-started) below. Existing MCP configurations
+continue to work.
 
 ## Documentation by audience
 
 | Reader | Start here |
 | --- | --- |
 | Installing or using BTAP | This README, then the [usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md) for workflows and boundaries. |
+| Installing the Claude Code or Codex plugin | [Plugin guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/PLUGINS.md). |
 | Diagnosing a local setup | [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md), with the output of `browsertap doctor`. |
 | An agent calling BTAP tools | The client's live tool schemas and the optional [caller skills](#agent-skills-optional). |
 | A human or agent changing BTAP | [Contributing](https://github.com/LinVireo/browsertap-mcp/blob/main/CONTRIBUTING.md); coding agents also read [AGENTS.md](https://github.com/LinVireo/browsertap-mcp/blob/main/AGENTS.md). |
@@ -77,34 +74,26 @@ come from the connected server, not from a different version of the README.
 
 - **Read and inspect pages:** simplified HTML/text, JavaScript, screenshots, and bounded network/console captures.
 - **Interact in a background tab:** `page_click`, `page_type`, `page_press`, and `page_drag` use trusted CDP input without moving the desktop cursor.
+- **Fill embedded forms:** locate, wait for, click, and type into controls in nested same-origin and cross-origin iframes.
 - **Use the existing profile:** authenticated downloads, cookies, storage, bookmarks, extensions, and temporary site-permission leases.
 - **Control interruptions:** explicit dialog policies, condition-based waiting, and operation handles for collecting delayed results without replaying an action.
 - **Separate concurrent tasks:** explicit browser/tab targets and owner-aware cleanup. Different tabs can run concurrently; shared-profile state is not isolated.
 - **Connect multiple browsers:** one bridge can serve Chrome, Edge, Opera, and multiple profiles. Browser-level operations can work without a page tab.
 
-## Known limitations in 0.5.2
+## Common workflows
 
-Live verification on 2026-09-12 exposed these unresolved cases:
+- **Read authenticated sites:** summarize a selected page, extract a table, or
+  follow links using your existing login.
+- **Complete web forms:** search, filter, and fill controls in ordinary pages,
+  SPAs, and embedded frames.
+- **Collect files and inspect pages:** download reports, capture screenshots,
+  and inspect network requests or console messages.
 
-- **Native file dialogs:** automatic cancellation did not succeed. Inspection
-  can reject a real Chrome dialog with a cross-process owner before issuing a
-  ticket. Manual closure does not count as automatic recovery; use `upload_files`
-  for page uploads without opening the chooser.
-- **JavaScript timeouts:** an `exec_timeout` result can release the tab's
-  reservation while the old script continues and later changes the page.
-  A failed result or `reservation_held=false` does not prove execution stopped.
-- **Sandboxed iframes:** a child frame without `allow-scripts` can make default
-  dialog-policy setup fail with `dialog_scope_setup_failed`, blocking execution
-  in an otherwise scriptable main page.
-- **Extension removal:** Chrome rejected `uninstall_extension` for lack of a
-  user gesture with both confirmation settings. Manual removal may be required.
+See the [usage guide](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.md)
+for step-by-step workflows and the [tool reference](#tools) for parameters.
 
-Passing offline CI does not establish success for these live browser paths or
-unattended recovery. These fixes remain deferred. See
-[Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md)
-for symptoms and current recovery guidance.
-
-## Capability model
+<details>
+<summary>Capability model and tool results</summary>
 
 BTAP exposes three capability layers so an agent can choose the narrowest
 interface that matches the task:
@@ -145,19 +134,7 @@ operation fields are projected at the top level for compatibility. Use the
 envelope's retry verdict: an explicit `retry_safe=false` or possible execution
 overrides a connection error's usual retry hint.
 
-## When to use something else
-
-Use BTAP when the task depends on your existing Chromium profile and should
-normally stay in a background tab. It is not a headless test runner, does not
-support Firefox/WebKit, and does not provide general desktop automation.
-
-For isolated browser tests or accessibility-snapshot-based workflows, compare
-[Playwright MCP](https://github.com/microsoft/playwright-mcp). For DevTools-led
-debugging and performance analysis, compare
-[Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp).
-Reusing a live browser is not unique to BTAP; choose by the task and the APIs
-you need. BTAP exposes all 51 tools, so clients that need a smaller tool set
-must filter it themselves.
+</details>
 
 ## Requirements
 
@@ -166,9 +143,7 @@ must filter it themselves.
 - Linux, macOS, or Windows. The ordinary page, browser, and CDP tools do not
   require OS-level input. The lab-only `resolve_leave_dialog` fallback and the
   Windows native-file-dialog tools need a usable desktop session.
-- A running Chromium user session rather than an isolated headless container.
-  There is no Docker image on purpose: the server attaches to the Chrome *you*
-  are signed into, through an extension a human loads once.
+- A running Chromium user session with the BrowserTap Bridge extension loaded.
 - Claude Code, or any other MCP client
 
 ## Getting started
@@ -426,6 +401,9 @@ the next start then creates a new token.
 
 ### Agent skills (optional)
 
+The Claude Code and Codex plugins load these Skills automatically. This section
+is for clients configured through the standard MCP installation.
+
 BTAP ships two skills that tell a calling agent how to drive it. They are ordinary
 Markdown and completely optional — every tool works without them. What they add is
 the judgement the tool descriptions cannot carry: which tool to reach for first,
@@ -455,6 +433,9 @@ anyway, `python -m scripts.check_tool_docs --check-installed-skills --skill-mirr
 DIR` compares them against the shipped originals and names whichever one drifted.
 
 ### Upgrade
+
+Plugin users: follow [plugin updates](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/PLUGINS.md).
+The steps below apply to a Python package installation.
 
 The marker below is maintained with this source tree. It is not proof that a
 development checkout has been published; compare the installed package with its
@@ -709,6 +690,8 @@ browser/profile selection.
 
 - **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. A background tab may report viewport height zero; ordinary DOM/text/API work still continues there, and only visual/layout fidelity requires explicit `activate_tab`. When the page can be probed, `render_state`/`content_ready` distinguish real content from a loading, hydrating, or shell-only SPA; retry or use `wait_for` before treating an empty shell as final content. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. The built-in scan does not write page attributes, ids, or `window` globals. Optional `extra_js` runs caller code and can modify the page or send requests.
   - `session_id` (string, optional), `text_only` (boolean, optional): default `false`, `cutlist` (boolean, optional): default `true`; collapse repetitive lists, `maxchars` (integer, optional): default `35000`, `instruction` (string, optional), `extra_js` (string, optional), `timeout` (number, optional): default `15`
+  The optional built-in readiness probe releases its tab reservation on timeout. Missing `render` fields mean readiness is unknown; use `wait_for` for the intended control.
+
 - **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. The server schedules short synchronous page checks under one deadline, avoiding background-page timer throttling. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input. Caller-provided `js` is evaluated repeatedly and can have side effects; use a read-only predicate. A timeout with `operation_id` retains a pending check. Timed-out selector/text/URL probes can release the tab without discarding that receipt: `reservation_held=false` permits another command, and `get_execute_js_result` in the same MCP session can collect the delayed reply. Caller-provided `js` stays reserved. When `reservation_held` is true or unknown, keep querying the original operation until it settles or releases its reservation. A pending probe is never replayed.
   - `selector` (string/object, optional): CSS or structured locator, `text` (string, optional): substring of body text, `url_pattern` (string, optional): regex on the URL, `js` (string, optional): expression to become truthy, `gone` (boolean, optional): wait for the condition to stop holding; default `false`, `timeout` (number, optional): default `15`, `session_id` (string, optional)
 - **wait_for_url** — wait for navigation to settle: blocks until the tab URL matches `url_pattern` (regex, or plain substring — both are tried) and, unless `wait_ready=false`, `document.readyState` is `complete`; then returns final `url`, `title` and `ready_state`. Use after a click or `open_url` that navigates; `wait_for(url_pattern=...)` only checks the URL and can return while the new document is still blank. Uses the same bounded synchronous checks and receipt recovery as `wait_for`. A pending probe with `reservation_held=false` no longer blocks the tab; its delayed reply remains available through `get_execute_js_result` in the same MCP session.
@@ -717,7 +700,7 @@ browser/profile selection.
   - `to` (string, optional): default `bottom`; also accepts `top`, a pixel offset, or a CSS selector to bring into view, `session_id` (string, optional), `timeout` (number, optional): default `15`
 - **execute_js** — run JavaScript in the page and return the result. `timeout` is one end-to-end deadline covering dialog-policy setup, monitor snapshots, delivery/retry, navigation inspection, and cleanup; an explicit `session_id` is forwarded through every one of those roundtrips instead of relying on the process default. Set `wait=false` for a genuinely long task: once the extension acknowledges delivery, BTAP returns `status="in_progress"` plus an `operation_id`; claim the result with `get_execute_js_result` instead of replaying the script. `dialog_policy="manual"` is intentionally unavailable in background mode. When a script navigates the page, `status` is `navigated` (not `success`) with `landed_url`; the script's return value is genuinely lost in that case and is reported as such rather than substituted. `dialog_policy` decides what happens if the script opens `alert`/`confirm`/`prompt`: `dismiss` (default) and `accept` answer it and report it under `dialogs`, while `manual` pauses a synchronous script with the native dialog still open and returns `blocked_by_dialog` — call `handle_dialog` to release it. A tab already holding a manual pause returns `busy` immediately. Use `wait_for`/`wait_for_url` instead of delayed `setTimeout` or sleep Promises when waiting for page state. When the JSON-encoded `js_return` exceeds the 24 KiB UTF-8 inline limit, BTAP writes the complete value to a private temporary JSON file and returns `result_file`, `result_bytes`, `result_sha256`, and `result_format` instead of a truncated inline value.
   - A `Cannot access contents of the page` error must be classified before retrying: if the script attempted `window.open` or navigation, use `open_new_tab` (Chrome may block it without a user gesture); if injection into the current tab is forbidden, choose a normal scriptable `http/https` tab or the supported CDP route. Do not treat the message as proof that reading the current page failed.
-  - `timeout` does not cancel dispatched JavaScript. A sandboxed child iframe without `allow-scripts` can also block the default dialog-policy setup for the main page with `dialog_scope_setup_failed`. See [known limitations](#known-limitations-in-052).
+  - `timeout` does not cancel dispatched JavaScript. See [Troubleshooting](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.md) for timeout recovery and frame-preparation errors.
   - `script` (string), `session_id` (string, optional), `no_monitor` (boolean, optional): default `false`, `timeout` (number, optional): default `15`, `dialog_policy` (string, optional): `dismiss` (default), `accept`, or `manual`, `wait` (boolean, optional): default `true`
   - All routes use the same result conversion: `undefined` and non-finite numbers become `null`; BigInt/symbol become strings; DOM, Error and function values become readable representations. Cycles and depth 6 have markers; iterables keep up to 200 items plus a truncation marker. A `result_file` preserves the complete **converted** value, including those markers.
   - Once user code starts, a script error does not trigger a second execution. Use an explicit `return` in a complex async body, preferably `(async () => { /* work */ return value; })()`. Ambiguous bodies may complete with `null`; `await(expr)` can parse as a call to an ordinary function named `await`, so use the async IIFE when that distinction matters.
@@ -746,13 +729,26 @@ browser/profile selection.
 <details>
 <summary><b>Background page input</b></summary>
 
+Role locators exclude hidden, `aria-hidden`, and inert controls, including inactive forms retained by SPAs. A visible disabled control can satisfy a query; CSS queries retain DOM-presence semantics. Multiple visible role matches still return `ambiguous`.
+
+`page_click`, `page_type`, and `wait_for` accept nested same-origin and cross-origin iframe paths, including frames in a separate renderer (OOPIF):
+
+```python
+control = {"frame": ["#outer", "#inner"], "css": "#control"}
+wait_for(selector=control, session_id=session_id)
+page_type("example", selector=control, clear=True, session_id=session_id)
+page_click(selector={"frame": ["#outer", "#inner"], "role": "button", "name": "Search"}, session_id=session_id)
+```
+
+Each call binds the actual frame documents and elements. Navigation or replacement after binding returns `stale_frame`; a later, independent call can locate the new document. Check `input_dispatched` before recovery: a partial sequence or unknown result must not be replayed. An iframe wait with an outstanding `operation_id` can retain its reservation; collect that result first. Old extension builds return `stale_extension` with `next_action=reload_extension`.
+
 Trusted CDP input events delivered to one named tab. They do **not** activate the tab, focus its window, or move the desktop cursor — every reply carries `foreground_changed: false` and `input_mode: "cdp"`. All coordinates are **viewport CSS pixels** (relative to the top-left of the page area, the space `getBoundingClientRect` reports), never desktop pixels and never the device pixels `capture_page_screenshot` returns.
 
 Pass `session_id` explicitly: the call holds that target in its own context without changing this MCP process's default. A stale handle without evidence of a same-tab replacement is refused. Another MCP call using the same tab can return `target_busy`; see the concurrent-task boundaries above.
 
-`selector` remains backward-compatible with CSS strings and also accepts a locator object with exactly one primary key: `css`, `role` (optional `name`), `text`, or `label`. Inside a locator object, `selector` is accepted as a compatibility alias for the `css` primary key. `exact` applies to role/name or text matching; `frame` walks one or more same-origin iframe locators; `shadow` walks open Shadow DOM hosts. A click-only frame-relative point can use `{"frame": [...], "x": 20, "y": 30}`; `x`/`y` are CSS coordinates in the final same-origin frame's viewport and are converted to top-document coordinates before dispatch. Zero matches return `not_found`, multiple matches return `ambiguous`, and cross-origin or closed roots are reported without dispatching input. Selector clicks that cross an iframe chain with a non-identity CSS transform return `unsupported_frame_transform` for the same reason; query/type paths remain available.
+`selector` remains backward-compatible with CSS strings and also accepts a locator object with exactly one primary key: `css`, `role` (optional `name`), `text`, or `label`. Inside a locator object, `selector` is a compatibility alias for `css`. `exact` applies to role/name or text matching; `frame` walks iframe locators across origin and renderer boundaries; `shadow` walks open Shadow DOM hosts. A click-only frame-relative point can use `{"frame": [...], "x": 20, "y": 30}`; its CSS coordinates in the final frame's viewport are converted to top-document coordinates before dispatch. Zero matches return `not_found`, multiple matches return `ambiguous`, and closed shadow roots remain inaccessible. Framed clicks refuse non-identity transforms, zoom or perspective on the frame or its ancestors with `unsupported_frame_transform`; query/type paths remain available.
 
-- **page_click** — click a CSS/structured `selector` or viewport coordinates. Exactly one targeting mode: either `selector`, or both `x` and `y`. With a selector, each omitted offset axis uses the element centre; a supplied `offset_x` or `offset_y` is measured from the element's top-left corner on that axis. A structured selector of the form `{"frame": [...], "x": 20, "y": 30}` is a frame-relative point: it enters the listed same-origin frames, adds their client offsets, and dispatches at the resulting top-document CSS coordinates. Point mode is intentionally not hit-tested because the caller named a pixel, not an element. Missing, ambiguous, non-interactable, cross-origin-frame, closed-shadow, and CSS-transformed-frame targets return structured status without input dispatch; the transformed-frame status is `unsupported_frame_transform`. In selector mode the point is also hit-tested in the page before dispatch: a target below the fold is scrolled into view (`scrolled_into_view`), one whose pixel belongs to something else returns `obscured` with `occluded_by` naming the overlay, and one still off screen returns `outside_viewport` — in both cases nothing is clicked, because a dispatched click would have landed on the other element and reported success. A verified click carries `hit_verified: true`. Coordinate mode is not hit-tested: coordinates name a pixel, not an element — and a pixel read off `capture_page_screenshot` is a *device* pixel, so it needs dividing by `devicePixelRatio` first. Challenge replies keep the bounded `challenge_detected`/`attempts`/`challenge_stalled` behavior.
+- **page_click** — click a CSS/structured `selector` or viewport coordinates. Exactly one targeting mode: either `selector`, or both `x` and `y`. With a selector, each omitted offset axis uses the element centre; a supplied `offset_x` or `offset_y` is measured from the element's top-left corner. `{"frame": [...], "x": 20, "y": 30}` names a point in the final iframe, converted to top-document CSS coordinates. Point mode is not hit-tested. Missing, ambiguous, non-interactable, closed-shadow, and unsupported transformed-frame targets dispatch no input. Selector mode checks the element and every parent frame for obstruction before dispatch: an overlay returns `obscured` with `occluded_by`, and an off-screen point returns `outside_viewport`. Top-document targets can be scrolled into view (`scrolled_into_view`); framed clicks do not scroll automatically. A verified click carries `hit_verified: true`. Screenshot coordinates are device pixels: divide by `devicePixelRatio` before using them as CSS coordinates. Challenge replies keep the bounded `challenge_detected`/`attempts`/`challenge_stalled` behavior.
   - `selector` (string/object, optional), `x` (number, optional), `y` (number, optional), `offset_x` (number, optional), `offset_y` (number, optional), `button` (string, optional): default `left`, `clicks` (integer, optional): default `1`, `session_id` (string, optional), `timeout` (number, optional): default `15`
 - **page_type** — insert text into a CSS/structured-locator field, or into whatever already has focus when `selector` is omitted. Xterm.js containers/descendants retarget to `.xterm-helper-textarea`. Missing, ambiguous, read-only, or otherwise unusable targets return a structured status without dispatching text or keys; invalid legacy CSS returns `status="invalid_selector"` instead of a raw `SyntaxError`. Successful and failed target resolution includes a redacted `active_element` descriptor and `focus_confirmed` when focus was attempted, so omitted-selector input is auditable. `clear=true` selects the existing value first; `submit_key` sends one key afterwards.
   - `text` (string), `selector` (string/object, optional), `clear` (boolean, optional): default `false`, `submit_key` (string, optional), `session_id` (string, optional), `timeout` (number, optional): default `15`

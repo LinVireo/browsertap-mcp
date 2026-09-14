@@ -31,6 +31,8 @@ def test_all_runtime_and_manifest_versions_are_identical():
         "package",
         "manifest",
         "server_manifest",
+        "claude_plugin",
+        "codex_plugin",
         "readme",
         "readme_zh",
         "changelog",
@@ -58,6 +60,12 @@ def test_invalid_versions_are_rejected(version):
 
 
 def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
+    for directory in (".claude-plugin", ".codex-plugin"):
+        manifest = tmp_path / directory / "plugin.json"
+        manifest.parent.mkdir()
+        manifest.write_text(
+            json.dumps({"name": "browsertap-mcp", "version": "0.1.0"}), encoding="utf-8"
+        )
     package = tmp_path / "src" / "browsertap_mcp"
     extension = package / "chrome_extension"
     extension.mkdir(parents=True)
@@ -117,6 +125,7 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "README.zh-CN.md",
         "CHANGELOG.md",
         "server.json",
+        "plugin.json",
     }
     assert read_source_version(tmp_path) == "0.3.0"
     assert (
@@ -127,6 +136,8 @@ def test_sync_versions_updates_source_and_manifest_atomically(tmp_path):
         "package": "0.3.0",
         "manifest": "0.3.0",
         "server_manifest": "0.3.0",
+        "claude_plugin": "0.3.0",
+        "codex_plugin": "0.3.0",
         "readme": "0.3.0",
         "readme_zh": "0.3.0",
         "changelog": "0.3.0",
@@ -158,6 +169,9 @@ def _mirror_release_tree(root: Path) -> None:
     itself. Mirroring means each case below is one single mutation away from a
     tree that really passes.
     """
+    for directory in (".claude-plugin", ".codex-plugin"):
+        (root / directory).mkdir()
+        shutil.copy2(ROOT / directory / "plugin.json", root / directory / "plugin.json")
     for name in ("pyproject.toml", "README.md", "README.zh-CN.md", "CHANGELOG.md", "server.json"):
         shutil.copy2(ROOT / name, root / name)
     extension = root / "src" / "browsertap_mcp" / "chrome_extension"
@@ -251,6 +265,44 @@ def test_static_project_version_is_rejected(tmp_path):
 
     with pytest.raises(VersionError, match="dynamic version"):
         validate_versions(tmp_path)
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+@pytest.mark.parametrize("field,value,message", [
+    ("version", "9.9.9", "versions are inconsistent"),
+    ("name", "another-package", "name must be browsertap-mcp"),
+])
+def test_plugins_cannot_describe_a_different_package(tmp_path, host, field, value, message):
+    _mirror_release_tree(tmp_path)
+    path = tmp_path / f".{host}-plugin/plugin.json"
+    plugin = json.loads(path.read_text(encoding="utf-8"))
+    plugin[field] = value
+    path.write_text(json.dumps(plugin), encoding="utf-8")
+    with pytest.raises(VersionError, match=message):
+        validate_versions(tmp_path)
+
+
+def test_failed_plugin_validation_rolls_back_every_version_file(tmp_path):
+    _mirror_release_tree(tmp_path)
+    path = tmp_path / ".codex-plugin/plugin.json"
+    plugin = json.loads(path.read_text(encoding="utf-8"))
+    plugin["name"] = "another-package"
+    path.write_bytes(json.dumps(plugin).encode("utf-8"))
+    originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    with pytest.raises(VersionError, match="name must be browsertap-mcp"):
+        sync_versions(tmp_path, bump_version(__version__, "patch"))
+
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.parametrize("path", [
+    ".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
+    ".agents/plugins/marketplace.json", "skills/browsertap-default/SKILL.md",
+])
+def test_plugin_distribution_changes_require_a_version_increment(path):
+    with pytest.raises(VersionError, match="did not increase"):
+        validate_version_increment("0.5.2", "0.5.2", [path])
 
 
 def test_production_changes_require_a_strict_version_increment():

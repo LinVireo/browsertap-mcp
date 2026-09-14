@@ -74,6 +74,7 @@ from .extension_build import (  # noqa: E402
     compute_extension_stamp,
     read_extension_stamp,
 )
+from .page_frames import frame_locator_payload  # noqa: E402
 from .page_input import (  # noqa: E402
     ChallengeAttemptTracker,
     InputValidationError,
@@ -490,8 +491,9 @@ class SessionTargetNotFoundError(RuntimeError):
             ) + "."
         super().__init__(
             f"Session {sid} not found: the explicitly requested tab session is stale; "
-            "BTAP refused to use a different tab. Run list_tabs (or list_all_tabs), "
-            "verify the URL/title, then retry with the replacement session_id."
+            "BTAP could not verify a live session for the same tab. "
+            "Run list_tabs (or list_all_tabs), verify the intended target, "
+            "then retry with its live session_id."
             + suffix
         )
 
@@ -1314,8 +1316,19 @@ def _bridge_log_path() -> Path:
 _SPAWN_LOCK_STALE = 30.0
 
 
+@dataclass(frozen=True)
+class _SpawnLockClaim:
+    path: Path
+    fingerprint: tuple[int, int, int, int, int]
+
+
 def _spawn_lock_path() -> Path:
     return state_dir() / "spawn.lock"
+
+
+def _spawn_lock_fingerprint(path: Path) -> tuple[int, int, int, int, int]:
+    info = path.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1328,7 +1341,7 @@ def _pid_alive(pid: int) -> bool:
     return physical_input._pid_alive(pid)
 
 
-def _acquire_spawn_lock() -> Optional[Path]:
+def _acquire_spawn_lock(*, reset: bool = False) -> Optional[_SpawnLockClaim]:
     """Win the right to spawn the bridge, or return None if someone else has it.
 
     MCP instances start in parallel, and "is the port open? no -> spawn" is not
@@ -1337,52 +1350,103 @@ def _acquire_spawn_lock() -> Optional[Path]:
     bind. Observed for real — two daemons with identical creation timestamps.
     """
     lock = _spawn_lock_path()
-    lock.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # O_EXCL is the atomic part: exactly one process creates the file.
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        # A crashed spawner would otherwise block every later attempt forever.
-        # Two recovery paths: if the lock is older than _SPAWN_LOCK_STALE it is
-        # definitely stale; otherwise read the pid and check liveness so a
-        # daemon that died seconds after spawn frees the lock immediately
-        # instead of holding recovery hostage for 30s.
-        try:
-            recycle = False
-            if time.time() - lock.stat().st_mtime > _SPAWN_LOCK_STALE:
-                recycle = True
-            else:
-                # An unreadable pid is NOT the same fact as a dead one, and the
-                # difference is the whole race this lock exists to close. O_EXCL
-                # publishes the file before the pid is written, so an instance
-                # arriving in that window reads it empty -- and "empty means the
-                # owner is gone" made it delete the winner's lock and spawn the
-                # duplicate. Only a pid that parsed and whose process is really
-                # gone may be recycled here; a corrupt lock is left to the
-                # _SPAWN_LOCK_STALE window above, which is what that window is
-                # for. Measured: 12 concurrent callers, 2 daemons, off Windows
-                # only -- the window is real but its width is scheduler-specific.
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        # Reuse only the OS file-lock primitive: this is spawn.lock.guard,
+        # independent of input arbitration. Keep this sibling file in place so
+        # every contender locks the same inode. The OS releases it after a crash.
+        with physical_input._ArbitrationGuard(lock):
+            if reset:
                 try:
-                    old_pid = int(lock.read_text(encoding="utf-8").strip())
-                except (ValueError, OSError):
-                    old_pid = 0
-                if old_pid and not _pid_alive(old_pid):
-                    recycle = True
-            if recycle:
-                lock.unlink(missing_ok=True)
-                return _acquire_spawn_lock()
-        except OSError:
-            pass
+                    lock.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for _ in range(2):
+                try:
+                    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    recycle = time.time() - lock.stat().st_mtime > _SPAWN_LOCK_STALE
+                    if not recycle:
+                        # An empty/unreadable PID does not prove death. O_EXCL
+                        # publishes the file before the PID write; treating an
+                        # empty file as abandoned once produced 2 daemons for
+                        # 12 concurrent callers. Unknown owners still expire.
+                        try:
+                            old_pid = int(lock.read_text(encoding="utf-8").strip())
+                        except (ValueError, OSError):
+                            old_pid = 0
+                        recycle = old_pid > 0 and not _pid_alive(old_pid)
+                    if not recycle:
+                        return None
+                    # Check, unlink and O_EXCL replacement share one guard. A
+                    # second reclaimer cannot delete this caller's new claim.
+                    lock.unlink(missing_ok=True)
+                    continue
+                try:
+                    os.write(fd, str(os.getpid()).encode())
+                except OSError:
+                    pass
+                finally:
+                    os.close(fd)
+                return _SpawnLockClaim(lock, _spawn_lock_fingerprint(lock))
+    except (OSError, physical_input.PhysicalInputBusy):
         return None
-    except OSError:
-        return None
+    return None
+
+
+def _release_spawn_lock(claim: _SpawnLockClaim) -> None:
+    """Release only our failed launch, never a successor's replacement claim."""
     try:
-        os.write(fd, str(os.getpid()).encode())
-    except OSError:
+        with physical_input._ArbitrationGuard(claim.path):
+            if _spawn_lock_fingerprint(claim.path) == claim.fingerprint:
+                claim.path.unlink(missing_ok=True)
+    except (OSError, physical_input.PhysicalInputBusy):
         pass
-    finally:
-        os.close(fd)
-    return lock
+
+
+def _handoff_spawn_lock(claim: _SpawnLockClaim, *, instance_id: Optional[str]) -> bool:
+    """Keep the successful claim, with the verified daemon as its live owner."""
+    record = bridge_module.read_bridge_record()
+    if (
+        record is None
+        or record.get("host") != _get_driver_host()
+        or record.get("ws_port") != _get_driver_port()
+        or record.get("http_port") != _get_driver_port() + 1
+        or (instance_id is not None and record.get("instance_id") != instance_id)
+    ):
+        return False
+    try:
+        identity = bridge_module.process_identity(record["pid"])
+        if identity is None or not bridge_module._same_process(record, identity):
+            return False
+        with physical_input._ArbitrationGuard(claim.path):
+            if _spawn_lock_fingerprint(claim.path) != claim.fingerprint:
+                return False
+            # Atomic publication preserves the original owner if writing fails;
+            # readers can never interpret a partially written daemon PID.
+            _atomic_write_bytes(claim.path, str(record["pid"]).encode())
+        return True
+    except (OSError, RuntimeError):
+        # Identity-unavailable and write errors retain the original claim and
+        # its bounded expiry. Neither authorizes dropping startup protection.
+        return False
+
+
+def _wait_for_spawned_bridge(
+    claim: Optional[_SpawnLockClaim], *, instance_id: Optional[str],
+) -> bool:
+    deadline = time.monotonic() + 8
+    ready = False
+    while time.monotonic() < deadline:
+        ready = _port_open(_get_driver_host(), _get_driver_port() + 1)
+        if ready and (claim is None or _handoff_spawn_lock(claim, instance_id=instance_id)):
+            return True
+        # BrowserBridge starts HTTP before main publishes bridge.pid. Keep the
+        # claim while waiting for the matching record, including on cold starts.
+        time.sleep(0.25)
+    # The public result still describes HTTP readiness. An unverifiable record
+    # leaves the MCP-owned claim to expire instead of spawning a rival daemon.
+    return ready
 
 
 def spawn_bridge_daemon(*, reset_spawn_lock: bool = False) -> bool:
@@ -1393,13 +1457,8 @@ def spawn_bridge_daemon(*, reset_spawn_lock: bool = False) -> bool:
     recycled, taking the bridge (and its bound ports) down with them.
     """
     _get_driver_port()
-    if reset_spawn_lock:
-        try:
-            _spawn_lock_path().unlink(missing_ok=True)
-        except OSError:
-            pass
-    lock = _acquire_spawn_lock()
-    if lock is None:
+    claim = _acquire_spawn_lock(reset=reset_spawn_lock)
+    if claim is None:
         # Another instance is spawning. Wait for its daemon rather than starting
         # a second one that will only lose the port bind.
         deadline = time.monotonic() + 10
@@ -1410,27 +1469,21 @@ def spawn_bridge_daemon(*, reset_spawn_lock: bool = False) -> bool:
         return False
     ok = False
     try:
-        ok = _spawn_bridge_daemon_locked()
+        ok = _spawn_bridge_daemon_locked(claim=claim)
         return ok
     finally:
-        # Only release on failure. Releasing after a success would let the next
-        # caller — whose own port check can still be failing, since a freshly
-        # spawned daemon needs a moment to bind — win the lock and spawn a
-        # duplicate. On success the lock is left to expire via _SPAWN_LOCK_STALE,
-        # by which point the port is up and nobody needs to spawn at all.
+        # Retain successful claims, but let a verified daemon's death recycle
+        # them immediately even while the spawning MCP process remains alive.
         if not ok:
-            try:
-                lock.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _release_spawn_lock(claim)
 
 
-def _spawn_bridge_daemon_locked() -> bool:
+def _spawn_bridge_daemon_locked(*, claim: Optional[_SpawnLockClaim] = None) -> bool:
     # Re-check under the lock: a daemon may have come up between the caller's
     # port check and our acquiring the lock, and spawning now would just create
     # the duplicate the lock exists to prevent.
     if _port_open(_get_driver_host(), _get_driver_port() + 1):
-        return True
+        return claim is None or _wait_for_spawned_bridge(claim, instance_id=None)
     # -u: unbuffered, so daemon tracebacks reach bridge.log immediately
     # instead of dying in a block buffer that never flushes.
     # Prefer pythonw.exe on Windows: it's the GUI-subsystem interpreter with no
@@ -1472,12 +1525,7 @@ def _spawn_bridge_daemon_locked() -> bool:
             subprocess.Popen(cmd, **kwargs)  # noqa: S603
     except OSError:
         return False
-    deadline = time.monotonic() + 8
-    while time.monotonic() < deadline:
-        if _port_open(_get_driver_host(), _get_driver_port() + 1):
-            return True
-        time.sleep(0.25)
-    return False
+    return _wait_for_spawned_bridge(claim, instance_id=instance_id)
 
 
 # --- Driver handle and session cache -----------------------------------------
@@ -4580,7 +4628,14 @@ def console_capture_stop(
 _RENDER_PROBE_JS = """
 (() => {
   const body = document.body;
-  const text = body ? String(body.innerText || '').trim() : '';
+  let text = body ? String(body.innerText || '').trim() : '';
+  // The extension's own visible badge is not application content. Count
+  // without mutating the live DOM or subtracting a hidden badge's label.
+  const indicator = body ? body.querySelector('#btap-indicator') : null;
+  if (indicator && indicator.checkVisibility({visibilityProperty: true})) {
+    const label = String(indicator.innerText || '').trim();
+    if (label) text = text.replace(label, '').trim();
+  }
   const html = body ? String(body.innerHTML || '') : '';
   const loading = !!document.querySelector(
     '[aria-busy="true"], [data-loading="true"], [data-testid*="loading" i]'
@@ -4603,7 +4658,11 @@ def _page_render_state(driver: Any, session_id: Optional[str], timeout: float) -
     if not callable(execute):
         return None
     try:
-        response = execute(_RENDER_PROBE_JS, timeout=timeout, session_id=session_id)
+        # This optional built-in read must not keep the tab reserved after
+        # scan_page has returned its content without a readiness verdict.
+        response = execute(
+            _RENDER_PROBE_JS, timeout=timeout, session_id=session_id, read_only_probe=True,
+        )
     except Exception:
         # scan_page's primary contract is the page content. An optional probe
         # must never turn a successful read into a transport failure.
@@ -4663,6 +4722,8 @@ def _page_render_state(driver: Any, session_id: Optional[str], timeout: float) -
         "The result also includes render_state/content_ready when the page can be probed: "
         "shell_only or hydrating means the SPA has not produced reliable content yet; retry "
         "scan_page or wait_for before treating an empty result as a real empty page. "
+        "A timed-out built-in readiness probe releases its tab reservation; missing render "
+        "fields mean readiness is unknown. "
         "Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
     )
 )
@@ -4802,6 +4863,7 @@ _WAIT_POLL_INTERVAL_SECONDS = 0.1
 
 def _poll_wait_condition(
     script: str, target_session: Optional[str], timeout: float, *, read_only_probe: bool = False,
+    probe: Optional[Callable[[float], dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], Optional[str], dict[str, Any], int]:
     """Poll synchronously; a delayed reply is collected without replaying JS."""
     started = time.monotonic()
@@ -4843,7 +4905,7 @@ def _poll_wait_condition(
                 if first_budget <= _WAIT_RESULT_MARGIN_SECONDS:
                     time.sleep(remaining)
                     break
-                response = exec_js(
+                response = probe(call_timeout) if probe is not None else exec_js(
                     script, session_id=target_session, timeout=call_timeout, read_only_probe=read_only_probe,
                 )
             if response is not None:
@@ -4868,7 +4930,7 @@ def _poll_wait_condition(
                     "retry_safe": False,
                     "poll_with": "get_execute_js_result",
                 }
-        if info.get("met"):
+        if info.get("met") or info.get("terminal"):
             break
         remaining = max(0.0, deadline - time.monotonic())
         if remaining > 0:
@@ -4882,14 +4944,17 @@ def _poll_wait_condition(
     description=(
         "Wait until a condition holds on the page, then return. Use this instead of "
         "polling scan_page (each scan re-serializes the whole DOM). Exactly one of "
-        "selector / text / url_pattern / js must be given: selector waits for a CSS "
-        "match, text for a substring in body text, url_pattern for a regex on the URL, "
+        "selector / text / url_pattern / js must be given: selector waits for a CSS or "
+        "structured-locator match, including nested same-origin/cross-origin iframe paths. "
+        "Role locators exclude hidden and inert controls; "
+        "disabled visible controls can still be observed. Text waits for a substring "
+        "in body text, url_pattern for a regex on the URL, "
         "js for a JS expression to become truthy. Caller js is evaluated repeatedly and can "
         "have side effects; use a read-only predicate. The server schedules short synchronous "
         "page checks under one deadline. A delayed reply returns its operation_id for "
         "get_execute_js_result; it is never replayed while pending. Timed-out "
-        "selector/text/URL checks can release the tab while keeping that receipt: "
-        "reservation_held=false permits another command. Caller-provided js stays reserved; "
+        "top-document selector/text/URL checks can release the tab while keeping that receipt: "
+        "reservation_held=false permits another command. Framed checks and caller-provided js may stay reserved; "
         "when reservation_held is true or unknown, collect the original operation first."
     )
 )
@@ -4918,11 +4983,18 @@ def wait_for(
     normalized_selector = (
         normalize_locator(selector) if kind == "selector" and selector is not None else None
     )
+    framed = isinstance(normalized_selector, dict) and bool(normalized_selector.get("frame"))
+    deadline = time.monotonic() + timeout
     driver = require_driver()
-    ensure_sessions()
+    if not framed:
+        ensure_sessions()
     prev_default = driver.default_session_id
     target_session = None
-    if session_id is not None:
+    if framed:
+        target_session = _resolve_page_input_session(
+            driver, session_id, deadline=deadline, operation="wait_for",
+        )
+    elif session_id is not None:
         target_session = switch_session(session_id=session_id)
     # Only condition evaluation runs in-page; scheduling belongs to the server
     # so background-tab timer throttling cannot strand a page promise.
@@ -4960,8 +5032,25 @@ def wait_for(
     }})()
     """
     try:
+        frame_probe = None
+        if framed and isinstance(normalized_selector, dict) and target_session is not None:
+            frame_payload = frame_locator_payload(normalized_selector, action="query", gone=gone)
+
+            def frame_probe(call_timeout: float) -> dict[str, Any]:
+                data = _call_frame_locator(
+                    frame_payload, str(target_session),
+                    min(deadline, time.monotonic() + call_timeout),
+                )
+                if data.get("status") == "stale_extension":
+                    data = {"met": False, "locator_status": "stale_extension",
+                            "error": data.get("next_action"), "terminal": True}
+                return {"data": data}
+
         info, last_error, pending, waited_ms = _poll_wait_condition(
-            script, target_session, timeout, read_only_probe=kind != "js",
+            script, target_session,
+            max(0.0, deadline - time.monotonic()) if framed else timeout,
+            read_only_probe=kind != "js",
+            **({"probe": frame_probe} if framed else {}),
         )
     finally:
         if session_id is not None:
@@ -5781,7 +5870,9 @@ def get_execute_js_result(
 @mcp.tool(description=(
     "Raw CDP can cause side effects in a tab, extension target or the entire browser profile. "
     "Choose session_id (client:tabId), tab_id (number or composite), extension_id or target_id "
-    "deliberately. Listed high-risk methods are blocked before dispatch unless mode=lab "
+    "deliberately. A cross-process iframe can use target_id from DOM.describeNode.frameId "
+    "of its exact parent-page element; verify the frame origin and control before input. "
+    "Listed high-risk methods are blocked before dispatch unless mode=lab "
     "AND operator env BROWSERTAP_ALLOW_UNSAFE_CDP=1; safe always blocks them "
     "(raw_cdp_blocked, delivery_state=undelivered, retry_safe=false, retryable=false). This guard prevents "
     "common destructive calls; allowed CDP/JavaScript can still change pages or profile state. Inspect state "
@@ -6358,6 +6449,114 @@ def _page_type_target_info(
     return raw
 
 
+def _call_frame_locator(
+    payload: dict[str, Any], session_id: str, deadline: float,
+) -> dict[str, Any]:
+    """One parent-tab reservation covers every renderer visited by the locator."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("iframe operation deadline exhausted before dispatch")
+    client_id, tab_id = _split_session_target(session_id)
+    ext_cmd = getattr(require_driver(), "ext_cmd", None)
+    try:
+        if not callable(ext_cmd):
+            raise RuntimeError("Unknown command: frame_locator")
+        response = ext_cmd(
+            {**payload, "tabId": tab_id, "timeoutMs": max(1, int(remaining * 1000)),
+             "deadlineEpochMs": int(time.time() * 1000 + remaining * 1000)},
+            client_id=client_id, timeout=remaining,
+        )
+        data = _extension_data(response)
+        if data.get("ok") is False:
+            raise PageExecutionError(data)
+        return data
+    except Exception as exc:
+        if not _unknown_command_error(exc):
+            raise
+        return {
+            "status": "stale_extension", "input_dispatched": False,
+            "required_capability": "frame_locators", "next_action": "reload_extension",
+        }
+
+
+def _run_frame_input(
+    selector: dict[str, Any], action: str, session_id: str, deadline: float,
+    commands: list[dict[str, Any]], *, text: str = "", clear: bool = False,
+    offset_x: Optional[float] = None, offset_y: Optional[float] = None,
+) -> dict[str, Any]:
+    point = "x" in selector
+    payload = frame_locator_payload(
+        selector, action=action, clear=clear,
+        offset_x=0 if offset_x is None else offset_x,
+        offset_y=0 if offset_y is None else offset_y,
+        center_x=not point and action == "click" and offset_x is None,
+        center_y=not point and action == "click" and offset_y is None,
+    )
+    payload["commands"] = commands
+    payload["submitDelayMs"] = _XTERM_SUBMIT_DELAY_MS
+    if action == "click":
+        with _PAGE_CHALLENGE_LOCK:
+            prior = _PAGE_CHALLENGE_ATTEMPTS.get(session_id)
+        if prior and _blocked_page_challenge_attempts(session_id, prior[0]) is not None:
+            payload["blockedMarker"] = prior[0]
+    raw = _call_frame_locator(payload, session_id, deadline)
+    out: dict[str, Any] = {
+        "status": raw.get("status", "error"), "session_id": session_id,
+        "input_mode": "cdp", "foreground_changed": False,
+        "target": {"selector": selector},
+        "input_dispatched": raw.get("input_dispatched", False),
+    }
+    for key in ("result", "matches", "stage", "next_action", "required_capability",
+                "input_commands_dispatched"):
+        if key in raw:
+            out[key] = raw[key]
+    for source, destination in (
+        ("frameTransform", "frame_transform"), ("occludedBy", "occluded_by"),
+        ("activeElement", "active_element"), ("focusConfirmed", "focus_confirmed"),
+        ("previousActiveElement", "previous_active_element"),
+    ):
+        if source in raw:
+            out[destination] = raw[source]
+    if action == "type":
+        out["target_kind"] = raw.get("targetKind", "element")
+        # A partial sequence (e.g. navigation after insertText) is not proof of
+        # how many characters landed. Never invite replay by reporting zero.
+        out["typed_chars"] = len(text) if out["status"] == "success" else (
+            None if out["input_dispatched"] else 0
+        )
+        return out
+    out["target"].update({
+        **({"x": raw["x"], "y": raw["y"]} if "x" in raw and "y" in raw else {}),
+        "offset_x": offset_x, "offset_y": offset_y,
+        "hit_verified": bool(raw.get("hitVerified")), "scrolled_into_view": False,
+    })
+    marker = raw.get("beforeMarker")
+    if out["status"] == "challenge_stalled":
+        out.update(challenge_detected=True, attempts=_blocked_page_challenge_attempts(session_id, str(marker)))
+    elif out["status"] != "success":
+        out.update(challenge_detected=False, attempts=0)
+    elif raw.get("challenge_check", {}).get("enforced"):
+        after = raw.get("afterMarker")
+        out["challenge_check"] = raw["challenge_check"]
+        if after and after == marker:
+            stalled, attempts = _record_unchanged_page_challenge(session_id, str(after))
+            out.update(challenge_detected=True, attempts=attempts)
+            if stalled:
+                out["status"] = "challenge_stalled"
+        elif after:
+            _prime_page_challenge(session_id, str(after))
+            out.update(challenge_detected=True, attempts=0)
+        else:
+            _clear_page_challenge(session_id)
+            out.update(challenge_detected=False, attempts=0)
+    else:
+        out.update(challenge_detected=None, attempts=None,
+                   challenge_check=raw.get("challenge_check", {"enforced": False}))
+    if out["status"] == "challenge_stalled":
+        out["next_action"] = "Stop automatic attempts and let the user take over the same tab."
+    return out
+
+
 # --- Tools: page input (click, type, press, drag, upload) --------------------
 @mcp.tool(
     description=(
@@ -6377,7 +6576,10 @@ def _page_type_target_info(
         "non-identity CSS-transformed iframe returns status 'unsupported_frame_transform' without "
         "dispatch; query/type paths remain available. A structured selector may use "
         "{'selector': '#pay', 'frame': [...]} as a CSS alias, or {'frame': [...], 'x': 20, 'y': 30} "
-        "to click a point inside the final same-origin frame; frame-point mode is not hit-tested."
+        "to click a point inside the final same-origin or cross-origin frame; frame-point mode is not hit-tested. "
+        "Nested frame locators also support OOPIFs. Framed clicks do not scroll automatically and "
+        "check every parent for obstruction. A binding invalidated during the call returns "
+        "stale_frame; inspect input_dispatched before recovery and never replay partial or unknown input."
     )
 )
 def page_click(
@@ -6432,6 +6634,13 @@ def page_click(
             deadline=deadline,
             operation="page_click",
         )
+        normalized = normalize_locator(selector)
+        if isinstance(normalized, dict) and normalized.get("frame"):
+            return _run_frame_input(
+                normalized, "click", target_session, deadline,
+                click_commands(0, 0, button=button, clicks=clicks),
+                offset_x=offset_x, offset_y=offset_y,
+            )
         resolver_x = 0 if offset_x is None else offset_x
         resolver_y = 0 if offset_y is None else offset_y
         resolver_budget = max(0.0, deadline - time.monotonic())
@@ -6636,7 +6845,11 @@ def page_click(
         "Optionally clear and submit a key. Missing, ambiguous, or unusable targets dispatch nothing. "
         "CSS/structured matches are reduced to visible, interactable candidates so hidden templates "
         "do not win; the resulting input event is trusted in the page. "
-        "The result includes active_element and focus_confirmed so omitted-selector input is auditable."
+        "The result includes active_element and focus_confirmed so omitted-selector input is auditable. "
+        "Nested frame locators support same-origin, cross-origin and OOPIF targets. A call retains "
+        "the selected document and element, then checks the focus chain before each input. "
+        "Navigation or replacement returns stale_frame; inspect input_dispatched and do not replay "
+        "partial or unknown input. A new independent call can locate the new document."
     )
 )
 def page_type(
@@ -6698,6 +6911,12 @@ def page_type(
         resolution_budget = max(0.0, deadline - time.monotonic())
         if resolution_budget <= 0:
             raise TimeoutError("page_type deadline exhausted before target resolution")
+        if isinstance(selector, dict) and selector.get("frame"):
+            return _run_frame_input(
+                selector, "type", target_session, deadline,
+                type_commands("", text, select_all=clear, submit_key=submit_key or None)[1:],
+                text=text, clear=clear,
+            )
         target_info = _page_type_target_info(
             selector,
             clear,

@@ -18,35 +18,33 @@ BTAP 连接的是真实浏览器 profile，不是临时沙箱。只连接允许�
 
 ## 60 秒上手
 
-共三步，手动加载扩展可能需要超过一分钟。
+**Claude Code 和 Codex 推荐安装插件**，一次接入 MCP 服务和调用方 Skills。
+先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)；首次下载依赖和手动加载扩展可能超过一分钟。
 
-1. **安装软件包**并定位扩展目录：
+1. **给 agent 安装 BrowserTap。** 按客户端选择：
 
+   Claude Code：
    ```bash
-   python -m venv .venv
-   ./.venv/bin/python -m pip install browsertap-mcp
-   ./.venv/bin/browsertap extension-path
+   claude plugin marketplace add LinVireo/browsertap-mcp
+   claude plugin install browsertap-mcp@browsertap
    ```
 
-   Windows PowerShell 改用 `.\.venv\Scripts\python.exe` 和
-   `.\.venv\Scripts\browsertap.exe`。普通页面和浏览器工具不需要桌面依赖；
-   受限物理兜底和显式 Windows 原生文件框工具需要在同一环境运行 `pip install "browsertap-mcp[desktop]"`。
-
-2. **手动加载扩展。** 打开 `chrome://extensions`，开启**开发者模式**，选择
-   **加载已解压的扩展程序**，选中刚打印的目录。页面工具需要一个正常的 `http://` 或 `https://` 页面。
-
-3. **连接 MCP 客户端**到已安装的可执行文件。以 Claude Code 为例：
-
+   Codex：
    ```bash
-   claude mcp add browsertap -- "$PWD/.venv/bin/browsertap"
+   codex plugin marketplace add LinVireo/browsertap-mcp
+   codex plugin add browsertap-mcp@browsertap
    ```
 
-   其他客户端及 Windows 路径见[快速开始](#快速开始)。使用明确的可执行文件路径时，
-   不需要先激活虚拟环境。
+2. **手动加载浏览器扩展。** 新开 agent 会话，让它调用 `get_setup_status` 获取
+   `extension_path`。打开 `chrome://extensions`，开启**开发者模式**，选择
+   **加载已解压的扩展程序**，选中该目录。Edge 和 Opera 分别使用 `edge://extensions`
+   和 `opera://extensions`。
 
-首次可问 agent：**列出已打开的标签页，再总结我选定的页面，不要导航或关闭它。**
-连接失败或没有预期标签页时，在安装环境中运行 `browsertap doctor`，按其 `action` 处理。
-下文为简洁使用 `browsertap` 短命令；若未加入 `PATH`，请使用其完整路径。
+3. **开始浏览器任务：**“列出已打开的标签页，再总结我选定的页面，不要导航或关闭它。”
+
+[插件安装与更新指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/PLUGINS.zh-CN.md)
+也说明了如何通过插件环境运行 `browsertap doctor`。
+Cursor、Claude Desktop 等其他客户端使用下方[通用 MCP 安装方式](#快速开始)，已有 MCP 配置继续可用。
 
 ## 按读者找文档
 
@@ -64,28 +62,23 @@ BTAP 连接的是真实浏览器 profile，不是临时沙箱。只连接允许�
 
 - **读取和检查页面**：简化 HTML/文本、JavaScript、页面截图，以及有容量限制的网络和 console 捕获。
 - **后台页面交互**：`page_click`、`page_type`、`page_press`、`page_drag` 派发受信任的 CDP 输入，不移动桌面光标。
+- **填写嵌套表单**：定位、等待、点击和填写同源、跨域 iframe 中的控件。
 - **复用现有 profile**：带登录态的下载、Cookies、storage、书签、扩展管理和临时站点权限。
 - **处理中断**：显式对话框策略、条件等待，以及用于补查延迟结果的操作句柄，避免重复执行。
 - **并行任务隔离**：显式浏览器/标签页目标和按所有权清理。不同标签页可并行，但同一 profile 的状态不隔离。
 - **多浏览器共存**：同一 bridge 可连接 Chrome、Edge、Opera 和多个 profile；部分浏览器级操作不需要页面标签页。
 
-## 0.5.2 已知限制
+## 常见用途
 
-2026-09-12 的真实浏览器验证暴露了以下尚未解决的问题：
+- **读取已登录网站**：总结选定页面、提取表格，或沿页面链接继续收集资料。
+- **操作网页表单**：在普通页面、SPA 和嵌套 frame 中搜索、筛选、填写控件。
+- **收集文件与检查页面**：下载报告、保存截图，检查网络请求和 console 消息。
 
-- **原生文件框**：自动取消未成功。真实 Chrome 文件框的跨进程 owner 会导致检查被拒绝，
-  无法取得取消票据。用户手动关闭不算自动恢复；普通上传用 `upload_files`，无需弹出文件框。
-- **JavaScript 超时**：返回 `exec_timeout` 后可能提前释放标签页占用，旧脚本仍继续运行并在
-  稍后修改页面。失败回执或 `reservation_held=false` 均不能证明执行已停止。
-- **sandbox iframe**：未包含 `allow-scripts` 的子 frame 可能使默认对话框策略准备返回
-  `dialog_scope_setup_failed`，连带阻断本可执行脚本的主页面。
-- **扩展卸载**：`uninstall_extension` 的两种确认设置都曾被 Chrome 的用户手势要求拒绝，
-  可能仍需用户手动移除。
+具体步骤见[使用指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/USAGE.zh-CN.md)，
+参数见[工具列表](#工具列表)。
 
-离线 CI 通过不能证明这些真实浏览器路径成功，也不能证明可无人值守恢复。这些修复留待后续版本；
-现有处理方式见[故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
-
-## 能力分层
+<details>
+<summary>能力分层与工具结果</summary>
 
 BTAP 把能力分成三层，让 agent 按任务选择最窄、最稳定的接口：
 
@@ -113,17 +106,7 @@ payload 保留在 `legacy`，`error`/`error_code`、`retryable`、`target` 和 `
 `legacy` 读取，顶层仅保留少量标量兼容字段。重试以 envelope 的裁定为准：明确的
 `retry_safe=false` 或可能已经执行的证据优先于连接错误的默认重试提示。
 
-## 什么时候该用别的
-
-需要复用现有 Chromium profile、并默认在后台标签页工作的任务适合 BTAP。
-本项目不是 headless 测试运行器，不支持 Firefox/WebKit，也不提供通用桌面自动化。
-
-隔离浏览器测试或基于无障碍快照的流程，可对照
-[Playwright MCP](https://github.com/microsoft/playwright-mcp)；
-以 DevTools 调试和性能分析为主的任务，可对照
-[Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp)。
-复用真实浏览器并非 BTAP 独有，应按任务和所需 API 选择。
-BTAP 注册全部 51 个工具，需要缩小工具面时由客户端筛选。
+</details>
 
 ## 环境要求
 
@@ -131,8 +114,7 @@ BTAP 注册全部 51 个工具，需要缩小工具面时由客户端筛选。
 - Chrome、Edge 或 Opera
 - Linux、macOS 或 Windows。普通页面、浏览器和 CDP 工具不需要操作系统级输入；只有
   仅限 lab 的 `resolve_leave_dialog` 物理兜底及 Windows 原生文件框工具需要可用的桌面会话
-- 运行中的 Chromium 用户会话，而不是隔离的 headless 容器。**故意不提供 Docker 镜像**：
-  服务接的是**你自己**已登录的 Chrome，扩展要人手动加载一次
+- 已加载 BrowserTap Bridge 扩展的 Chromium 用户会话
 - Claude Code 或其他 MCP 客户端
 
 ## 快速开始
@@ -354,6 +336,8 @@ BTAP 首次使用时创建 `~/.browsertap/bridge-token`，bridge 和所有 MCP �
 
 ### Agent skill（可选）
 
+Claude Code 和 Codex 插件会自动加载这两份 Skills。本节面向采用通用 MCP 安装方式的客户端。
+
 BTAP 随包发布两份 skill，用来告诉调用方的 agent 该怎么驱动它。它们就是普通 Markdown，
 **完全可选** —— 不装也不影响任何工具。它们补的是工具描述装不下的那部分判断：先调哪个工具、
 什么时候必须带 `session_id`、哪些标签页属于用户因此不能碰。
@@ -379,6 +363,9 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 与随包原件比对，并指出是哪一份漂了。
 
 ### 升级
+
+插件用户请按[插件更新指南](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/PLUGINS.zh-CN.md)操作。
+以下步骤适用于 Python 包安装。
 
 以下版本标记随源码维护，不代表开发工作树已经发布。使用新工具签名或 0.5.0 迁移说明前，
 先核对安装包和对应 release tag。
@@ -641,6 +628,8 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 
 - **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`。后台标签页可能报告 viewport 高度为 0；普通 DOM/文本/API 工作仍可继续，只有明确需要视觉/布局保真时才调用 `activate_tab`;页面可探测时还会返回 `render_state`/`content_ready`，区分真实正文与 loading、hydrating、shell-only 的 SPA；空壳结果应先重试或使用 `wait_for`。`cutlist`（默认开）会折叠重复的长列表，并为每个被折叠的容器返回一个由该容器自身结构推导出来的 CSS selector。内置扫描不写页面属性、id 或 `window` 全局变量；可选的 `extra_js` 执行调用方代码，可以修改页面或发送请求
   - `session_id`(string,可选)、`text_only`(boolean,可选):默认 `false`、`cutlist`(boolean,可选):默认 `true`,把重复列表裁成少量样本、`maxchars`(integer,可选):默认 `35000`、`instruction`(string,可选)、`extra_js`(string,可选)、`timeout`(number,可选):默认 `15`
+  可选的内置就绪探测超时后会释放自身标签占用。缺少 `render` 字段表示就绪状态未知，应使用 `wait_for` 等待目标控件。
+
 - **wait_for** —— 等待指定条件成立后返回。与轮询 `scan_page` 相比，该工具避免重复序列化完整 DOM。服务端在同一截止时间内调度短同步检查，避免后台页面定时器节流。四个条件必须且只能提供一个；`selector` 接受 CSS 字符串或“后台页面输入”一节所述的结构化 locator。调用方 `js` 会重复求值，可能产生副作用，应使用只读条件表达式。超时带 `operation_id` 时保留原检查的收据。selector/text/URL 只读探针超时后可以释放标签页而保留收据：`reservation_held=false` 时可执行其他命令，并在同一 MCP 会话用 `get_execute_js_result` 领取迟到回包。调用方提供的 `js` 继续保守占用；`reservation_held` 为 true 或未知时，持续查询原操作，直到它结案或释放占用。未完成探针不重放
   - `selector`(string/object,可选):CSS 或结构化 locator、`text`(string,可选)、`url_pattern`(string,可选)、`js`(string,可选)、`gone`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`session_id`(string,可选)
 - **wait_for_url** —— 等导航落定:阻塞到标签页 URL 匹配 `url_pattern`(正则,或纯子串,两种都试),并且在 `wait_ready=false` 之外还要求 `document.readyState` 为 `complete`,然后返回最终的 `url`、`title` 和 `ready_state`。在会触发跳转的点击或 `open_url` 之后用它;`wait_for(url_pattern=...)` 只查 URL,新文档还是空白的时候就可能返回。使用与 `wait_for` 相同的有界同步检查和收据恢复流程；未完成探针返回 `reservation_held=false` 时不再阻塞标签页，同一 MCP 会话仍可通过 `get_execute_js_result` 领取迟到回包
@@ -649,7 +638,7 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
   - `to`(string,可选):默认 `bottom`,也可传 `top`、像素偏移或要滚到可见的 CSS 选择器、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
 - **execute_js** —— 在页面中执行 JavaScript 并返回结果。`timeout` 是覆盖对话框策略设置、monitor 快照、投递/重试、导航检查和清理的单一总 deadline；显式 `session_id` 在这些浏览器往返中保持不变，不依赖进程默认目标。真正的长任务可设 `wait=false`：扩展确认收到后，BTAP 立即返回 `status="in_progress"` 和 `operation_id`，后续用 `get_execute_js_result` 领取结果，不得重放脚本；后台模式有意不支持 `dialog_policy="manual"`。脚本导致页面导航时返回 `status="navigated"` 和 `landed_url`，而不是 `success`，且脚本返回值不可用。`dialog_policy` 控制 `alert`/`confirm`/`prompt`：`dismiss`（默认）和 `accept` 直接应答并记录到 `dialogs`；`manual` 只用于同步调用，保持原生对话框打开、暂停脚本并返回 `blocked_by_dialog`，后续由 `handle_dialog` 处理。标签页已有 manual 执行暂停时立即返回 `busy`。等待页面状态应使用 `wait_for`/`wait_for_url`，不要在 `execute_js` 中嵌入延迟 `setTimeout` 或 sleep Promise。JSON 编码后的 `js_return` 超过 24 KiB UTF-8 内联上限时，BTAP 会把完整值写入私有临时 JSON 文件，并返回 `result_file`、`result_bytes`、`result_sha256` 和 `result_format`，不再返回会被截断的半截内容
   - 遇到 `Cannot access contents of the page` 先分流再重试：如果脚本尝试了 `window.open` 或导航，使用 `open_new_tab`（Chrome 没有用户手势时可能拦截）；如果是当前 tab 本身不允许注入，换可脚本化的普通 `http/https` tab 或使用支持的 CDP 路径。不要把这句错误直接理解成“当前页面读不到”。
-  - `timeout` 不会取消已派发的 JavaScript。未包含 `allow-scripts` 的 sandbox 子 iframe 还可能使主页面的默认对话框策略准备返回 `dialog_scope_setup_failed`；见 [0.5.2 已知限制](#052-已知限制)。
+  - `timeout` 不会取消已派发的 JavaScript。超时恢复与 frame 准备错误的处理见[故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
   - `script`(string)、`session_id`(string,可选)、`no_monitor`(boolean,可选):默认 `false`、`timeout`(number,可选):默认 `15`、`dialog_policy`(string,可选):`dismiss`(默认)、`accept` 或 `manual`、`wait`(boolean,可选):默认 `true`
   - 各通道使用相同结果转换：`undefined` 和非有限数变为 `null`，BigInt/symbol 变为字符串，DOM、Error 和函数变为可读值。循环和深度 6 有标记；迭代结果最多保留 200 项并附截断标记。`result_file` 保存完整的**转换后**值，包括这些标记。
   - 用户代码开始执行后，脚本错误不会触发第二次执行。复杂 async body 使用显式 `return`，推荐 `(async () => { /* work */ return value; })()`；含糊的 body 可能返回 `null`。`await(expr)` 可能被解析成调用名为 `await` 的普通函数，需要消除歧义时使用上述 async IIFE。
@@ -687,9 +676,28 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 失效句柄没有同一 tab 被替换的证据时会被拒绝。另一 MCP 调用正在使用该标签页时可能返回
 `target_busy`；作用范围见上方并行任务说明。
 
-`selector` 保持兼容 CSS 字符串,也可传结构化 locator 对象,主定位键必须且只能有一个:`css`、`role`(可带 `name`)、`text` 或 `label`;在 locator 对象内部,`selector` 是兼容旧调用的 CSS 别名。`exact` 控制 role/name 或 text 精确匹配;`frame` 逐层进入同源 iframe;`shadow` 逐层进入开放 Shadow DOM。仅点击支持 frame 内点位形状 `{"frame":[...],"x":20,"y":30}`,其中 x/y 是最终同源 iframe 视口内的 CSS 坐标,执行前会累加 frame 偏移。零匹配返回 `not_found`,多匹配返回 `ambiguous`,跨域 iframe/关闭 shadow root 会明确上报且不派发输入。selector 点击若穿过带非恒等 CSS transform 的 iframe 链,会返回 `unsupported_frame_transform` 并保持零派发;查询/输入路径不受影响。
+role 定位排除隐藏、`aria-hidden` 和 inert 控件，包括 SPA 保留的未显示表单模板。
+可见 disabled 控件仍可满足查询；CSS 查询保持 DOM 存在性语义。多个可见 role 匹配仍返回 `ambiguous`。
 
-- **page_click** —— 点 CSS/结构化 `selector` 或视口坐标。定位方式二选一。selector 模式中,未提供 offset 的轴取元素中心;显式提供的 `offset_x`/`offset_y` 则从元素左上角按对应轴计算。`{"frame":[...],"x":20,"y":30}` 是 frame 内点位模式:进入列出的同源 iframe,累加偏移后按顶层文档 CSS 坐标派发;它指向像素而非元素,因此不做命中判定。缺失、歧义、不可交互、跨域 iframe、关闭 shadow root 或带 CSS transform 的 iframe 都返回结构化状态且不派发;后者状态为 `unsupported_frame_transform`。selector 模式还会在派发前在页面里做一次命中判定:在折叠线以下就先滚动进视口(`scrolled_into_view`),那个像素属于别的元素时返回 `obscured` 并用 `occluded_by` 指出遮挡者,滚动后仍不在屏幕上返回 `outside_viewport` —— 这两种情况都不点,因为派发出去的点击会落在别的元素上并报成功。命中通过的点击带 `hit_verified: true`。坐标模式不做命中判定:坐标指的是像素,不是元素——而且从 `capture_page_screenshot` 上量到的像素是*设备*像素,得先除以 `devicePixelRatio`。验证码仍有 `challenge_detected`、`attempts` 与 `challenge_stalled` 上限
+`page_click`、`page_type` 和 `wait_for` 支持嵌套的同源、跨域 iframe，
+包括独立渲染进程中的 iframe（OOPIF）：
+
+```python
+control = {"frame": ["#outer", "#inner"], "css": "#control"}
+wait_for(selector=control, session_id=session_id)
+page_type("example", selector=control, clear=True, session_id=session_id)
+page_click(selector={"frame": ["#outer", "#inner"], "role": "button", "name": "Search"}, session_id=session_id)
+```
+
+每次调用绑定实际文档和元素；绑定后导航或替换会返回 `stale_frame`，
+下一次独立调用可以重新定位新文档。恢复前检查 `input_dispatched`：
+部分输入已派发或结果未知时，先检查状态，不重放整段输入。
+iframe 等待带未完成的 `operation_id` 时可能仍持有标签页占用，先领取原结果。
+旧扩展返回 `stale_extension` 和 `next_action=reload_extension`。
+
+`selector` 保持兼容 CSS 字符串，也可传结构化 locator 对象；主定位键必须且只能有一个：`css`、`role`（可带 `name`）、`text` 或 `label`。对象内部的 `selector` 是 `css` 的兼容别名。`exact` 控制 role/name 或 text 精确匹配；`frame` 逐层进入 iframe，支持跨源和跨渲染进程；`shadow` 进入开放 Shadow DOM。仅点击支持 `{"frame":[...],"x":20,"y":30}`：坐标来自最终 iframe 视口的 CSS 像素，执行前换算到顶层文档。零匹配返回 `not_found`，多匹配返回 `ambiguous`，关闭的 shadow root 仍不可访问。frame 或其祖先带非恒等 transform、zoom 或 perspective 时，framed click 返回 `unsupported_frame_transform` 且不派发输入；查询和键盘输入仍可用。
+
+- **page_click** —— 点 CSS/结构化 `selector` 或视口坐标，两种方式只能选一种。selector 模式未提供 offset 的轴取元素中心；显式 `offset_x`/`offset_y` 从元素左上角计算。`{"frame":[...],"x":20,"y":30}` 指定最终 iframe 内的点，换算成顶层 CSS 坐标；点位模式不做命中判定。缺失、歧义、不可交互、关闭 shadow root 或不支持的 frame 变换均不派发输入。selector 模式检查元素及每层父 frame 的遮挡：返回 `obscured` 时用 `occluded_by` 指出遮挡者，视口外返回 `outside_viewport`。顶层元素可自动滚动（`scrolled_into_view`），iframe 点击不自动滚动。通过时带 `hit_verified: true`。截图使用设备像素，转为 CSS 坐标前需除以 `devicePixelRatio`。验证码仍有 `challenge_detected`、`attempts` 与 `challenge_stalled` 上限
   - `selector`(string/object,可选)、`x`(number,可选)、`y`(number,可选)、`offset_x`(number,可选)、`offset_y`(number,可选)、`button`(string,可选):默认 `left`、`clicks`(integer,可选):默认 `1`、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`
 - **page_type** —— 往 CSS/结构化 locator 选中的字段输入;省略 `selector` 时使用当前焦点。Xterm.js 自动改投 helper textarea;缺失、歧义、只读或不可输入目标不会收到文本/按键;旧 CSS 字符串非法时返回 `status="invalid_selector"`,不再裸抛 `SyntaxError`。定位结果带脱敏的 `active_element` 身份,并在尝试聚焦时带 `focus_confirmed`,所以省略 selector 的输入也可审计。`clear=true` 先选中已有内容,`submit_key` 事后按键
   - `text`(string)、`selector`(string/object,可选)、`clear`(boolean,可选):默认 `false`、`submit_key`(string,可选)、`session_id`(string,可选)、`timeout`(number,可选):默认 `15`

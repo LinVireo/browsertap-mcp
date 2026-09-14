@@ -162,8 +162,21 @@ finalizer 把旧证据归档到 `artifacts/archive/`，然后生成规范报告�
 `browsertap skill-path` 会打印存放目录（形如 `<name>/SKILL.md`）。`MANIFEST.in`
 的规则与 `pyproject.toml` 的 `package-data` 通配**两者都必需**：前者管 source archive，
 后者管 wheel；只写一处会得到「sdist 里有、wheel 里没有」，而 `pip install` 用的正是 wheel。
-`scripts/check_distribution.py` 要求两个归档里都有这两份文件，并拒绝归档中其他位置出现的
-`SKILL.md`。
+`scripts/check_distribution.py` 要求两个归档里都有这两份文件。源码包还包含根目录 `skills/`
+下的两份插件发现副本；其他调用方副本和私人 agent 配置会被拒绝。
+
+### 插件分发
+
+以 `src/browsertap_mcp/skills/` 为正本。修改公开 Skill 后运行
+`python -m scripts.sync_plugin_skills`；加 `--check` 可只检查漂移。插件回归测试要求副本逐字节一致。
+两种宿主清单都用 uv 启动插件自带源码，`scripts.versioning` 同步插件、Python 包和扩展的版本。
+公开元数据仅限 `.claude-plugin/`、`.codex-plugin/` 与 `.agents/plugins/marketplace.json`。
+
+运行 `python -m pytest tests/test_plugins.py tests/test_versioning.py
+tests/test_distribution_contract.py -q` 及两种宿主的清单校验。
+使用新构建的源码归档和临时宿主配置目录验证 marketplace 安装；开发工作区可能含私人
+`.mcp.json`、hooks 和 agent 指令，不能直接整体复制进插件缓存。
+宿主命令见[插件指南](docs/PLUGINS.zh-CN.md)。
 
 skill 管理器应**指向随包发布的那个目录**，不要复制文件。复制出来的副本在内容恰好一致期间
 看不出问题，之后就静默收不到更新 —— 哈希校验就是为了抓这种漂移。如果确实保留了副本，在加

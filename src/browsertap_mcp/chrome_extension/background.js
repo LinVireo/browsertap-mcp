@@ -5,9 +5,10 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = '1b751886b135aa05';
+const BTAP_BUILD = 'f329797db28b1caf';
 importScripts('result_serialization.js');
 importScripts('guarded_eval.js');
+importScripts('frame_locator.js');
 importScripts('disable_dialogs.js');
 chrome.runtime.onInstalled.addListener(() => {
   console.log('CDP Bridge installed');
@@ -1917,7 +1918,9 @@ async function resolveDebuggerTargetIdentity(target) {
     };
   }
   const targetId = match.id || match.targetId || original.targetId || null;
-  const tabId = match.tabId || null;
+  // An OOPIF is a distinct renderer even when Chrome reports its owning tab.
+  // Collapsing its targetId to that tab would execute in the parent document.
+  const tabId = match.type === 'iframe' ? null : (match.tabId || null);
   if (targetId) aliases.add(`target:${targetId}`);
   if (tabId) aliases.add(`tab:${tabId}`);
   if (match.extensionId) aliases.add(`extension:${match.extensionId}`);
@@ -3296,7 +3299,13 @@ async function handleDownloadCommand(msg) {
 async function createTabAck(msg) {
   const operationId = String(msg.operation_id || '').trim();
   if (!operationId) {
-    return { ok: false, error: 'tabs.create requires operation_id' };
+    return {
+      ok: false,
+      error: 'tabs.create requires operation_id. Use open_new_tab(url="https://example.com") '
+        + 'to generate it automatically and track tab ownership. For raw tabs.create, pass '
+        + 'operation_id with a fresh UUID for each intended tab; after an uncertain result, '
+        + 'keep that ID and query tabs.create_status instead of creating again.',
+    };
   }
   try {
     await loadCreateOperations();
@@ -3500,6 +3509,10 @@ async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'downloads') return await handleDownloadCommand(msg);
   if (msg.cmd === 'cdp') return await handleCDP(msg, sender);
   if (msg.cmd === 'batch') return await handleBatch(msg, sender);
+  if (msg.cmd === 'frame_locator') return await globalThis.BtapFrameLocator.run(msg, sender, {
+    attach: attachBtapDebugger, detach: detachBtapDebugger,
+    send: sendDebuggerCommandWithTimeout, failureCode: debuggerFailureCode,
+  });
   if (msg.cmd === 'tabs') {
     try {
       if (msg.method === 'switch') {
@@ -3834,6 +3847,7 @@ async function handleExtMessage(msg, sender) {
       protocol_version: 3,
       capabilities: {
         batch_result_guard: true,
+        frame_locators: true,
         structured_locator: true,
         console_user_filter: true,
         network_stop_filter: true,

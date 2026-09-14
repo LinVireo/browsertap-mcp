@@ -1613,7 +1613,7 @@ def test_only_one_process_may_spawn_the_bridge(tmp_path, monkeypatch):
     first = S._acquire_spawn_lock()
     assert first is not None
     assert S._acquire_spawn_lock() is None      # loser stands down
-    first.unlink()
+    first.path.unlink()
     assert S._acquire_spawn_lock() is not None  # released, next one may try
 
 
@@ -1625,7 +1625,7 @@ def test_a_crashed_spawner_does_not_block_forever(tmp_path, monkeypatch):
     lock = S._acquire_spawn_lock()
     assert lock is not None
     stale = time.time() - (S._SPAWN_LOCK_STALE + 5)
-    _os.utime(lock, (stale, stale))
+    _os.utime(lock.path, (stale, stale))
     assert S._acquire_spawn_lock() is not None
 
 
@@ -1666,7 +1666,7 @@ def test_concurrent_starts_still_spawn_one_daemon(tmp_path, monkeypatch):
     def fake_port_open(_h, _p):
         return port_up_at[0] is not None and time.monotonic() >= port_up_at[0]
 
-    def fake_locked():
+    def fake_locked(**_kwargs):
         with guard:
             spawned.append(1)
             if port_up_at[0] is None:
@@ -2031,11 +2031,11 @@ def test_spawn_lock_recycled_when_owner_pid_is_dead(tmp_path, monkeypatch):
     # test_a_lock_being_written_is_not_a_dead_owner.
     dead = subprocess.Popen([sys.executable, "-c", ""])
     dead.wait()
-    lock.write_text(str(dead.pid), encoding="utf-8")
+    lock.path.write_text(str(dead.pid), encoding="utf-8")
     # Make mtime recent so the age-based path does NOT fire; only pid liveness
     # should recycle it.
     fresh = time.time()
-    _os.utime(lock, (fresh, fresh))
+    _os.utime(lock.path, (fresh, fresh))
     assert S._acquire_spawn_lock() is not None
 
 

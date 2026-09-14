@@ -7,7 +7,7 @@ failures. For normal operating workflows, see the [usage guide](USAGE.md).
 
 ## Known limitations in 0.5.2
 
-The following cases remain unresolved after live verification on 2026-09-12.
+The following cases remain unresolved after live verification on 2026-09-12–14.
 Their fixes are deferred. Passing offline tests or CI does not establish
 successful browser recovery for these cases.
 
@@ -65,6 +65,21 @@ If refused, the user must remove the selected extension through
 `chrome://extensions` or the browser's equivalent management page. Recheck with
 `list_extensions`; disappearance after manual removal is not tool success.
 BTAP also cannot uninstall itself through its active response channel.
+
+### A visible button returns `not_interactable` or `obscured`
+
+A button can have a `0×0` DOM box while CSS `::after` supplies its visible
+click area. In live verification, locating such a button by role/name returned
+`not_interactable`; targeting its visible text returned `obscured` because
+the button itself owned that point. Selector clicks do not yet account for
+this layout.
+
+Inspect the current layout and use `document.elementFromPoint(x, y)` to verify
+that a point in the visible control belongs to the intended button. Then use
+`page_click(x=x, y=y, session_id=session_id)` with top-document viewport CSS
+coordinates. Coordinate mode does not perform the selector's hit test, so
+verify the point before dispatch and inspect the resulting page state.
+Reconnecting the bridge does not change this layout limitation.
 
 ## Diagnostic order
 
@@ -163,15 +178,15 @@ setup report, adds `port_probe_errors`, and exits nonzero.
 
 ### A call is refused with `Session ... is not connected`
 
-This refusal is deliberate. You named an explicit `session_id`, that tab is
-gone, and BTAP did not run the call anywhere else: a click or a form submit
-landing on a substitute tab is worse than an error. The message names the tabs
-that are still connected:
+This refusal is deliberate. You named an explicit `session_id`, and BTAP could
+not verify a live session for that same tab. No script was dispatched. The
+message names the sessions that are still connected so you can inspect the
+intended target:
 
 ```text
-Session chrome:123 is not connected. BTAP refused to execute on a different tab.
-Active sessions: chrome:456, chrome:789. Select the intended target with
-switch_tab and retry.
+Session chrome:123 is not connected. BTAP refused to execute because no live session could be verified for the same tab.
+No script was dispatched. Active sessions: chrome:456, chrome:789. Run list_tabs,
+verify the intended target, then select its live session_id with switch_tab and retry.
 ```
 
 Select the tab you meant with `switch_tab`, or pass its `session_id` verbatim,

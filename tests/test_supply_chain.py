@@ -153,7 +153,12 @@ def test_local_agent_material_is_not_tracked():
         text=True,
         check=True,
     )
-    tracked = [name for name in completed.stdout.split("\0") if name]
+    public_plugin_metadata = {".agents/plugins/marketplace.json"}
+    tracked = [
+        name
+        for name in completed.stdout.split("\0")
+        if name and name not in public_plugin_metadata
+    ]
     assert not tracked, f"local collaboration files are tracked: {tracked}"
 
 
@@ -163,6 +168,8 @@ def test_git_excludes_local_agents_and_preserves_public_inputs():
         pytest.skip("needs a git checkout")
     local_names = [
         ".agents/skills/trellis-start/SKILL.md",
+        ".agents/plugins/private.json",
+        ".agents/private.json",
         ".claude/settings.json",
         ".claude/settings.local.json",
         ".claude/settings.local.json.bak-bypass",
@@ -176,6 +183,7 @@ def test_git_excludes_local_agents_and_preserves_public_inputs():
     ]
     public_names = [
         "AGENTS.md",
+        ".agents/plugins/marketplace.json",
         ".github/workflows/test.yml",
         "src/browsertap_mcp/skills/browsertap-default/SKILL.md",
         "src/browsertap_mcp/skills/browsertap-bridge-recovery/SKILL.md",

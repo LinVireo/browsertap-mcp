@@ -431,23 +431,24 @@ def test_spawn_lock_write_failure_retains_the_exclusive_claim(monkeypatch, tmp_p
         raise OSError("write failed")
 
     monkeypatch.setattr(S.os, "write", fail_write)
-    assert S._acquire_spawn_lock() == lock
+    claim = S._acquire_spawn_lock()
+    assert claim is not None and claim.path == lock
     assert lock.read_bytes() == b""
     assert S._acquire_spawn_lock() is None
 
 
 @pytest.mark.parametrize("reset", [False, True])
-def test_spawn_lock_cleanup_failure_does_not_mask_the_failed_launch(monkeypatch, reset):
+def test_spawn_lock_cleanup_failure_does_not_mask_the_failed_launch(monkeypatch, tmp_path, reset):
     cleanups = []
 
-    def unlink(**kwargs):
+    def unlink(self, **kwargs):
         cleanups.append(kwargs)
         raise PermissionError("lock is busy")
 
-    lock = SimpleNamespace(unlink=unlink)
+    lock = tmp_path / "spawn.lock"
     monkeypatch.setattr(S, "_spawn_lock_path", lambda: lock)
-    monkeypatch.setattr(S, "_acquire_spawn_lock", lambda: lock)
-    monkeypatch.setattr(S, "_spawn_bridge_daemon_locked", lambda: False)
+    monkeypatch.setattr(S.Path, "unlink", unlink)
+    monkeypatch.setattr(S, "_spawn_bridge_daemon_locked", lambda **_kwargs: False)
     assert S.spawn_bridge_daemon(reset_spawn_lock=reset) is False
     assert cleanups == [{"missing_ok": True}] * (2 if reset else 1)
 
@@ -545,7 +546,7 @@ def test_spawn_lock_permission_and_os_errors_stand_down(monkeypatch, tmp_path, e
 
 def test_spawn_bridge_waiter_times_out_without_starting_another_daemon(monkeypatch):
     sleeps = []
-    monkeypatch.setattr(S, "_acquire_spawn_lock", lambda: None)
+    monkeypatch.setattr(S, "_acquire_spawn_lock", lambda **_kwargs: None)
     monkeypatch.setattr(S, "_port_open", lambda *_args: False)
     monkeypatch.setattr(S.time, "sleep", sleeps.append)
     _monotonic(monkeypatch, [0.0, 0.0, 11.0])
@@ -556,9 +557,8 @@ def test_spawn_bridge_waiter_times_out_without_starting_another_daemon(monkeypat
 
 def test_spawn_bridge_failed_daemon_start_releases_lock(monkeypatch, tmp_path):
     lock = tmp_path / "spawn.lock"
-    lock.write_text("owner", encoding="utf-8")
-    monkeypatch.setattr(S, "_acquire_spawn_lock", lambda: lock)
-    monkeypatch.setattr(S, "_spawn_bridge_daemon_locked", lambda: False)
+    monkeypatch.setattr(S, "_spawn_lock_path", lambda: lock)
+    monkeypatch.setattr(S, "_spawn_bridge_daemon_locked", lambda **_kwargs: False)
 
     assert S.spawn_bridge_daemon() is False
     assert not lock.exists()

@@ -5,8 +5,16 @@ from __future__ import annotations
 import argparse
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+PUBLIC_PLUGIN_FILES = (
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    ".codex-plugin/plugin.json",
+    ".agents/plugins/marketplace.json",
+    "skills/browsertap-default/SKILL.md",
+    "skills/browsertap-bridge-recovery/SKILL.md",
+)
 # A licence obligation, not packaging tidiness: the wheel is the copy most people
 # receive, and a wheel without the licence file distributes the code with its
 # terms stripped. Kept apart from REQUIRED_WHEEL_SUFFIXES because this is a
@@ -36,6 +44,10 @@ REQUIRED_WHEEL_SUFFIXES = (
     "/browsertap_mcp/page_scripts/list_groups.js",
 )
 REQUIRED_SDIST_SUFFIXES = (
+    *(f"/{name}" for name in PUBLIC_PLUGIN_FILES),
+    "/docs/PLUGINS.md",
+    "/docs/PLUGINS.zh-CN.md",
+    "/scripts/sync_plugin_skills.py",
     "/.gitignore",
     "/LICENSE",
     "/CONTRIBUTING.zh-CN.md",
@@ -92,9 +104,16 @@ def _is_packaged_skill(path: str) -> bool:
     return tail.count("/") == 1 and tail.endswith("/SKILL.md")
 
 
-def _forbidden_reason(name: str) -> str | None:
+def _forbidden_reason(name: str, *, source_root: str | None = None) -> str | None:
     path = _normalise(name)
     basename = path.rsplit("/", 1)[-1].lower()
+    public_files = {
+        f"/{source_root}/{relative}" for relative in PUBLIC_PLUGIN_FILES
+    } if source_root is not None else set()
+    public_plugin_file = path in public_files
+    public_parent = path.rstrip("/") in {
+        parent.as_posix() for item in public_files for parent in PurePosixPath(item).parents
+    }
     if path.endswith("/browsertap_mcp/chrome_extension/config.js"):
         return "generated extension config"
     if basename == "bridge-token":
@@ -103,8 +122,23 @@ def _forbidden_reason(name: str) -> str | None:
         return "environment secrets file"
     if basename.endswith(".har"):
         return "browser network capture"
-    if (basename == "skill.md" or basename.endswith(".skill.md")) and not _is_packaged_skill(path):
+    if (
+        (basename == "skill.md" or basename.endswith(".skill.md"))
+        and not _is_packaged_skill(path)
+        and not public_plugin_file
+    ):
         return "agent skill outside the packaged skills directory"
+    if basename in {".mcp.json", "claude.md", "agents.local.md"}:
+        return "local agent configuration"
+    if source_root is not None and path.startswith(f"/{source_root}/skills/"):
+        if not public_plugin_file and not public_parent:
+            return "unlisted plugin Skill file"
+    for segment in (".claude", ".codex", ".trellis", ".agents", ".claude-plugin", ".codex-plugin"):
+        if segment not in path.lower().strip("/").split("/"):
+            continue
+        # Source archives include directory records as well as files.
+        if not public_plugin_file and not public_parent:
+            return f"local agent directory {segment}"
     if basename.startswith("cookie") and basename.endswith(".json"):
         return "cookie export"
     for segment in ("/.browsertap/", "/artifacts/", "/out/", "/screenshots/"):
@@ -332,8 +366,15 @@ def _version_violations(path: Path) -> list[str]:
 def validate_archive(path: Path) -> list[str]:
     names = archive_names(path)
     normalised_names = {_normalise(name) for name in names}
+    source_roots = {
+        name.strip("/").split("/")[0]
+        for name in normalised_names
+        if name.count("/") == 2 and name.endswith("/PKG-INFO")
+    } if path.name.endswith((".tar.gz", ".tgz")) else set()
+    source_root = next(iter(source_roots)) if len(source_roots) == 1 else None
     violations = [
-        f"{name}: {reason}" for name in names if (reason := _forbidden_reason(name)) is not None
+        f"{name}: {reason}" for name in names
+        if (reason := _forbidden_reason(name, source_root=source_root)) is not None
     ]
     if path.suffix == ".whl":
         for suffix in (*REQUIRED_WHEEL_SUFFIXES, *REQUIRED_WHEEL_METADATA_SUFFIXES):

@@ -11,9 +11,7 @@
 `error` / `error_code` / `retryable`，并结合 `target` / `diagnostics` 判断是否可以安全重试。
 为保持兼容，既有操作字段仍可能投影在顶层。
 
-0.5.2 的原生文件框取消、JavaScript 超时、sandbox iframe 和扩展卸载仍有实测未解决问题。
-工作流依赖这些路径时，先查看[已知限制与恢复说明](TROUBLESHOOTING.zh-CN.md)；
-离线 CI 通过不能证明可无人值守恢复。
+连接错误、工具返回异常及恢复步骤见[故障排查](TROUBLESHOOTING.zh-CN.md)。
 
 ## 1. 操作层级
 
@@ -71,6 +69,22 @@ Chrome 明确报告同一个原生标签页被替换时，结果可能包含 `re
 `replacement_session_id` 和 `tab_identity`。此时应采用返回的新 session 句柄，并在副作用操作前
 重新确认页面；没有这些字段的普通过期显式 session 仍会被拒绝，应通过 `list_tabs` / `switch_tab`
 重新选定目标。
+
+### 按表单控件选择操作
+
+先检查控件类型、可编辑性、frame 路径和实际点击区域，再选择操作。跨域 iframe 也支持直接定位。
+
+| 控件 | 推荐操作 |
+|---|---|
+| 可编辑的文本输入框、`textarea` 或 `contenteditable` | 使用显式定位器调用 `page_type`；嵌入字段带上 `frame`。 |
+| 有可用 DOM 目标的按钮或自定义下拉选项 | 使用 CSS 或结构化定位器调用 `page_click`。 |
+| 本体零尺寸、可见点击区来自伪元素的代理节点 | 寻找可用目标，或核实可见点位后使用坐标点击；见[已知布局限制](TROUBLESHOOTING.zh-CN.md#可见按钮返回-not_interactable-或-obscured)。 |
+| 原生 HTML `select` | 在控件所属文档中用 `execute_js` 设置已有选项的值，派发冒泡的 `input`、`change` 事件，再读回值和级联选项；此方式要求页面接受合成事件。 |
+
+例如，嵌入的文本字段可使用
+`selector={"frame": ["#payment-frame"], "css": "input[name='reference']"}`。
+输入后检查 `focus_confirmed` 并读回字段。坐标点击不会为后续调用指定编辑目标，应继续显式传入
+字段和 frame 定位器。目标缺失、匹配歧义、禁用或只读时应先检查；不能仅凭报错就切换坐标。
 
 ## 4. 截图与模型能力
 

@@ -590,8 +590,15 @@ def structured_locator_script(
     verify_hit: bool = False,
     center_x: bool = False,
     center_y: bool = False,
+    return_element: bool = False,
+    bound_element: bool = False,
+    frame_context: bool = False,
 ) -> str:
-    """Build the strict browser-side resolver for structured locators."""
+    """Build the strict resolver, optionally retaining a CDP-bound DOM identity.
+
+    The internal frame router selects a remote node once, then calls this same
+    resolver on that node. It must not re-query a replacement before input.
+    """
     locator = normalize_locator(locator)  # type: ignore[assignment]
     if not isinstance(locator, dict):  # pragma: no cover - guarded by the signature
         raise InputValidationError("structured locator must be an object")
@@ -609,6 +616,9 @@ def structured_locator_script(
         ("verify_hit", verify_hit),
         ("center_x", center_x),
         ("center_y", center_y),
+        ("return_element", return_element),
+        ("bound_element", bound_element),
+        ("frame_context", frame_context),
     ):
         if not isinstance(flag, bool):
             raise InputValidationError(f"{name} must be a boolean")
@@ -621,7 +631,11 @@ def structured_locator_script(
   const verifyHit = {json.dumps(verify_hit)};
   const centerX = {json.dumps(center_x)};
   const centerY = {json.dumps(center_y)};
-  const framed = {json.dumps(bool(locator.get("frame")))};{_HIT_TEST_JS}{_TYPE_TARGET_HELPERS_JS if purpose == "type" else ""}
+  const boundElement = {"this" if bound_element else "null"};
+  const returnElement = {json.dumps(return_element)};
+  if (boundElement && (!boundElement.isConnected || boundElement.ownerDocument !== document))
+    return {{found:false, status:'stale_frame', stage:'element'}};
+  const framed = {json.dumps(frame_context or bool(locator.get("frame")))};{_HIT_TEST_JS}{_TYPE_TARGET_HELPERS_JS if purpose == "type" else ""}
   const clean = value => String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
   const same = (actual, expected, exact) => exact ? clean(actual) === clean(expected) : clean(actual).includes(clean(expected));
   const accessibleText = node => {{
@@ -662,6 +676,17 @@ def structured_locator_script(
     return clean((el.getAttribute && (el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('value'))) || accessibleText(el));
   }};
   const allElements = root => [...root.querySelectorAll('*')];
+  const roleVisible = el => {{
+    // SPAs keep inactive forms in the DOM. Role locators describe accessible
+    // controls, so hidden templates must not make a visible button ambiguous.
+    if (typeof el.checkVisibility === 'function' &&
+        !el.checkVisibility({{visibilityProperty:true, contentVisibilityAuto:true}})) return false;
+    for (let node = el; node;
+         node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null) {{
+      if (node.inert || clean(node.getAttribute && node.getAttribute('aria-hidden')).toLowerCase() === 'true') return false;
+    }}
+    return true;
+  }};
   const transformIsIdentity = value => {{
     const text = String(value == null ? '' : value).trim().toLowerCase();
     if (!text || text === 'none') return true;
@@ -695,7 +720,7 @@ def structured_locator_script(
       try {{ matches = [...root.querySelectorAll(spec.css)]; }}
       catch (error) {{ return {{error:'invalid_selector', message:String(error && error.message || error)}}; }}
     }} else if (spec.role) {{
-      matches = allElements(root).filter(el => clean(el.getAttribute('role') || implicitRole(el)).toLowerCase() === clean(spec.role).toLowerCase());
+      matches = allElements(root).filter(el => clean(el.getAttribute('role') || implicitRole(el)).toLowerCase() === clean(spec.role).toLowerCase() && roleVisible(el));
       if (spec.name) matches = matches.filter(el => same(accessibleName(el), spec.name, !!spec.exact));
     }} else if (spec.text) {{
       matches = allElements(root).filter(el => same(el.textContent, spec.text, !!spec.exact));
@@ -731,7 +756,7 @@ def structured_locator_script(
     return {{found:true, status:'found', x:frameOffsetX + locator.x, y:frameOffsetY + locator.y,
       width:0, height:0, hitVerified:false, scrolledIntoView:false, framePoint:true}};
   }}
-  for (const hostSelector of (locator.shadow || [])) {{
+  for (const hostSelector of (boundElement ? [] : (locator.shadow || []))) {{
     let hosts = [];
     try {{ hosts = [...root.querySelectorAll(hostSelector)]; }}
     catch (error) {{ return {{found:false, status:'invalid_selector', error:String(error && error.message || error), stage:'shadow'}}; }}
@@ -740,7 +765,7 @@ def structured_locator_script(
     if (!hosts[0].shadowRoot) return {{found:false, status:'closed_shadow_root', stage:'shadow'}};
     root = hosts[0].shadowRoot;
   }}
-  const found = find(root, locator);
+  const found = boundElement ? {{matches:[boundElement]}} : find(root, locator);
   if (found.error) return {{found:false, status:found.error, error:found.message}};
   if (found.matches.length === 0) return {{found:false, status:'not_found'}};
   if (purpose !== 'query') {{
@@ -775,6 +800,7 @@ def structured_locator_script(
     if (!helper && xtermRoot) helper = xtermRoot.querySelector('.xterm-helper-textarea');
     if (helper) el = helper;
     if (!editableTarget(el)) return {{found:false, status:'not_interactable', targetKind:'unusable'}};
+    if (returnElement) return el;
     const activeBefore = deepActiveElement(document);
     try {{ el.focus({{preventScroll:true}}); }} catch (_) {{ el.focus(); }}
     if (selectAll) {{
@@ -800,6 +826,7 @@ def structured_locator_script(
       activeElement:describe(activeAfter), focusConfirmed:activeAfter === el,
       previousActiveElement:describe(activeBefore)}};
   }}
+  if (returnElement) return el;
   let rect = el.getBoundingClientRect();
   const ariaDisabled = clean(el.getAttribute && el.getAttribute('aria-disabled')).toLowerCase() === 'true';
   if (purpose === 'click' && (rect.width <= 0 || rect.height <= 0 || el.disabled || ariaDisabled)) return {{found:false, status:'not_interactable'}};

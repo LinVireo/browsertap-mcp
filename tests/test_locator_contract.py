@@ -174,25 +174,17 @@ def test_page_click_frame_relative_point_dispatches_at_resolved_top_coordinates(
         "active_sessions",
         lambda *args, **kwargs: [{"id": "chrome:test:7", "url": "https://example.test/"}],
     )
-    monkeypatch.setattr(
-        S,
-        "_page_selector_info",
-        lambda *args, **kwargs: {
-            "found": True,
-            "x": 120,
-            "y": 130,
-            "width": 0,
-            "height": 0,
-            "hitVerified": False,
-        },
-    )
     seen = []
 
-    def fake_input(commands, *args, **kwargs):
-        seen.extend(commands)
-        return {"status": "success", "session_id": "chrome:test:7"}
+    def fake_frames(payload, **kwargs):
+        assert payload["cmd"] == "frame_locator"
+        assert payload["point"] == {"x": 20, "y": 30}
+        assert payload["centerX"] is False and payload["centerY"] is False
+        seen.extend(payload["commands"])
+        return {"data": {"status": "success", "x": 120, "y": 130,
+                         "hitVerified": False, "input_dispatched": True}}
 
-    monkeypatch.setattr(S, "_run_page_input", fake_input)
+    monkeypatch.setattr(driver, "ext_cmd", fake_frames)
     result = S.page_click(
         selector={"frame": [{"css": "iframe.checkout"}], "x": 20, "y": 30},
         session_id="chrome:test:7",
@@ -202,8 +194,7 @@ def test_page_click_frame_relative_point_dispatches_at_resolved_top_coordinates(
     assert result["target"]["x"] == 120
     assert result["target"]["y"] == 130
     assert result["target"]["hit_verified"] is False
-    assert seen[-1]["params"]["x"] == 120
-    assert seen[-1]["params"]["y"] == 130
+    assert seen[-1]["method"] == "Input.dispatchMouseEvent"
 
 
 def test_page_type_unusable_locator_dispatches_nothing(monkeypatch):

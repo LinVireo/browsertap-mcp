@@ -12,11 +12,8 @@ from `data`, inspect `error`/`error_code` and `retryable` on failures, and use
 `target`/`diagnostics` when deciding whether a retry is safe. Established fields
 may still appear at the top level for compatibility.
 
-Version 0.5.2 has unresolved live failures involving native file-dialog
-cancellation, JavaScript timeouts, sandboxed iframes, and extension removal.
-Review the [known limitations and recovery guidance](TROUBLESHOOTING.md) when
-planning a workflow that depends on these paths; offline CI does not verify
-unattended recovery.
+For connection errors, unexpected tool results, and recovery steps, see
+[Troubleshooting](TROUBLESHOOTING.md).
 
 ## 1. Operation levels
 
@@ -80,6 +77,25 @@ case a result may include `rebound_from`, `replacement_session_id`, and
 `tab_identity`; adopt the returned session handle and verify the page before a
 side effect. An ordinary stale explicit session without those fields is still
 refused and must be selected again with `list_tabs`/`switch_tab`.
+
+### Choose an operation for the form control
+
+Inspect the control's type, editability, frame path, and actual hit area before
+choosing an operation. Cross-origin frames support direct locators too.
+
+| Control | Recommended operation |
+|---|---|
+| Editable text input, `textarea`, or `contenteditable` | Use `page_type` with an explicit locator; include `frame` for an embedded field. |
+| Button or custom dropdown option with a usable DOM target | Use `page_click` with a CSS or structured locator. |
+| Zero-size proxy element whose visible hit area comes from a pseudo-element | Find a usable target or verify the visible point and use a coordinate click; see [the known layout limitation](TROUBLESHOOTING.md#a-visible-button-returns-not_interactable-or-obscured). |
+| Native HTML `select` | Use `execute_js` in the control's document to set an existing option value and dispatch bubbling `input` and `change` events, then read back the value and any dependent options. This depends on the page accepting synthetic events. |
+
+For example, an embedded text field can use
+`selector={"frame": ["#payment-frame"], "css": "input[name='reference']"}`.
+After input, check `focus_confirmed` and read back the field. A coordinate click
+does not identify an editor for a later call: retain the explicit field and
+frame locator. Missing, ambiguous, disabled, or read-only targets require
+inspection; an error alone is not a reason to switch to coordinates.
 
 ## 4. Screenshots and model capabilities
 
