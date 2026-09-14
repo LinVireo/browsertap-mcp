@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable, Literal, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence, cast
 from urllib.parse import urlsplit
 
 import anyio
@@ -299,6 +299,16 @@ mcp = FastMCP(
         "present; on status='challenge_stalled', stop and return the tab to the user. Do not launch a "
         "second browser and do not route a challenge through a solver or token service. "
         "Supports page scanning, JS execution, CDP commands, screenshots, cookies, and page-level input. "
+        "Default workflow: list_tabs, scan_page, page_click/page_type, wait_for or wait_for_url, "
+        "verify the result, then close only owned tabs. scan_page.observation contains current "
+        "locators, editability, recommended_tool and reasons. Pass a target's locator unchanged "
+        "as selector; pass an observation.frames entry's frame to scan_page to inspect that child "
+        "document, including cross-origin frames. Re-observe after page changes. A coordinate "
+        "review hint requires checking a screenshot and its CSS/device pixel conversion; a missing, "
+        "disabled, readonly or obscured control is not a reason to guess coordinates. "
+        "The complete packaged caller workflow and recovery guide are also MCP resources at "
+        "browsertap://agent/workflow and browsertap://agent/recovery; no external Skill installation "
+        "is required to read them. Resources supplement these instructions and tool results. "
         "Page screenshots include MCP image content; a model that cannot process images must not claim to "
         "have seen the pixels and should use scan_page, execute_js, a page-specific API, or OCR instead. "
         "Several browsers can be connected at once; list_tabs shows a browser field per tab. "
@@ -321,6 +331,23 @@ mcp = FastMCP(
         "result_file_error.message_json, must also be parsed once."
     ),
 )
+
+
+@mcp.resource(
+    "browsertap://agent/workflow", name="agent_workflow", mime_type="text/markdown",
+    description="Packaged BTAP caller workflow: target selection, observation, input, verification and owned-tab cleanup.",
+)
+def agent_workflow() -> str:
+    return (ROOT / "skills" / "browsertap-default" / "SKILL.md").read_text(encoding="utf-8")
+
+
+@mcp.resource(
+    "browsertap://agent/recovery", name="agent_recovery", mime_type="text/markdown",
+    description="Packaged BTAP recovery guide: operation receipts, uncertain delivery, page refusals and bridge diagnostics.",
+)
+def agent_recovery() -> str:
+    return (ROOT / "skills" / "browsertap-bridge-recovery" / "SKILL.md").read_text(encoding="utf-8")
+
 
 _driver: Optional[BrowserBridge] = None
 _DRIVER_PORT: Optional[int] = None
@@ -4724,7 +4751,18 @@ def _page_render_state(driver: Any, session_id: Optional[str], timeout: float) -
         "scan_page or wait_for before treating an empty result as a real empty page. "
         "A timed-out built-in readiness probe releases its tab reservation; missing render "
         "fields mean readiness is unknown. "
-        "Defaults: cutlist=true, maxchars=35000, timeout=15 seconds."
+        "observation adds current control locators, editability, recommended_tool and reasons; "
+        "pass a locator unchanged as page_click/page_type selector. Its frames list gives frame "
+        "paths for another scan_page call, including cross-origin/OOPIF documents. Frame scans "
+        "are explicit and do not accept extra_js. Top-document extra_js preserves its existing "
+        "execution semantics and omits actionable metadata. Locators are observations, not "
+        "persistent refs: re-scan after page changes. verify_coordinate_target means inspect a "
+        "screenshot before choosing viewport CSS coordinates; it is not an automatic click. "
+        "upload_files is recommended only for top-document file inputs outside shadow roots; "
+        "use locator.css as its string selector. Frame/shadow file inputs report no supported upload. "
+        "max_targets caps controls and frame entries together (0 disables them, maximum 200); "
+        "truncated=true means more targets or DOM nodes remain uninspected. maxchars caps content "
+        "separately. Defaults: cutlist=true, maxchars=35000, max_targets=80, timeout=15 seconds."
     )
 )
 def scan_page(
@@ -4735,7 +4773,21 @@ def scan_page(
     instruction: str = "",
     extra_js: str = "",
     timeout: float = 15.0,
+    frame: Optional[list[str | dict[str, Any]]] = None,
+    max_targets: int = 80,
 ) -> dict[str, Any]:
+    if isinstance(max_targets, bool) or not isinstance(max_targets, int) or not 0 <= max_targets <= 200:
+        raise InputValidationError("max_targets must be an integer between 0 and 200")
+    if isinstance(maxchars, bool) or not isinstance(maxchars, int) or maxchars < 0:
+        raise InputValidationError("maxchars must be a non-negative integer")
+    normalized_frame: list[Any] = []
+    if frame is not None:
+        normalized = cast(dict[str, Any], normalize_locator({"css": "html", "frame": frame}))
+        normalized_frame = normalized["frame"]
+        if extra_js.strip():
+            raise InputValidationError("frame scans do not accept extra_js")
+    timeout = _positive_timeout(timeout)
+    deadline = time.monotonic() + timeout
     driver = require_driver()
     ensure_sessions()
     # Target a specific tab without permanently clobbering the shared default:
@@ -4754,18 +4806,51 @@ def scan_page(
         # it just read, or to aim a follow-up call at the same one.
         switch_session()
     link_refs: dict[str, str] = {}
+    observation: dict[str, Any] = {}
     try:
-        content = simphtml.get_html(
-            driver,
-            cutlist=cutlist,
-            maxchars=maxchars,
-            instruction=instruction,
-            extra_js=extra_js,
-            text_only=text_only,
-            timeout=timeout,
-            link_refs=None if text_only else link_refs,
-        )
         active = driver.default_session_id
+        if normalized_frame:
+            frame_payload = frame_locator_payload({"css": "html", "frame": normalized_frame}, action="query")
+            script = simphtml.page_observation_script(
+                cutlist=cutlist, text_only=text_only, max_targets=max_targets,
+            )
+            frame_payload["inspect"] = (
+                "(() => { if (!this.isConnected || this.ownerDocument !== document) "
+                "return {found:false, status:'stale_frame'}; "
+                "return {found:true, status:'found', scan:(() => {" + script + "})()}; })()"
+            )
+            raw = _call_frame_locator(frame_payload, active, deadline)
+            if "scan" not in raw:
+                status = raw.get("status") or raw.get("locator_status") or "frame_scan_unavailable"
+                if status in {"success", "found"}:
+                    status = "frame_scan_unavailable"
+                return {
+                    **raw, "ok": False, "status": status, "error_code": status,
+                    "active_session_id": active, "frame": normalized_frame,
+                    "hint": "Inspect the frame locator and get_setup_status. A successful query without scan data requires the updated extension and manual Reload.",
+                }
+            page, groups, observation = simphtml.unpack_observation(raw["scan"])
+            content = simphtml.render_page(
+                page, groups=groups, cutlist=cutlist, maxchars=maxchars,
+                instruction=instruction, text_only=text_only,
+                link_refs=None if text_only else link_refs,
+            )
+        else:
+            content = simphtml.get_html(
+                driver,
+                cutlist=cutlist,
+                maxchars=maxchars,
+                instruction=instruction,
+                extra_js=extra_js,
+                text_only=text_only,
+                timeout=timeout,
+                link_refs=None if text_only else link_refs,
+                observation=observation,
+                max_targets=max_targets,
+            )
+            # Implicit targets can be rebound while execute_js resolves a closed
+            # or replaced tab. Match metadata and readiness to the tab read.
+            active = driver.default_session_id
     except simphtml.PageUnavailable as e:
         # The tab never answered. Report that as a failure with the bridge's
         # own diagnosis, instead of an empty page the agent would read as
@@ -4794,11 +4879,23 @@ def scan_page(
         "tabs": compact_tabs(),
         "content": content,
     }
+    if not observation:
+        observation = {"status": "unavailable", "reason": "no_target_metadata"}
+    observation["frame"] = normalized_frame
+    for target in observation.get("targets", []):
+        if normalized_frame:
+            target["locator"]["frame"] = normalized_frame
+            if target.get("recommended_tool") == "upload_files":
+                target["recommended_tool"] = None
+                target["reason"] = "file_input_frame_unsupported"
+    for child in observation.get("frames", []):
+        child["frame"] = [*normalized_frame, *child["frame"]]
+    out["observation"] = observation
     try:
         probe_timeout = min(1.5, max(0.25, _positive_timeout(timeout) / 4.0))
     except (TypeError, ValueError):
         probe_timeout = 1.0
-    render = _page_render_state(driver, active, probe_timeout)
+    render = None if normalized_frame else _page_render_state(driver, active, probe_timeout)
     if render is not None:
         out["render"] = render
         out["render_state"] = render["state"]

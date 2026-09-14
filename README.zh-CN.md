@@ -338,9 +338,10 @@ BTAP 首次使用时创建 `~/.browsertap/bridge-token`，bridge 和所有 MCP �
 
 Claude Code 和 Codex 插件会自动加载这两份 Skills。本节面向采用通用 MCP 安装方式的客户端。
 
-BTAP 随包发布两份 skill，用来告诉调用方的 agent 该怎么驱动它。它们就是普通 Markdown，
-**完全可选** —— 不装也不影响任何工具。它们补的是工具描述装不下的那部分判断：先调哪个工具、
-什么时候必须带 `session_id`、哪些标签页属于用户因此不能碰。
+BTAP 已在 MCP 初始化说明和工具描述中提供主要工作流与恢复规则。同一份随包 Markdown
+还通过 MCP `resources/list` 暴露，可用 `resources/read` 读取：
+`browsertap://agent/workflow` 和 `browsertap://agent/recovery`，无需安装 Skills。
+宿主自行决定何时加载资源；关键的目标选择、标签页归属和重试规则仍由初始化说明及工具结果提供。
 
 ```bash
 browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
@@ -370,7 +371,7 @@ browsertap skill-path           # 例如 .../site-packages/browsertap_mcp/skills
 以下版本标记随源码维护，不代表开发工作树已经发布。使用新工具签名或 0.5.0 迁移说明前，
 先核对安装包和对应 release tag。
 
-当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.3**。
+当前版本:Python 包、bridge 与 Chrome unpacked 扩展统一为 **0.5.4**。
 
 三个组件分别加载更新：
 
@@ -628,7 +629,8 @@ JS 文件描述位于 `data`，迟到回包则在 `legacy.late_result`。
 <summary><b>页面读取与执行</b></summary>
 
 - **scan_page** —— 把页面读成简化 HTML 或纯文本。返回 `links`,把正文里每个 `#rN` 引用映射到绝对 URL;有内容留在视区外时返回 `offscreen` 和 `hint`。后台标签页可能报告 viewport 高度为 0；普通 DOM/文本/API 工作仍可继续，只有明确需要视觉/布局保真时才调用 `activate_tab`;页面可探测时还会返回 `render_state`/`content_ready`，区分真实正文与 loading、hydrating、shell-only 的 SPA；空壳结果应先重试或使用 `wait_for`。`cutlist`（默认开）会折叠重复的长列表，并为每个被折叠的容器返回一个由该容器自身结构推导出来的 CSS selector。内置扫描不写页面属性、id 或 `window` 全局变量；可选的 `extra_js` 执行调用方代码，可以修改页面或发送请求
-  - `session_id`(string,可选)、`text_only`(boolean,可选):默认 `false`、`cutlist`(boolean,可选):默认 `true`,把重复列表裁成少量样本、`maxchars`(integer,可选):默认 `35000`、`instruction`(string,可选)、`extra_js`(string,可选)、`timeout`(number,可选):默认 `15`
+  - `session_id`(string,可选)、`text_only`(boolean,可选):默认 `false`、`cutlist`(boolean,可选):默认 `true`,把重复列表裁成少量样本、`maxchars`(integer,可选):默认 `35000`、`instruction`(string,可选)、`extra_js`(string,可选)、`timeout`(number,可选):默认 `15`、`frame`(array,可选):由 CSS 字符串或结构化 frame locator 组成的非空路径、`max_targets`(integer,可选):默认 `80`，范围 `0`–`200`
+  `observation.targets` 返回当前 locator、控件名称、可编辑状态、矩形和带原因的 `recommended_tool`。将 `locator` 原样传给 `page_click` / `page_type` 的 `selector`，页面变化后重新观察。`observation.frames` 列出尚未读取的子文档；将其中的 `frame` 传回 `scan_page` 可读取对应 iframe，包括跨域和 OOPIF。扫描包含开放 Shadow DOM，是有数量上限的 DOM 观察，不是完整可访问性树。`max_targets` 合计限制控件和 frame 数量，与正文预算独立；`0` 关闭枚举，`truncated=true` 表示仍有目标或 DOM 节点未检查。矩形使用被观察文档视口的 CSS 像素，未做命中测试。`verify_coordinate_target` 提示先截图确认 canvas 或零尺寸目标，不会自动点击坐标。disabled、inert、readonly 控件不推荐输入工具；原生 select 返回 `select_existing_option`。只有顶层非 shadow 文件控件推荐 `upload_files(selector=locator.css, ...)`，frame/shadow 内文件上传标为暂不支持。frame 扫描不接受 `extra_js`，也不探测父页面就绪状态；顶层传入 `extra_js` 时保留原执行语义，目标元数据标为不可用。
   可选的内置就绪探测超时后会释放自身标签占用。缺少 `render` 字段表示就绪状态未知，应使用 `wait_for` 等待目标控件。
 
 - **wait_for** —— 等待指定条件成立后返回。与轮询 `scan_page` 相比，该工具避免重复序列化完整 DOM。服务端在同一截止时间内调度短同步检查，避免后台页面定时器节流。四个条件必须且只能提供一个；`selector` 接受 CSS 字符串或“后台页面输入”一节所述的结构化 locator。调用方 `js` 会重复求值，可能产生副作用，应使用只读条件表达式。超时带 `operation_id` 时保留原检查的收据。selector/text/URL 只读探针超时后可以释放标签页而保留收据：`reservation_held=false` 时可执行其他命令，并在同一 MCP 会话用 `get_execute_js_result` 领取迟到回包。调用方提供的 `js` 继续保守占用；`reservation_held` 为 true 或未知时，持续查询原操作，直到它结案或释放占用。未完成探针不重放

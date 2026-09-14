@@ -1,6 +1,6 @@
 {
   "name": "browsertap-mcp",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Use your logged-in Chrome, Edge, or Opera to read pages, fill forms, and automate browser workflows.",
   "author": {
     "name": "LinVireo",

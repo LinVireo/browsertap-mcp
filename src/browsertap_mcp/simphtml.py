@@ -560,11 +560,56 @@ def _collapse_list(soup, selector, instruction):
     return True
 
 
+_OBSERVATION_MARK = '__btap_observation_payload__'
+
+
+def page_observation_script(*, cutlist=True, text_only=False, max_targets=80):
+    """Collect content and actionable targets in the same document roundtrip."""
+    groups = 'listGroups(document.body)' if cutlist and not text_only else '[]'
+    return (
+        f'{js_list_groups if cutlist and not text_only else ""}\n{js_page_outline}\n'
+        f'return {{{json.dumps(_OBSERVATION_MARK)}: true, groups: {groups}, '
+        f'page: pageOutline({str(text_only).lower()}), observation: JSON.stringify(pageTargets({max_targets}))}};'
+    )
+
+
+def unpack_observation(payload):
+    details = payload.get('observation') if isinstance(payload, dict) else None
+    if isinstance(details, str):
+        # Keep nested shadow/frame locators outside the generic JS-value depth
+        # cap. The public MCP result still exposes an ordinary structured object.
+        try:
+            details = json.loads(details)
+        except ValueError:
+            details = None
+    if not (
+        isinstance(payload, dict) and payload.get(_OBSERVATION_MARK) is True
+        and isinstance(payload.get('page'), str)
+        and isinstance(details, dict)
+    ):
+        raise PageUnavailable('The page did not return a complete observation; inspect the current target before retrying.')
+    return payload['page'], payload.get('groups', []), details
+
+
 def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
-             text_only=False, timeout=15, link_refs=None, session_id=None):
+             text_only=False, timeout=15, link_refs=None, session_id=None,
+             observation=None, max_targets=80):
     if isinstance(maxchars, bool) or not isinstance(maxchars, int) or maxchars < 0:
         raise ValueError("maxchars must be a non-negative integer")
-    if cutlist and not text_only and not extra_js.strip():
+    if observation is not None and not extra_js.strip():
+        payload = _page_from_response(_execute_in_session(
+            driver, page_observation_script(
+                cutlist=cutlist, text_only=text_only, max_targets=max_targets,
+            ), timeout, session_id=session_id,
+        ))
+        if isinstance(payload, str):
+            # A legacy driver may still provide HTML, but no target metadata.
+            page, rr = payload, []
+            observation.update(status='unavailable', reason='legacy_page_response')
+        else:
+            page, rr, details = unpack_observation(payload)
+            observation.update(details)
+    elif cutlist and not text_only and not extra_js.strip():
         rr, page = _get_cutlist_page(driver, extra_js, timeout, session_id)
         if page is _CUTLIST_FALLBACK:
             page = get_main_block(
@@ -595,10 +640,21 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
             timeout=timeout,
             session_id=session_id,
         )
+        if observation is not None:
+            observation.update(status='unavailable', reason='extra_js_preserves_legacy_execution')
+    return render_page(
+        page, groups=rr if cutlist and not text_only else [], cutlist=cutlist,
+        maxchars=maxchars, instruction=instruction, text_only=text_only, link_refs=link_refs,
+    )
+
+
+def render_page(page, *, groups=(), cutlist=False, maxchars=35000,
+                instruction="", text_only=False, link_refs=None):
+    """Apply the same content budget and link/list handling in any document."""
     # Hard cap before parsing: BeautifulSoup on a multi-MB page dominates the
     # call's latency, and callers only ever see maxchars of it anyway.
     if isinstance(page, str) and len(page) > 1_500_000: page = page[:1_500_000]
-    if text_only: return _limit_chars(page, maxchars)
+    if text_only: return _limit_chars(_collapsed_text(page), maxchars)
     base_url = None
     if isinstance(page, str):
         m = re.search(r'<!--btap-base:(.*?)-->', page)
@@ -620,7 +676,7 @@ def get_html(driver, cutlist=False, maxchars=35000, instruction="", extra_js="",
     # `listGroups` answers with one entry per repeated block, but a single dict
     # and a non-answer are both shapes this has had to read, so the reply is
     # normalised before anything looks for a selector inside it.
-    candidates = rr if isinstance(rr, list) else [rr]
+    candidates = groups if isinstance(groups, list) else [groups]
     selectors = [
         entry['selector'] for entry in candidates
         if isinstance(entry, dict) and entry.get('selector')

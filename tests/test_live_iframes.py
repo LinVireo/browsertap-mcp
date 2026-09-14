@@ -566,3 +566,103 @@ def test_missing_element_and_frame_locators_never_fall_back_to_root(
         typed = S.page_type("must not appear", selector=locator, clear=True, session_id=scratch_session)
         assert typed["status"] == "not_found", typed
     _no_events(case)
+
+
+@pytest.mark.parametrize('shape', ['same-origin', 'cross-site-oopif', 'nested-mixed'])
+def test_scan_observation_locators_can_fill_and_submit_without_external_skills(
+    scratch_session, iframe_site, shape,
+):
+    from test_mcp_result_regressions import _wire_call
+
+    case = iframe_site.case(shape)
+    _load(case, scratch_session)
+    _assert_topology(case, scratch_session)
+
+    def scan(**options):
+        reply = _wire_call(S.mcp, 'scan_page', {'session_id': scratch_session, **options})
+        assert not reply.isError, reply
+        return reply.structuredContent['data']
+
+    observed = scan()
+    for _ in range(3):
+        frames = observed['observation']['frames']
+        if not frames:
+            break
+        observed = scan(frame=frames[0]['frame'])
+    targets = observed['observation']['targets']
+    field = next(target for target in targets if target['name'] == 'Search terms')
+    assert field['recommended_tool'] == 'page_type' and field['editable']
+    assert field['locator']['frame'] == case.frames
+    query = f'observed search {shape}'
+    reply = _wire_call(S.mcp, field['recommended_tool'], {
+        'session_id': scratch_session, 'selector': field['locator'],
+        'text': query, 'clear': True,
+    })
+    assert not reply.isError, reply
+    _input_value(case, query)
+    updated = scan(frame=observed['observation']['frame'])
+    assert query in updated['content'], updated
+    submit = next(target for target in updated['observation']['targets']
+                  if target['tag'] == 'button' and target['name'] == 'Search')
+    assert submit['recommended_tool'] == 'page_click'
+    reply = _wire_call(S.mcp, submit['recommended_tool'], {
+        'session_id': scratch_session, 'selector': submit['locator'],
+    })
+    assert not reply.isError, reply
+    case.until(lambda events: any(event['document'] == 'leaf' and event['kind'] == 'submit'
+                                 for event in events))
+    submits = case.events('leaf', 'submit')
+    assert len(submits) == 1 and submits[0]['trusted']
+    assert submits[0]['query_value'] == query
+    assert not [event for event in case.events('root') if event['kind'] in _INPUT_EVENTS]
+
+
+def test_navigation_initialization_recovers_while_a_local_renderer_is_busy(
+    driver, iframe_site, monkeypatch,
+):
+    """Exercise a new renderer whose main thread delays the first CDP session."""
+    case = iframe_site.case("same-origin")
+    path = f"/case/{case.token}/busy"
+    started = json.dumps({
+        "token": case.token, "document": "busy", "sequence": 0, "kind": "busy-start",
+    })
+    body = (
+        "<script>{const deadline=Date.now()+12000;"
+        "fetch('/case/" + case.token + "/events', {method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify({..."
+        + started + ",busy_until_ms:deadline})});while(Date.now()<deadline){}}</script>"
+    )
+    with iframe_site.condition:
+        iframe_site.pages[path] = _document(case.token, "busy", body)
+    # A new owned tab is necessary here: reusing an already initialized CDP
+    # renderer would miss the startup failure. The suite's scratch tab is intact.
+    created = S.open_new_tab(f"http://127.0.0.1:{iframe_site.ports[0]}{path}")
+    assert created.get("owned"), created
+    sid = created["session_id"]
+    try:
+        case.until(lambda events: any(event["kind"] == "busy-start" for event in events))
+        busy_until_ms = case.events("busy", "busy-start")[0]["busy_until_ms"]
+        bridge = S.require_driver()
+        send = bridge.ext_cmd
+        navigation_windows = []
+
+        def checked_send(command, *args, **kwargs):
+            if command.get("cmd") == "navigate":
+                # open_url refreshes sessions first. Check the busy window at
+                # the real send boundary so that lookup time cannot hide the
+                # old pair of premature 2.5-second initialization deadlines.
+                remaining_ms = busy_until_ms - time.time() * 1000
+                navigation_windows.append(remaining_ms)
+                assert remaining_ms > 7000, (
+                    f"navigation left too little busy time to test recovery: {remaining_ms}ms"
+                )
+            return send(command, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(bridge, "ext_cmd", checked_send)
+            _load(case, sid)
+        assert len(navigation_windows) == 1
+        assert case.events("root", "ready")
+    finally:
+        closed = S.close_tabs(sid, session_id=sid, owner_id=created["owner_id"])
+        assert closed["status"] == "ok", closed

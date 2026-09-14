@@ -116,6 +116,9 @@ function pageOutline(textOnly = false) {
       const box = document.createElement('div');
       box.setAttribute('data-tag', 'iframe');
       box.setAttribute('data-iframe-content', src.src || '');
+      for (const name of ['id', 'name', 'title']) {
+        if (src.getAttribute(name)) box.setAttribute(name, src.getAttribute(name));
+      }
       return box;
     }
 
@@ -185,4 +188,124 @@ function pageOutline(textOnly = false) {
   }
 }
 
+// Locators describe this observation, not persistent element identities. Input
+// tools resolve and validate them again before dispatch. No live DOM is changed.
+function pageTargets(limit = 80) {
+  const targets = [];
+  const frames = [];
+  let truncated = false;
+  let visited = 0;
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const selectorFor = (element, root) => {
+    const unique = selector => {
+      const matches = root.querySelectorAll(selector);
+      return matches.length === 1 && matches[0] === element;
+    };
+    if (element.id) {
+      const selector = '#' + CSS.escape(element.id);
+      if (unique(selector)) return selector;
+    }
+    const tag = CSS.escape(element.localName);
+    for (const attr of ['name', 'data-testid']) {
+      const value = element.getAttribute(attr);
+      if (value) {
+        const selector = `${tag}[${attr}="${CSS.escape(value)}"]`;
+        if (unique(selector)) return selector;
+      }
+    }
+    const parts = [];
+    for (let node = element; node && node.nodeType === 1; node = node.parentElement) {
+      let index = 1;
+      for (let sibling = node.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        if (sibling.localName === node.localName) index++;
+      }
+      parts.unshift(`${CSS.escape(node.localName)}:nth-of-type(${index})`);
+      const selector = parts.join(' > ');
+      if (unique(selector)) return selector;
+    }
+    return null;
+  };
+  const inherited = (element, selector) => {
+    for (let node = element; node; node = node.parentElement || node.getRootNode().host) {
+      if (node.matches(selector)) return true;
+    }
+    return false;
+  };
+  const describe = (element, locator, visible, rect) => {
+    const tag = element.localName;
+    const type = tag === 'input' ? element.type : '';
+    const disabled = element.matches(':disabled') || inherited(element, '[aria-disabled="true"]');
+    const inert = inherited(element, '[inert]');
+    const readonly = !!element.readOnly || element.getAttribute('aria-readonly') === 'true';
+    const textual = tag === 'textarea' || element.isContentEditable ||
+      (tag === 'input' && ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(type));
+    const editable = !!(textual && !disabled && !inert && !readonly && visible);
+    const root = element.getRootNode();
+    const labelled = (element.getAttribute('aria-labelledby') || '').split(/\s+/)
+      .map(id => root.getElementById?.(id)?.textContent || '').join(' ');
+    const name = clean(labelled) || clean(element.getAttribute('aria-label')) ||
+      clean([...(element.labels || [])].map(label => label.textContent).join(' ')) ||
+      clean(element.getAttribute('placeholder')) || clean(element.getAttribute('title')) ||
+      (tag === 'input' ? '' : clean(element.textContent));
+    let tool = null;
+    let reason;
+    if (disabled || inert || readonly) reason = disabled ? 'disabled' : inert ? 'inert' : 'readonly';
+    else if (tag === 'input' && type === 'file') {
+      if (locator.shadow) reason = 'file_input_shadow_unsupported';
+      else { tool = 'upload_files'; reason = 'file_input'; }
+    }
+    else if (!visible) reason = 'not_visible';
+    else if (tag === 'canvas' || rect.width <= 0 || rect.height <= 0) {
+      tool = 'capture_page_screenshot'; reason = 'verify_coordinate_target';
+    } else if (editable) { tool = 'page_type'; reason = 'editable_text'; }
+    else if (tag === 'select') reason = 'select_existing_option';
+    else { tool = 'page_click'; reason = 'dom_target'; }
+    return {
+      locator, tag, type, name, role: element.getAttribute('role') || '',
+      visible, editable, disabled, readonly, inert,
+      rect: {x: rect.left, y: rect.top, width: rect.width, height: rect.height},
+      hit_test: 'not_checked',
+      recommended_tool: tool, reason,
+    };
+  };
+  const walk = (root, shadow) => {
+    for (const element of root.querySelectorAll('*')) {
+      if (++visited > 10000) { truncated = true; return; }
+      const candidate = element.matches(
+        'input,textarea,select,button,a[href],[contenteditable],[role],[tabindex],[onclick],canvas,iframe,frame',
+      );
+      if (candidate) {
+        const rendered = element.checkVisibility({opacityProperty: true, visibilityProperty: true});
+        const file = element.localName === 'input' && element.type === 'file';
+        if (rendered || file) {
+          if (targets.length + frames.length >= limit) { truncated = true; return; }
+          const css = selectorFor(element, root);
+          if (css) {
+            const locator = {css, ...(shadow.length ? {shadow: [...shadow]} : {})};
+            const rect = element.getBoundingClientRect();
+            if (['iframe', 'frame'].includes(element.localName)) {
+              frames.push({locator, frame: [locator], name: clean(element.title || element.name),
+                url: element.src || '', inspected: false});
+            } else targets.push(describe(element, locator, rendered, rect));
+          }
+        }
+      }
+      if (element.shadowRoot) {
+        const host = selectorFor(element, root);
+        if (host) walk(element.shadowRoot, [...shadow, host]);
+        if (truncated) return;
+      }
+    }
+  };
+  if (limit > 0 && document.body) walk(document, []);
+  return {
+    status: limit === 0 ? 'disabled' : 'success',
+    url: location.href, title: document.title, ready_state: document.readyState,
+    targets, frames, truncated, limit,
+    viewport: {width: innerWidth, height: innerHeight, device_pixel_ratio: devicePixelRatio},
+    coordinate_space: 'viewport_css',
+  };
+}
+
+pageTargets;
 pageOutline;

@@ -45,6 +45,21 @@ uncertain. Closing a tab owned by the current task with its `owner_id` ends
 that document's lifecycle; do not close a user's tab for cleanup. A lifecycle
 end does not undo requests or other effects already sent.
 
+### Navigation fails during `Page.enable`
+
+Before 0.5.4, navigation initialization could fail after two 2.5-second
+`Page.enable` attempts even when the caller's timeout had time left. A fully
+local page with a busy main thread reproduced this failure; external network
+latency is not required. Version 0.5.4 bounds debugger attachment by the same
+deadline and gives the single initialization retry the remaining call budget.
+`Page.navigate` still dispatches at most once; initialization failures report
+`dispatched=false`.
+
+The original intermittent incident's trigger remains unconfirmed. This fix
+does not diagnose unrelated JavaScript read or dialog-cleanup timeouts. After
+an error, inspect the operation receipt and target state before retrying a
+state-changing call; a later successful call alone does not establish a fix.
+
 ### Manual dialog recovery reports a CDP timeout
 
 A live manual-dialog check returned `debugger_detached` after

@@ -6,6 +6,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-14
+
+### Added
+
+- `scan_page` returns bounded actionable control observations and supports explicit
+  frame scans, including cross-origin/OOPIF documents. Returned locators retain
+  frame and open-shadow paths, with editability and input-method guidance.
+- MCP resources expose the existing packaged caller and recovery guides; the
+  initialization instructions include the observation/input/verification workflow.
+
+### Fixed
+
+- Keep navigation debugger attachment and page initialization within the caller's
+  total timeout. After one short initialization attempt, recovery uses the remaining
+  budget so a busy renderer does not cause two premature 2.5-second failures.
+  Navigation still dispatches at most once; preparation failures remain undispatched.
+
 ## [0.5.3] - 2026-09-14
 
 ### Added
@@ -1531,7 +1548,8 @@ exist so that every compare link spans one version rather than several; there is
 no 0.4.13 and no 0.4.14 on PyPI, and no GitHub Release for either.
 -->
 
-[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/LinVireo/browsertap-mcp/compare/v0.5.0...v0.5.1

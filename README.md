@@ -404,11 +404,12 @@ the next start then creates a new token.
 The Claude Code and Codex plugins load these Skills automatically. This section
 is for clients configured through the standard MCP installation.
 
-BTAP ships two skills that tell a calling agent how to drive it. They are ordinary
-Markdown and completely optional — every tool works without them. What they add is
-the judgement the tool descriptions cannot carry: which tool to reach for first,
-when `session_id` is mandatory, and which tabs belong to you and must be left
-alone.
+BTAP includes the primary workflow and recovery rules in MCP initialization
+instructions and tool descriptions. The same two packaged Markdown guides are
+also discoverable through MCP `resources/list` and readable with `resources/read`:
+`browsertap://agent/workflow` and `browsertap://agent/recovery`. A client can read
+them without installing Skills. Hosts decide when to load resources; the critical
+target, ownership and retry rules remain in the instructions and tool results.
 
 ```bash
 browsertap skill-path           # e.g. .../site-packages/browsertap_mcp/skills
@@ -441,7 +442,7 @@ The marker below is maintained with this source tree. It is not proof that a
 development checkout has been published; compare the installed package with its
 release tag before using new tool signatures or the 0.5.0 migration notes.
 
-Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.3**.
+Current release: unified Python package, bridge, and unpacked Chrome extension **0.5.4**.
 
 The three components load updates separately:
 
@@ -690,7 +691,8 @@ browser/profile selection.
 <summary><b>Page reading and execution</b></summary>
 
 - **scan_page** — read the page as simplified HTML or text. Returns `links` mapping each `#rN` ref in the content to its absolute URL, and `offscreen` + `hint` when content was left outside the viewport. A background tab may report viewport height zero; ordinary DOM/text/API work still continues there, and only visual/layout fidelity requires explicit `activate_tab`. When the page can be probed, `render_state`/`content_ready` distinguish real content from a loading, hydrating, or shell-only SPA; retry or use `wait_for` before treating an empty shell as final content. `cutlist` (on by default) collapses long repeated lists and reports a CSS selector for each container it collapsed, derived from that container's own structure. The built-in scan does not write page attributes, ids, or `window` globals. Optional `extra_js` runs caller code and can modify the page or send requests.
-  - `session_id` (string, optional), `text_only` (boolean, optional): default `false`, `cutlist` (boolean, optional): default `true`; collapse repetitive lists, `maxchars` (integer, optional): default `35000`, `instruction` (string, optional), `extra_js` (string, optional), `timeout` (number, optional): default `15`
+  - `session_id` (string, optional), `text_only` (boolean, optional): default `false`, `cutlist` (boolean, optional): default `true`; collapse repetitive lists, `maxchars` (integer, optional): default `35000`, `instruction` (string, optional), `extra_js` (string, optional), `timeout` (number, optional): default `15`, `frame` (array, optional): non-empty path of CSS strings or structured frame locators, `max_targets` (integer, optional): default `80`, range `0`–`200`
+  `observation.targets` adds current locators, control names, editability, rectangles and `recommended_tool` with a reason. Pass a returned `locator` unchanged as the `page_click` / `page_type` selector; re-observe after page changes. `observation.frames` lists uninspected child documents: pass an entry's `frame` back to `scan_page` to inspect it, including cross-origin/OOPIF frames. Open shadow roots are included; this is a bounded DOM observation, not a complete accessibility tree. `max_targets` caps controls and frame entries together, separately from the content budget; `0` disables enumeration and `truncated=true` means more targets or DOM nodes remain uninspected. Rectangles use the observed document's viewport CSS pixels and are not hit-tested. `verify_coordinate_target` recommends a screenshot to verify a canvas or zero-size target, not an automatic coordinate click. Disabled, inert and readonly controls have no recommended input tool; native selects report `select_existing_option`. Only top-document file inputs outside shadow roots recommend `upload_files`, using `selector=locator.css`; frame/shadow file uploads report unsupported. Frame scans reject `extra_js` and omit the parent's readiness probe; top-document `extra_js` preserves its execution semantics and reports target metadata unavailable.
   The optional built-in readiness probe releases its tab reservation on timeout. Missing `render` fields mean readiness is unknown; use `wait_for` for the intended control.
 
 - **wait_for** — wait until a condition holds, then return. Use this instead of polling `scan_page`, which re-serializes the whole DOM each time. The server schedules short synchronous page checks under one deadline, avoiding background-page timer throttling. Exactly one condition is required. `selector` accepts legacy CSS or the structured locator object described under background page input. Caller-provided `js` is evaluated repeatedly and can have side effects; use a read-only predicate. A timeout with `operation_id` retains a pending check. Timed-out selector/text/URL probes can release the tab without discarding that receipt: `reservation_held=false` permits another command, and `get_execute_js_result` in the same MCP session can collect the delayed reply. Caller-provided `js` stays reserved. When `reservation_held` is true or unknown, keep querying the original operation until it settles or releases its reservation. A pending probe is never replayed.

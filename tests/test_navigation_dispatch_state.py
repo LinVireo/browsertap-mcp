@@ -110,6 +110,12 @@ eval(source.slice(
 // The navigation wait and CDP watchdog have separate deadlines. Control their
 // order while retaining the real dispatcher, cancellation, and cleanup paths.
 const sendWithDeadline = sendDebuggerCommandWithTimeout;
+const attachWithDeadline = attachBtapDebugger;
+const attachBudgets = [];
+attachBtapDebugger = function(target, timeout) {{
+  attachBudgets.push(timeout ?? null);
+  return attachWithDeadline(target, timeout);
+}};
 sendDebuggerCommandWithTimeout = function(lease, method, params, timeout, ...rest) {{
   if (method === 'Page.navigate') {{
     if (behaviour[method] === 'wait_timeout') timeout += 2000;
@@ -122,7 +128,9 @@ sendDebuggerCommandWithTimeout = function(lease, method, params, timeout, ...res
     tabId: 42, url: 'https://new.example/',
     beforeunload: {json.dumps(beforeunload)}, timeoutMs: {timeout_ms},
   }});
-  process.stdout.write(JSON.stringify({{ result, calls, pendingAtEnd: pendingNavigations.has(42) }}));
+  process.stdout.write(JSON.stringify({{
+    result, calls, attachBudgets, pendingAtEnd: pendingNavigations.has(42),
+  }}));
 }})().catch(error => {{ console.error(error); process.exit(1); }});
 """
     )
@@ -146,6 +154,27 @@ def test_page_enable_timeout_before_navigate_is_reported_as_not_dispatched():
     # The bridge releases the tab for this reply instead of holding it.
     assert _bridge_verdict(result) is False
     assert outcome["pendingAtEnd"] is False
+
+
+def test_slow_page_initialization_can_recover_within_the_navigation_budget():
+    """A busy renderer can need more than 2.5s to create its debugger session."""
+    outcome = _navigate_harness(
+        page_enable="slow_success", page_navigate="ok", timeout_ms=9000,
+    )
+    assert outcome["result"]["ok"] is True, outcome
+    assert outcome["result"]["data"]["status"] == "ok"
+    assert outcome["calls"] == {"Page.enable": 2, "Page.navigate": 1}
+    assert len(outcome["attachBudgets"]) == 2
+    assert 0 < outcome["attachBudgets"][1] < outcome["attachBudgets"][0] <= 9000
+    assert outcome["pendingAtEnd"] is False
+
+
+def test_navigation_attach_is_bounded_by_the_callers_remaining_deadline():
+    outcome = _navigate_harness(page_enable="ok", page_navigate="ok", timeout_ms=1200)
+    assert outcome["result"]["ok"] is True, outcome
+    assert len(outcome["attachBudgets"]) == 1
+    assert outcome["attachBudgets"][0] is not None
+    assert 0 < outcome["attachBudgets"][0] <= 1200
 
 
 @pytest.mark.parametrize(("mode", "policy", "code"), [

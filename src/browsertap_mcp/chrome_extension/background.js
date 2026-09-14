@@ -5,7 +5,7 @@
 // reporting the pre-bump version and once reporting a matching version while a
 // reload was still needed. A literal has no such layer. GENERATED: run
 // `python -m scripts.extension_stamp --write` after editing any extension file.
-const BTAP_BUILD = 'f329797db28b1caf';
+const BTAP_BUILD = '9bd13d4f306b2646';
 importScripts('result_serialization.js');
 importScripts('guarded_eval.js');
 importScripts('frame_locator.js');
@@ -2711,15 +2711,20 @@ async function enablePageForNavigation(tabId, deadlineEpochMs) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let lease = null;
     try {
-      lease = await attachBtapDebugger({ tabId });
+      lease = await attachBtapDebugger(
+        { tabId }, navigationDeadlineRemaining(deadlineEpochMs, 'before debugger attach'),
+      );
       const remaining = navigationDeadlineRemaining(
         deadlineEpochMs, 'before Page.enable',
       );
+      // Keep one short attempt to recover a stalled debugger attachment. A busy
+      // renderer can also take seconds to initialize: the recovery must use the
+      // remaining caller budget instead of failing at the same short cutoff.
       await sendDebuggerCommandWithTimeout(
         lease,
         'Page.enable',
         {},
-        Math.min(remaining, 2500),
+        attempt === 0 ? Math.min(remaining, 2500) : remaining,
         1,
       );
       return lease;

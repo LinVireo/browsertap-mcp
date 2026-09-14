@@ -10,6 +10,9 @@ description: "诊断和恢复 browsertap-mcp (BTAP) 的连接、超时、旧 sch
 安装与完整人工操作见[故障排查](https://github.com/LinVireo/browsertap-mcp/blob/main/docs/TROUBLESHOOTING.zh-CN.md)。
 修改产品源码的任务另读仓库 AGENTS.md / CONTRIBUTING.md。
 
+本说明可通过 MCP resource `browsertap://agent/recovery` 读取；正常调用流程对应
+`browsertap://agent/workflow`，两者与随包 Skills 使用同一份内容。
+
 **通过插件安装时**，管理命令复用宿主中 `browsertap` MCP 配置的完整 `uv` 启动前缀，
 在末尾的 `python -m browsertap_mcp.cli` 后追加 `doctor` 或 `bridge --restart`。
 在终端执行时，把 `${CLAUDE_PLUGIN_ROOT}` 或 Codex 的相对路径 `.[desktop]` 换成
@@ -228,6 +231,11 @@ wire `operation_id` 交给 `get_execute_js_result`，外层创建句柄继续走
 修改页面或发送请求，不能按内置只读探针处理，应使用只读条件表达式。
 `scan_page` 的可选内置就绪探测超时会释放自身占用；缺少 `render` 是状态未知，
 可继续用 `wait_for` 等目标控件，不需要重启桥。
+`scan_page(frame=...)` 读取指定子文档，不探测父页面就绪状态。`frame_scan_unavailable`
+表示未取得完整扫描结果；先核对 locator 和 `get_setup_status`，旧扩展 query 成功却没有
+扫描数据时需更新并手动 Reload。`observation.status=unavailable` 或 `truncated=true`
+均不能证明目标不存在；`max_targets=0` 主动关闭枚举，顶层 `extra_js` 不提供该元数据。
+按返回的完整 `locator`/`frame` 路径重新观察；disabled、readonly、inert 和遮挡不是改用坐标的依据。
 `wait_for` / `wait_for_url` 的 selector/text/URL 只读探针超时后可释放标签页并保留
 原句柄；`reservation_held=false` 时可执行其他命令，同一 MCP 会话仍可补查迟到回包。
 为 true 或未知时，持续查询原操作直到结案或释放。调用方 `wait_for(js=...)`、旧桥、

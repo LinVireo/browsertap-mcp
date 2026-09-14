@@ -108,6 +108,7 @@ globalThis.BtapFrameLocator = (() => {
         ...snapshot,
         met: msg.gone ? detail.status === 'not_found' : detail.found === true,
         locator_status: detail.status, matches: detail.matches, stage: detail.stage,
+        ...(detail.scan === undefined ? {} : {scan: detail.scan}),
       } };
       return { ok: true, data: {
         ...detail, input_dispatched: inputs.some(item => item.dispatched),

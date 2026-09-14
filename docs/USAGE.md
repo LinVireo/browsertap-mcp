@@ -80,6 +80,24 @@ refused and must be selected again with `list_tabs`/`switch_tab`.
 
 ### Choose an operation for the form control
 
+Start with `scan_page.observation.targets`: each entry has a current `locator`,
+control name, editability and `recommended_tool` with a reason. Pass the locator
+unchanged as the `page_click` / `page_type` selector. For an embedded document, pass an entry from
+`observation.frames` back as `scan_page(frame=...)`; returned target locators
+already include the complete frame path, including cross-origin frames.
+Re-scan after page changes. Open shadow roots are included, but this is not a
+complete accessibility tree. `max_targets` limits controls and frame entries
+together; `truncated=true` means the observation is incomplete.
+
+Rectangles use the observed document's viewport CSS pixels and have not been
+hit-tested. `verify_coordinate_target` requests visual inspection before choosing
+a point; it does not prove a coordinate click will succeed. Disabled, inert and
+readonly targets have no recommended input tool. Native selects report
+`select_existing_option` and follow the table below.
+For top-document file inputs outside shadow roots, use `upload_files` with
+`selector=locator.css`. Frame/shadow file inputs report uploads unsupported;
+keep their paths intact instead of trying the same CSS in another document.
+
 Inspect the control's type, editability, frame path, and actual hit area before
 choosing an operation. Cross-origin frames support direct locators too.
 
