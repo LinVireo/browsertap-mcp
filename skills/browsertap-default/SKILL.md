@@ -188,7 +188,7 @@ iframe 等待返回未完成 `operation_id` 时可能仍有占用；按 `reserva
 | `target_busy` / `busy` | 等已有操作结束或让原会话处理对话框。检查投递状态，不删锁、不用重启清占用。 |
 | `capture_busy` | 让启动捕获的 MCP 会话收尾，不停止或清空其他会话的捕获。 |
 | `switched_session` | 隐式默认目标发生变化；核对新目标，后续显式指定。 |
-| `cdp_timeout` / `debugger_detached` | 先补查操作句柄并核对页面；通道错误不证明操作没执行。 |
+| `exec_timeout` / `cdp_timeout` / `debugger_detached` | 已派发的超时保留有限期 `outcome_unknown` 占用；先补查原句柄和实际状态。轮询不取消 JS，占用到期也不证明脚本停止。 |
 | `debugger_conflict` | 确认 DevTools/其他 debugger 的占用，由其所有者释放后再执行。 |
 | `challenge_stalled` | 停止自动尝试，把同一标签页交给用户。 |
 | `requires_user_action` | 批准失败时读 `reason`：`elicitation_unsupported` / `declined` / `timeout` / `cancelled` / `error`；按原因处理，不切 profile 绕过拒绝。 |
